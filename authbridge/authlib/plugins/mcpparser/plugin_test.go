@@ -186,6 +186,49 @@ func TestMCPParser_SkipsJSONThatIsNotJSONRPC(t *testing.T) {
 	}
 }
 
+// MCP and A2A both ride JSON-RPC 2.0, so mcp-parser must NOT claim A2A
+// methods just because they carry a non-empty JSON-RPC method. Gating on
+// the MCP namespace makes it decline A2A traffic (message/*, tasks/*,
+// agent/*) — so an A2A request shows no mcp-parser row in abctl. Mirror
+// of a2a-parser's own-namespace guard.
+func TestMCPParser_ForeignNamespaceMethods_Declined(t *testing.T) {
+	a2aMethods := []string{
+		"message/send",
+		"message/stream",
+		"tasks/get",
+		"tasks/cancel",
+		"agent/getAuthenticatedExtendedCard",
+	}
+	for _, method := range a2aMethods {
+		t.Run(method, func(t *testing.T) {
+			p := NewMCPParser()
+			pctx := &pipeline.Context{
+				Body: []byte(`{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":{}}`),
+			}
+			action := p.OnRequest(context.Background(), pctx)
+			if action.Type != pipeline.Continue {
+				t.Fatalf("expected Continue, got %v", action.Type)
+			}
+			if pctx.Extensions.MCP != nil {
+				t.Errorf("Extensions.MCP should be nil for non-MCP method %q, got %+v", method, pctx.Extensions.MCP)
+			}
+			if pctx.Extensions.Invocations != nil {
+				t.Errorf("expected no Invocation for non-MCP method %q, got %+v", method, pctx.Extensions.Invocations)
+			}
+			// Declining (no extension attached) means Classification() reports
+			// "unclassified" — (anyAction=false, anyBypass=false) — NOT a
+			// recorded bypass. IBAC then applies unclassified_policy (default
+			// passthrough). Locks the interaction raised in review: scoping the
+			// parser to its namespace moves out-of-namespace JSON-RPC from
+			// "bypass" to "unclassified".
+			if anyAction, anyBypass := pctx.Classification(); anyAction || anyBypass {
+				t.Errorf("Classification() = (action=%v, bypass=%v) for non-MCP method %q; want (false, false) unclassified",
+					anyAction, anyBypass, method)
+			}
+		})
+	}
+}
+
 func TestMCPParser_InvalidJSON(t *testing.T) {
 	p := NewMCPParser()
 	pctx := &pipeline.Context{Body: []byte("not json")}

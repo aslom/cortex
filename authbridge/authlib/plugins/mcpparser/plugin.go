@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/bypass"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
@@ -136,6 +137,32 @@ func isMCPAction(method string) bool {
 	return false
 }
 
+// isMCPMethod reports whether a JSON-RPC method name belongs to the MCP
+// protocol namespace (spec revision 2025-06-18, Streamable HTTP). MCP
+// methods are either the bare handshake verbs initialize/ping or are
+// slash-namespaced under notifications/, tools/, resources/, prompts/,
+// completion/, logging/, sampling/, roots/, and elicitation/. An empty
+// method (non-JSON-RPC body) matches nothing and is declined. Gating on
+// the namespace is what distinguishes MCP from A2A traffic, which also
+// rides JSON-RPC 2.0 but under message/, tasks/, and agent/. When a
+// future MCP revision adds a top-level namespace, extend this set (the
+// spec-revision string above is the audit anchor).
+func isMCPMethod(method string) bool {
+	switch method {
+	case "initialize", "ping":
+		return true
+	}
+	return strings.HasPrefix(method, "notifications/") ||
+		strings.HasPrefix(method, "tools/") ||
+		strings.HasPrefix(method, "resources/") ||
+		strings.HasPrefix(method, "prompts/") ||
+		strings.HasPrefix(method, "completion/") ||
+		strings.HasPrefix(method, "logging/") ||
+		strings.HasPrefix(method, "sampling/") ||
+		strings.HasPrefix(method, "roots/") ||
+		strings.HasPrefix(method, "elicitation/")
+}
+
 func (p *MCPParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	// Body-less transport-layer detection. Scoped to the configured
 	// MCP-endpoint paths because there's no protocol payload to
@@ -187,13 +214,17 @@ func (p *MCPParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 		slog.Debug("mcp-parser: body is not valid JSON-RPC", "error", err, "bodyLen", len(pctx.Body))
 		return pipeline.Action{Type: pipeline.Continue}
 	}
-	// Empty method → body parses as JSON but isn't a JSON-RPC request
-	// (e.g. an OpenAI chat/completions body also unmarshals into
-	// JSONRPCRequest with zero-value fields). Don't attach a useless
-	// MCPExtension to non-MCP traffic — downstream consumers shouldn't
-	// see a phantom "mcp: {}" on every inference event.
-	if rpc.Method == "" {
-		slog.Debug("mcp-parser: body is JSON but not JSON-RPC, skipping", "bodyLen", len(pctx.Body))
+	// Claim only MCP-namespace methods. Both MCP and A2A ride JSON-RPC 2.0
+	// over HTTP, so "the method is non-empty" cannot tell them apart — the
+	// method namespace is the only in-body signal that does. Gating here
+	// keeps mcp-parser from attaching an MCPExtension to A2A traffic
+	// (message/send, tasks/get, agent/*, ...) or to a non-JSON-RPC body
+	// such as an inference /v1/messages call (which unmarshals into
+	// JSONRPCRequest with an empty Method) — which would otherwise show a
+	// phantom "mcp: {}" on every such event. a2a-parser has the mirror
+	// guard for its own namespace.
+	if !isMCPMethod(rpc.Method) {
+		slog.Debug("mcp-parser: not an MCP-namespace method, skipping", "method", rpc.Method, "bodyLen", len(pctx.Body))
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
