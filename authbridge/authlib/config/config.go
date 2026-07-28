@@ -55,6 +55,15 @@ type TLSBridgeConfig struct {
 	// ca.crt is the trust cert handed to the agent. cert-manager Secret key
 	// conventions, so only the directory is configured.
 	CADir string `yaml:"ca_dir" json:"ca_dir"`
+	// GenerateCA, when true, makes the bridge mint and persist a self-signed CA
+	// into CADir (tls.crt/tls.key/ca.crt) if those files are absent, instead of
+	// failing at startup. For standalone / demo use only — in-cluster the CA is
+	// a mounted cert-manager Secret and this stays false so a missing Secret
+	// fails loudly rather than silently forging leaves under an untrusted CA.
+	// CADir should persist across restarts: on ephemeral storage (e.g. an
+	// emptyDir) a fresh CA is minted each boot, so clients must re-trust the
+	// new ca.crt.
+	GenerateCA bool `yaml:"generate_ca" json:"generate_ca"`
 	// UpstreamCABundle is an extra-roots PEM file for re-origination (private-CA
 	// origins the agent trusts); empty == system roots only.
 	UpstreamCABundle string `yaml:"upstream_ca_bundle" json:"upstream_ca_bundle"`

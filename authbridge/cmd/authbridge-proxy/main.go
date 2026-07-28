@@ -317,11 +317,18 @@ func main() {
 	// A nil *Engine leaves today's blind-tunnel behavior intact.
 	var bridge *tlsbridge.Engine
 	if cfg.TLSBridge != nil && cfg.TLSBridge.Mode == "enabled" {
-		// CA is always the operator-mounted cert-manager Secret (tls.crt/tls.key
-		// under ca_dir). EphemeralSource exists only for in-process tests.
-		src, cerr := tlsbridge.NewFileSource(cfg.TLSBridge.CADir+"/tls.crt", cfg.TLSBridge.CADir+"/tls.key")
+		// CA is normally the operator-mounted cert-manager Secret (tls.crt/tls.key
+		// under ca_dir). For standalone/demo use, generate_ca mints and persists a
+		// self-signed CA into ca_dir when those files are absent (default false, so
+		// in-cluster a missing Secret still fails loudly).
+		src, generated, cerr := tlsbridge.EnsureFileSource(cfg.TLSBridge.CADir, cfg.TLSBridge.GenerateCA)
 		if cerr != nil {
 			log.Fatalf("tls-bridge CA init failed: %v", cerr)
+		}
+		if generated {
+			slog.Warn("tls-bridge: generated self-signed CA (generate_ca=true; standalone/demo)",
+				"ca_dir", cfg.TLSBridge.CADir,
+				"hint", "clients must trust it, e.g. NODE_EXTRA_CA_CERTS="+cfg.TLSBridge.CADir+"/ca.crt")
 		}
 		var extra []byte
 		if cfg.TLSBridge.UpstreamCABundle != "" {
