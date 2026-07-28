@@ -286,15 +286,17 @@ func TestMCPParser_OnResponse_NoRequestContext(t *testing.T) {
 	}
 }
 
-// TestMCPParser_OnResponse_EmptyBody is the regression test for the
-// notifications/initialized pairing bug: when the request side parsed
-// the message (Extensions.MCP populated) but the response body is empty
-// (HTTP 202 ack), the parser must record a Skip so abctl can pair the
-// response row with the request row in the events timeline.
-func TestMCPParser_OnResponse_EmptyBody(t *testing.T) {
+// A JSON-RPC notification (no request id) is acked by the transport with an
+// empty HTTP 202 and gets no response object to parse — that's the expected,
+// complete end of the exchange. mcp-parser records an Observe so abctl credits
+// it (and pairs the response row with the request row) instead of rendering
+// the paired row as "—". Regression for the notification-ack observability
+// fix; supersedes the older skip-based pairing test.
+func TestMCPParser_OnResponse_NotificationAck_Observe(t *testing.T) {
 	p := NewMCPParser()
 	pctx := &pipeline.Context{
-		Direction:  pipeline.Outbound,
+		Direction: pipeline.Outbound,
+		// notifications/* carry no id → RPCID nil.
 		Extensions: pipeline.Extensions{MCP: &pipeline.MCPExtension{Method: "notifications/initialized"}},
 	}
 	action := p.OnResponse(context.Background(), pctx)
@@ -303,6 +305,36 @@ func TestMCPParser_OnResponse_EmptyBody(t *testing.T) {
 	}
 	if pctx.Extensions.MCP.Result != nil {
 		t.Error("Result should remain nil when response body is empty")
+	}
+	if pctx.Extensions.Invocations == nil {
+		t.Fatal("expected an Observe Invocation, got none")
+	}
+	invs := pctx.Extensions.Invocations.Outbound
+	if len(invs) != 1 {
+		t.Fatalf("expected 1 Invocation, got %d", len(invs))
+	}
+	if invs[0].Action != pipeline.ActionObserve {
+		t.Errorf("Action = %q, want observe", invs[0].Action)
+	}
+	if invs[0].Reason != "matched_notifications/initialized_ack" {
+		t.Errorf("Reason = %q, want matched_notifications/initialized_ack", invs[0].Reason)
+	}
+}
+
+// A request that carried an id but came back with an empty body is anomalous
+// (truncated / failed upstream response). mcp-parser keeps a Skip there — a
+// skip never credits the plugin in abctl, which is the correct signal for a
+// broken response, and it still pairs the response row with the request row.
+func TestMCPParser_OnResponse_RequestEmptyBody_Skip(t *testing.T) {
+	p := NewMCPParser()
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		// tools/call is a request and carries an id → RPCID non-nil.
+		Extensions: pipeline.Extensions{MCP: &pipeline.MCPExtension{Method: "tools/call", RPCID: float64(7)}},
+	}
+	action := p.OnResponse(context.Background(), pctx)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue, got %v", action.Type)
 	}
 	if pctx.Extensions.Invocations == nil {
 		t.Fatal("expected a Skip Invocation, got none")
