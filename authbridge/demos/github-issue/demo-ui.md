@@ -87,7 +87,7 @@ providing end-to-end security:
 ## Prerequisites
 
 Ensure you have completed the Rossoctl platform setup as described in the
-[Installation Guide](https://github.com/rossoctl/rossoctl/blob/main/docs/install.md),
+[Installation Guide](https://github.com/rossoctl/rossoctl/blob/main/docs/getting-started/install.md),
 including the Rossoctl UI.
 
 You should also have:
