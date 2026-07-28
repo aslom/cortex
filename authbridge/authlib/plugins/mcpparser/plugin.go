@@ -242,6 +242,30 @@ func (p *MCPParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
+// recordEmptyResponse records the terminal invocation for a response that
+// carried no body, distinguishing an expected ack from an anomaly:
+//
+//   - A JSON-RPC notification has no request id, so the transport acks it
+//     with an empty HTTP 202 and there is no response object to parse. That
+//     is the expected, complete end of the exchange — record an Observe so
+//     abctl credits mcp-parser (otherwise the paired response row renders as
+//     "—", which reads as if nothing handled it). Synthetic transport events
+//     ($transport/*) likewise carry no id and are handled MCP protocol events.
+//   - A request that DID carry an id but came back empty is anomalous (a
+//     truncated or failed upstream response). Keep it a Skip so it is not
+//     mistaken for a clean handling — a skip never credits the plugin in
+//     abctl, which is the right signal for a broken response.
+//
+// Either branch records an invocation, so abctl still pairs the response row
+// with the request row (pairing keys on plugin+method+direction).
+func recordEmptyResponse(pctx *pipeline.Context) {
+	if pctx.Extensions.MCP.RPCID == nil {
+		pctx.Observe("matched_" + pctx.Extensions.MCP.Method + "_ack")
+		return
+	}
+	pctx.Skip("no_response_body")
+}
+
 // OnResponse is the legacy buffered-path response hook. Because this
 // plugin implements StreamingResponder, pipeline.RunResponse skips it
 // and OnResponseFrame is the dispatch path under all listeners — this
@@ -266,12 +290,13 @@ func (p *MCPParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeli
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 	// We DID process the request but the response has no body — typical
-	// for JSON-RPC notifications that ack with HTTP 202. Record a Skip
-	// so abctl can pair the response row with the request row in the
-	// timeline (pairing keys on plugin+method+direction; an empty
-	// invocation slot orphans both ends).
+	// for JSON-RPC notifications that ack with HTTP 202. recordEmptyResponse
+	// credits mcp-parser with an Observe for an expected notification ack
+	// (no request id) and keeps a Skip for an anomalous empty response to a
+	// request that carried an id. Either way an invocation is recorded so
+	// abctl pairs the response row with the request row.
 	if len(pctx.ResponseBody) == 0 {
-		pctx.Skip("no_response_body")
+		recordEmptyResponse(pctx)
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -317,16 +342,17 @@ func (p *MCPParser) OnResponseFrame(_ context.Context, pctx *pipeline.Context, f
 
 	state := getOrCreateMCPStreamState(pctx)
 
-	// End-of-stream call with no payload. If we never saw a frame with
-	// a result/error and the response body was empty, record a Skip
-	// (matches the buffered path's "no_response_body" semantics so
-	// abctl pairs request and response rows uniformly across shapes).
-	// If we observed too many frames, emit a single truncation row so
-	// operators see that records were dropped.
+	// End-of-stream call with no payload. If we never saw a frame with a
+	// result/error and the response body was empty, record the terminal
+	// invocation via recordEmptyResponse (matches the buffered path: an
+	// Observe for an expected notification ack, a Skip for an anomalous empty
+	// response to a request with an id) so abctl pairs request and response
+	// rows uniformly across shapes. If we observed too many frames, emit a
+	// single truncation row so operators see that records were dropped.
 	if len(frame) == 0 {
 		if last {
 			if pctx.Extensions.MCP.Result == nil && pctx.Extensions.MCP.Err == nil && state.observed == 0 {
-				pctx.Skip("no_response_body")
+				recordEmptyResponse(pctx)
 			}
 			if state.truncated {
 				pctx.Observe("matched_" + pctx.Extensions.MCP.Method + "_response_truncated")
