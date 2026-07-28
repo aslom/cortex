@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
@@ -45,6 +46,20 @@ func (p *A2AParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 	var rpc parsercommon.JSONRPCRequest
 	if err := json.Unmarshal(pctx.Body, &rpc); err != nil {
 		slog.Debug("a2a-parser: invalid JSON-RPC", "error", err, "bodyLen", len(pctx.Body))
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+
+	// Claim only A2A-namespace methods. Both A2A and MCP ride JSON-RPC 2.0
+	// over HTTP, so "the method is non-empty" cannot tell them apart — the
+	// method namespace is the only in-body signal that does. Gating here
+	// keeps this parser from claiming traffic that is JSON-RPC but belongs
+	// to another protocol — MCP (initialize, tools/list, notifications/*,
+	// ...) — or a non-JSON-RPC body such as an inference /v1/messages call
+	// (which unmarshals into JSONRPCRequest with an empty Method). Without
+	// it, abctl showed a phantom a2a-parser match on both MCP and inference
+	// traffic. mcp-parser has the mirror guard for its own namespace.
+	if !isA2AMethod(rpc.Method) {
+		slog.Debug("a2a-parser: not an A2A-namespace method, skipping", "method", rpc.Method, "bodyLen", len(pctx.Body))
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -430,6 +445,22 @@ func parseA2AParts(rawParts []any) []pipeline.A2APart {
 		parts = append(parts, pipeline.A2APart{Kind: kind, Content: content})
 	}
 	return parts
+}
+
+// isA2AMethod reports whether a JSON-RPC method name belongs to the A2A
+// protocol namespace. A2A methods are slash-namespaced under message/,
+// tasks/, and agent/ (per the A2A spec: message/send, message/stream,
+// tasks/get, tasks/list, tasks/cancel, tasks/resubscribe,
+// tasks/pushNotificationConfig/*, agent/getAuthenticatedExtendedCard).
+// This positively identifies A2A traffic — declining MCP JSON-RPC and
+// non-JSON-RPC bodies (empty method) that also unmarshal into a
+// JSONRPCRequest. It stays forward-compatible within A2A's own namespace
+// design: future message/*, tasks/*, and agent/* methods match without a
+// code change.
+func isA2AMethod(method string) bool {
+	return strings.HasPrefix(method, "message/") ||
+		strings.HasPrefix(method, "tasks/") ||
+		strings.HasPrefix(method, "agent/")
 }
 
 // isA2AAction reports whether an A2A JSON-RPC method name names a
