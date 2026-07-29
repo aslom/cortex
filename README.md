@@ -1,37 +1,34 @@
 # Cortex
 
-Cortex is a sidecar framework that **secures and observes the traffic of AI agents and Kubernetes workloads**. It sits in the request path — as a local forward/reverse proxy, an Envoy `ext_proc` filter, or a mesh waypoint — and adds:
+Cortex delivers easy-to-use platform services to agentic workloads. It runs in a workload's request path — a sidecar in Kubernetes, or a standalone binary anywhere else — and provides:
 
-- **Identity & tokens** — SPIFFE/SPIRE workload identity, JWT validation, and RFC 8693 token exchange (the original "AuthBridge" capability).
-- **Protocol-aware observability** — decrypts egress (TLS bridge) and parses LLM inference, MCP, and A2A calls into a live session view (`abctl`).
-- **Egress control & policy** — guardrails (IBAC / OPA) and per-host routing over a workload's outbound calls.
+- **Identity & access** — a verifiable identity for each workload, authentication and authorization of its calls, and the right credentials for each downstream service.
+- **Guardrails** — block agent actions that stray from the user's intent or aren't grounded in the conversation.
+- **Observability** — decrypt and parse a workload's model, tool, and agent-to-agent traffic into a live view.
+- **Egress control** — govern which external services a workload can reach.
+- **Optimizations** — trim the model context a workload sends and cap its spend, to cut latency and cost.
 
-It runs the same way **in Kubernetes** (operator-injected sidecar) or **standalone** on a laptop/VM (a single binary, no cluster).
-
-> Formerly **AuthBridge** — the code lives under [`authbridge/`](./authbridge/) and ships as the `authbridge-proxy` binary and the `abctl` session viewer.
+It ships as a single binary; the identity and access layer is **AuthBridge**, and the code lives under [`authbridge/`](./authbridge/).
 
 ## Quick start (local, no Kubernetes)
 
 See an AI agent's egress — LLM, MCP, and A2A calls — decrypted and parsed live on your laptop. No cluster, no Keycloak, no SPIRE.
 
-1. **Get the binaries.** Download prebuilt `abctl` and `authbridge-proxy` (linux/macOS, amd64/arm64) from the [Releases page](https://github.com/rossoctl/cortex/releases) and put them on your `PATH`. On macOS, clear the quarantine once: `xattr -dr com.apple.quarantine ./abctl ./authbridge-proxy`.
-   _(Or build from source: `cd authbridge/cmd/abctl && go build .` then `cd ../authbridge-proxy && go build .`.)_
-
-2. **Start Cortex** with the built-in local preset — a forward-only proxy (loopback-only) with the TLS bridge on and the protocol parsers, no config file needed. On first run it generates a demo CA under `./cortex-ca` (override with `--ca-dir`) and logs the exact `NODE_EXTRA_CA_CERTS=…` line to trust it:
+1. **Install and start it.** One line installs the `abctl` and `authbridge-proxy` binaries (macOS/Linux) and starts the local demo. On first run it mints a demo CA under `./cortex-ca` and logs the `NODE_EXTRA_CA_CERTS=…` line to trust it:
 
    ```sh
-   authbridge-proxy --demo
+   curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/authbridge/install-demo.sh | sh
    ```
 
-   _(It also writes that config to `./cortex-ca/demo.yaml` — edit that file and the running proxy hot-reloads it.)_
+   _(Prefer to inspect first? Read [`install-demo.sh`](./authbridge/install-demo.sh) — or build from source: `cd authbridge/cmd/abctl && go build .` then `cd ../authbridge-proxy && go build . && ./authbridge-proxy --demo`.)_
 
-3. **Open the session viewer** in another terminal:
+2. **Open the session viewer** in another terminal:
 
    ```sh
    abctl --endpoint http://localhost:9094
    ```
 
-4. **Run your agent through it** — e.g. Claude Code (from the same directory, so `./cortex-ca` resolves — or use the absolute path the proxy logged):
+3. **Run your agent through it** — e.g. Claude Code (from the same directory, so `./cortex-ca` resolves — or use the absolute path the proxy logged):
 
    ```sh
    HTTPS_PROXY=http://localhost:8081 \
@@ -42,7 +39,7 @@ See an AI agent's egress — LLM, MCP, and A2A calls — decrypted and parsed li
 
    Its LLM, MCP, and A2A calls appear live in `abctl`, decrypted and parsed.
 
-> Local / observe-only: the parsers *observe* traffic; nothing is enforced. `generate_ca` and the self-signed CA are for local use — in Kubernetes the CA is a mounted cert-manager Secret.
+> Observe-only: the parsers *observe* traffic; nothing is enforced. The self-signed demo CA is for local use — in Kubernetes the CA is a mounted cert-manager Secret.
 
 ## Running on Kubernetes
 
