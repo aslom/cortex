@@ -6,7 +6,7 @@ AuthBridge provides **secure, transparent token management** for Kubernetes work
 
 ## Deployment Modes
 
-The [`cmd/authbridge/`](./cmd/authbridge/) directory contains a unified binary that supports three deployment modes in a single codebase. Two container images are published:
+Two container images are published:
 
 | Image | Contents |
 |-------|----------|
@@ -344,7 +344,7 @@ sequenceDiagram
 
 ### Quick Setup
 
-The easiest way to get all prerequisites is to use the [Rossoctl Ansible installer](https://github.com/rossoctl/rossoctl/blob/main/docs/install.md#ansible-based-installer-recommended).
+The easiest way to get all prerequisites is to use the [Rossoctl Quickstart](https://www.rossoctl.dev/docs/overview/quickstart).
 
 ## Getting Started
 
@@ -456,6 +456,6 @@ Keycloak client registration is handled by the [operator](https://github.com/ros
 
 ## References
 
-- [Rossoctl Installation](https://github.com/rossoctl/rossoctl/blob/main/docs/install.md)
+- [Rossoctl Installation](https://github.com/rossoctl/rossoctl/blob/main/docs/getting-started/install.md)
 - [SPIRE Documentation](https://spiffe.io/docs/latest/)
 - [OAuth 2.0 Token Exchange (RFC 8693)](https://www.rfc-editor.org/rfc/rfc8693)
