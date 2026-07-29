@@ -57,6 +57,10 @@ import (
 
 var logLevel = new(slog.LevelVar)
 
+// version is the authbridge-proxy build version, overridden at release time
+// via -ldflags "-X main.version=<tag>". Defaults to "dev" for local builds.
+var version = "dev"
+
 func initLogging() {
 	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
 	case "debug":
@@ -141,7 +145,13 @@ func pluginUsesSPIFFEIdentity(p config.PluginEntry) bool {
 
 func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("authbridge-proxy", version)
+		return
+	}
 
 	initLogging()
 	startSignalToggle()
@@ -435,7 +445,7 @@ func main() {
 		}()
 	}
 
-	slog.Info("authbridge-proxy starting", "mode", cfg.Mode, "logLevel", logLevel.Level().String())
+	slog.Info("authbridge-proxy starting", "version", version, "mode", cfg.Mode, "logLevel", logLevel.Level().String())
 
 	go func() {
 		mux := http.NewServeMux()

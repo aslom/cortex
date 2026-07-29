@@ -4,6 +4,34 @@ AuthBridge provides **secure, transparent token management** for Kubernetes work
 
 > **📘 Looking to run the demo?** See the [Weather Agent](./demos/weather-agent/demo-ui.md) or [GitHub Issue Agent](./demos/github-issue/demo.md) demos for step-by-step instructions, and [Token-Exchange Routes](./demos/token-exchange-routes/README.md) for route configuration.
 
+## Download prebuilt binaries
+
+Prefer not to compile from source? Every `v*` release attaches prebuilt `abctl` (the
+session-inspector TUI) and `authbridge-proxy` binaries for linux and macOS (amd64 +
+arm64) on the [Releases page](https://github.com/rossoctl/cortex/releases).
+
+```sh
+VER=v0.1.0                 # a released tag
+OS=darwin ARCH=arm64       # one of: linux/darwin × amd64/arm64
+base="https://github.com/rossoctl/cortex/releases/download/${VER}"
+
+curl -fsSLO "${base}/abctl_${VER}_${OS}_${ARCH}.tar.gz"
+curl -fsSLO "${base}/checksums.txt"
+sha256sum -c checksums.txt --ignore-missing    # macOS: shasum -a 256 -c ... --ignore-missing
+tar xzf "abctl_${VER}_${OS}_${ARCH}.tar.gz"
+sudo mv abctl /usr/local/bin/                  # onto PATH
+abctl --version
+```
+
+`authbridge-proxy` ships the same way (`authbridge-proxy_${VER}_${OS}_${ARCH}.tar.gz`).
+
+- **Linux** binaries are fully static (`CGO_ENABLED=0`) — no libc dependency, run anywhere.
+- **macOS** binaries are portable but unsigned; after extracting, clear the Gatekeeper
+  quarantine once: `xattr -dr com.apple.quarantine ./abctl` (or `codesign --sign - ./abctl`).
+
+Building from source instead is just `cd authbridge/cmd/abctl && go build .` (likewise
+`cmd/authbridge-proxy`).
+
 ## Deployment Modes
 
 The [`cmd/authbridge/`](./cmd/authbridge/) directory contains a unified binary that supports three deployment modes in a single codebase. Two container images are published:
