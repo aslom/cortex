@@ -1,67 +1,57 @@
-# Rossoctl Extensions
+# Cortex
 
-Kubernetes security extensions for the [Rossoctl](https://github.com/rossoctl/rossoctl) ecosystem, providing **zero-trust authentication** for workloads through transparent token exchange and dynamic Keycloak client registration using SPIFFE/SPIRE identities.
+Cortex is a sidecar framework that **secures and observes the traffic of AI agents and Kubernetes workloads**. It sits in the request path — as a local forward/reverse proxy, an Envoy `ext_proc` filter, or a mesh waypoint — and adds:
 
-## AuthBridge
+- **Identity & tokens** — SPIFFE/SPIRE workload identity, JWT validation, and RFC 8693 token exchange (the original "AuthBridge" capability).
+- **Protocol-aware observability** — decrypts egress (TLS bridge) and parses LLM inference, MCP, and A2A calls into a live session view (`abctl`).
+- **Egress control & policy** — guardrails (IBAC / OPA) and per-host routing over a workload's outbound calls.
 
-[AuthBridge](./authbridge/) provides end-to-end authentication for Kubernetes workloads with [SPIFFE/SPIRE](https://spiffe.io) integration. It consists of:
+It runs the same way **in Kubernetes** (operator-injected sidecar) or **standalone** on a laptop/VM (a single binary, no cluster).
 
-- **[Authlib](./authbridge/authlib/)** — shared Go library: JWT validation, RFC 8693 token exchange, plugin pipeline, listener implementations.
-- **Mode-specific binaries** under [`authbridge/cmd/`](./authbridge/cmd/):
-  - [`authbridge-proxy`](./authbridge/cmd/authbridge-proxy/) — proxy-sidecar (default): HTTP forward + reverse proxies, full plugin set.
-  - [`authbridge-envoy`](./authbridge/cmd/authbridge-envoy/) — envoy-sidecar: ext_proc gRPC server hooked into Envoy, full plugin set.
-  - `authbridge-lite` — **not a separate binary**: the `authbridge-lite` image is `authbridge-proxy` built with `exclude_plugin_*` tags (auth-only: jwt-validation + token-exchange), for size-constrained deployments. See [`authbridge-proxy`](./authbridge/cmd/authbridge-proxy/).
-- **[proxy-init](./authbridge/proxy-init/)** — iptables init container used by envoy-sidecar mode for transparent traffic interception.
-- **[Keycloak Sync](./authbridge/keycloak_sync.py)** — Declarative tool for synchronizing Keycloak configuration.
+> Formerly **AuthBridge** — the code lives under [`authbridge/`](./authbridge/) and ships as the `authbridge-proxy` binary and the `abctl` session viewer.
 
-Keycloak client registration runs in the [operator](https://github.com/rossoctl/operator) (separate repo, post-#411 / operator#361 — no in-pod registration sidecar).
+## Quick start (local, no Kubernetes)
 
-See the [AuthBridge README](./authbridge/README.md) for architecture details and the [demos index](./authbridge/demos/README.md) for getting started.
+See an AI agent's egress — LLM, MCP, and A2A calls — decrypted and parsed live on your laptop. No cluster, no Keycloak, no SPIRE.
 
-## Container Images
+1. **Get the binaries.** Download prebuilt `abctl` and `authbridge-proxy` (linux/macOS, amd64/arm64) from the [Releases page](https://github.com/rossoctl/cortex/releases) and put them on your `PATH`. On macOS, clear the quarantine once: `xattr -dr com.apple.quarantine ./abctl ./authbridge-proxy`.
+   _(Or build from source: `cd authbridge/cmd/abctl && go build .` then `cd ../authbridge-proxy && go build .`.)_
 
-All images are published to `ghcr.io/rossoctl/cortex/`. After
-cortex#411 the unified binary was split into three
-mode-specific combined images, and the per-component sidecars
-(`client-registration`, standalone `spiffe-helper`) were retired:
+2. **Start Cortex** with the built-in local preset — a forward-only proxy (loopback-only) with the TLS bridge on and the protocol parsers, no config file needed. On first run it generates a demo CA under `./cortex-ca` (override with `--ca-dir`) and logs the exact `NODE_EXTRA_CA_CERTS=…` line to trust it:
 
-| Image | Description |
-|-------|-------------|
-| `authbridge` | proxy-sidecar combined (default): authbridge-proxy + bundled spiffe-helper, full plugin set |
-| `authbridge-envoy` | envoy-sidecar combined: Envoy + ext_proc + bundled spiffe-helper, full plugin set |
-| `authbridge-lite` | `authbridge-proxy` built with `exclude_plugin_*` tags — auth-only (jwt-validation + token-exchange, OPA + parsers dropped), for size-constrained deployments. A build variant, not a separate binary |
-| `proxy-init` | Alpine + iptables init container (envoy-sidecar mode only) |
+   ```sh
+   authbridge-proxy --demo
+   ```
 
-`spiffe-helper` is bundled inside each combined image and gated per
-workload by the `SPIRE_ENABLED` env var. Client registration is
-handled by the operator's `ClientRegistrationReconciler` and
-no longer ships as a separate image. The legacy `authbridge-unified`,
-`authbridge-light`, `client-registration`, and standalone `spiffe-helper`
-images are no longer published; older release tags continue to
-publish the previous shape.
+   _(It also writes that config to `./cortex-ca/demo.yaml` — edit that file and the running proxy hot-reloads it.)_
 
-## Development
+3. **Open the session viewer** in another terminal:
 
-```bash
-# Install pre-commit hooks
-make pre-commit
+   ```sh
+   abctl --endpoint http://localhost:9094
+   ```
 
-# Run formatters
-make fmt
+4. **Run your agent through it** — e.g. Claude Code (from the same directory, so `./cortex-ca` resolves — or use the absolute path the proxy logged):
 
-# Build the proxy-init iptables init container image
-make build-proxy-init
+   ```sh
+   HTTPS_PROXY=http://localhost:8081 \
+     NODE_EXTRA_CA_CERTS="$PWD/cortex-ca/ca.crt" \
+     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+     claude
+   ```
 
-# Run local testing (requires Kind cluster)
-./local-build-and-test.sh
-```
+   Its LLM, MCP, and A2A calls appear live in `abctl`, decrypted and parsed.
 
-See [LOCAL_TESTING_GUIDE.md](./LOCAL_TESTING_GUIDE.md) for the full local development setup.
+> Local / observe-only: the parsers *observe* traffic; nothing is enforced. `generate_ca` and the self-signed CA are for local use — in Kubernetes the CA is a mounted cert-manager Secret.
 
-## Related Repositories
+## Running on Kubernetes
 
-- [rossoctl](https://github.com/rossoctl/rossoctl) — Core Rossoctl platform
-- [operator](https://github.com/rossoctl/operator) — Kubernetes operator for sidecar injection (includes the admission webhook)
+In a cluster, Cortex sidecars are injected automatically by the [operator](https://github.com/rossoctl/operator), with Keycloak + SPIFFE/SPIRE for identity and token exchange. Start with the end-to-end **[Weather Agent walkthrough](./authbridge/demos/weather-agent/demo-ui.md)** (or the [`abctl` version](./authbridge/demos/weather-agent/demo-with-abctl.md)); see the [demos index](./authbridge/demos/README.md) and the [architecture reference](./authbridge/README.md) for all modes and details.
+
+## Related repositories
+
+- [rossoctl](https://github.com/rossoctl/rossoctl) — core platform
+- [operator](https://github.com/rossoctl/operator) — sidecar injection + admission webhook
 
 ## License
 

@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -60,6 +61,14 @@ var logLevel = new(slog.LevelVar)
 // version is the authbridge-proxy build version, overridden at release time
 // via -ldflags "-X main.version=<tag>". Defaults to "dev" for local builds.
 var version = "dev"
+
+// demoMode is set by --demo. It suppresses listeners that only make sense with
+// iptables enforce-redirect: the demo uses cooperative HTTPS_PROXY, so nothing
+// is ever REDIRECTed to the transparent listener and opening it would just be
+// an idle port. The forward-role preset defaults transparent_proxy_addr to
+// :8082, and config can't unset it (the preset refills an empty value), so this
+// gate is the only way to keep the demo to the listeners it actually uses.
+var demoMode bool
 
 func initLogging() {
 	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
@@ -146,6 +155,10 @@ func pluginUsesSPIFFEIdentity(p config.PluginEntry) bool {
 func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	demo := flag.Bool("demo", false,
+		"run a built-in local demo (forward-only TLS bridge + protocol parsers) that decrypts and parses an agent's egress; no --config, cluster, Keycloak, or SPIRE needed")
+	caDir := flag.String("ca-dir", "",
+		"CA directory for --demo (auto-generated); defaults to ./"+demoCADirDefault)
 	flag.Parse()
 
 	if *showVersion {
@@ -156,8 +169,34 @@ func main() {
 	initLogging()
 	startSignalToggle()
 
+	if *demo {
+		demoMode = true
+		if *configPath != "" {
+			log.Fatal("--demo and --config are mutually exclusive")
+		}
+		dir := *caDir
+		if dir == "" {
+			dir = demoCADirDefault // relative to cwd — no absolute path baked in
+		}
+		abs, aerr := filepath.Abs(dir)
+		if aerr != nil {
+			log.Fatalf("--demo: resolving --ca-dir %q: %v", dir, aerr)
+		}
+		// Write the built-in config next to the CA and drive the normal
+		// file-based load + hot-reload path — so editing the file reloads live.
+		p, werr := writeDemoConfig(abs)
+		if werr != nil {
+			log.Fatalf("--demo: %v", werr)
+		}
+		*configPath = p
+		slog.Info("demo mode — wrote built-in config next to the CA; edit it to hot-reload",
+			"config", p, "ca_dir", abs)
+	} else if *caDir != "" {
+		log.Fatal("--ca-dir only applies with --demo")
+	}
+
 	if *configPath == "" {
-		log.Fatal("--config is required and must point to a YAML file")
+		log.Fatal("--config is required (or use --demo for the local demo)")
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured. The
@@ -411,7 +450,10 @@ func main() {
 		// forward proxy's outbound pipeline via HandleTransparentConn, so explicit
 		// HTTP_PROXY egress and iptables-REDIRECTed bypass egress are gated and
 		// tunnelled identically. Closed explicitly on shutdown (not an *http.Server).
-		transparentLn = startTransparentProxy(fpSrv, cfg.Listener.TransparentProxyAddr)
+		// Skipped in --demo: no iptables there, so nothing is ever REDIRECTed to it.
+		if !demoMode {
+			transparentLn = startTransparentProxy(fpSrv, cfg.Listener.TransparentProxyAddr)
+		}
 	}
 
 	_ = mtlsMetrics // TODO Phase 2: surface metrics through /stats
