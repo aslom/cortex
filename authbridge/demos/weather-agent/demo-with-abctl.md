@@ -37,9 +37,14 @@ Verify by sending one chat message and getting a weather response. Once that wor
 
    Merging only the `pipeline:` key into the existing YAML is brittle across operator versions. If the patch above doesn't take effect, `kubectl edit configmap authbridge-runtime-config -n team1` and add the `pipeline:` section to the existing `config.yaml` by hand. See [mcp-parser demo](../mcp-parser/README.md) for the full config format and rationale.
 
-## 1. Build `abctl`
+## 1. Get `abctl`
 
-`abctl` lives in the `cortex` repo. Build it once:
+Download a prebuilt `abctl` (linux/macOS, amd64/arm64) from the
+[Releases page](https://github.com/rossoctl/cortex/releases) — see
+[Download prebuilt binaries](../../README.md#download-prebuilt-binaries) for verify + macOS
+quarantine steps — and put it on your PATH.
+
+Or build it from source:
 
 ```sh
 git clone https://github.com/rossoctl/cortex.git
@@ -47,7 +52,7 @@ cd cortex/authbridge/cmd/abctl
 go build .
 ```
 
-Produces a single ~10 MB binary at `./abctl`. See [the abctl README](../../cmd/abctl/README.md) for full flags and keybindings.
+Either way you get a single `abctl` binary. See [the abctl README](../../cmd/abctl/README.md) for full flags and keybindings.
 
 ## 2. Launch `abctl`
 
