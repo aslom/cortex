@@ -5,7 +5,8 @@
 #
 # Detects your OS/arch, downloads the prebuilt `abctl` and `authbridge-proxy`
 # binaries for the newest release, verifies their SHA-256 checksums, installs
-# them to ~/.local/bin, and starts `authbridge-proxy --demo` (Ctrl-C to stop).
+# them to ~/.local/bin, and starts the demo in the background — then prints the
+# commands to watch traffic and point an agent at it, plus how to stop it.
 # macOS + Linux, amd64 + arm64. No cluster, Keycloak, or SPIRE needed.
 #
 # Environment:
@@ -37,6 +38,25 @@ sha_check() {
 	fi
 }
 
+# Demo listener ports — loopback, and deliberately uncommon to avoid colliding
+# with common dev tools. Keep in sync with the demo config in
+# authbridge/cmd/authbridge-proxy/demo.go.
+DEMO_FORWARD_PORT=47600
+DEMO_SESSION_PORT=47601
+DEMO_STATS_PORT=47602
+
+# port_in_use exits 0 if something is already listening on the given loopback
+# port. Best-effort: uses lsof, then nc; if neither exists, it assumes free.
+port_in_use() {
+	if command -v lsof >/dev/null 2>&1; then
+		lsof -nP -iTCP@127.0.0.1:"$1" -sTCP:LISTEN >/dev/null 2>&1
+	elif command -v nc >/dev/null 2>&1; then
+		nc -z 127.0.0.1 "$1" >/dev/null 2>&1
+	else
+		return 1
+	fi
+}
+
 # --- detect platform ---
 os=$(uname -s)
 case "$os" in
@@ -51,6 +71,15 @@ case "$arch" in
 	arm64 | aarch64) arch=arm64 ;;
 	*) die "unsupported architecture: $arch (supported: amd64, arm64)" ;;
 esac
+
+# --- preflight: fail early (before downloading) if a demo port is taken ---
+if [ "${AUTHBRIDGE_INSTALL_ONLY:-}" != "1" ]; then
+	for p in "$DEMO_FORWARD_PORT" "$DEMO_SESSION_PORT" "$DEMO_STATS_PORT"; do
+		if port_in_use "$p"; then
+			die "port ${p} is already in use. Is the demo already running (see ./cortex-ca/demo.pid)? Otherwise free the port, or change the ports in ./cortex-ca/demo.yaml, then re-run."
+		fi
+	done
+fi
 
 # --- resolve the release tag ---
 # `releases/latest` excludes prereleases, and the project ships prereleases, so
@@ -104,8 +133,9 @@ fi
 rm -rf "$tmp"
 trap - EXIT
 
-# --- report + next steps ---
+# --- report ---
 proxy="${BIN_DIR}/authbridge-proxy"
+ca_dir="$(pwd)/cortex-ca" # matches demoCADirDefault in demo.go
 case ":${PATH}:" in
 	*":${BIN_DIR}:"*) abctl_cmd="abctl" proxy_cmd="authbridge-proxy" ;;
 	*) abctl_cmd="${BIN_DIR}/abctl" proxy_cmd="$proxy" ;;
@@ -116,25 +146,61 @@ info "Installed abctl and authbridge-proxy (${version}) to ${BIN_DIR}"
 case ":${PATH}:" in
 	*":${BIN_DIR}:"*) ;;
 	*)
-		warn "${BIN_DIR} is not on your PATH; the commands below use full paths."
+		warn "${BIN_DIR} is not on your PATH."
 		warn "Add it for future sessions:  export PATH=\"${BIN_DIR}:\$PATH\""
 		;;
 esac
-info ""
-info "In two more terminals (from this directory, so ./cortex-ca resolves):"
-info "  View the live session:  ${abctl_cmd} --endpoint http://localhost:9094"
-info '  Run your agent, e.g. Claude Code:'
-# $PWD is intentionally literal here — printed for the user's shell to expand
-# when they paste the command, not expanded by this script.
-# shellcheck disable=SC2016
-info '    HTTPS_PROXY=http://localhost:8081 NODE_EXTRA_CA_CERTS="$PWD/cortex-ca/ca.crt" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude'
-info ""
 
 if [ "${AUTHBRIDGE_INSTALL_ONLY:-}" = "1" ]; then
+	info ""
 	info "Install-only mode. Start the demo with:  ${proxy_cmd} --demo"
 	exit 0
 fi
 
-info "Starting the demo proxy (Ctrl-C to stop)..."
+# --- start in the background, then wait until it's actually listening ---
 info ""
-exec "$proxy" --demo
+info "Starting the demo in the background..."
+mkdir -p "$ca_dir"
+log="${ca_dir}/demo.log"
+pidfile="${ca_dir}/demo.pid"
+nohup "$proxy" --demo </dev/null >"$log" 2>&1 &
+demo_pid=$!
+echo "$demo_pid" >"$pidfile"
+
+# Confirm readiness from real signals, not the "listening" log line — that line is
+# emitted just *before* the socket is bound, so a bind failure could look ready.
+# A bind failure exits within ms (the proxy Fatalf's), so watch for early exit;
+# and probe the forward port for a true post-bind signal.
+ready=0
+i=0
+while [ "$i" -lt 50 ]; do
+	if ! kill -0 "$demo_pid" 2>/dev/null; then
+		warn "the demo exited during startup — last log lines:"
+		tail -n 15 "$log" >&2 || true
+		die "demo failed to start (full log: ${log})"
+	fi
+	if port_in_use "$DEMO_FORWARD_PORT"; then
+		ready=1
+		break
+	fi
+	sleep 0.2
+	i=$((i + 1))
+done
+
+info ""
+if [ "$ready" -eq 1 ]; then
+	info "Cortex demo is running (pid ${demo_pid}).   Logs: ${log}"
+else
+	# It didn't exit during the startup window (a bind failure would have killed
+	# it), but no probe tool confirmed the port — most likely up. Say so honestly.
+	info "Cortex demo started (pid ${demo_pid}); couldn't confirm it's listening (install lsof or nc to verify). Logs: ${log}"
+fi
+info ""
+info "  Watch traffic:   ${abctl_cmd} --endpoint http://localhost:${DEMO_SESSION_PORT}"
+info "  Send traffic through it (e.g. Claude Code):"
+info "    HTTPS_PROXY=http://localhost:${DEMO_FORWARD_PORT} \\"
+info "      NODE_EXTRA_CA_CERTS=${ca_dir}/ca.crt \\"
+info "      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude"
+info ""
+info "  Stop the demo:   kill ${demo_pid}   (or: kill \$(cat ${pidfile}))"
+info ""

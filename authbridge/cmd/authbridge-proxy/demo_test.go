@@ -41,15 +41,19 @@ func TestDemoConfig_WriteLoadsAndValidates(t *testing.T) {
 		t.Errorf("expected forward-only roles, got %v", roles)
 	}
 
-	// The listeners the demo uses must bind loopback, never a wildcard that
-	// would expose an open forward proxy or the unauthenticated session API
-	// (decrypted bodies + injected tokens) to the LAN. The transparent listener
-	// isn't started under --demo (main.go gates it), so it's not asserted here.
-	if got := cfg.Listener.ForwardProxyAddr; got != "127.0.0.1:8081" {
-		t.Errorf("ForwardProxyAddr = %q, want loopback 127.0.0.1:8081", got)
+	// The listeners the demo uses must bind loopback on the uncommon ports the
+	// installer probes/prints, never a wildcard that would expose an open forward
+	// proxy, the stats endpoint, or the unauthenticated session API (decrypted
+	// bodies + injected tokens) to the LAN. The transparent listener isn't started
+	// under --demo (main.go gates it), so it's not asserted here.
+	if got := cfg.Listener.ForwardProxyAddr; got != "127.0.0.1:47600" {
+		t.Errorf("ForwardProxyAddr = %q, want loopback 127.0.0.1:47600", got)
 	}
-	if got := cfg.Listener.SessionAPIAddr; got != "127.0.0.1:9094" {
-		t.Errorf("SessionAPIAddr = %q, want loopback 127.0.0.1:9094", got)
+	if got := cfg.Listener.SessionAPIAddr; got != "127.0.0.1:47601" {
+		t.Errorf("SessionAPIAddr = %q, want loopback 127.0.0.1:47601", got)
+	}
+	if got := cfg.Stats.StatsAddress; got != "127.0.0.1:47602" {
+		t.Errorf("Stats.StatsAddress = %q, want loopback 127.0.0.1:47602", got)
 	}
 
 	if cfg.TLSBridge == nil {

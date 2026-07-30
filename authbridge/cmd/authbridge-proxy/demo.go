@@ -16,12 +16,15 @@ const demoCADirDefault = "cortex-ca"
 // the LLM / MCP / A2A parsers, so an agent's egress is decrypted and parsed.
 // Kept in sync with the root README.
 //
-// The listeners the demo actually uses are pinned to loopback: this runs on a
-// laptop, so a wildcard bind would expose an open forward proxy and the
-// unauthenticated session API (which carries decrypted bodies and any injected
-// tokens) to the LAN. The preset only fills empty addresses, so these explicit
-// values win. The enforce-redirect transparent listener isn't used here (no
-// iptables) and main.go skips starting it under --demo.
+// Every listener the demo uses is pinned to loopback on an uncommon port. This
+// runs on a laptop, so (a) a wildcard bind would expose an open forward proxy,
+// the stats endpoint, and the unauthenticated session API (which carries
+// decrypted bodies and any injected tokens) to the LAN, and (b) the usual
+// 8081/909x ports collide with common dev tools. The preset only fills empty
+// addresses, so these explicit values win — keep them in sync with the ports
+// the installer probes and prints (authbridge/install-demo.sh). The
+// enforce-redirect transparent listener isn't used here (no iptables) and
+// main.go skips starting it under --demo.
 //
 // The YAML body is flush-left on purpose — a raw string literal preserves
 // leading whitespace, so indenting these lines in source would corrupt the YAML.
@@ -32,8 +35,10 @@ func demoConfigYAML(caDir string) string {
 mode: proxy-sidecar
 listener:
   roles: [forward]
-  forward_proxy_addr: 127.0.0.1:8081
-  session_api_addr: 127.0.0.1:9094
+  forward_proxy_addr: 127.0.0.1:47600
+  session_api_addr: 127.0.0.1:47601
+stats:
+  address: 127.0.0.1:47602
 tls_bridge:
   mode: enabled
   ca_dir: "` + caDir + `"
