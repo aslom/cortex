@@ -12,34 +12,30 @@ It ships as a single binary; the identity and access layer is **AuthBridge**, an
 
 ## Quick start (local, no Kubernetes)
 
-See an AI agent's egress — LLM, MCP, and A2A calls — decrypted and parsed live on your laptop. No cluster, no Keycloak, no SPIRE.
+Watch an AI agent's traffic — its model, tool, and agent-to-agent calls — decrypted and parsed live on your laptop.
 
-1. **Install and start it.** One line installs the `abctl` and `authbridge-proxy` binaries (macOS/Linux) and starts the local demo. On first run it mints a demo CA under `./cortex-ca` and logs the `NODE_EXTRA_CA_CERTS=…` line to trust it:
+1. **Install and start the demo** (macOS/Linux). Downloads two small binaries and starts the proxy in the background:
 
    ```sh
    curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/authbridge/install-demo.sh | sh
    ```
 
-   _(Prefer to inspect first? Read [`install-demo.sh`](./authbridge/install-demo.sh) — or build from source: `cd authbridge/cmd/abctl && go build .` then `cd ../authbridge-proxy && go build . && ./authbridge-proxy --demo`.)_
-
-2. **Open the session viewer** in another terminal:
+2. **Open the live viewer** in another terminal:
 
    ```sh
-   abctl --endpoint http://localhost:9094
+   abctl --endpoint http://localhost:47601
    ```
 
-3. **Run your agent through it** — e.g. Claude Code (from the same directory, so `./cortex-ca` resolves — or use the absolute path the proxy logged):
+3. **Send an agent's traffic through it** — e.g. Claude Code, from the directory where you started the demo:
 
    ```sh
-   HTTPS_PROXY=http://localhost:8081 \
+   HTTPS_PROXY=http://localhost:47600 \
      NODE_EXTRA_CA_CERTS="$PWD/cortex-ca/ca.crt" \
      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
      claude
    ```
 
-   Its LLM, MCP, and A2A calls appear live in `abctl`, decrypted and parsed.
-
-> Observe-only: the parsers *observe* traffic; nothing is enforced. The self-signed demo CA is for local use — in Kubernetes the CA is a mounted cert-manager Secret.
+   Its calls stream into `abctl`, decrypted and parsed.
 
 ## Running on Kubernetes
 
