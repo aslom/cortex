@@ -76,7 +76,7 @@ OVERLAY_FILE="$(mktemp /tmp/opa-kind-enable-overlay.XXXXXX.yaml)"
 trap 'rm -f "$OVERLAY_FILE"' EXIT
 
 echo "==> Step 1/5: deploying bundle-service (${OPERATOR_DIR})"
-( cd "$OPERATOR_DIR" && ./hack/bundle-service-kind.sh "$CLUSTER_NAME" "$RELEASE_NAMESPACE" )
+( cd "$OPERATOR_DIR" && ./operator/hack/bundle-service-kind.sh "$CLUSTER_NAME" "$RELEASE_NAMESPACE" )
 kubectl get pods -n "$RELEASE_NAMESPACE" -l app=bundle-service
 
 echo "==> Step 2/5: building + loading authbridge-proxy (${IMAGE_TAG}) via ${CONTAINER_RUNTIME}"
@@ -123,6 +123,7 @@ pipeline: |
 YAML
 
 echo "==> Step 4/5: helm upgrade (base values.yaml + overlay — base file not modified)"
+( cd "$CHART_DIR" && helm dependency build )
 helm upgrade "$RELEASE_NAME" "$CHART_DIR" -n "$RELEASE_NAMESPACE" \
   -f "$VALUES_FILE" \
   -f "$OVERLAY_FILE" \
