@@ -140,7 +140,8 @@ helm upgrade "$RELEASE_NAME" "$CHART_DIR" -n "$RELEASE_NAMESPACE" \
   --wait --timeout 5m
 
 echo "==> Step 5/5: restarting authbridge pods in ${AGENT_NAMESPACE}"
-kubectl delete pods -n "$AGENT_NAMESPACE" -l rossoctl.io/type=agent
+# --ignore-not-found so this no-ops cleanly when the namespace has no agent pods yet.
+kubectl delete pods -n "$AGENT_NAMESPACE" -l rossoctl.io/type=agent --ignore-not-found
 
 cat <<EOF
 ==> Done.
