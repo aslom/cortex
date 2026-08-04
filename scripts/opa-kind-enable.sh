@@ -59,11 +59,19 @@ else
   CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 fi
 
+# Track every temp file we create and remove them on exit, so an early failure
+# (set -e) under any step still cleans up. Trailing-X templates only (no suffix
+# after the Xs) for portability across GNU and BSD/macOS mktemp.
+TMPFILES=()
+cleanup() { [ "${#TMPFILES[@]}" -gt 0 ] && rm -f "${TMPFILES[@]}"; }
+trap cleanup EXIT
+
 load_image_to_kind() {
   local image_name="$1"
   if [ "$CONTAINER_RUNTIME" = "podman" ]; then
     local tar_file
-    tar_file="$(mktemp /tmp/opa-kind-enable-image.XXXXXX.tar)"
+    tar_file="$(mktemp "${TMPDIR:-/tmp}/opa-kind-enable-image.XXXXXX")"
+    TMPFILES+=("$tar_file")
     "$CONTAINER_RUNTIME" save "$image_name" -o "$tar_file"
     kind load image-archive "$tar_file" --name "$CLUSTER_NAME"
     rm -f "$tar_file"
@@ -72,8 +80,8 @@ load_image_to_kind() {
   fi
 }
 
-OVERLAY_FILE="$(mktemp /tmp/opa-kind-enable-overlay.XXXXXX.yaml)"
-trap 'rm -f "$OVERLAY_FILE"' EXIT
+OVERLAY_FILE="$(mktemp "${TMPDIR:-/tmp}/opa-kind-enable-overlay.XXXXXX")"
+TMPFILES+=("$OVERLAY_FILE")
 
 echo "==> Step 1/5: deploying bundle-service (${OPERATOR_DIR})"
 ( cd "$OPERATOR_DIR" && ./hack/bundle-service-kind.sh "$CLUSTER_NAME" "$RELEASE_NAMESPACE" )
@@ -84,7 +92,7 @@ echo "==> Step 2/5: building + loading authbridge-proxy (${IMAGE_TAG}) via ${CON
 load_image_to_kind "$IMAGE_TAG"
 
 echo "==> Step 3/5: writing throwaway pipeline overlay (${VALUES_FILE} stays untouched)"
-cat > "$OVERLAY_FILE" <<'YAML'
+cat > "$OVERLAY_FILE" <<YAML
 # Throwaway overlay — merged on top of the real values.yaml at helm-upgrade
 # time, never written back to it. Adds OPA plus the full parser set
 # (a2a-parser, mcp-parser, inference-parser) to both pipeline legs:
@@ -111,7 +119,7 @@ pipeline: |
           keycloak_realm: "rossoctl"
       - name: opa
         config:
-          bundle_url: "http://bundle-service.rossoctl-system.svc.cluster.local:8080"
+          bundle_url: "http://bundle-service.${RELEASE_NAMESPACE}.svc.cluster.local:8080"
   outbound:
     plugins:
       - name: a2a-parser
@@ -119,7 +127,7 @@ pipeline: |
       - name: inference-parser
       - name: opa
         config:
-          bundle_url: "http://bundle-service.rossoctl-system.svc.cluster.local:8080"
+          bundle_url: "http://bundle-service.${RELEASE_NAMESPACE}.svc.cluster.local:8080"
 YAML
 
 echo "==> Step 4/5: helm upgrade (base values.yaml + overlay — base file not modified)"
@@ -128,7 +136,8 @@ helm upgrade "$RELEASE_NAME" "$CHART_DIR" -n "$RELEASE_NAMESPACE" \
   -f "$OVERLAY_FILE" \
   --set openshift=false \
   --set featureFlags.agentSandbox=true \
-  --set operator-chart.defaults.images.authbridge="$IMAGE_TAG"
+  --set operator-chart.defaults.images.authbridge="$IMAGE_TAG" \
+  --wait --timeout 5m
 
 echo "==> Step 5/5: restarting authbridge pods in ${AGENT_NAMESPACE}"
 kubectl delete pods -n "$AGENT_NAMESPACE" -l rossoctl.io/type=agent
