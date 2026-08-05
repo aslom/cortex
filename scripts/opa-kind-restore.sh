@@ -45,7 +45,8 @@ fi
 
 echo "==> Restoring original pipeline from ${VALUES_FILE} (no OPA/parser overlay)"
 helm upgrade "$RELEASE_NAME" "$CHART_DIR" -n "$RELEASE_NAMESPACE" \
-  -f "$VALUES_FILE"
+  -f "$VALUES_FILE" \
+  --wait --timeout 5m
 
 echo "==> Restarting authbridge pods in ${AGENT_NAMESPACE}"
 kubectl delete pods -n "$AGENT_NAMESPACE" -l rossoctl.io/type=agent
