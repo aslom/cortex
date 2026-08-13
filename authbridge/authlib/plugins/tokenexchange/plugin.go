@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lestrrat-go/jwx/v2/jwt"
+
 	"github.com/rossoctl/cortex/authbridge/authlib/auth"
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
@@ -703,7 +705,7 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		return pipeline.DenyStatus(result.DenyStatus, code, result.DenyReason)
 	case auth.ActionReplaceToken:
 		pctx.Headers.Set("Authorization", "Bearer "+result.Token)
-		recordDelegationHop(pctx, result)
+		recordDelegationHop(pctx, authHeader, result)
 		reason := "token_replaced"
 		if result.CacheHit {
 			reason = "cache_hit"
@@ -774,17 +776,22 @@ func boolStr(b bool) string {
 // whether it came from cache.
 //
 // SubjectID is best-effort: the forward-proxy outbound pctx generally has
-// no validated Identity (JWT validation runs on the separate inbound pass),
-// so it's populated only when an Identity happens to be present. The
-// audience / scopes / strategy / from-cache fields are always known from
-// the exchange result and carry the bulk of the signal regardless.
-func recordDelegationHop(pctx *pipeline.Context, result *auth.OutboundResult) {
+// no validated Identity (JWT validation runs on the separate inbound pass).
+// When an Identity is present we use it; otherwise we fall back to the `sub`
+// claim of the incoming bearer — the token token-exchange uses as the RFC
+// 8693 subject_token — decoded WITHOUT signature verification (see
+// subjectFromToken). Either way, empty is a valid result: the audience /
+// scopes / strategy / from-cache fields are always known from the exchange
+// result and carry the bulk of the signal regardless.
+func recordDelegationHop(pctx *pipeline.Context, authHeader string, result *auth.OutboundResult) {
 	if pctx.Extensions.Delegation == nil {
 		pctx.Extensions.Delegation = &pipeline.DelegationExtension{}
 	}
 	subject := ""
 	if pctx.Identity != nil {
 		subject = pctx.Identity.Subject()
+	} else {
+		subject = subjectFromToken(authHeader)
 	}
 	pctx.Extensions.Delegation.AppendHop(pipeline.DelegationHop{
 		SubjectID: subject,
@@ -794,6 +801,35 @@ func recordDelegationHop(pctx *pipeline.Context, result *auth.OutboundResult) {
 		Strategy:  "token-exchange",
 		FromCache: result.CacheHit,
 	})
+}
+
+// subjectFromToken best-effort extracts the `sub` claim from an incoming
+// Authorization bearer WITHOUT signature verification. On the outbound leg
+// there is no validated Identity and no JWKS trust anchor for the caller's
+// token, but that token (used as the RFC 8693 subject_token) still names the
+// delegated subject. The value is surfaced into policy input as
+// `input.identity.subject` (delegation provenance) — it is NOT independently
+// verified here, so AuthBridge itself makes no auth decision from it.
+//
+// TRUST BOUNDARY: because the claim is unverified, any policy that gates
+// `allow` on `input.identity.subject` (e.g. the outbound `subject_ok` rule) is
+// trusting a value a caller can forge freely. That is a deliberate choice the
+// policy author owns; treat this decode as observability-grade input, not as a
+// security guarantee. The unverified decode mirrors how the protocol parsers
+// read request bodies. Returns "" on any error (missing/empty bearer, malformed
+// JWT).
+func subjectFromToken(authHeader string) string {
+	raw := auth.ExtractBearer(authHeader)
+	if raw == "" {
+		return ""
+	}
+	// unverified: subject enriches policy input (input.identity.subject); it is
+	// forgeable, so gating allow on it is a policy-author trust decision (see godoc).
+	tok, err := jwt.ParseInsecure([]byte(raw))
+	if err != nil {
+		return ""
+	}
+	return tok.Subject()
 }
 
 // splitScopes splits a raw space-separated OAuth scope string into a

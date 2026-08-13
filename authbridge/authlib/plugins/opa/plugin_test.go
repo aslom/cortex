@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/open-policy-agent/opa/sdk"
 
@@ -340,7 +341,7 @@ func TestBuildInput_Basic(t *testing.T) {
 		Host:      "my-service",
 		Headers:   http.Header{"Content-Type": {"application/json"}},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	if input["direction"] != "inbound" {
 		t.Errorf("expected inbound, got %v", input["direction"])
 	}
@@ -378,7 +379,7 @@ func TestBuildInput_WithIdentity(t *testing.T) {
 		Headers:   http.Header{},
 		Identity:  testIdentity{},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	id, ok := input["identity"].(map[string]any)
 	if !ok {
 		t.Fatal("expected identity map")
@@ -401,13 +402,227 @@ func TestBuildInput_WithAgent(t *testing.T) {
 		Headers:   http.Header{},
 		Agent:     &pipeline.AgentIdentity{ClientID: "agent-x"},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	agent, ok := input["agent"].(map[string]any)
 	if !ok {
 		t.Fatal("expected agent map")
 	}
 	if agent["client_id"] != "agent-x" {
 		t.Errorf("expected agent-x, got %v", agent["client_id"])
+	}
+}
+
+// --- Delegation input tests ---
+
+func TestBuildInput_NoDelegation(t *testing.T) {
+	inc := newIncludeSet(nil)
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Method:    "GET",
+		Path:      "/data",
+		Host:      "github-tool-mcp",
+		Headers:   http.Header{},
+	}
+	input := buildInput(pctx, inc, "")
+	if _, ok := input["delegation"]; ok {
+		t.Error("delegation should be absent when no hops recorded")
+	}
+}
+
+func TestBuildInput_WithDelegation(t *testing.T) {
+	inc := newIncludeSet(nil)
+	del := &pipeline.DelegationExtension{}
+	ts := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	del.AppendHop(pipeline.DelegationHop{
+		SubjectID: "agent-team1",
+		Scopes:    []string{"openid", "github-full-access"},
+		Audience:  "github-tool",
+		Strategy:  "token-exchange",
+		FromCache: true,
+		Timestamp: ts,
+	})
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Method:    "POST",
+		Path:      "/mcp",
+		Host:      "github-tool-mcp",
+		Headers:   http.Header{},
+	}
+	pctx.Extensions.Delegation = del
+
+	input := buildInput(pctx, inc, "")
+	d, ok := input["delegation"].(map[string]any)
+	if !ok {
+		t.Fatal("expected delegation map")
+	}
+	if d["origin"] != "agent-team1" {
+		t.Errorf("expected origin agent-team1, got %v", d["origin"])
+	}
+	if d["actor"] != "agent-team1" {
+		t.Errorf("expected actor agent-team1, got %v", d["actor"])
+	}
+	if d["depth"] != 1 {
+		t.Errorf("expected depth 1, got %v", d["depth"])
+	}
+	chain, ok := d["chain"].([]map[string]any)
+	if !ok || len(chain) != 1 {
+		t.Fatalf("expected chain with 1 hop, got %v", d["chain"])
+	}
+	hop := chain[0]
+	if hop["audience"] != "github-tool" {
+		t.Errorf("expected audience github-tool, got %v", hop["audience"])
+	}
+	if hop["strategy"] != "token-exchange" {
+		t.Errorf("expected strategy token-exchange, got %v", hop["strategy"])
+	}
+	if hop["from_cache"] != true {
+		t.Errorf("expected from_cache true, got %v", hop["from_cache"])
+	}
+	scopes, ok := hop["scopes"].([]string)
+	if !ok || len(scopes) != 2 || scopes[1] != "github-full-access" {
+		t.Errorf("expected scopes [openid github-full-access], got %v", hop["scopes"])
+	}
+	if hop["timestamp"] != "2026-08-03T12:00:00Z" {
+		t.Errorf("expected RFC3339 timestamp, got %v", hop["timestamp"])
+	}
+}
+
+// TestBuildInput_OutboundIdentityFromDelegation verifies the outbound leg —
+// where there is no validated JWT — synthesizes input.identity in the SAME
+// shape as inbound, sourced from the delegation hop, while STILL emitting the
+// full input.delegation chain. subject = origin, client_id = the agent's own
+// client, scopes = the last hop's scopes.
+func TestBuildInput_OutboundIdentityFromDelegation(t *testing.T) {
+	inc := newIncludeSet(nil)
+	del := &pipeline.DelegationExtension{}
+	del.AppendHop(pipeline.DelegationHop{
+		SubjectID: "dev-user",
+		Scopes:    []string{"openid", "agent-team1-github-tool-aud"},
+		Audience:  "github-tool",
+		Strategy:  "token-exchange",
+	})
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Method:    "POST",
+		Path:      "/mcp",
+		Host:      "github-tool-mcp",
+		Headers:   http.Header{},
+		// Identity nil — the outbound forward-proxy leg has no validated JWT.
+	}
+	pctx.Extensions.Delegation = del
+
+	input := buildInput(pctx, inc, "github-agent")
+
+	id, ok := input["identity"].(map[string]any)
+	if !ok {
+		t.Fatal("expected synthesized identity map on outbound")
+	}
+	if id["subject"] != "dev-user" {
+		t.Errorf("subject = %v, want dev-user", id["subject"])
+	}
+	if id["client_id"] != "github-agent" {
+		t.Errorf("client_id = %v, want github-agent (agent's own client)", id["client_id"])
+	}
+	scopes, ok := id["scopes"].([]string)
+	if !ok || len(scopes) != 2 || scopes[1] != "agent-team1-github-tool-aud" {
+		t.Errorf("scopes = %v, want [openid agent-team1-github-tool-aud]", id["scopes"])
+	}
+	// service_id mirrors the last hop's target audience so outbound policy can
+	// key on input.identity.service_id the same way inbound keys on audience.
+	if id["service_id"] != "github-tool" {
+		t.Errorf("service_id = %v, want github-tool (last hop target)", id["service_id"])
+	}
+	// Both signals must coexist: the full chain stays available.
+	if _, ok := input["delegation"].(map[string]any); !ok {
+		t.Error("expected input.delegation to still be present alongside synthesized identity")
+	}
+}
+
+// TestBuildInput_OutboundIdentityEmptyClientIDWhenAgentIDUnset pins the
+// contract when delegation is present but no agent_id is configured: the
+// synthesized input.identity carries client_id == "" (the empty string, not
+// absent). Outbound policy keys its allow decision on service_id/scopes, not
+// client_id, so "" is a benign but observable value worth asserting explicitly.
+func TestBuildInput_OutboundIdentityEmptyClientIDWhenAgentIDUnset(t *testing.T) {
+	inc := newIncludeSet(nil)
+	del := &pipeline.DelegationExtension{}
+	del.AppendHop(pipeline.DelegationHop{
+		SubjectID: "dev-user",
+		Scopes:    []string{"openid"},
+		Audience:  "github-tool",
+		Strategy:  "token-exchange",
+	})
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Method:    "POST",
+		Path:      "/mcp",
+		Host:      "github-tool-mcp",
+		Headers:   http.Header{},
+	}
+	pctx.Extensions.Delegation = del
+
+	input := buildInput(pctx, inc, "") // no agent_id configured
+	id, ok := input["identity"].(map[string]any)
+	if !ok {
+		t.Fatal("expected synthesized identity map on outbound")
+	}
+	cid, present := id["client_id"]
+	if !present {
+		t.Error("client_id should be present (as empty string), not omitted")
+	}
+	if cid != "" {
+		t.Errorf("client_id = %v, want \"\" when agent_id is unset", cid)
+	}
+}
+
+// TestBuildInput_OutboundIdentityOmitsServiceIDWhenAbsent verifies that a hop
+// with no recorded target audience (e.g. a non-exchange hop) does not assert an
+// empty input.identity.service_id, matching the scopes-omitted behavior.
+func TestBuildInput_OutboundIdentityOmitsServiceIDWhenAbsent(t *testing.T) {
+	inc := newIncludeSet(nil)
+	del := &pipeline.DelegationExtension{}
+	del.AppendHop(pipeline.DelegationHop{SubjectID: "dev-user"}) // no Audience, no Scopes
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Method:    "POST",
+		Path:      "/mcp",
+		Host:      "github-tool-mcp",
+		Headers:   http.Header{},
+	}
+	pctx.Extensions.Delegation = del
+
+	input := buildInput(pctx, inc, "github-agent")
+	id := input["identity"].(map[string]any)
+	if _, ok := id["service_id"]; ok {
+		t.Errorf("service_id should be absent when last hop recorded none, got %v", id["service_id"])
+	}
+	if _, ok := id["scopes"]; ok {
+		t.Errorf("scopes should be absent when last hop recorded none, got %v", id["scopes"])
+	}
+}
+
+// TestBuildInput_ValidatedIdentityWinsOverDelegation confirms that when a
+// validated Identity IS present (e.g. an inbound leg that also recorded a
+// delegation hop), the real identity is used and NOT overwritten by the
+// delegation-synthesized one.
+func TestBuildInput_ValidatedIdentityWinsOverDelegation(t *testing.T) {
+	inc := newIncludeSet(nil)
+	del := &pipeline.DelegationExtension{}
+	del.AppendHop(pipeline.DelegationHop{SubjectID: "dev-user", Audience: "tool"})
+	pctx := &pipeline.Context{
+		Direction: pipeline.Inbound,
+		Method:    "GET",
+		Path:      "/",
+		Host:      "svc",
+		Headers:   http.Header{},
+		Identity:  testIdentity{},
+	}
+	pctx.Extensions.Delegation = del
+
+	input := buildInput(pctx, inc, "github-agent")
+	id := input["identity"].(map[string]any)
+	if id["subject"] != "user-123" || id["client_id"] != "client-abc" {
+		t.Errorf("validated identity should win: got subject=%v client_id=%v", id["subject"], id["client_id"])
 	}
 }
 
@@ -432,7 +647,7 @@ func TestBuildInput_A2A_LeanMode(t *testing.T) {
 		Artifact:     "some artifact",
 		ErrorMessage: "some error",
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	a2a := input["a2a"].(map[string]any)
 
 	// Always present
@@ -484,7 +699,7 @@ func TestBuildInput_A2A_WithContent(t *testing.T) {
 		Artifact:     "artifact data",
 		ErrorMessage: "err msg",
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	a2a := input["a2a"].(map[string]any)
 
 	parts, ok := a2a["parts"].([]map[string]any)
@@ -527,7 +742,7 @@ func TestBuildInput_MCP_LeanMode(t *testing.T) {
 		Result: map[string]any{"content": "result data"},
 		Err:    &pipeline.MCPError{Code: -1, Message: "fail", Data: "detail"},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	mcp := input["mcp"].(map[string]any)
 
 	if mcp["method"] != "tools/call" {
@@ -579,7 +794,7 @@ func TestBuildInput_MCP_FullParams(t *testing.T) {
 			"arguments": map[string]any{"title": "Bug"},
 		},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	mcp := input["mcp"].(map[string]any)
 	params := mcp["params"].(map[string]any)
 	if _, ok := params["arguments"]; !ok {
@@ -604,7 +819,7 @@ func TestBuildInput_MCP_CustomParamKey(t *testing.T) {
 			"arguments": map[string]any{"large": "data"},
 		},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	mcp := input["mcp"].(map[string]any)
 	params := mcp["params"].(map[string]any)
 	if params["name"] != "read_resource" {
@@ -633,7 +848,7 @@ func TestBuildInput_MCP_WithResultAndError(t *testing.T) {
 		Result: map[string]any{"content": "data"},
 		Err:    &pipeline.MCPError{Code: -1, Message: "fail", Data: "detail"},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	mcp := input["mcp"].(map[string]any)
 	if _, ok := mcp["result"]; !ok {
 		t.Error("expected result when mcp.result is included")
@@ -687,7 +902,7 @@ func TestBuildInput_Inference_LeanMode(t *testing.T) {
 			{ID: "tc1", Name: "create_issue", Arguments: `{"title":"Bug"}`},
 		},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	inf := input["inference"].(map[string]any)
 
 	// Always present
@@ -760,7 +975,7 @@ func TestBuildInput_Inference_WithMessages(t *testing.T) {
 			{Role: "assistant", Content: "Hi there"},
 		},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	inf := input["inference"].(map[string]any)
 	messages, ok := inf["messages"].([]map[string]any)
 	if !ok {
@@ -789,7 +1004,7 @@ func TestBuildInput_Inference_WithToolsDetail(t *testing.T) {
 			{Name: "create_issue", Description: "Creates issues", Parameters: map[string]any{"type": "object"}},
 		},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	inf := input["inference"].(map[string]any)
 	tools, ok := inf["tools"].([]map[string]any)
 	if !ok {
@@ -822,7 +1037,7 @@ func TestBuildInput_Inference_WithCompletion(t *testing.T) {
 		Model:      "gpt-4",
 		Completion: "The answer is 42",
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	inf := input["inference"].(map[string]any)
 	if inf["completion"] != "The answer is 42" {
 		t.Errorf("expected completion, got %v", inf["completion"])
@@ -844,7 +1059,7 @@ func TestBuildInput_Inference_WithToolCalls(t *testing.T) {
 			{ID: "tc1", Name: "create_issue", Arguments: `{"title":"Bug"}`},
 		},
 	}
-	input := buildInput(pctx, inc)
+	input := buildInput(pctx, inc, "")
 	inf := input["inference"].(map[string]any)
 	tcs, ok := inf["tool_calls"].([]map[string]any)
 	if !ok {
