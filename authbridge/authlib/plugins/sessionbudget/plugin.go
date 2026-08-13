@@ -1,8 +1,8 @@
-// Package tokenbudget enforces per-session lifetime budgets on tokens,
+// Package sessionbudget enforces per-session lifetime budgets on tokens,
 // inference calls, and wall-clock duration. Must run before inference-parser
 // in the declared plugin order (response path is reverse: inference-parser
 // finalizes counts first, then this plugin reads them).
-package tokenbudget
+package sessionbudget
 
 import (
 	"context"
@@ -35,9 +35,9 @@ type counters struct {
 	startedAt time.Time
 }
 
-// TokenBudget is the plugin state. Redis provides cross-pod durability;
+// SessionBudget is the plugin state. Redis provides cross-pod durability;
 // the local cache provides zero-I/O enforcement on the request path.
-type TokenBudget struct {
+type SessionBudget struct {
 	cfg   config
 	store storage.Store
 	log   *slog.Logger
@@ -48,28 +48,28 @@ type TokenBudget struct {
 	stopped chan struct{}
 }
 
-func New() *TokenBudget {
-	return &TokenBudget{
+func New() *SessionBudget {
+	return &SessionBudget{
 		cache:   make(map[string]*counters),
 		stopCh:  make(chan struct{}),
 		stopped: make(chan struct{}),
-		log:     slog.Default().With("plugin", "token-budget"),
+		log:     slog.Default().With("plugin", "session-budget"),
 	}
 }
 
 func init() {
-	plugins.RegisterPlugin("token-budget", func() pipeline.Plugin { return New() })
+	plugins.RegisterPlugin("session-budget", func() pipeline.Plugin { return New() })
 }
 
-func (p *TokenBudget) Name() string { return "token-budget" }
+func (p *SessionBudget) Name() string { return "session-budget" }
 
-func (p *TokenBudget) Capabilities() pipeline.PluginCapabilities {
+func (p *SessionBudget) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
 		Description: "Enforce per-session token, call, and duration budgets via Redis.",
 	}
 }
 
-func (p *TokenBudget) Configure(raw json.RawMessage) error {
+func (p *SessionBudget) Configure(raw json.RawMessage) error {
 	p.cfg = config{
 		OnExceed:          "deny",
 		SessionTTLSeconds: 7200,
@@ -77,33 +77,33 @@ func (p *TokenBudget) Configure(raw json.RawMessage) error {
 		RedisUnavailable:  "fail_open",
 	}
 	if err := json.Unmarshal(raw, &p.cfg); err != nil {
-		return fmt.Errorf("token-budget config: %w", err)
+		return fmt.Errorf("session-budget config: %w", err)
 	}
 	if p.cfg.RedisURL == "" {
-		return fmt.Errorf("token-budget: redis_url is required")
+		return fmt.Errorf("session-budget: redis_url is required")
 	}
 	if p.cfg.MaxTokens <= 0 && p.cfg.MaxCalls <= 0 && p.cfg.MaxDurationSeconds <= 0 {
-		return fmt.Errorf("token-budget: at least one limit (max_tokens, max_calls, max_duration_seconds) must be > 0")
+		return fmt.Errorf("session-budget: at least one limit (max_tokens, max_calls, max_duration_seconds) must be > 0")
 	}
 	if p.cfg.OnExceed != "deny" && p.cfg.OnExceed != "observe" {
-		return fmt.Errorf("token-budget: on_exceed must be \"deny\" or \"observe\" (got %q)", p.cfg.OnExceed)
+		return fmt.Errorf("session-budget: on_exceed must be \"deny\" or \"observe\" (got %q)", p.cfg.OnExceed)
 	}
 	if d, err := time.ParseDuration(p.cfg.RefreshInterval); err != nil {
-		return fmt.Errorf("token-budget: invalid refresh_interval %q: %w", p.cfg.RefreshInterval, err)
+		return fmt.Errorf("session-budget: invalid refresh_interval %q: %w", p.cfg.RefreshInterval, err)
 	} else if d <= 0 {
-		return fmt.Errorf("token-budget: refresh_interval must be > 0 (got %q)", p.cfg.RefreshInterval)
+		return fmt.Errorf("session-budget: refresh_interval must be > 0 (got %q)", p.cfg.RefreshInterval)
 	}
 	if p.cfg.RedisUnavailable == "fail_closed" {
-		return fmt.Errorf("token-budget: redis_unavailable=fail_closed is not yet implemented; use fail_open")
+		return fmt.Errorf("session-budget: redis_unavailable=fail_closed is not yet implemented; use fail_open")
 	}
 	return nil
 }
 
-func (p *TokenBudget) Init(_ context.Context) error {
+func (p *SessionBudget) Init(_ context.Context) error {
 	// "redis" driver handles both Redis and Valkey (wire-compatible); URL must use redis:// scheme.
 	store, err := storage.Open("redis", p.cfg.RedisURL)
 	if err != nil {
-		return fmt.Errorf("token-budget: redis connect: %w", err)
+		return fmt.Errorf("session-budget: redis connect: %w", err)
 	}
 	p.store = store
 
@@ -113,7 +113,7 @@ func (p *TokenBudget) Init(_ context.Context) error {
 }
 
 // In-flight accumulate goroutines get ErrClosed after store.Close — bounded by their 2s ctx.
-func (p *TokenBudget) Shutdown(_ context.Context) error {
+func (p *SessionBudget) Shutdown(_ context.Context) error {
 	close(p.stopCh)
 	<-p.stopped
 	if p.store != nil {
@@ -124,7 +124,7 @@ func (p *TokenBudget) Shutdown(_ context.Context) error {
 
 // OnRequest evaluates cached counters against limits and optimistically reserves
 // a call slot so concurrent requests on the same session see each other. No I/O.
-func (p *TokenBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+func (p *SessionBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	sessionID := p.sessionID(pctx)
 	if sessionID == "" {
 		return pipeline.Action{Type: pipeline.Continue}
@@ -174,12 +174,12 @@ func (p *TokenBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 }
 
 // OnResponse is a no-op; see OnResponseFrame.
-func (p *TokenBudget) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+func (p *SessionBudget) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
 // OnResponseFrame accumulates token counts on finalization (last=true).
-func (p *TokenBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Context, _ []byte, last bool) pipeline.Action {
+func (p *SessionBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Context, _ []byte, last bool) pipeline.Action {
 	if !last {
 		return pipeline.Action{Type: pipeline.Continue}
 	}
@@ -212,7 +212,7 @@ func (p *TokenBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-func (p *TokenBudget) evaluate(c *counters) string {
+func (p *SessionBudget) evaluate(c *counters) string {
 	if p.cfg.MaxTokens > 0 && c.tokens >= p.cfg.MaxTokens {
 		return fmt.Sprintf("token limit reached: %d/%d", c.tokens, p.cfg.MaxTokens)
 	}
@@ -229,7 +229,7 @@ func (p *TokenBudget) evaluate(c *counters) string {
 }
 
 // accumulate writes counters to Redis. On failure, writes are dropped (fail-open).
-func (p *TokenBudget) accumulate(sessionID string, tokens int64) {
+func (p *SessionBudget) accumulate(sessionID string, tokens int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -252,7 +252,7 @@ func (p *TokenBudget) accumulate(sessionID string, tokens int64) {
 	}
 }
 
-func (p *TokenBudget) refreshLoop(interval time.Duration) {
+func (p *SessionBudget) refreshLoop(interval time.Duration) {
 	defer close(p.stopped)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -268,7 +268,7 @@ func (p *TokenBudget) refreshLoop(interval time.Duration) {
 }
 
 // refreshCache replaces local counters with authoritative Redis values.
-func (p *TokenBudget) refreshCache() {
+func (p *SessionBudget) refreshCache() {
 	p.mu.RLock()
 	keys := make([]string, 0, len(p.cache))
 	for k := range p.cache {
@@ -319,21 +319,21 @@ func (p *TokenBudget) refreshCache() {
 	}
 }
 
-func (p *TokenBudget) sessionID(pctx *pipeline.Context) string {
+func (p *SessionBudget) sessionID(pctx *pipeline.Context) string {
 	if pctx.Session != nil && pctx.Session.ID != "" {
 		return pctx.Session.ID
 	}
 	return ""
 }
 
-func (p *TokenBudget) redisKey(sessionID string) string {
-	return "token-budget:" + sessionID
+func (p *SessionBudget) redisKey(sessionID string) string {
+	return "session-budget:" + sessionID
 }
 
 var (
-	_ pipeline.Plugin             = (*TokenBudget)(nil)
-	_ pipeline.Configurable       = (*TokenBudget)(nil)
-	_ pipeline.Initializer        = (*TokenBudget)(nil)
-	_ pipeline.Shutdowner         = (*TokenBudget)(nil)
-	_ pipeline.StreamingResponder = (*TokenBudget)(nil)
+	_ pipeline.Plugin             = (*SessionBudget)(nil)
+	_ pipeline.Configurable       = (*SessionBudget)(nil)
+	_ pipeline.Initializer        = (*SessionBudget)(nil)
+	_ pipeline.Shutdowner         = (*SessionBudget)(nil)
+	_ pipeline.StreamingResponder = (*SessionBudget)(nil)
 )

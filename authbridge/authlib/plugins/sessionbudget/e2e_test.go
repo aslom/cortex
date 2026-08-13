@@ -1,4 +1,4 @@
-package tokenbudget
+package sessionbudget
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
 
-func newE2EPlugin(t *testing.T, maxTokens int64, store *memStore) *TokenBudget {
+func newE2EPlugin(t *testing.T, maxTokens int64, store *memStore) *SessionBudget {
 	t.Helper()
 	p := New()
 	cfg, _ := json.Marshal(config{
@@ -35,11 +35,11 @@ func newE2EPlugin(t *testing.T, maxTokens int64, store *memStore) *TokenBudget {
 	return p
 }
 
-func respond(p *TokenBudget, sessionID string, tokens int) {
+func respond(p *SessionBudget, sessionID string, tokens int) {
 	p.OnResponseFrame(context.Background(), makePctx(sessionID, tokens), nil, true)
 }
 
-func request(p *TokenBudget, sessionID string) pipeline.Action {
+func request(p *SessionBudget, sessionID string) pipeline.Action {
 	pctx := &pipeline.Context{
 		Direction: pipeline.Outbound,
 		Headers:   http.Header{},
@@ -156,9 +156,9 @@ func TestE2E_RefreshRecovery(t *testing.T) {
 	p.store = cs
 
 	ctx := context.Background()
-	inner.HashIncr(ctx, "token-budget:s", "tokens", 180)
-	inner.HashIncr(ctx, "token-budget:s", "calls", 7)
-	inner.HashSetNX(ctx, "token-budget:s", "started_at", "1700000000")
+	inner.HashIncr(ctx, "session-budget:s", "tokens", 180)
+	inner.HashIncr(ctx, "session-budget:s", "calls", 7)
+	inner.HashSetNX(ctx, "session-budget:s", "started_at", "1700000000")
 
 	p.mu.Lock()
 	p.cache["s"] = &counters{tokens: 50}
@@ -189,9 +189,9 @@ func TestE2E_PodRestart(t *testing.T) {
 
 	ctx := context.Background()
 	// Pre-seed Redis above the limit (210 > 200).
-	store.HashIncr(ctx, "token-budget:s", "tokens", 210)
-	store.HashIncr(ctx, "token-budget:s", "calls", 8)
-	store.HashSetNX(ctx, "token-budget:s", "started_at", "1700000000")
+	store.HashIncr(ctx, "session-budget:s", "tokens", 210)
+	store.HashIncr(ctx, "session-budget:s", "calls", 8)
+	store.HashSetNX(ctx, "session-budget:s", "started_at", "1700000000")
 
 	// Cold cache — first request passes (overshoot window).
 	if a := request(p, "s"); a.Type != pipeline.Continue {

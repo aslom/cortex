@@ -1,4 +1,4 @@
-package tokenbudget
+package sessionbudget
 
 import (
 	"context"
@@ -128,7 +128,7 @@ func init() {
 	})
 }
 
-func newTestPlugin(maxTokens, maxCalls, maxDuration int64) *TokenBudget {
+func newTestPlugin(maxTokens, maxCalls, maxDuration int64) *SessionBudget {
 	p := New()
 	cfg := fmt.Sprintf(`{
 		"redis_url": "mem://test",
@@ -253,7 +253,7 @@ func TestAccumulate_WritesToStore(t *testing.T) {
 
 	p.accumulate("sess-1", 100)
 
-	fields, _ := store.HashGet(context.Background(), "token-budget:sess-1")
+	fields, _ := store.HashGet(context.Background(), "session-budget:sess-1")
 	if fields["tokens"] != "100" {
 		t.Errorf("tokens in store = %q, want 100", fields["tokens"])
 	}
@@ -272,7 +272,7 @@ func TestAccumulate_ZeroTokens(t *testing.T) {
 
 	p.accumulate("sess-1", 0)
 
-	fields, _ := store.HashGet(context.Background(), "token-budget:sess-1")
+	fields, _ := store.HashGet(context.Background(), "session-budget:sess-1")
 	if fields["tokens"] != "" {
 		t.Errorf("tokens in store = %q, want empty (no HINCRBY for 0)", fields["tokens"])
 	}

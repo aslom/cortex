@@ -609,7 +609,7 @@ func (s *Server) handleStreamingResponse(w http.ResponseWriter, r *http.Request,
 	defer func() {
 		// Use a detached context for finalization: the client may have
 		// cancelled the request context after reading the full stream,
-		// but aggregating plugins (inference-parser, token-budget) still
+		// but aggregating plugins (inference-parser, session-budget) still
 		// need their last=true dispatch to finalize state.
 		finalCtx := context.WithoutCancel(r.Context())
 		finalAction := s.OutboundPipeline.RunResponseFrame(finalCtx, pctx, nil, true)
