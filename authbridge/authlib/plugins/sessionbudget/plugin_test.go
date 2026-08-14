@@ -596,6 +596,65 @@ func TestOnRequest_PauseWebhookUnreachable(t *testing.T) {
 	}
 }
 
+func TestRefreshCache_PreservesLastApprovedAt(t *testing.T) {
+	webhookCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		webhookCalls++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"action":"approve"}`))
+	}))
+	defer srv.Close()
+
+	p := New()
+	cfg := fmt.Sprintf(`{
+		"redis_url": "mem://test",
+		"max_calls": 3,
+		"on_exceed": "pause",
+		"pause_webhook": %q,
+		"pause_timeout": "2s",
+		"pause_timeout_action": "deny",
+		"pause_grace_period": "10m",
+		"refresh_interval": "100ms"
+	}`, srv.URL)
+	if err := p.Configure(json.RawMessage(cfg)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	store := newMemStore()
+	p.store = store
+	p.httpClient = &http.Client{Timeout: 0}
+
+	// Seed cache at limit and fire first request to get approval.
+	p.mu.Lock()
+	p.cache["sess"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	action := p.OnRequest(context.Background(), makePctx("sess", 0))
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue after approval, got %v", action.Type)
+	}
+	if webhookCalls != 1 {
+		t.Fatalf("expected 1 webhook call, got %d", webhookCalls)
+	}
+
+	// Simulate Redis having authoritative counters.
+	ctx := context.Background()
+	store.HashIncr(ctx, "session-budget:sess", "tokens", 100)
+	store.HashIncr(ctx, "session-budget:sess", "calls", 5)
+	store.HashSetNX(ctx, "session-budget:sess", "started_at", "1700000000")
+
+	// Refresh replaces counters from Redis — must preserve lastApprovedAt.
+	p.refreshCache()
+
+	// Second request should still be within grace (no new webhook call).
+	action = p.OnRequest(context.Background(), makePctx("sess", 0))
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue within grace after refresh, got %v", action.Type)
+	}
+	if webhookCalls != 1 {
+		t.Fatalf("expected still 1 webhook call after refresh, got %d", webhookCalls)
+	}
+}
+
 func TestOnRequest_PauseGraceWindow(t *testing.T) {
 	webhookCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

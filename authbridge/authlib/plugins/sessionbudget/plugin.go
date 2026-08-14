@@ -432,6 +432,7 @@ func (p *SessionBudget) refreshCache() {
 		}
 
 		p.mu.Lock()
+		var lastApprovedAt time.Time
 		if existing, ok := p.cache[sessionID]; ok {
 			// Take the max of local and Redis to avoid regressing counters when
 			// in-flight accumulate goroutines haven't committed to Redis yet.
@@ -444,8 +445,9 @@ func (p *SessionBudget) refreshCache() {
 			if startedAt.IsZero() && !existing.startedAt.IsZero() {
 				startedAt = existing.startedAt
 			}
+			lastApprovedAt = existing.lastApprovedAt
 		}
-		p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt}
+		p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt, lastApprovedAt: lastApprovedAt}
 		p.mu.Unlock()
 	}
 }
