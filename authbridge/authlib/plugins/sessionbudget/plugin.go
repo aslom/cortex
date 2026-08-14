@@ -37,10 +37,11 @@ type config struct {
 }
 
 type counters struct {
-	tokens         int64
-	calls          int64
-	startedAt      time.Time
-	lastApprovedAt time.Time
+	tokens           int64
+	calls            int64
+	startedAt        time.Time
+	lastApprovedAt   time.Time
+	pendingApproval  bool
 }
 
 // SessionBudget is the plugin state. Redis provides cross-pod durability;
@@ -145,6 +146,7 @@ func (p *SessionBudget) Init(_ context.Context) error {
 	p.store = store
 
 	if p.cfg.OnExceed == "pause" && p.httpClient == nil {
+		// Timeout: 0 — per-request deadline is set via context in callPauseWebhook.
 		p.httpClient = &http.Client{Timeout: 0}
 	}
 
@@ -195,22 +197,34 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			return pipeline.Action{Type: pipeline.Continue}
 
 		case "pause":
+			// Grace window: skip webhook if recently approved or another request is already waiting.
 			if p.gracePeriod > 0 && !c.lastApprovedAt.IsZero() && time.Since(c.lastApprovedAt) < p.gracePeriod {
 				c.calls++
 				p.mu.Unlock()
 				return pipeline.Action{Type: pipeline.Continue}
 			}
+			if c.pendingApproval {
+				// Another goroutine is already calling the webhook — piggyback on grace.
+				c.calls++
+				p.mu.Unlock()
+				return pipeline.Action{Type: pipeline.Continue}
+			}
+			c.pendingApproval = true
 			c.calls++
 			p.mu.Unlock()
 			p.log.Info("budget exceeded, requesting approval",
 				"session", sessionID,
 				"reason", reason)
-			if p.callPauseWebhook(ctx, sessionID, reason, &snap) {
-				p.mu.Lock()
-				if cc, ok := p.cache[sessionID]; ok {
+			approved := p.callPauseWebhook(ctx, sessionID, reason, &snap)
+			p.mu.Lock()
+			if cc, ok := p.cache[sessionID]; ok {
+				cc.pendingApproval = false
+				if approved {
 					cc.lastApprovedAt = time.Now()
 				}
-				p.mu.Unlock()
+			}
+			p.mu.Unlock()
+			if approved {
 				return pipeline.Action{Type: pipeline.Continue}
 			}
 			details := p.buildDetails(&snap)

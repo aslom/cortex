@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -744,6 +745,47 @@ func TestOnRequest_PauseGraceExpired(t *testing.T) {
 	p.OnRequest(context.Background(), makePctx("sess", 0))
 	if webhookCalls != 1 {
 		t.Fatalf("expected 1 webhook call after grace expired, got %d", webhookCalls)
+	}
+}
+
+func TestOnRequest_PausePendingApprovalSentinel(t *testing.T) {
+	var webhookCalls int32
+	started := make(chan struct{})
+	proceed := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&webhookCalls, 1)
+		close(started)
+		<-proceed
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"action":"approve"}`))
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "deny")
+	p.mu.Lock()
+	p.cache["sess"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	// First goroutine fires the webhook and blocks.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.OnRequest(context.Background(), makePctx("sess", 0))
+	}()
+	<-started // webhook is in-flight
+
+	// Second concurrent request should piggyback (pendingApproval=true).
+	action := p.OnRequest(context.Background(), makePctx("sess", 0))
+	if action.Type != pipeline.Continue {
+		t.Fatalf("concurrent request: expected Continue (piggyback), got %v", action.Type)
+	}
+
+	close(proceed) // unblock the webhook
+	wg.Wait()
+
+	if c := atomic.LoadInt32(&webhookCalls); c != 1 {
+		t.Errorf("webhook called %d times, want exactly 1 (sentinel prevents thundering herd)", c)
 	}
 }
 
