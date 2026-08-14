@@ -5,10 +5,13 @@
 package sessionbudget
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -23,24 +26,31 @@ type config struct {
 	MaxTokens          int64  `json:"max_tokens" description:"Cumulative token ceiling per session. 0 = no limit."`
 	MaxCalls           int64  `json:"max_calls" description:"Max inference calls per session. 0 = no limit."`
 	MaxDurationSeconds int64  `json:"max_duration_seconds" description:"Wall-clock session lifetime in seconds. 0 = no limit."`
-	OnExceed           string `json:"on_exceed" description:"Action on breach: deny (block) or observe (shadow — log but continue)." default:"deny" enum:"deny,observe"`
+	OnExceed           string `json:"on_exceed" description:"Action on breach: deny, observe (shadow), or pause (HITL webhook approval)." default:"deny" enum:"deny,observe,pause"`
+	PauseWebhook       string `json:"pause_webhook" description:"URL to POST for approval when on_exceed=pause. Required when on_exceed=pause."`
+	PauseTimeout       string `json:"pause_timeout" description:"How long to wait for webhook response." default:"30s"`
+	PauseTimeoutAction string `json:"pause_timeout_action" description:"Action on webhook timeout/error: deny or allow." default:"deny" enum:"deny,allow"`
+	PauseGracePeriod   string `json:"pause_grace_period" description:"After approval, suppress further webhooks for this duration." default:"5m"`
 	SessionTTLSeconds  int    `json:"session_ttl_seconds" description:"Redis key TTL; should be >= max_duration_seconds." default:"7200"`
 	RefreshInterval    string `json:"refresh_interval" description:"How often to sync local cache from Redis." default:"5s"`
 	RedisUnavailable   string `json:"redis_unavailable" description:"Behavior when Redis is unreachable. Only fail_open is supported; fail_closed is reserved." default:"fail_open"`
 }
 
 type counters struct {
-	tokens    int64
-	calls     int64
-	startedAt time.Time
+	tokens         int64
+	calls          int64
+	startedAt      time.Time
+	lastApprovedAt time.Time
 }
 
 // SessionBudget is the plugin state. Redis provides cross-pod durability;
 // the local cache provides zero-I/O enforcement on the request path.
 type SessionBudget struct {
-	cfg   config
-	store storage.Store
-	log   *slog.Logger
+	cfg         config
+	store       storage.Store
+	log         *slog.Logger
+	httpClient  *http.Client
+	gracePeriod time.Duration
 
 	mu      sync.RWMutex
 	cache   map[string]*counters
@@ -85,8 +95,35 @@ func (p *SessionBudget) Configure(raw json.RawMessage) error {
 	if p.cfg.MaxTokens <= 0 && p.cfg.MaxCalls <= 0 && p.cfg.MaxDurationSeconds <= 0 {
 		return fmt.Errorf("session-budget: at least one limit (max_tokens, max_calls, max_duration_seconds) must be > 0")
 	}
-	if p.cfg.OnExceed != "deny" && p.cfg.OnExceed != "observe" {
-		return fmt.Errorf("session-budget: on_exceed must be \"deny\" or \"observe\" (got %q)", p.cfg.OnExceed)
+	switch p.cfg.OnExceed {
+	case "deny", "observe", "pause":
+	default:
+		return fmt.Errorf("session-budget: on_exceed must be \"deny\", \"observe\", or \"pause\" (got %q)", p.cfg.OnExceed)
+	}
+	if p.cfg.OnExceed == "pause" {
+		if p.cfg.PauseWebhook == "" {
+			return fmt.Errorf("session-budget: pause_webhook is required when on_exceed=\"pause\"")
+		}
+		if p.cfg.PauseTimeout == "" {
+			p.cfg.PauseTimeout = "30s"
+		}
+		if _, err := time.ParseDuration(p.cfg.PauseTimeout); err != nil {
+			return fmt.Errorf("session-budget: invalid pause_timeout %q: %w", p.cfg.PauseTimeout, err)
+		}
+		if p.cfg.PauseTimeoutAction == "" {
+			p.cfg.PauseTimeoutAction = "deny"
+		}
+		if p.cfg.PauseTimeoutAction != "deny" && p.cfg.PauseTimeoutAction != "allow" {
+			return fmt.Errorf("session-budget: pause_timeout_action must be \"deny\" or \"allow\" (got %q)", p.cfg.PauseTimeoutAction)
+		}
+		if p.cfg.PauseGracePeriod == "" {
+			p.cfg.PauseGracePeriod = "5m"
+		}
+		if d, err := time.ParseDuration(p.cfg.PauseGracePeriod); err != nil {
+			return fmt.Errorf("session-budget: invalid pause_grace_period %q: %w", p.cfg.PauseGracePeriod, err)
+		} else {
+			p.gracePeriod = d
+		}
 	}
 	if d, err := time.ParseDuration(p.cfg.RefreshInterval); err != nil {
 		return fmt.Errorf("session-budget: invalid refresh_interval %q: %w", p.cfg.RefreshInterval, err)
@@ -107,6 +144,10 @@ func (p *SessionBudget) Init(_ context.Context) error {
 	}
 	p.store = store
 
+	if p.cfg.OnExceed == "pause" && p.httpClient == nil {
+		p.httpClient = &http.Client{Timeout: 0}
+	}
+
 	interval, _ := time.ParseDuration(p.cfg.RefreshInterval)
 	go p.refreshLoop(interval)
 	return nil
@@ -124,7 +165,7 @@ func (p *SessionBudget) Shutdown(_ context.Context) error {
 
 // OnRequest evaluates cached counters against limits and optimistically reserves
 // a call slot so concurrent requests on the same session see each other. No I/O.
-func (p *SessionBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.Action {
 	sessionID := p.sessionID(pctx)
 	if sessionID == "" {
 		return pipeline.Action{Type: pipeline.Continue}
@@ -141,8 +182,8 @@ func (p *SessionBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pip
 	}
 	snap := *c
 	if reason := p.evaluate(&snap); reason != "" {
-		if p.cfg.OnExceed == "observe" {
-			// Still reserve a call — the request will proceed in shadow mode.
+		switch p.cfg.OnExceed {
+		case "observe":
 			c.calls++
 			p.mu.Unlock()
 			pctx.Observe("shadow_budget_exceeded")
@@ -152,19 +193,34 @@ func (p *SessionBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pip
 				"tokens", snap.tokens,
 				"calls", snap.calls)
 			return pipeline.Action{Type: pipeline.Continue}
+
+		case "pause":
+			if p.gracePeriod > 0 && !c.lastApprovedAt.IsZero() && time.Since(c.lastApprovedAt) < p.gracePeriod {
+				c.calls++
+				p.mu.Unlock()
+				return pipeline.Action{Type: pipeline.Continue}
+			}
+			c.calls++
+			p.mu.Unlock()
+			p.log.Info("budget exceeded, requesting approval",
+				"session", sessionID,
+				"reason", reason)
+			if p.callPauseWebhook(ctx, sessionID, reason, &snap) {
+				p.mu.Lock()
+				if cc, ok := p.cache[sessionID]; ok {
+					cc.lastApprovedAt = time.Now()
+				}
+				p.mu.Unlock()
+				return pipeline.Action{Type: pipeline.Continue}
+			}
+			details := p.buildDetails(&snap)
+			return pipeline.DenyWithDetails("budget.exceeded", reason+" (approval denied)", details)
+
+		default: // "deny"
+			p.mu.Unlock()
+			details := p.buildDetails(&snap)
+			return pipeline.DenyWithDetails("budget.exceeded", reason, details)
 		}
-		p.mu.Unlock()
-		details := map[string]any{
-			"spent_tokens": snap.tokens,
-			"spent_calls":  snap.calls,
-			"token_limit":  p.cfg.MaxTokens,
-			"call_limit":   p.cfg.MaxCalls,
-		}
-		if p.cfg.MaxDurationSeconds > 0 && !snap.startedAt.IsZero() {
-			details["duration_seconds"] = int64(time.Since(snap.startedAt).Seconds())
-			details["duration_limit"] = p.cfg.MaxDurationSeconds
-		}
-		return pipeline.DenyWithDetails("budget.exceeded", reason, details)
 	}
 	// Optimistically reserve a call slot so concurrent requests see it.
 	c.calls++
@@ -210,6 +266,81 @@ func (p *SessionBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Contex
 	p.mu.Unlock()
 
 	return pipeline.Action{Type: pipeline.Continue}
+}
+
+func (p *SessionBudget) buildDetails(snap *counters) map[string]any {
+	details := map[string]any{
+		"spent_tokens": snap.tokens,
+		"spent_calls":  snap.calls,
+		"token_limit":  p.cfg.MaxTokens,
+		"call_limit":   p.cfg.MaxCalls,
+	}
+	if p.cfg.MaxDurationSeconds > 0 && !snap.startedAt.IsZero() {
+		details["duration_seconds"] = int64(time.Since(snap.startedAt).Seconds())
+		details["duration_limit"] = p.cfg.MaxDurationSeconds
+	}
+	return details
+}
+
+type pauseRequest struct {
+	SessionID       string `json:"session_id"`
+	Reason          string `json:"reason"`
+	SpentTokens     int64  `json:"spent_tokens"`
+	SpentCalls      int64  `json:"spent_calls"`
+	TokenLimit      int64  `json:"token_limit"`
+	CallLimit       int64  `json:"call_limit"`
+	DurationSeconds int64  `json:"duration_seconds,omitempty"`
+	DurationLimit   int64  `json:"duration_limit,omitempty"`
+}
+
+type pauseResponse struct {
+	Action string `json:"action"`
+}
+
+func (p *SessionBudget) callPauseWebhook(ctx context.Context, sessionID, reason string, snap *counters) bool {
+	timeout, _ := time.ParseDuration(p.cfg.PauseTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	body := pauseRequest{
+		SessionID:   sessionID,
+		Reason:      reason,
+		SpentTokens: snap.tokens,
+		SpentCalls:  snap.calls,
+		TokenLimit:  p.cfg.MaxTokens,
+		CallLimit:   p.cfg.MaxCalls,
+	}
+	if p.cfg.MaxDurationSeconds > 0 && !snap.startedAt.IsZero() {
+		body.DurationSeconds = int64(time.Since(snap.startedAt).Seconds())
+		body.DurationLimit = p.cfg.MaxDurationSeconds
+	}
+
+	payload, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.PauseWebhook, bytes.NewReader(payload))
+	if err != nil {
+		p.log.Warn("pause webhook request build failed", "session", sessionID, "err", err)
+		return p.cfg.PauseTimeoutAction == "allow"
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		p.log.Warn("pause webhook call failed", "session", sessionID, "err", err)
+		return p.cfg.PauseTimeoutAction == "allow"
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		p.log.Warn("pause webhook non-200", "session", sessionID, "status", resp.StatusCode)
+		return p.cfg.PauseTimeoutAction == "allow"
+	}
+
+	var result pauseResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&result); err != nil {
+		p.log.Warn("pause webhook response decode failed", "session", sessionID, "err", err)
+		return p.cfg.PauseTimeoutAction == "allow"
+	}
+	return result.Action == "approve"
 }
 
 func (p *SessionBudget) evaluate(c *counters) string {
