@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -322,6 +323,10 @@ func TestConfigure_Validation(t *testing.T) {
 		{"unparseable refresh_interval", `{"redis_url":"redis://localhost","max_tokens":100,"refresh_interval":"abc"}`, true},
 		{"fail_closed rejected", `{"redis_url":"redis://localhost","max_tokens":100,"redis_unavailable":"fail_closed"}`, true},
 		{"invalid on_exceed", `{"redis_url":"redis://localhost","max_tokens":100,"on_exceed":"block"}`, true},
+		{"pause valid", `{"redis_url":"redis://localhost","max_calls":10,"on_exceed":"pause","pause_webhook":"http://localhost:9999/approve"}`, false},
+		{"pause missing webhook", `{"redis_url":"redis://localhost","max_calls":10,"on_exceed":"pause"}`, true},
+		{"pause invalid timeout", `{"redis_url":"redis://localhost","max_calls":10,"on_exceed":"pause","pause_webhook":"http://x","pause_timeout":"nope"}`, true},
+		{"pause invalid timeout_action", `{"redis_url":"redis://localhost","max_calls":10,"on_exceed":"pause","pause_webhook":"http://x","pause_timeout_action":"maybe"}`, true},
 	}
 
 	for _, tt := range tests {
@@ -447,6 +452,239 @@ func TestOnRequest_ConcurrentCallLimit(t *testing.T) {
 	p.mu.RUnlock()
 	if calls != 10 {
 		t.Errorf("final calls = %d, want 10", calls)
+	}
+}
+
+func newPausePlugin(t *testing.T, maxCalls int64, webhookURL, timeoutAction string) *SessionBudget {
+	t.Helper()
+	p := New()
+	cfg := fmt.Sprintf(`{
+		"redis_url": "mem://test",
+		"max_calls": %d,
+		"on_exceed": "pause",
+		"pause_webhook": %q,
+		"pause_timeout": "2s",
+		"pause_timeout_action": %q,
+		"refresh_interval": "100ms"
+	}`, maxCalls, webhookURL, timeoutAction)
+	if err := p.Configure(json.RawMessage(cfg)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	p.store = newMemStore()
+	p.httpClient = &http.Client{Timeout: 0}
+	return p
+}
+
+func TestOnRequest_PauseApproved(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"action":"approve"}`))
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "deny")
+	p.mu.Lock()
+	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue after approval, got %v", action.Type)
+	}
+}
+
+func TestOnRequest_PauseDenied(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"action":"deny"}`))
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "deny")
+	p.mu.Lock()
+	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
+	if action.Type != pipeline.Reject {
+		t.Fatalf("expected Reject after denial, got %v", action.Type)
+	}
+}
+
+func TestOnRequest_PauseTimeout(t *testing.T) {
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-done
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "deny")
+	p.mu.Lock()
+	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
+	close(done)
+	if action.Type != pipeline.Reject {
+		t.Fatalf("expected Reject on timeout (pause_timeout_action=deny), got %v", action.Type)
+	}
+}
+
+func TestOnRequest_PauseTimeoutAllow(t *testing.T) {
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-done
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "allow")
+	p.mu.Lock()
+	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
+	close(done)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue on timeout (pause_timeout_action=allow), got %v", action.Type)
+	}
+}
+
+func TestOnRequest_PauseWebhookNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "deny")
+	p.mu.Lock()
+	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
+	if action.Type != pipeline.Reject {
+		t.Fatalf("expected Reject on non-200 webhook (pause_timeout_action=deny), got %v", action.Type)
+	}
+}
+
+func TestOnRequest_PauseWebhookBadJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`not json`))
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "deny")
+	p.mu.Lock()
+	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
+	if action.Type != pipeline.Reject {
+		t.Fatalf("expected Reject on bad JSON (pause_timeout_action=deny), got %v", action.Type)
+	}
+}
+
+func TestOnRequest_PauseWebhookUnreachable(t *testing.T) {
+	p := newPausePlugin(t, 3, "http://127.0.0.1:1", "deny")
+	p.mu.Lock()
+	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
+	if action.Type != pipeline.Reject {
+		t.Fatalf("expected Reject on unreachable webhook (pause_timeout_action=deny), got %v", action.Type)
+	}
+}
+
+func TestOnRequest_PauseGraceWindow(t *testing.T) {
+	webhookCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		webhookCalls++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"action":"approve"}`))
+	}))
+	defer srv.Close()
+
+	p := New()
+	cfg := fmt.Sprintf(`{
+		"redis_url": "mem://test",
+		"max_calls": 3,
+		"on_exceed": "pause",
+		"pause_webhook": %q,
+		"pause_timeout": "2s",
+		"pause_timeout_action": "deny",
+		"pause_grace_period": "10m",
+		"refresh_interval": "100ms"
+	}`, srv.URL)
+	if err := p.Configure(json.RawMessage(cfg)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	p.store = newMemStore()
+	p.httpClient = &http.Client{Timeout: 0}
+
+	p.mu.Lock()
+	p.cache["sess"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	// First request fires the webhook.
+	action := p.OnRequest(context.Background(), makePctx("sess", 0))
+	if action.Type != pipeline.Continue {
+		t.Fatalf("first request: expected Continue, got %v", action.Type)
+	}
+	if webhookCalls != 1 {
+		t.Fatalf("expected 1 webhook call, got %d", webhookCalls)
+	}
+
+	// Second request within grace window skips the webhook.
+	action = p.OnRequest(context.Background(), makePctx("sess", 0))
+	if action.Type != pipeline.Continue {
+		t.Fatalf("second request (grace): expected Continue, got %v", action.Type)
+	}
+	if webhookCalls != 1 {
+		t.Fatalf("expected still 1 webhook call after grace, got %d", webhookCalls)
+	}
+}
+
+func TestOnRequest_PauseGraceExpired(t *testing.T) {
+	webhookCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		webhookCalls++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"action":"approve"}`))
+	}))
+	defer srv.Close()
+
+	p := New()
+	cfg := fmt.Sprintf(`{
+		"redis_url": "mem://test",
+		"max_calls": 3,
+		"on_exceed": "pause",
+		"pause_webhook": %q,
+		"pause_timeout": "2s",
+		"pause_timeout_action": "deny",
+		"pause_grace_period": "10m",
+		"refresh_interval": "100ms"
+	}`, srv.URL)
+	if err := p.Configure(json.RawMessage(cfg)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	p.store = newMemStore()
+	p.httpClient = &http.Client{Timeout: 0}
+
+	// Seed cache with lastApprovedAt already expired (11 minutes ago > 10m grace).
+	p.mu.Lock()
+	p.cache["sess"] = &counters{
+		tokens:         0,
+		calls:          3,
+		startedAt:      time.Now(),
+		lastApprovedAt: time.Now().Add(-11 * time.Minute),
+	}
+	p.mu.Unlock()
+
+	// Request after grace expired fires webhook.
+	p.OnRequest(context.Background(), makePctx("sess", 0))
+	if webhookCalls != 1 {
+		t.Fatalf("expected 1 webhook call after grace expired, got %d", webhookCalls)
 	}
 }
 
