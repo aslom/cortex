@@ -159,6 +159,10 @@ per-request webhook spam once a session is approved. Concurrent breaches during
 an in-flight webhook piggyback on the pending call rather than each firing
 their own.
 
+Requests that arrive during an in-flight webhook piggyback on it and continue
+optimistically. If the webhook ultimately denies, those extra requests have
+already passed.
+
 **On timeout / non-200 / bad JSON / unreachable:** falls back to
 `pause_timeout_action` (`deny` returns 403; `allow` continues).
 

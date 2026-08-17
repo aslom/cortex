@@ -447,6 +447,7 @@ func (p *SessionBudget) refreshCache() {
 
 		p.mu.Lock()
 		var lastApprovedAt time.Time
+		var pendingApproval bool
 		if existing, ok := p.cache[sessionID]; ok {
 			// Take the max of local and Redis to avoid regressing counters when
 			// in-flight accumulate goroutines haven't committed to Redis yet.
@@ -460,8 +461,10 @@ func (p *SessionBudget) refreshCache() {
 				startedAt = existing.startedAt
 			}
 			lastApprovedAt = existing.lastApprovedAt
+			// Preserve mid-webhook: dropping would let a concurrent breach fire a duplicate.
+			pendingApproval = existing.pendingApproval
 		}
-		p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt, lastApprovedAt: lastApprovedAt}
+		p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt, lastApprovedAt: lastApprovedAt, pendingApproval: pendingApproval}
 		p.mu.Unlock()
 	}
 }
