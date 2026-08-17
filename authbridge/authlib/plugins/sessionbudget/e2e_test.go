@@ -182,7 +182,8 @@ func TestE2E_RefreshRecovery(t *testing.T) {
 }
 
 // TestE2E_PodRestart verifies that a fresh plugin with an empty cache
-// resumes enforcement after refresh picks up pre-existing store counters.
+// enforces on the first request via synchronous Redis hydrate — no
+// cold-cache overshoot for sessions already over-budget on Redis.
 func TestE2E_PodRestart(t *testing.T) {
 	store := newMemStore()
 	p := newE2EPlugin(t, 200, store)
@@ -193,19 +194,9 @@ func TestE2E_PodRestart(t *testing.T) {
 	store.HashIncr(ctx, "session-budget:s", "calls", 8)
 	store.HashSetNX(ctx, "session-budget:s", "started_at", "1700000000")
 
-	// Cold cache — first request passes (overshoot window).
-	if a := request(p, "s"); a.Type != pipeline.Continue {
-		t.Fatalf("cold cache: expected Continue, got %v", a.Type)
-	}
-
-	// Seed cache entry so refresh discovers this session key.
-	respond(p, "s", 5)
-
-	// Directly invoke refresh (deterministic, no timing dependency).
-	p.refreshCache()
-
+	// Cold cache — first request hydrates from Redis and rejects.
 	if a := request(p, "s"); a.Type != pipeline.Reject {
-		t.Fatalf("after refresh: expected Reject, got %v", a.Type)
+		t.Fatalf("cold cache with over-budget Redis: expected Reject, got %v", a.Type)
 	}
 }
 

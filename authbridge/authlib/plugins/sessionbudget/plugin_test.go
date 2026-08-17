@@ -369,90 +369,30 @@ func TestOnRequest_ShadowMode(t *testing.T) {
 		t.Fatalf("shadow mode: expected Continue past limit, got %v", action.Type)
 	}
 
-	// Verify observe mode still reserves a call slot.
+	// Calls are counted in OnResponseFrame (2 responses -> 2 calls).
+	// OnRequest in observe mode does not increment.
 	p.mu.RLock()
 	calls := p.cache["sess-1"].calls
 	p.mu.RUnlock()
 	if calls != 2 {
-		t.Errorf("calls after shadow OnRequest = %d, want 2 (1 from cold-cache response + 1 observe reservation)", calls)
+		t.Errorf("calls after shadow OnRequest = %d, want 2 (from 2 OnResponseFrame calls)", calls)
 	}
 }
 
-func TestOnRequest_OptimisticReservation(t *testing.T) {
+// TestOnRequest_RejectsAtCallLimit verifies that once cache reflects
+// calls >= max_calls (populated by prior OnResponseFrame or hydrate),
+// further OnRequests reject. Calls are counted on inference response,
+// not on request, so this test seeds the cache directly.
+func TestOnRequest_RejectsAtCallLimit(t *testing.T) {
 	p := newTestPlugin(1000, 10, 0)
 
-	// Seed cache so OnRequest finds the session.
 	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 50, calls: 7, startedAt: time.Now()}
+	p.cache["sess-1"] = &counters{tokens: 50, calls: 10, startedAt: time.Now()}
 	p.mu.Unlock()
 
-	// Three sequential requests each reserve a slot; calls should reach the limit.
-	for i := 0; i < 3; i++ {
-		action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
-		if action.Type != pipeline.Continue {
-			t.Fatalf("request %d: expected Continue, got %v", i+1, action.Type)
-		}
-	}
-
-	// Fourth request should be denied (7+3 = 10, limit is 10).
 	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
 	if action.Type != pipeline.Reject {
-		t.Fatalf("request 4: expected Reject at limit, got %v", action.Type)
-	}
-
-	p.mu.RLock()
-	calls := p.cache["sess-1"].calls
-	p.mu.RUnlock()
-	if calls != 10 {
-		t.Errorf("calls = %d, want 10", calls)
-	}
-}
-
-// TestOnRequest_ConcurrentCallLimit verifies that concurrent goroutines racing
-// through OnRequest cannot exceed the call limit. This is the scenario the
-// RLock→Lock upgrade and optimistic reservation were designed to prevent.
-// Distinct from TestOnRequest_OptimisticReservation which tests serial ordering.
-func TestOnRequest_ConcurrentCallLimit(t *testing.T) {
-	p := newTestPlugin(1000, 10, 0)
-
-	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 0, calls: 0, startedAt: time.Now()}
-	p.mu.Unlock()
-
-	const n = 20
-	var wg sync.WaitGroup
-	results := make([]pipeline.ActionType, n)
-	wg.Add(n)
-	for i := 0; i < n; i++ {
-		go func(idx int) {
-			defer wg.Done()
-			action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
-			results[idx] = action.Type
-		}(i)
-	}
-	wg.Wait()
-
-	var continued, rejected int
-	for _, r := range results {
-		switch r {
-		case pipeline.Continue:
-			continued++
-		case pipeline.Reject:
-			rejected++
-		}
-	}
-	if continued != 10 {
-		t.Errorf("continued = %d, want exactly 10 (call limit)", continued)
-	}
-	if rejected != 10 {
-		t.Errorf("rejected = %d, want 10", rejected)
-	}
-
-	p.mu.RLock()
-	calls := p.cache["sess-1"].calls
-	p.mu.RUnlock()
-	if calls != 10 {
-		t.Errorf("final calls = %d, want 10", calls)
+		t.Fatalf("at limit: expected Reject, got %v", action.Type)
 	}
 }
 

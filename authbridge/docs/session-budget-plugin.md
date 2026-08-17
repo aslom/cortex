@@ -193,7 +193,7 @@ sticky sessions, each pod fires one webhook before its own grace kicks in.
 |----------|----------|
 | Redis down at startup | Fail-open until refresh populates cache |
 | Redis fails mid-session | Local cache keeps enforcing; writes dropped |
-| Pod restart | First request passes (cold cache); refresh restores counters within `refresh_interval` |
+| Pod restart | First request hydrates from Redis synchronously; enforcement resumes on request #1 |
 | Webhook unreachable | Falls back to `pause_timeout_action` |
 
 Infrastructure failures never produce false denials — Redis unavailability
