@@ -19,6 +19,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 	"github.com/rossoctl/cortex/authbridge/authlib/storage"
+	"golang.org/x/sync/singleflight"
 )
 
 type config struct {
@@ -53,10 +54,11 @@ type SessionBudget struct {
 	httpClient  *http.Client
 	gracePeriod time.Duration
 
-	mu      sync.RWMutex
-	cache   map[string]*counters
-	stopCh  chan struct{}
-	stopped chan struct{}
+	mu       sync.RWMutex
+	cache    map[string]*counters
+	hydrateG singleflight.Group
+	stopCh   chan struct{}
+	stopped  chan struct{}
 }
 
 func New() *SessionBudget {
@@ -424,31 +426,34 @@ func (p *SessionBudget) refreshLoop(interval time.Duration) {
 	}
 }
 
-// hydrateCache pulls one session's counters from Redis into the local cache
-// so a cold-cache OnRequest miss can enforce immediately. Fail-open on error.
+// hydrateCache pulls one session's counters from Redis on cold-cache miss.
+// Concurrent callers for the same session share one Redis lookup via singleflight.
 func (p *SessionBudget) hydrateCache(ctx context.Context, sessionID string) bool {
-	lookupCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
-	defer cancel()
-	fields, err := p.store.HashGet(lookupCtx, p.redisKey(sessionID))
-	if err != nil {
-		p.log.Debug("hydrate: redis lookup failed", "session", sessionID, "err", err)
-		return false
-	}
-	if len(fields) == 0 {
-		return false
-	}
-	tokens, _ := strconv.ParseInt(fields["tokens"], 10, 64)
-	calls, _ := strconv.ParseInt(fields["calls"], 10, 64)
-	var startedAt time.Time
-	if ts, err := strconv.ParseInt(fields["started_at"], 10, 64); err == nil {
-		startedAt = time.Unix(ts, 0)
-	}
-	p.mu.Lock()
-	if _, exists := p.cache[sessionID]; !exists {
-		p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt}
-	}
-	p.mu.Unlock()
-	return true
+	v, _, _ := p.hydrateG.Do(sessionID, func() (any, error) {
+		lookupCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		defer cancel()
+		fields, err := p.store.HashGet(lookupCtx, p.redisKey(sessionID))
+		if err != nil {
+			p.log.Debug("hydrate: redis lookup failed", "session", sessionID, "err", err)
+			return false, nil
+		}
+		if len(fields) == 0 {
+			return false, nil
+		}
+		tokens, _ := strconv.ParseInt(fields["tokens"], 10, 64)
+		calls, _ := strconv.ParseInt(fields["calls"], 10, 64)
+		var startedAt time.Time
+		if ts, err := strconv.ParseInt(fields["started_at"], 10, 64); err == nil {
+			startedAt = time.Unix(ts, 0)
+		}
+		p.mu.Lock()
+		if _, exists := p.cache[sessionID]; !exists {
+			p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt}
+		}
+		p.mu.Unlock()
+		return true, nil
+	})
+	return v.(bool)
 }
 
 // refreshCache replaces local counters with authoritative Redis values.
