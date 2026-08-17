@@ -24,7 +24,7 @@ import (
 type config struct {
 	RedisURL           string `json:"redis_url" required:"true" description:"Redis/Valkey connection URL."`
 	MaxTokens          int64  `json:"max_tokens" description:"Cumulative token ceiling per session. 0 = no limit."`
-	MaxCalls           int64  `json:"max_calls" description:"Max inference calls per session. 0 = no limit."`
+	MaxCalls           int64  `json:"max_calls" description:"Max LLM/inference calls per session (counted from inference-parser output; MCP tool calls and other outbound traffic do not count). 0 = no limit."`
 	MaxDurationSeconds int64  `json:"max_duration_seconds" description:"Wall-clock session lifetime in seconds. 0 = no limit."`
 	OnExceed           string `json:"on_exceed" description:"Action on breach: deny, observe (shadow), or pause (HITL webhook approval)." default:"deny" enum:"deny,observe,pause"`
 	PauseWebhook       string `json:"pause_webhook" description:"URL to POST for approval when on_exceed=pause. Required when on_exceed=pause."`
@@ -165,11 +165,12 @@ func (p *SessionBudget) Shutdown(_ context.Context) error {
 	return nil
 }
 
-// OnRequest evaluates cached counters against limits and optimistically reserves
-// a call slot so concurrent requests on the same session see each other. No I/O.
+// OnRequest evaluates cached counters against limits. On cold cache the first
+// miss hydrates from Redis so pre-existing sessions enforce immediately.
 func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.Action {
 	sessionID := p.sessionID(pctx)
 	if sessionID == "" {
+		pctx.Skip("no_session_id")
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -177,16 +178,26 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	c, ok := p.cache[sessionID]
 	if !ok {
 		p.mu.Unlock()
-		// Cold cache: session not yet seen by this pod. First request passes; refresh loop
-		// picks up Redis counters within one interval. Intentional one-request overshoot
-		// tradeoff for zero-I/O enforcement on the hot path.
-		return pipeline.Action{Type: pipeline.Continue}
+		// Cold cache: try a synchronous hydrate from Redis. If the session
+		// is already there (e.g. seeded by another pod), we enforce now.
+		// If Redis is empty or unreachable, we fall through open and Skip.
+		hydrated := p.hydrateCache(ctx, sessionID)
+		if !hydrated {
+			pctx.Skip("cold_cache")
+			return pipeline.Action{Type: pipeline.Continue}
+		}
+		p.mu.Lock()
+		c, ok = p.cache[sessionID]
+		if !ok {
+			p.mu.Unlock()
+			pctx.Skip("cold_cache")
+			return pipeline.Action{Type: pipeline.Continue}
+		}
 	}
 	snap := *c
 	if reason := p.evaluate(&snap); reason != "" {
 		switch p.cfg.OnExceed {
 		case "observe":
-			c.calls++
 			p.mu.Unlock()
 			pctx.Observe("shadow_budget_exceeded")
 			p.log.Warn("budget exceeded (shadow mode)",
@@ -199,18 +210,17 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		case "pause":
 			// Grace window: skip webhook if recently approved or another request is already waiting.
 			if p.gracePeriod > 0 && !c.lastApprovedAt.IsZero() && time.Since(c.lastApprovedAt) < p.gracePeriod {
-				c.calls++
 				p.mu.Unlock()
+				pctx.Allow("pause_grace_window")
 				return pipeline.Action{Type: pipeline.Continue}
 			}
 			if c.pendingApproval {
 				// Another goroutine is already calling the webhook — piggyback on grace.
-				c.calls++
 				p.mu.Unlock()
+				pctx.Allow("pause_pending_approval")
 				return pipeline.Action{Type: pipeline.Continue}
 			}
 			c.pendingApproval = true
-			c.calls++
 			p.mu.Unlock()
 			p.log.Info("budget exceeded, requesting approval",
 				"session", sessionID,
@@ -225,21 +235,24 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			}
 			p.mu.Unlock()
 			if approved {
+				pctx.Allow("pause_approved")
 				return pipeline.Action{Type: pipeline.Continue}
 			}
 			details := p.buildDetails(&snap)
+			pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "pause_denied"})
 			return pipeline.DenyWithDetails("budget.exceeded", reason+" (approval denied)", details)
 
 		default: // "deny"
 			p.mu.Unlock()
 			details := p.buildDetails(&snap)
+			pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "budget_exceeded"})
 			return pipeline.DenyWithDetails("budget.exceeded", reason, details)
 		}
 	}
-	// Optimistically reserve a call slot so concurrent requests see it.
-	c.calls++
 	p.mu.Unlock()
-
+	// Counts are incremented in OnResponseFrame when inference lands, so
+	// max_calls only counts LLM/inference calls (see plugin doc).
+	pctx.Allow("under_budget")
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
@@ -271,12 +284,11 @@ func (p *SessionBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Contex
 	p.mu.Lock()
 	c, ok := p.cache[sessionID]
 	if !ok {
-		// First response without a prior OnRequest (e.g. cold cache path).
-		c = &counters{startedAt: time.Now(), calls: 1}
+		c = &counters{startedAt: time.Now()}
 		p.cache[sessionID] = c
 	}
 	c.tokens += tokens
-	// calls already incremented by OnRequest's optimistic reserve.
+	c.calls++
 	p.mu.Unlock()
 
 	return pipeline.Action{Type: pipeline.Continue}
@@ -410,6 +422,33 @@ func (p *SessionBudget) refreshLoop(interval time.Duration) {
 			p.refreshCache()
 		}
 	}
+}
+
+// hydrateCache pulls one session's counters from Redis into the local cache
+// so a cold-cache OnRequest miss can enforce immediately. Fail-open on error.
+func (p *SessionBudget) hydrateCache(ctx context.Context, sessionID string) bool {
+	lookupCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	fields, err := p.store.HashGet(lookupCtx, p.redisKey(sessionID))
+	if err != nil {
+		p.log.Debug("hydrate: redis lookup failed", "session", sessionID, "err", err)
+		return false
+	}
+	if len(fields) == 0 {
+		return false
+	}
+	tokens, _ := strconv.ParseInt(fields["tokens"], 10, 64)
+	calls, _ := strconv.ParseInt(fields["calls"], 10, 64)
+	var startedAt time.Time
+	if ts, err := strconv.ParseInt(fields["started_at"], 10, 64); err == nil {
+		startedAt = time.Unix(ts, 0)
+	}
+	p.mu.Lock()
+	if _, exists := p.cache[sessionID]; !exists {
+		p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt}
+	}
+	p.mu.Unlock()
+	return true
 }
 
 // refreshCache replaces local counters with authoritative Redis values.

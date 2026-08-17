@@ -1,6 +1,8 @@
 # session-budget Plugin
 
-Enforces per-session budgets on tokens, inference calls, and wall-clock duration.
+Enforces per-session budgets on tokens, LLM/inference calls, and wall-clock
+duration. `max_calls` counts inference calls only — MCP tool calls, A2A
+messages, and other outbound traffic do not count toward it.
 Supports three `on_exceed` modes:
 
 - `deny` — return 403 (default)
@@ -44,7 +46,7 @@ pipeline:
 |-------|---------|-------------|
 | `redis_url` | — (required) | Redis/Valkey URL |
 | `max_tokens` | 0 | Token ceiling (0 = no limit) |
-| `max_calls` | 0 | Inference call cap (0 = no limit) |
+| `max_calls` | 0 | LLM/inference call cap. Counts calls surfaced by `inference-parser`; MCP, A2A, and other outbound traffic do NOT count. 0 = no limit. |
 | `max_duration_seconds` | 0 | Session lifetime cap (0 = no limit) |
 | `on_exceed` | `deny` | `deny` (403), `observe` (log only), or `pause` (webhook) |
 | `pause_webhook` | — | URL to POST on breach (required when `on_exceed=pause`) |
