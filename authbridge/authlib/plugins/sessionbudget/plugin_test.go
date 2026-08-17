@@ -464,7 +464,7 @@ func newPausePlugin(t *testing.T, maxCalls int64, webhookURL, timeoutAction stri
 		"max_calls": %d,
 		"on_exceed": "pause",
 		"pause_webhook": %q,
-		"pause_timeout": "2s",
+		"pause_timeout": "200ms",
 		"pause_timeout_action": %q,
 		"refresh_interval": "100ms"
 	}`, maxCalls, webhookURL, timeoutAction)
@@ -512,76 +512,48 @@ func TestOnRequest_PauseDenied(t *testing.T) {
 	}
 }
 
-func TestOnRequest_PauseTimeout(t *testing.T) {
-	done := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-done
-	}))
-	defer srv.Close()
-
-	p := newPausePlugin(t, 3, srv.URL, "deny")
-	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
-	p.mu.Unlock()
-
-	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
-	close(done)
-	if action.Type != pipeline.Reject {
-		t.Fatalf("expected Reject on timeout (pause_timeout_action=deny), got %v", action.Type)
+// TestOnRequest_PauseWebhookFailureFallback covers every "webhook doesn't
+// return a valid approve" path: timeout, non-200, malformed body. All fall
+// back to pause_timeout_action. The 'allow' row also proves the allow
+// branch (only place it's exercised).
+func TestOnRequest_PauseWebhookFailureFallback(t *testing.T) {
+	hang := func(done <-chan struct{}) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) { <-done }
 	}
-}
-
-func TestOnRequest_PauseTimeoutAllow(t *testing.T) {
-	done := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-done
-	}))
-	defer srv.Close()
-
-	p := newPausePlugin(t, 3, srv.URL, "allow")
-	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
-	p.mu.Unlock()
-
-	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
-	close(done)
-	if action.Type != pipeline.Continue {
-		t.Fatalf("expected Continue on timeout (pause_timeout_action=allow), got %v", action.Type)
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		action  string
+		want    pipeline.ActionType
+	}{
+		{"timeout_deny", nil, "deny", pipeline.Reject},
+		{"timeout_allow", nil, "allow", pipeline.Continue},
+		{"non200_deny", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }, "deny", pipeline.Reject},
+		{"badjson_deny", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`not json`))
+		}, "deny", pipeline.Reject},
 	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			done := make(chan struct{})
+			h := tt.handler
+			if h == nil {
+				h = hang(done)
+			}
+			srv := httptest.NewServer(h)
+			defer func() { close(done); srv.Close() }()
 
-func TestOnRequest_PauseWebhookNon200(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
+			p := newPausePlugin(t, 3, srv.URL, tt.action)
+			p.mu.Lock()
+			p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+			p.mu.Unlock()
 
-	p := newPausePlugin(t, 3, srv.URL, "deny")
-	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
-	p.mu.Unlock()
-
-	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
-	if action.Type != pipeline.Reject {
-		t.Fatalf("expected Reject on non-200 webhook (pause_timeout_action=deny), got %v", action.Type)
-	}
-}
-
-func TestOnRequest_PauseWebhookBadJSON(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`not json`))
-	}))
-	defer srv.Close()
-
-	p := newPausePlugin(t, 3, srv.URL, "deny")
-	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
-	p.mu.Unlock()
-
-	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
-	if action.Type != pipeline.Reject {
-		t.Fatalf("expected Reject on bad JSON (pause_timeout_action=deny), got %v", action.Type)
+			got := p.OnRequest(context.Background(), makePctx("sess-1", 0))
+			if got.Type != tt.want {
+				t.Fatalf("action = %v, want %v", got.Type, tt.want)
+			}
+		})
 	}
 }
 

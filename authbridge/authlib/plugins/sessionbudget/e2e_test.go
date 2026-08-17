@@ -295,93 +295,69 @@ func TestE2E_ShadowMode(t *testing.T) {
 	}
 }
 
-// TestE2E_PauseMode verifies the full lifecycle: accumulate past limit,
-// webhook approves, request passes through.
+// TestE2E_PauseMode covers the full lifecycle for both webhook outcomes.
+// The 'approve' row also verifies the request body carries session_id;
+// the 'deny' row also verifies the 403 response schema.
 func TestE2E_PauseMode(t *testing.T) {
-	approveServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req map[string]any
-		json.NewDecoder(r.Body).Decode(&req)
-		if req["session_id"] != "sess" {
-			t.Errorf("webhook got session_id=%v, want sess", req["session_id"])
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"action":"approve"}`))
-	}))
-	defer approveServer.Close()
-
-	p := New()
-	cfg, _ := json.Marshal(config{
-		RedisURL:           "mem://test",
-		MaxCalls:           3,
-		OnExceed:           "pause",
-		PauseWebhook:       approveServer.URL,
-		PauseTimeout:       "5s",
-		PauseTimeoutAction: "deny",
-		RefreshInterval:    "30ms",
-		RedisUnavailable:   "fail_open",
-	})
-	if err := p.Configure(cfg); err != nil {
-		t.Fatalf("Configure: %v", err)
+	tests := []struct {
+		name     string
+		response string
+		want     pipeline.ActionType
+	}{
+		{"approve", `{"action":"approve"}`, pipeline.Continue},
+		{"deny", `{"action":"deny"}`, pipeline.Reject},
 	}
-	p.store = newMemStore()
-	p.httpClient = &http.Client{}
-	go p.refreshLoop(30 * time.Millisecond)
-	t.Cleanup(func() { close(p.stopCh); <-p.stopped })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req map[string]any
+				json.NewDecoder(r.Body).Decode(&req)
+				if req["session_id"] != "sess" {
+					t.Errorf("webhook got session_id=%v, want sess", req["session_id"])
+				}
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(tt.response))
+			}))
+			defer srv.Close()
 
-	// Seed cache at the limit.
-	p.mu.Lock()
-	p.cache["sess"] = &counters{tokens: 100, calls: 3, startedAt: time.Now()}
-	p.mu.Unlock()
+			p := New()
+			cfg, _ := json.Marshal(config{
+				RedisURL:           "mem://test",
+				MaxCalls:           3,
+				OnExceed:           "pause",
+				PauseWebhook:       srv.URL,
+				PauseTimeout:       "5s",
+				PauseTimeoutAction: "deny",
+				RefreshInterval:    "30ms",
+				RedisUnavailable:   "fail_open",
+			})
+			if err := p.Configure(cfg); err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
+			p.store = newMemStore()
+			p.httpClient = &http.Client{}
+			go p.refreshLoop(30 * time.Millisecond)
+			t.Cleanup(func() { close(p.stopCh); <-p.stopped })
 
-	// Next request exceeds limit — webhook approves.
-	action := request(p, "sess")
-	if action.Type != pipeline.Continue {
-		t.Fatalf("pause mode (approved): expected Continue, got %v", action.Type)
-	}
-}
+			p.mu.Lock()
+			p.cache["sess"] = &counters{tokens: 100, calls: 3, startedAt: time.Now()}
+			p.mu.Unlock()
 
-// TestE2E_PauseModeDeny verifies webhook denial produces a 403.
-func TestE2E_PauseModeDeny(t *testing.T) {
-	denyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"action":"deny"}`))
-	}))
-	defer denyServer.Close()
-
-	p := New()
-	cfg, _ := json.Marshal(config{
-		RedisURL:           "mem://test",
-		MaxCalls:           3,
-		OnExceed:           "pause",
-		PauseWebhook:       denyServer.URL,
-		PauseTimeout:       "5s",
-		PauseTimeoutAction: "deny",
-		RefreshInterval:    "30ms",
-		RedisUnavailable:   "fail_open",
-	})
-	if err := p.Configure(cfg); err != nil {
-		t.Fatalf("Configure: %v", err)
-	}
-	p.store = newMemStore()
-	p.httpClient = &http.Client{}
-	go p.refreshLoop(30 * time.Millisecond)
-	t.Cleanup(func() { close(p.stopCh); <-p.stopped })
-
-	p.mu.Lock()
-	p.cache["sess"] = &counters{tokens: 100, calls: 3, startedAt: time.Now()}
-	p.mu.Unlock()
-
-	action := request(p, "sess")
-	if action.Type != pipeline.Reject {
-		t.Fatalf("pause mode (denied): expected Reject, got %v", action.Type)
-	}
-	status, _, body := action.Violation.Render()
-	if status != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", status)
-	}
-	var parsed map[string]any
-	json.Unmarshal(body, &parsed)
-	if parsed["error"] != "budget.exceeded" {
-		t.Errorf("error = %v, want budget.exceeded", parsed["error"])
+			action := request(p, "sess")
+			if action.Type != tt.want {
+				t.Fatalf("action = %v, want %v", action.Type, tt.want)
+			}
+			if tt.want == pipeline.Reject {
+				status, _, body := action.Violation.Render()
+				if status != http.StatusForbidden {
+					t.Errorf("status = %d, want 403", status)
+				}
+				var parsed map[string]any
+				json.Unmarshal(body, &parsed)
+				if parsed["error"] != "budget.exceeded" {
+					t.Errorf("error = %v, want budget.exceeded", parsed["error"])
+				}
+			}
+		})
 	}
 }
