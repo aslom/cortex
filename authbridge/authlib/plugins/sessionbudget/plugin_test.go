@@ -416,41 +416,8 @@ func newPausePlugin(t *testing.T, maxCalls int64, webhookURL, timeoutAction stri
 	return p
 }
 
-func TestOnRequest_PauseApproved(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"action":"approve"}`))
-	}))
-	defer srv.Close()
-
-	p := newPausePlugin(t, 3, srv.URL, "deny")
-	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
-	p.mu.Unlock()
-
-	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
-	if action.Type != pipeline.Continue {
-		t.Fatalf("expected Continue after approval, got %v", action.Type)
-	}
-}
-
-func TestOnRequest_PauseDenied(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"action":"deny"}`))
-	}))
-	defer srv.Close()
-
-	p := newPausePlugin(t, 3, srv.URL, "deny")
-	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
-	p.mu.Unlock()
-
-	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
-	if action.Type != pipeline.Reject {
-		t.Fatalf("expected Reject after denial, got %v", action.Type)
-	}
-}
+// Approve / deny happy paths are covered by TestE2E_PauseMode in e2e_test.go
+// (table-driven, asserts webhook request body + 403 response schema).
 
 // TestOnRequest_PauseWebhookFailureFallback covers every "webhook doesn't
 // return a valid approve" path: timeout, non-200, malformed body. All fall

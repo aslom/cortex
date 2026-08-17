@@ -200,16 +200,56 @@ func TestE2E_PodRestart(t *testing.T) {
 	}
 }
 
-// controllableStore delegates to inner memStore but can be toggled to fail.
-type controllableStore struct {
-	inner   *memStore
-	failing bool
-	mu      sync.Mutex
+// TestE2E_HydrateSingleflight verifies concurrent cold-cache requests
+// for the same session share one Redis lookup instead of stampeding.
+func TestE2E_HydrateSingleflight(t *testing.T) {
+	inner := newMemStore()
+	cs := &controllableStore{inner: inner, hashGetDelay: 50 * time.Millisecond}
+	p := newE2EPlugin(t, 200, newMemStore())
+	p.store = cs
+
+	ctx := context.Background()
+	inner.HashIncr(ctx, "session-budget:s", "tokens", 210)
+	inner.HashIncr(ctx, "session-budget:s", "calls", 8)
+	inner.HashSetNX(ctx, "session-budget:s", "started_at", "1700000000")
+
+	const N = 20
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			if a := request(p, "s"); a.Type != pipeline.Reject {
+				t.Errorf("expected Reject, got %v", a.Type)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Without singleflight all N calls would hit HashGet. With it, only the
+	// first flight does — later arrivals see the populated cache and skip hydrate.
+	// Allow a small slack for goroutines that raced past the cache-check before
+	// the first flight populated it.
+	got := cs.hashGetCalls()
+	if got > 3 {
+		t.Errorf("HashGet called %d times for %d concurrent cold-cache requests; expected ≤3 (singleflight dedup)", got, N)
+	}
 }
 
-func (c *controllableStore) setFailing(v bool) { c.mu.Lock(); c.failing = v; c.mu.Unlock() }
-func (c *controllableStore) isFailing() bool   { c.mu.Lock(); defer c.mu.Unlock(); return c.failing }
-func (c *controllableStore) err() error         { return context.DeadlineExceeded }
+// controllableStore delegates to inner memStore but can be toggled to fail,
+// counts HashGet calls, and optionally injects latency into HashGet.
+type controllableStore struct {
+	inner        *memStore
+	failing      bool
+	hashGetDelay time.Duration
+	mu           sync.Mutex
+	hashGets     int
+}
+
+func (c *controllableStore) setFailing(v bool)   { c.mu.Lock(); c.failing = v; c.mu.Unlock() }
+func (c *controllableStore) isFailing() bool     { c.mu.Lock(); defer c.mu.Unlock(); return c.failing }
+func (c *controllableStore) hashGetCalls() int   { c.mu.Lock(); defer c.mu.Unlock(); return c.hashGets }
+func (c *controllableStore) err() error          { return context.DeadlineExceeded }
 
 func (c *controllableStore) Get(ctx context.Context, key string) (string, error) {
 	if c.isFailing() { return "", c.err() }
@@ -228,7 +268,13 @@ func (c *controllableStore) HashIncr(ctx context.Context, key, field string, del
 	return c.inner.HashIncr(ctx, key, field, delta)
 }
 func (c *controllableStore) HashGet(ctx context.Context, key string) (map[string]string, error) {
-	if c.isFailing() { return nil, c.err() }
+	c.mu.Lock()
+	c.hashGets++
+	delay := c.hashGetDelay
+	failing := c.failing
+	c.mu.Unlock()
+	if delay > 0 { time.Sleep(delay) }
+	if failing { return nil, c.err() }
 	return c.inner.HashGet(ctx, key)
 }
 func (c *controllableStore) HashSetNX(ctx context.Context, key, field, value string) (bool, error) {
