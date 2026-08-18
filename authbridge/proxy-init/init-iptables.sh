@@ -114,7 +114,9 @@
 #                   forwards to 127.0.0.1:<that port>.
 #   Ambient HBONE:  ztunnel terminates mTLS and re-originates LOCALLY, so it
 #                   appears in OUTPUT, not PREROUTING. Captured by a mark-based
-#                   DNAT at the head of AB_REDIRECT (see setup_enforce_redirect).
+#                   DNAT at the head of AB_REDIRECT (see setup_enforce_redirect),
+#                   preceded by the SAME exemptions AB_INBOUND applies — both are
+#                   emitted from emit_inbound_exemptions so they cannot drift.
 #
 # Intra-pod loopback is intentionally NOT captured: containers share a netns and
 # are a single entity to every network enforcement layer, so that traffic is
@@ -267,6 +269,29 @@ get_nameservers() {
   return 0
 }
 
+# POD_IPS is the pod's full address list (Downward API status.podIPs,
+# comma-separated). Needed because the ambient DNAT target must match the address
+# family of the traffic: keying only off POD_IP — the PRIMARY address — leaves the
+# other family's HBONE delivery hitting AB_REDIRECT's ztunnel-mark RETURN and
+# passing unvalidated, while that family's PREROUTING rules ARE installed. That is
+# the half-enforcement this mode otherwise refuses to ship. Falls back to POD_IP
+# so an older operator that injects only the singular field still works for its
+# family.
+POD_IPS="${POD_IPS:-${POD_IP}}"
+
+# pod_ip_for_family <v4|v6> echoes the first POD_IPS entry of that family, or
+# nothing when the pod has no address in it.
+pod_ip_for_family() {
+  for _pif in $(echo "${POD_IPS}" | tr ',' ' '); do
+    if [ "$1" = "v6" ]; then
+      if is_ipv6 "${_pif}"; then echo "${_pif}"; return 0; fi
+    else
+      if is_ipv6 "${_pif}"; then :; else echo "${_pif}"; return 0; fi
+    fi
+  done
+  return 0
+}
+
 # is_ipv6 reports whether an address literal is IPv6, by the presence of a
 # colon. Sufficient here because the only inputs are resolv.conf nameservers and
 # the downward-API POD_IP, both of which are bare literals (never host:port).
@@ -311,6 +336,61 @@ if [ -n "${INBOUND_TRANSPARENT_PORT}" ] && [ -z "${POD_IP}" ]; then
   echo "Set POD_IP via the Kubernetes Downward API (status.podIP)." >&2
   exit 1
 fi
+
+# emit_inbound_exemptions <cmd> <chain> [match-prefix...]
+#
+# Emits the RETURN rules for every port/source that must NOT be inbound-
+# intercepted. ONE definition, because inbound arrives over TWO hooks:
+# nat PREROUTING (plain network) and nat OUTPUT (ambient — ztunnel terminates
+# HBONE and re-originates a LOCAL connection, so it never reaches PREROUTING).
+#
+# The redirect-mode rules drifted in exactly this way: PROXY_INBOUND's
+# exclusions had no effect on ambient traffic until a second, hand-maintained
+# copy was added to PROXY_OUTPUT ("Rule 1" below, whose comment names the
+# pitfall). Emitting both from one function makes that drift impossible.
+#
+# RETURN and not ACCEPT: an exempt port must fall through to Istio's appended
+# chain (ISTIO_PRERT / ISTIO_OUTPUT) so ambient still terminates mTLS for it.
+# ACCEPT would end nat traversal and silently drop the port out of the mesh.
+# That also rules out a shared sub-chain of RETURNs — a sub-chain RETURN resumes
+# in the caller, landing straight on the terminal REDIRECT/DNAT it was meant to
+# skip.
+#
+# $3.. is an optional match prefix. On the OUTPUT hook it scopes every rule to
+# ztunnel's inbound delivery, so egress capture is untouched.
+emit_inbound_exemptions() {
+  _ec="$1"; _ech="$2"; shift 2
+
+  # Istio rewrites kubelet health checks to a synthetic source. Gating them
+  # fails probes and crash-loops the pod. The literal is IPv4-only, so emit it
+  # only for the v4 command — branching on family rather than suppressing the
+  # error keeps a genuine IPv4 failure (gated probes) loud.
+  case "${_ec}" in
+    *ip6tables*) ;;
+    *) ${_ec} -t nat -A "${_ech}" "$@" -s "${ISTIO_HEALTH_PROBE_SRC}/32" -p tcp -j RETURN ;;
+  esac
+
+  # The transparent ports themselves (redirecting INBOUND_TRANSPARENT_PORT to
+  # itself would self-loop), SSH, and ztunnel's HBONE port — which takes mTLS
+  # tunnels straight from the network and must reach ztunnel's in-pod socket,
+  # not an HTTP listener.
+  for _p in "${INBOUND_TRANSPARENT_PORT}" "${TRANSPARENT_PORT}" "${SSH_PORT}" "${ZTUNNEL_HBONE_PORT}"; do
+    if [ -n "${_p}" ]; then
+      ${_ec} -t nat -A "${_ech}" "$@" -p tcp --dport "${_p}" -j RETURN
+    fi
+  done
+
+  # SIDECAR_PORTS_EXCLUDE: AuthBridge's own listeners (health, stats,
+  # session-events, forward proxy). Gating health breaks probes; gating the rest
+  # breaks abctl and operator introspection.
+  # INBOUND_PORTS_EXCLUDE: the operator/user escape hatch for app ports that must
+  # not be validated — e.g. an OpenShift oauth-proxy doing its own auth on 8443.
+  for _p in $(echo "${SIDECAR_PORTS_EXCLUDE},${INBOUND_PORTS_EXCLUDE}" | tr ',' ' '); do
+    if [ -n "${_p}" ]; then
+      ${_ec} -t nat -A "${_ech}" "$@" -p tcp --dport "${_p}" -j RETURN
+    fi
+  done
+}
 
 # =============================================================================
 # enforce-redirect mode (proxy-sidecar fail-closed egress guard, capture variant)
@@ -395,10 +475,19 @@ setup_enforce_redirect() {
   # unless route_localnet=1 (which needs a privileged write to /proc/sys).
   # SO_ORIGINAL_DST is unaffected — conntrack records the pre-NAT tuple for DNAT
   # and REDIRECT identically.
-  if [ -n "${INBOUND_TRANSPARENT_PORT}" ] && ! is_ipv6 "${POD_IP}"; then
+  _dnat4=$(pod_ip_for_family v4)
+  if [ -n "${INBOUND_TRANSPARENT_PORT}" ] && [ -n "${_dnat4}" ]; then
+    # The SAME exemptions AB_INBOUND applies, scoped to ztunnel's inbound
+    # delivery and emitted BEFORE the DNAT. Without them every exemption
+    # (health 9091, the operator's INBOUND_PORTS_EXCLUDE, ztunnel's own HBONE
+    # port) is a silent no-op on the ambient path — and a JWT-gated 9091
+    # crash-loops the pod.
+    emit_inbound_exemptions "${IPT}" "${REDIR_CHAIN}" \
+      -m mark --mark "${ZTUNNEL_MARK}" -m owner ! --uid-owner "${PROXY_UID}" \
+      -m addrtype --dst-type LOCAL
     ${IPT} -t nat -A "${REDIR_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" \
       -m owner ! --uid-owner "${PROXY_UID}" -m addrtype --dst-type LOCAL \
-      -p tcp -j DNAT --to-destination "${POD_IP}:${INBOUND_TRANSPARENT_PORT}"
+      -p tcp -j DNAT --to-destination "${_dnat4}:${INBOUND_TRANSPARENT_PORT}"
   fi
   # ztunnel's own sockets (ambient) carry fwmark 0x539 — let them through.
   ${IPT} -t nat -A "${REDIR_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
@@ -459,13 +548,23 @@ setup_enforce_redirect() {
   if command -v "${IP6T%% *}" >/dev/null 2>&1 && ${IP6T} -t nat -L >/dev/null 2>&1; then
     ${IP6T} -t nat -N "${REDIR_CHAIN}" 2>/dev/null || true
     ${IP6T} -t nat -F "${REDIR_CHAIN}"
-    # Ambient inbound DNAT, v6 mirror. Installed only when POD_IP is itself v6:
-    # the downward API yields the pod's primary address, and a v4 target in
-    # ip6tables is rejected outright.
-    if [ -n "${INBOUND_TRANSPARENT_PORT}" ] && is_ipv6 "${POD_IP}"; then
+    # Ambient inbound DNAT, v6 mirror. Keyed on the pod's v6 address rather than
+    # on POD_IP's family, so a dual-stack pod (whose primary is usually v4) still
+    # gets v6 ambient covered. A v4 target in ip6tables is rejected outright.
+    _dnat6=$(pod_ip_for_family v6)
+    if [ -n "${INBOUND_TRANSPARENT_PORT}" ] && [ -n "${_dnat6}" ]; then
+      emit_inbound_exemptions "${IP6T}" "${REDIR_CHAIN}" \
+        -m mark --mark "${ZTUNNEL_MARK}" -m owner ! --uid-owner "${PROXY_UID}" \
+        -m addrtype --dst-type LOCAL
       ${IP6T} -t nat -A "${REDIR_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" \
         -m owner ! --uid-owner "${PROXY_UID}" -m addrtype --dst-type LOCAL \
-        -p tcp -j DNAT --to-destination "[${POD_IP}]:${INBOUND_TRANSPARENT_PORT}"
+        -p tcp -j DNAT --to-destination "[${_dnat6}]:${INBOUND_TRANSPARENT_PORT}"
+    elif [ -n "${INBOUND_TRANSPARENT_PORT}" ]; then
+      # v6 PREROUTING rules are still installed below, so non-mesh v6 inbound is
+      # covered; only the v6 ambient path is not. Say so rather than leave it
+      # implicit — on a v4-only cluster this is expected and harmless.
+      echo "transparent-inbound: WARNING: no IPv6 pod address in POD_IPS — IPv6 ambient (HBONE) inbound is NOT captured" >&2
+      echo "transparent-inbound: set POD_IPS from the Downward API (status.podIPs) if this pod is dual-stack" >&2
     fi
     ${IP6T} -t nat -A "${REDIR_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
     ${IP6T} -t nat -A "${REDIR_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
@@ -557,39 +656,7 @@ setup_transparent_inbound() {
     ${_ic} -t nat -N "${IN_CHAIN}" 2>/dev/null || true
     ${_ic} -t nat -F "${IN_CHAIN}"
 
-    # Istio rewrites kubelet health checks to a synthetic source. Gating them
-    # would fail probes and crash-loop the pod.
-    ${_ic} -t nat -A "${IN_CHAIN}" -s "${ISTIO_HEALTH_PROBE_SRC}/32" -p tcp -j RETURN 2>/dev/null || true
-
-    # The transparent ports themselves. Redirecting INBOUND_TRANSPARENT_PORT to
-    # itself would self-loop (AuthBridge's CheckDst drops it, but not before
-    # burning a connection); TRANSPARENT_PORT is the egress listener and receives
-    # nothing from the network.
-    ${_ic} -t nat -A "${IN_CHAIN}" -p tcp --dport "${INBOUND_TRANSPARENT_PORT}" -j RETURN
-    ${_ic} -t nat -A "${IN_CHAIN}" -p tcp --dport "${TRANSPARENT_PORT}" -j RETURN
-
-    # AuthBridge's own listeners: health, stats, session-events API, forward
-    # proxy. Gating health breaks probes; gating the others breaks abctl and
-    # operator introspection.
-    for _p in $(echo "${SIDECAR_PORTS_EXCLUDE}" | tr ',' ' '); do
-      if [ -n "${_p}" ]; then
-        ${_ic} -t nat -A "${IN_CHAIN}" -p tcp --dport "${_p}" -j RETURN
-      fi
-    done
-
-    ${_ic} -t nat -A "${IN_CHAIN}" -p tcp --dport "${SSH_PORT}" -j RETURN
-
-    # ztunnel's HBONE port takes mTLS tunnels straight from the network and must
-    # reach ztunnel's in-pod socket, not an HTTP listener.
-    ${_ic} -t nat -A "${IN_CHAIN}" -p tcp --dport "${ZTUNNEL_HBONE_PORT}" -j RETURN
-
-    # Operator/user escape hatch (kagenti.io/inbound-ports-exclude), for app
-    # ports that must not be validated — e.g. an oauth-proxy doing its own auth.
-    for _p in $(echo "${INBOUND_PORTS_EXCLUDE}" | tr ',' ' '); do
-      if [ -n "${_p}" ]; then
-        ${_ic} -t nat -A "${IN_CHAIN}" -p tcp --dport "${_p}" -j RETURN
-      fi
-    done
+    emit_inbound_exemptions "${_ic}" "${IN_CHAIN}"
 
     # Everything else — the app's ports, whichever and however many they are.
     # SO_ORIGINAL_DST recovers which one each connection targeted, so no per-port

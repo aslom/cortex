@@ -223,7 +223,51 @@ assert "operator exclude 8443 honored"         'AB_INBOUND -p tcp -m tcp --dport
 
 # The ambient path is the one a PREROUTING-only implementation silently misses.
 assert "ambient inbound DNAT installed in AB_REDIRECT" \
-       "AB_REDIRECT .*0x539.*--uid-owner 1337.*LOCAL.*-j DNAT --to-destination ${POD_IP_MOCK}:${IN_TPORT}" "${innat}"
+       "AB_REDIRECT .*0x539.*! --uid-owner 1337.*--dst-type LOCAL.*-j DNAT --to-destination ${POD_IP_MOCK}:${IN_TPORT}" "${innat}"
+# The negation is load-bearing and easy to lose: without it the rule matches
+# AuthBridge's OWN delivery to the app and DNATs it back into the inbound
+# listener, looping. Asserted separately so a regex that merely tolerates its
+# absence cannot pass.
+if echo "${innat}" | grep -E 'AB_REDIRECT.*-j DNAT' | grep -qv '! --uid-owner'; then
+  echo "FAIL: an ambient DNAT rule lacks '! --uid-owner' (would loop the proxy's own forward hop)"; fail=1
+else
+  echo "PASS: every ambient DNAT rule negates the proxy UID"
+fi
+
+echo "### Ambient path must honor the SAME exemptions as AB_INBOUND"
+# The bug this guards: ztunnel delivers inbound via OUTPUT, so exemptions living
+# only in AB_INBOUND are silently a no-op for mesh traffic. A JWT-gated 9091
+# crash-loops the pod; a captured 8443 breaks an oauth-proxy doing its own auth.
+for port_desc in "9091 health" "9093 stats" "9094 session-api" "8443 operator-exclude" "15008 ztunnel-hbone" "${IN_TPORT} inbound-transparent"; do
+  _p=${port_desc%% *}; _d=${port_desc#* }
+  if echo "${innat}" | grep -qE "AB_REDIRECT.*0x539.*! --uid-owner 1337.*--dst-type LOCAL.*--dport ${_p} -j RETURN"; then
+    echo "PASS: ambient path exempts ${_p} (${_d})"
+  else
+    echo "FAIL: ambient path does NOT exempt ${_p} (${_d}) — exemption is a no-op for mesh traffic"; fail=1
+  fi
+done
+# Ordering: the exemptions are useless if the DNAT is evaluated first.
+ex_line=$(echo "${innat}" | grep -nE "AB_REDIRECT.*0x539.*! --uid-owner 1337.*--dst-type LOCAL.*--dport 9091 -j RETURN" | head -1 | cut -d: -f1)
+dn_line=$(echo "${innat}" | grep -nE 'AB_REDIRECT.*-j DNAT' | head -1 | cut -d: -f1)
+if [ -n "${ex_line}" ] && [ -n "${dn_line}" ] && [ "${ex_line}" -lt "${dn_line}" ]; then
+  echo "PASS: ambient exemptions precede the DNAT"
+else
+  echo "FAIL: ambient exemptions do not precede the DNAT (exempt=${ex_line:-?} dnat=${dn_line:-?})"; fail=1
+fi
+
+echo "### Health-probe source exemption present on IPv4, absent from IPv6"
+# Branching on family rather than suppressing the error: the v4 rule must exist
+# (or probes are gated), and the v4-only literal cannot be emitted into ip6tables.
+assert "IPv4 health-probe source exempted in AB_INBOUND" \
+       "AB_INBOUND -s 169.254.7.127/32 -p tcp -j RETURN" "${innat}"
+in6nat=$(ip6tables-nft -t nat -S 2>/dev/null || true)
+if [ -n "${in6nat}" ]; then
+  if echo "${in6nat}" | grep -q "169.254.7.127"; then
+    echo "FAIL: IPv4 health-probe literal leaked into the IPv6 ruleset"; fail=1
+  else
+    echo "PASS: IPv4-only health-probe literal not emitted into ip6tables"
+  fi
+fi
 assert "forward-hop mark rule in mangle OUTPUT" \
        'OUTPUT -p tcp -m owner --uid-owner 1337 -m addrtype --dst-type LOCAL -j MARK --set-x?mark 0x539' "${inmangle}"
 
@@ -256,7 +300,7 @@ else
   echo "FAIL: mark rule stacked ${markcount} times across re-runs (expected 1)"; fail=1
 fi
 
-echo "### Inbound capture test: packet to the app port must hit AB_INBOUND"
+echo "### AB_INBOUND chain is present in the live backend (not a capture test)"
 # PREROUTING only sees packets arriving on an interface, which a netns cannot
 # easily synthesise without a peer. Assert the REDIRECT rule exists and is
 # reachable instead; live capture is covered by the Kind e2e.
@@ -264,6 +308,31 @@ if "${IPT}" -t nat -L AB_INBOUND -n >/dev/null 2>&1; then
   echo "PASS: AB_INBOUND chain exists and is listable in the live backend"
 else
   echo "FAIL: AB_INBOUND chain missing from the live backend"; fail=1
+fi
+
+echo "### Dual-stack: POD_IPS must drive a DNAT for BOTH families"
+# With only POD_IP (primary, usually v4) the other family's HBONE delivery hit
+# AB_REDIRECT's ztunnel-mark RETURN and passed unvalidated, while that family's
+# PREROUTING rules WERE installed — exactly the half-enforcement this mode
+# refuses to ship elsewhere.
+env MODE=enforce-redirect PROXY_UID=1337 RESOLV_CONF="${RESOLV_MOCK}" \
+    TRANSPARENT_PORT="${TPORT}" INBOUND_TRANSPARENT_PORT="${IN_TPORT}" \
+    POD_IP="${POD_IP_MOCK}" POD_IPS="${POD_IP_MOCK},fd00:10:244::7" \
+    IPTABLES_CMD="${IPT}" IP6TABLES_CMD=ip6tables-nft \
+    sh "${INIT}" >/dev/null 2>&1 || { echo "FAIL: init failed with dual-stack POD_IPS"; fail=1; }
+ds4=$("${IPT}" -t nat -S 2>/dev/null || true)
+ds6=$(ip6tables-nft -t nat -S 2>/dev/null || true)
+if echo "${ds4}" | grep -qE "AB_REDIRECT.*-j DNAT --to-destination ${POD_IP_MOCK}:${IN_TPORT}"; then
+  echo "PASS: dual-stack v4 ambient DNAT installed"
+else
+  echo "FAIL: dual-stack v4 ambient DNAT missing"; fail=1
+fi
+if [ -n "${ds6}" ]; then
+  if echo "${ds6}" | grep -qE "AB_REDIRECT.*-j DNAT --to-destination \[?fd00:10:244::7\]?:${IN_TPORT}"; then
+    echo "PASS: dual-stack v6 ambient DNAT installed (v6 HBONE cannot bypass)"
+  else
+    echo "FAIL: dual-stack v6 ambient DNAT missing — v6 HBONE delivery bypasses validation"; fail=1
+  fi
 fi
 
 echo "### Malformed exclude list must not abort init (set -e trap)"
