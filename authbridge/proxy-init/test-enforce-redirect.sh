@@ -19,6 +19,13 @@
 #      counters: our REDIRECT increments, the simulated ISTIO REDIRECT does not.
 #   3. NON-TCP DROP — an external UDP datagram (QUIC/HTTP-3 bypass attempt) hits
 #      the mangle AB_NOTCP DROP, proving non-TCP external egress cannot bypass.
+#   4. TRANSPARENT INBOUND (INBOUND_TRANSPARENT_PORT) — off by default; when on,
+#      AB_INBOUND is hooked at nat PREROUTING position 1 with the sidecar's own
+#      ports exempted (health 9091 in particular, or kubelet probes would be
+#      JWT-gated and crash-loop the pod), and the ambient DNAT is installed
+#      BEFORE AB_REDIRECT's ztunnel-mark RETURN — the ordering that decides
+#      whether mesh-delivered traffic is validated or waved through. Also covers
+#      the POD_IP fail-closed guard and re-run idempotency of the mark rule.
 #
 # Requirements: root (for unshare --net + iptables), iproute2, iptables-nft,
 # bash, the dummy kernel module. Runs on Linux / CI (e.g. ubuntu-latest); not on
@@ -31,6 +38,8 @@ INIT="${INIT_SCRIPT:-${SCRIPT_DIR}/init-iptables.sh}"
 IPT="${IPTABLES_CMD:-iptables-nft}"
 EXTERNAL="198.51.100.7"   # RFC5737 TEST-NET-2, guaranteed unused
 TPORT="8082"
+IN_TPORT="8083"                  # inbound transparent listener port
+POD_IP_MOCK="10.244.1.7"         # stands in for the downward-API status.podIP
 RESOLVER_V4="172.31.0.10"        # OCP-style resolver, deliberately OUTSIDE 10/8
 RESOLVER_V6="fd00:10:96::10"     # IPv6 resolver, exercises the ip6tables path
 
@@ -128,8 +137,11 @@ echo "### Capture + preemption test: append a simulated ISTIO_OUTPUT nat REDIREC
 # listener on TPORT the redirected SYN gets an RST; the rule counter still ticks.
 timeout 2 bash -c "exec 3<>/dev/tcp/${EXTERNAL}/80" 2>/dev/null || true
 
-capc=$("${IPT}" -t nat -L AB_REDIRECT -n -v | awk '/REDIRECT/{print $1; exit}')
-istioc=$("${IPT}" -t nat -L OUTPUT -n -v | awk '/REDIRECT/{print $1; exit}')
+# $3 is the target column under -v. Matching the column rather than the line is
+# required: /REDIRECT/ also matches the "Chain AB_REDIRECT" header (yielding the
+# literal "Chain") and, in OUTPUT, the "-j AB_REDIRECT" jump rule's own counter.
+capc=$("${IPT}" -t nat -L AB_REDIRECT -n -v | awk '$3=="REDIRECT"{print $1; exit}')
+istioc=$("${IPT}" -t nat -L OUTPUT -n -v | awk '$3=="REDIRECT"{print $1; exit}')
 echo "AB_REDIRECT REDIRECT pkts=${capc:-?} | simulated ISTIO REDIRECT pkts=${istioc:-?}"
 if [ "${capc:-0}" -gt 0 ] && [ "${istioc:-0}" -eq 0 ]; then
   echo "PASS: external TCP captured to transparent port, preempting nat REDIRECT (ambient-robust)"
@@ -160,6 +172,114 @@ else
   echo "PASS: init aborts fail-closed when resolv.conf has no nameservers"
 fi
 
+# =============================================================================
+# Transparent inbound (INBOUND_TRANSPARENT_PORT) — opt-in inbound capture
+# =============================================================================
+
+echo "### Inbound OFF by default: no AB_INBOUND without INBOUND_TRANSPARENT_PORT"
+if echo "${natdump}" | grep -q 'AB_INBOUND'; then
+  echo "FAIL: AB_INBOUND present without INBOUND_TRANSPARENT_PORT (inbound must be opt-in)"; fail=1
+else
+  echo "PASS: inbound capture off by default — egress guard unchanged"
+fi
+
+echo "### Fail-closed test: inbound port without POD_IP must abort init"
+# PREROUTING-only rules would silently miss every ambient (HBONE) request, since
+# ztunnel re-originates inbound locally through OUTPUT. Half-enforced is worse
+# than not started, so this must exit non-zero.
+if env MODE=enforce-redirect PROXY_UID=1337 RESOLV_CONF="${RESOLV_MOCK}" \
+       TRANSPARENT_PORT="${TPORT}" INBOUND_TRANSPARENT_PORT="${IN_TPORT}" \
+       IPTABLES_CMD="${IPT}" IP6TABLES_CMD=ip6tables-nft \
+       sh "${INIT}" >/dev/null 2>&1; then
+  echo "FAIL: init succeeded with INBOUND_TRANSPARENT_PORT but no POD_IP"; fail=1
+else
+  echo "PASS: init aborts fail-closed when inbound capture is requested without POD_IP"
+fi
+
+echo "### Installing enforce-redirect + transparent inbound (POD_IP=${POD_IP_MOCK})"
+env MODE=enforce-redirect PROXY_UID=1337 RESOLV_CONF="${RESOLV_MOCK}" \
+    TRANSPARENT_PORT="${TPORT}" INBOUND_TRANSPARENT_PORT="${IN_TPORT}" \
+    POD_IP="${POD_IP_MOCK}" INBOUND_PORTS_EXCLUDE=8443 \
+    IPTABLES_CMD="${IPT}" IP6TABLES_CMD=ip6tables-nft \
+    sh "${INIT}" || { echo "FAIL: init script exited non-zero with inbound enabled"; exit 1; }
+
+innat=$("${IPT}" -t nat -S)
+inmangle=$("${IPT}" -t mangle -S)
+echo "--- nat ruleset (inbound enabled) ---"; echo "${innat}"
+
+assert "AB_INBOUND hooked from nat PREROUTING" '^-A PREROUTING -p tcp -j AB_INBOUND' "${innat}"
+assert "inbound catch-all REDIRECTs to the inbound port" \
+       "AB_INBOUND -p tcp -j REDIRECT --to-ports ${IN_TPORT}" "${innat}"
+# Self-loop and sidecar-port exemptions. Redirecting the health port would put
+# kubelet probes behind JWT validation and crash-loop the pod.
+assert "inbound port exempted (no self-loop)"  "AB_INBOUND -p tcp -m tcp --dport ${IN_TPORT} -j RETURN" "${innat}"
+assert "egress transparent port exempted"      "AB_INBOUND -p tcp -m tcp --dport ${TPORT} -j RETURN" "${innat}"
+assert "health port 9091 exempted (probes)"    'AB_INBOUND -p tcp -m tcp --dport 9091 -j RETURN' "${innat}"
+assert "stats port 9093 exempted"              'AB_INBOUND -p tcp -m tcp --dport 9093 -j RETURN' "${innat}"
+assert "session-events port 9094 exempted"     'AB_INBOUND -p tcp -m tcp --dport 9094 -j RETURN' "${innat}"
+assert "forward-proxy port 8081 exempted"      'AB_INBOUND -p tcp -m tcp --dport 8081 -j RETURN' "${innat}"
+assert "ztunnel HBONE 15008 exempted"          'AB_INBOUND -p tcp -m tcp --dport 15008 -j RETURN' "${innat}"
+assert "operator exclude 8443 honored"         'AB_INBOUND -p tcp -m tcp --dport 8443 -j RETURN' "${innat}"
+
+# The ambient path is the one a PREROUTING-only implementation silently misses.
+assert "ambient inbound DNAT installed in AB_REDIRECT" \
+       "AB_REDIRECT .*0x539.*--uid-owner 1337.*LOCAL.*-j DNAT --to-destination ${POD_IP_MOCK}:${IN_TPORT}" "${innat}"
+assert "forward-hop mark rule in mangle OUTPUT" \
+       'OUTPUT -p tcp -m owner --uid-owner 1337 -m addrtype --dst-type LOCAL -j MARK --set-x?mark 0x539' "${inmangle}"
+
+echo "### Ambient DNAT must precede the ztunnel-mark RETURN (else mesh bypasses)"
+# Rule ORDER is the whole correctness argument here: AB_REDIRECT's ztunnel-mark
+# RETURN would let every HBONE-delivered request through unvalidated if it were
+# evaluated first.
+dnat_line=$(echo "${innat}" | grep -n 'AB_REDIRECT.*-j DNAT' | head -1 | cut -d: -f1)
+ret_line=$(echo "${innat}" | grep -n 'AB_REDIRECT -m mark --mark 0x539/0xfff -j RETURN' | head -1 | cut -d: -f1)
+if [ -n "${dnat_line}" ] && [ -n "${ret_line}" ] && [ "${dnat_line}" -lt "${ret_line}" ]; then
+  echo "PASS: ambient DNAT precedes the ztunnel-mark RETURN"
+else
+  echo "FAIL: ambient DNAT not before ztunnel RETURN (dnat=${dnat_line:-?} return=${ret_line:-?})"; fail=1
+fi
+
+echo "### AB_INBOUND must be at nat PREROUTING position 1 (precede ISTIO_PRERT)"
+inpos1=$("${IPT}" -t nat -L PREROUTING --line-numbers 2>/dev/null | awk '$1=="1"{print $2}')
+if [ "${inpos1}" = "AB_INBOUND" ]; then echo "PASS: AB_INBOUND at nat PREROUTING position 1"
+else echo "FAIL: AB_INBOUND not at nat PREROUTING position 1 (got '${inpos1}')"; fail=1; fi
+
+echo "### Idempotency: re-running init must not stack duplicate mark rules"
+env MODE=enforce-redirect PROXY_UID=1337 RESOLV_CONF="${RESOLV_MOCK}" \
+    TRANSPARENT_PORT="${TPORT}" INBOUND_TRANSPARENT_PORT="${IN_TPORT}" \
+    POD_IP="${POD_IP_MOCK}" IPTABLES_CMD="${IPT}" IP6TABLES_CMD=ip6tables-nft \
+    sh "${INIT}" >/dev/null 2>&1 || true
+markcount=$("${IPT}" -t mangle -S OUTPUT | grep -c 'MARK --set-x\?mark 0x539' || true)
+if [ "${markcount}" -eq 1 ]; then
+  echo "PASS: forward-hop mark rule is idempotent across init re-runs"
+else
+  echo "FAIL: mark rule stacked ${markcount} times across re-runs (expected 1)"; fail=1
+fi
+
+echo "### Inbound capture test: packet to the app port must hit AB_INBOUND"
+# PREROUTING only sees packets arriving on an interface, which a netns cannot
+# easily synthesise without a peer. Assert the REDIRECT rule exists and is
+# reachable instead; live capture is covered by the Kind e2e.
+if "${IPT}" -t nat -L AB_INBOUND -n >/dev/null 2>&1; then
+  echo "PASS: AB_INBOUND chain exists and is listable in the live backend"
+else
+  echo "FAIL: AB_INBOUND chain missing from the live backend"; fail=1
+fi
+
+echo "### Malformed exclude list must not abort init (set -e trap)"
+# A trailing comma yields an empty field. If the port loop used `[ -n ] && cmd`
+# as its last statement, the loop would exit non-zero and `set -e` would abort
+# init — turning a cosmetic annotation typo into a pod that never starts.
+if env MODE=enforce-redirect PROXY_UID=1337 RESOLV_CONF="${RESOLV_MOCK}" \
+       TRANSPARENT_PORT="${TPORT}" INBOUND_TRANSPARENT_PORT="${IN_TPORT}" \
+       POD_IP="${POD_IP_MOCK}" INBOUND_PORTS_EXCLUDE="8443," SIDECAR_PORTS_EXCLUDE="9091," \
+       IPTABLES_CMD="${IPT}" IP6TABLES_CMD=ip6tables-nft \
+       sh "${INIT}" >/dev/null 2>&1; then
+  echo "PASS: trailing comma in an exclude list is tolerated"
+else
+  echo "FAIL: init aborted on a trailing comma in an exclude list"; fail=1
+fi
+
 echo "### Backend detection unit test (/proc/modules seam)"
 # Pull detect_iptables_cmd (and its PROC_MODULES default) out of the script and
 # exercise it against fixture module tables — no real kernel needed. The legacy
@@ -169,13 +289,13 @@ eval "$(sed -n '/^PROC_MODULES=/,/^}/p' "${INIT}")"
 mods_legacy=$(mktemp); printf 'ip_tables 28672 4 - Live 0x0\niptable_nat 12288 19 - Live 0x0\n' > "${mods_legacy}"
 mods_nft=$(mktemp);    printf 'nf_tables 315392 344 nft_compat - Live 0x0\nnft_compat 20480 0 - Live 0x0\n' > "${mods_nft}"
 if command -v iptables-legacy >/dev/null 2>&1; then
-  got=$(PROC_MODULES="${mods_legacy}" detect_iptables_cmd)
+  got=$(IPTABLES_CMD= PROC_MODULES="${mods_legacy}" detect_iptables_cmd)
   [ "${got}" = "iptables-legacy" ] && echo "PASS: iptable_nat loaded => iptables-legacy" \
     || { echo "FAIL: expected iptables-legacy, got '${got}'"; fail=1; }
 else
   echo "SKIP: iptables-legacy not installed on host — legacy-positive case skipped"
 fi
-got=$(PROC_MODULES="${mods_nft}" detect_iptables_cmd)
+got=$(IPTABLES_CMD= PROC_MODULES="${mods_nft}" detect_iptables_cmd)
 [ "${got}" = "iptables" ] && echo "PASS: iptable_nat absent => iptables (nft)" \
   || { echo "FAIL: expected iptables, got '${got}'"; fail=1; }
 got=$(IPTABLES_CMD=iptables-legacy PROC_MODULES="${mods_nft}" detect_iptables_cmd)
