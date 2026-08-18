@@ -104,20 +104,11 @@ calibrate limits before enforcing:
 On breach, POST to `pause_webhook` and block the request until the webhook
 responds or `pause_timeout` fires.
 
-**What the webhook is.** Any HTTP endpoint that speaks the contract below. You
-build and operate it — session-budget doesn't ship one. Common shapes:
-
-- **A Kubernetes Service** in the cluster (e.g. an approval controller or a
-  small in-house service that decides based on session metadata).
-- **A workflow entrypoint** — Temporal, Argo, GitHub Actions
-  `repository_dispatch`, Slack/PagerDuty middleware, etc. — that synchronously
-  blocks on an operator's response.
-- **A stub for local development** — a tiny handler returning a hardcoded
-  `{"action":"approve"}` for smoke tests.
-
-Whatever it is, `pause_webhook` must be reachable from the AuthBridge pod on the
-outbound path and return within `pause_timeout` (default `30s`) or the plugin
-falls back to `pause_timeout_action`.
+The webhook is any HTTP endpoint you build that speaks the contract
+below — an in-cluster Service, a workflow entrypoint (Temporal, Argo,
+Slack middleware), or a local stub. It must be reachable from the
+AuthBridge pod and respond within `pause_timeout` (default `30s`), or
+the plugin falls back to `pause_timeout_action`.
 
 **Contract:**
 
@@ -156,37 +147,20 @@ or
 {"action": "deny", "reason": "operator rejected"}
 ```
 
-**On approval:** the request continues, and subsequent requests from the same
-session skip the webhook for `pause_grace_period` (default `5m`). This prevents
-per-request webhook spam once a session is approved. Concurrent breaches during
-an in-flight webhook piggyback on the pending call rather than each firing
-their own.
-
-Requests that arrive during an in-flight webhook piggyback on it and continue
-optimistically. If the webhook ultimately denies, those extra requests have
-already passed.
+**On approval:** the request continues; subsequent requests from the
+same session skip the webhook for `pause_grace_period` (default `5m`,
+pod-local — each pod fires one webhook before its own grace kicks in).
+Concurrent breaches during an in-flight webhook piggyback on the
+pending call and continue optimistically; if that call ultimately
+denies, those extra requests have already passed.
 
 **On timeout / non-200 / bad JSON / unreachable:** falls back to
-`pause_timeout_action` (`deny` returns 403; `allow` continues).
+`pause_timeout_action` (`deny` returns 403; `allow` continues). If your
+webhook can be unhealthy and `pause_timeout_action: deny`, an outage
+turns budget breaches into hard 403s.
 
-The grace window is pod-local (in-memory). In multi-pod deployments without
-sticky sessions, each pod fires one webhook before its own grace kicks in.
-
-**Implementation tips for the webhook:**
-
-- **Key on `session_id`.** All fields in the request describe one session. Use
-  `session_id` as the correlation key if you queue, cache, or fan out to human
-  reviewers.
-- **Respond fast, or make `pause_timeout` generous.** The caller's request
-  goroutine is blocked for the full webhook duration. If a human is in the
-  loop, either bump `pause_timeout` (minutes) or have the webhook return `deny`
-  immediately and approve out-of-band on a later request.
-- **Idempotency isn't required** but is nice to have. Under bursty breaches
-  you'll typically see one call per (session, pod) before grace kicks in;
-  concurrent breaches on the same pod are coalesced.
-- **Health matters.** An unreachable / 5xx / slow webhook falls back to
-  `pause_timeout_action`. If that's `deny`, an outage of your webhook turns
-  budget breaches into hard 403s.
+If a human is in the loop, either bump `pause_timeout` to minutes or
+have the webhook return `deny` immediately and approve out-of-band.
 
 ## Failure Modes
 
@@ -200,20 +174,18 @@ sticky sessions, each pod fires one webhook before its own grace kicks in.
 
 ### Cold-cache behavior
 
-Cold-cache handling on `OnRequest` is mode-dependent:
+When a request arrives with no local cache entry for the session:
 
-- **`pause`** — synchronously hydrates from Redis before evaluating, so a
-  session already over-budget on Redis fires the webhook on request #1.
-  HITL only works if we ask before continuing.
+- **`pause`** — hydrates from Redis synchronously, so an over-budget
+  session fires the webhook on request #1.
 - **`deny` / `observe`** — skip with `reason=cold_cache` and continue.
-  Counters populate via `OnResponseFrame` and the refresh loop. A
-  pre-existing over-budget session may pass **up to one request per pod**
-  before enforcement resumes — the same tradeoff these modes have always
-  had. Keeps Redis off the hot path.
+  Counters populate as inference responses stream back and via the
+  background refresh loop. A pre-existing over-budget session may pass
+  **up to one request per pod** before enforcement resumes. Keeps Redis
+  off the hot path.
 
-Infrastructure failures never produce false denials — Redis unavailability
-degrades enforcement to local-cache-only (no cross-pod consistency) rather than
-blocking requests.
+Redis unavailability degrades enforcement to local-cache-only rather
+than blocking requests.
 
 **Token counting requires `usage` in provider responses.** Providers that omit
 `usage` from streaming chunks (e.g. Anthropic via LiteLLM) will show
@@ -262,29 +234,10 @@ Swap `approve` for `deny` to test the reject path. Logs land in
 **If your namespace runs Istio ambient mesh** (label
 `istio.io/dataplane-mode: ambient`), the Valkey pod and any plain-HTTP
 pause webhook need to opt out with the pod-level label
-`istio.io/dataplane-mode: none`. This matters most for `on_exceed: pause`,
-which puts a synchronous Redis lookup on the request path (see
-"Cold-cache behavior"); deny/observe tolerate Redis being unreachable on
-the hot path but still need it for cross-pod counter sync via the refresh
-loop. Here's why:
-
-Ambient mesh puts a per-node proxy (ztunnel) in front of every enrolled
-pod. Traffic between enrolled pods is wrapped in **HBONE** — HTTP/2
-CONNECT tunnels with mTLS between ztunnels. The destination ztunnel
-only accepts HBONE; anything else gets closed at L4 with
-`Connection reset by peer`.
-
-Redis (and Valkey) speaks its own binary protocol (RESP) directly over
-TCP — it can't be tunneled inside HTTP/2, so ambient's ztunnel rejects
-the connection before it ever reaches Valkey. Same story for any
-plain-TCP or plain-HTTP service you don't want mesh-managed. Opting
-those pods out of ambient makes them normal Kubernetes pods again, so
-callers reach them over plain TCP.
-
-Symptom if you forget: `session-budget action=skip reason=cold_cache`
-on every request even though `HGETALL session-budget:<id>` in Redis
-shows the key — the plugin's Redis lookup is being closed by ztunnel
-before it reaches Valkey.
+`istio.io/dataplane-mode: none`. Ambient's ztunnel only accepts HBONE
+(HTTP/2 CONNECT), and Redis RESP is raw TCP — the connection is closed
+before reaching Valkey. Symptom: `session-budget action=skip
+reason=cold_cache` on every request even though the Redis key exists.
 
 For an in-cluster stub, apply
 `authbridge/demos/session-budget/k8s/pause-webhook-stub.yaml` and set
