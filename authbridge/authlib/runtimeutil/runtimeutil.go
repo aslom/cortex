@@ -160,6 +160,25 @@ func StartHTTPServer(name string, handler http.Handler, addr string) (*http.Serv
 // Logged "mtls" attribute makes the listener mode visible at startup;
 // operators expecting a separate :8443 port for TLS get a clear hint
 // that this is the same :8080 with byte-peek detection.
+func StartReverseProxyServer(name string, rp *reverseproxy.Server, addr string) (*http.Server, error) {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           rp.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	listener, err := rp.Listen(addr)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		slog.Info("Reverse server listening", "name", name, "addr", listener.Addr().String(), "mtls", rp.MTLSEnabled())
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			slog.Error("Reverse server failed", "name", name, "error", err)
+		}
+	}()
+	return srv, nil
+}
+
 // StartTransparentInboundServer binds the inbound transparent listener and
 // serves the reverse proxy's handler over it, resolving each request's
 // forwarding target from the destination the client actually addressed
@@ -199,25 +218,6 @@ func StartTransparentInboundServer(name string, rp *reverseproxy.Server, addr st
 			"name", name, "addr", listener.Addr().String(), "mtls", rp.MTLSEnabled())
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("Transparent inbound server failed", "name", name, "error", err)
-		}
-	}()
-	return srv, nil
-}
-
-func StartReverseProxyServer(name string, rp *reverseproxy.Server, addr string) (*http.Server, error) {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           rp.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	listener, err := rp.Listen(addr)
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		slog.Info("Reverse server listening", "name", name, "addr", listener.Addr().String(), "mtls", rp.MTLSEnabled())
-		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			slog.Error("Reverse server failed", "name", name, "error", err)
 		}
 	}()
 	return srv, nil

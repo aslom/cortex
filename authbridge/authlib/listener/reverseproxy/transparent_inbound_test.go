@@ -217,3 +217,91 @@ func TestWrapListener_NoMTLSIsPassthrough(t *testing.T) {
 		t.Errorf("WrapListener with mTLS off = %T, want the same listener back", got)
 	}
 }
+
+// TestFixedBackendIgnoresRecoveredDestination locks the gate on the Director's
+// rewrite. The closure is installed by NewServer, so without an explicit flag it
+// is live on every fixed-backend server too — safe only while nothing populates
+// the context key without an InboundListener, which nothing enforces. A stray
+// key must not silently redirect a port-stealing deployment's traffic.
+func TestFixedBackendIgnoresRecoveredDestination(t *testing.T) {
+	var reached string
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer app.Close()
+
+	// A fixed-backend server, exactly as the reverse-proxy mechanism builds it.
+	srv, err := NewServer(inboundPipelineFromAuth(t, allowAllAuth()), nil, app.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.transparentInbound {
+		t.Fatal("NewServer must not enable the transparent rewrite")
+	}
+
+	// Inject a destination naming a port the app is NOT on. If the rewrite were
+	// ungated, the request would be sent to loopback:9 and never arrive.
+	proxy := httptest.NewServer(withOrigDst("10.244.0.5:9", srv.Handler()))
+	defer proxy.Close()
+
+	req, _ := http.NewRequest("GET", proxy.URL+"/api/data", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: a fixed-backend server must ignore the recovered destination", resp.StatusCode)
+	}
+	if want := portOfURL(t, app.URL); reached == "" || reached == net.JoinHostPort("127.0.0.1", "9") {
+		t.Errorf("request did not reach the configured backend (app Host=%q, want the :%s backend)", reached, want)
+	}
+}
+
+// TestTransparentServerWithFallbackStillRewrites guards the reason
+// transparentInbound is separate from perConnBackend: a transparent server that
+// also has a fallback backend must still honor a recovered destination.
+func TestTransparentServerWithFallbackStillRewrites(t *testing.T) {
+	var reached string
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer app.Close()
+
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("fallback must not be used when a destination was recovered")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fallback.Close()
+
+	srv, err := NewTransparentServer(inboundPipelineFromAuth(t, allowAllAuth()), nil, fallback.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.perConnBackend {
+		t.Fatal("a configured fallback must leave perConnBackend false")
+	}
+	if !srv.transparentInbound {
+		t.Fatal("a transparent server must enable the rewrite even with a fallback")
+	}
+
+	dst := net.JoinHostPort("10.244.0.5", portOfURL(t, app.URL))
+	proxy := httptest.NewServer(withOrigDst(dst, srv.Handler()))
+	defer proxy.Close()
+
+	req, _ := http.NewRequest("GET", proxy.URL+"/api/data", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if want := net.JoinHostPort("127.0.0.1", portOfURL(t, app.URL)); reached != want {
+		t.Errorf("app saw Host = %q, want %q (recovered destination should win over the fallback)", reached, want)
+	}
+}

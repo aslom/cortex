@@ -58,12 +58,19 @@ type Server struct {
 	proxy           *httputil.ReverseProxy
 	backend         string
 
-	// perConnBackend makes the forwarding target per-connection rather than
-	// fixed: the Director resolves it from the original destination the
-	// transparent inbound listener recovered via SO_ORIGINAL_DST. Set by
-	// NewTransparentServer. When true, backend may be empty and a request
-	// arriving without a recovered destination fails closed (502) rather than
-	// being forwarded to a guessed target.
+	// transparentInbound enables the Director's per-connection target rewrite.
+	// Set by NewTransparentServer only. Without it the rewrite would be live on
+	// EVERY server NewServer builds, including fixed-backend ones — safe today
+	// only because nothing populates the context key without an InboundListener,
+	// an invariant nothing enforces. Deliberately separate from perConnBackend,
+	// which is false when a fallback backend is configured even though such a
+	// server still wants the rewrite.
+	transparentInbound bool
+
+	// perConnBackend additionally makes the target REQUIRED rather than merely
+	// preferred: with no configured fallback, a request arriving without a
+	// recovered destination fails closed (502) instead of being forwarded to a
+	// guessed target.
 	perConnBackend bool
 
 	// mtlsCfg is the *tls.Config wrapping the local SVID for inbound
@@ -101,6 +108,10 @@ func NewServer(inbound *pipeline.Holder, sessions *session.Store, backendURL str
 	if err != nil {
 		return nil, err
 	}
+	// Declared before the Director so the closure can capture it: the
+	// transparent-inbound rewrite is gated on s.transparentInbound, which
+	// NewTransparentServer sets after this constructor returns.
+	s := &Server{}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	// The default Director rewrites the outbound scheme/host/path but
 	// deliberately leaves req.Host as the inbound caller's Host (e.g.
@@ -123,11 +134,13 @@ func NewServer(inbound *pipeline.Holder, sessions *session.Store, backendURL str
 		//
 		// The client's real IP is preserved by REDIRECT and reaches the app via
 		// X-Forwarded-For, which ReverseProxy appends from req.RemoteAddr.
-		if dst, ok := transparentproxy.OrigDstFromContext(req.Context()); ok {
-			if _, port, err := net.SplitHostPort(dst); err == nil {
-				req.URL.Scheme = "http"
-				req.URL.Host = net.JoinHostPort("127.0.0.1", port)
-				req.Host = req.URL.Host
+		if s.transparentInbound {
+			if dst, ok := transparentproxy.OrigDstFromContext(req.Context()); ok {
+				if _, port, err := net.SplitHostPort(dst); err == nil {
+					req.URL.Scheme = "http"
+					req.URL.Host = net.JoinHostPort("127.0.0.1", port)
+					req.Host = req.URL.Host
+				}
 			}
 		}
 		// Strip the client's Accept-Encoding, but only when a plugin will
@@ -159,12 +172,10 @@ func NewServer(inbound *pipeline.Holder, sessions *session.Store, backendURL str
 	// uniform across content types we install via
 	// installStreamingResponseBody.
 	proxy.FlushInterval = -1
-	s := &Server{
-		InboundPipeline: inbound,
-		Sessions:        sessions,
-		proxy:           proxy,
-		backend:         backendURL,
-	}
+	s.InboundPipeline = inbound
+	s.Sessions = sessions
+	s.proxy = proxy
+	s.backend = backendURL
 	if mtls != nil {
 		if mtls.Source == nil {
 			return nil, fmt.Errorf("reverseproxy: MTLSOptions.Source is required when mtls is non-nil")
@@ -207,6 +218,10 @@ func NewTransparentServer(inbound *pipeline.Holder, sessions *session.Store, fal
 	if err != nil {
 		return nil, err
 	}
+	// Enables the Director's rewrite. Set unconditionally, unlike
+	// perConnBackend: a transparent server WITH a fallback backend still resolves
+	// the target per connection whenever one was recovered.
+	s.transparentInbound = true
 	s.perConnBackend = fallbackBackend == ""
 	return s, nil
 }
