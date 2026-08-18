@@ -27,6 +27,12 @@ spec:
     metadata:
       labels:
         app: pause-webhook-stub
+        # Opt out of ambient mesh: the plain HTTP stub isn't part of the
+        # authbridge zero-trust boundary and ambient interception drops
+        # non-HBONE peers with 'Connection reset'.
+        istio.io/dataplane-mode: none
+      annotations:
+        ambient.istio.io/redirection: disabled
     spec:
       containers:
         - name: stub

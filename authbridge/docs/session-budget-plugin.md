@@ -242,6 +242,31 @@ http.server.HTTPServer(('',8888),h).serve_forever()"
 Swap `approve` for `deny` to test the reject path. Logs land in
 `docker logs pause-webhook`.
 
+## In-cluster deployment note
+
+**If your namespace runs Istio ambient mesh** (label
+`istio.io/dataplane-mode: ambient`), the Valkey pod and any plain-HTTP
+pause webhook need to opt out with the pod-level label
+`istio.io/dataplane-mode: none`. Here's why:
+
+Ambient mesh puts a per-node proxy (ztunnel) in front of every enrolled
+pod. Traffic between enrolled pods is wrapped in **HBONE** — HTTP/2
+CONNECT tunnels with mTLS between ztunnels. The destination ztunnel
+only accepts HBONE; anything else gets closed at L4 with
+`Connection reset by peer`.
+
+Redis (and Valkey) speaks its own binary protocol (RESP) directly over
+TCP — it can't be tunneled inside HTTP/2, so ambient's ztunnel rejects
+the connection before it ever reaches Valkey. Same story for any
+plain-TCP or plain-HTTP service you don't want mesh-managed. Opting
+those pods out of ambient makes them normal Kubernetes pods again, so
+callers reach them over plain TCP.
+
+Symptom if you forget: `session-budget action=skip reason=cold_cache`
+on every request even though `HGETALL session-budget:<id>` in Redis
+shows the key — the plugin's Redis lookup is being closed by ztunnel
+before it reaches Valkey.
+
 For an in-cluster stub, apply
 `authbridge/demos/session-budget/k8s/pause-webhook-stub.yaml` and set
 `pause_webhook: http://pause-webhook-stub.team1.svc.cluster.local`. See
