@@ -73,3 +73,44 @@ pipeline:
 lands in the `default` session bucket (no `Rekey` from `contextId`), so
 session-budget can never distinguish sessions and cold-cache hydrate
 looks for the wrong key.
+
+## Try it end-to-end (pause mode)
+
+Assumes an authbridge-sidecar'd agent is already running in `${NS}` with
+`session-budget` (pause mode) + `a2a-parser` inbound configured per
+above. Substitute your own agent, session id, and A2A payload.
+
+```bash
+NS=team1
+AGENT_POD=$(kubectl -n $NS get pod -l app.kubernetes.io/name=<your-agent> \
+  -o jsonpath='{.items[0].metadata.name}')
+SESSION=demo-$RANDOM
+
+# 1. Seed Redis so this session is already over budget.
+kubectl -n $NS exec valkey -- valkey-cli HSET \
+  session-budget:$SESSION calls 99 tokens 0 started_at $(date +%s)
+
+# 2. Fire one A2A request with contextId = seeded session.
+#    (Any callable agent works; adjust auth + payload to fit yours.)
+kubectl -n $NS port-forward pod/$AGENT_POD 8000:8000 &
+curl -sS -X POST http://localhost:8000/ \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{
+       "message":{"messageId":"m1","role":"user",
+       "parts":[{"kind":"text","text":"hi"}],
+       "contextId":"'$SESSION'"}}}'
+
+# 3. Confirm the webhook was called with the right session_id.
+kubectl -n $NS logs deploy/pause-webhook-stub | grep $SESSION
+```
+
+Expected: the request returns 200 (stub approves), and the webhook log
+shows one POST body with `"session_id":"<SESSION>"` and `"reason":
+"call limit reached: ..."`.
+
+**Try the other modes:** swap `on_exceed: pause` for `deny` or
+`observe` in the plugin config, redeploy, and repeat step 2. `deny`
+returns 403 with a `budget.exceeded` body once the local cache catches
+up (one request may pass first — see the cold-cache note in the
+reference doc). `observe` never blocks; grep the authbridge-proxy logs
+for `"budget exceeded (shadow mode)"` to see breaches.
