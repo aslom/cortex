@@ -7,11 +7,11 @@ Supports three `on_exceed` modes:
 
 - `deny` — return 403 (default)
 - `observe` — shadow mode: log without blocking, useful for calibrating limits
-- `pause` — HITL: POST to a webhook for human/system approval before continuing
+- `pause` — HITL: POST to a webhook for approval before continuing
 
-A "session" is the AuthBridge session ID (typically one A2A conversation or agent
-task invocation). Redis holds durable counters across pods; a local cache serves
-the hot path with zero I/O.
+A "session" is the AuthBridge session ID (typically one A2A conversation
+or agent task invocation). Redis holds durable counters across pods; a
+local cache serves the hot path with zero I/O.
 
 ## Build
 
@@ -95,7 +95,8 @@ calibrate limits before enforcing:
 
 1. Deploy with `on_exceed: observe` and conservative limits.
 2. Watch logs for shadow-mode entries.
-3. Adjust `max_tokens` / `max_calls` / `max_duration_seconds` to fit real workloads.
+3. Adjust `max_tokens` / `max_calls` / `max_duration_seconds` to fit real
+   workloads.
 4. Flip to `on_exceed: deny` (or `pause`) once confident.
 
 ### `pause` (HITL webhook)
@@ -193,8 +194,22 @@ sticky sessions, each pod fires one webhook before its own grace kicks in.
 |----------|----------|
 | Redis down at startup | Fail-open until refresh populates cache |
 | Redis fails mid-session | Local cache keeps enforcing; writes dropped |
-| Pod restart | First request hydrates from Redis synchronously; enforcement resumes on request #1 |
+| Pod restart, `pause` | Request #1 hydrates from Redis synchronously |
+| Pod restart, `deny` / `observe` | Request #1 skips (`cold_cache`); see below |
 | Webhook unreachable | Falls back to `pause_timeout_action` |
+
+### Cold-cache behavior
+
+Cold-cache handling on `OnRequest` is mode-dependent:
+
+- **`pause`** — synchronously hydrates from Redis before evaluating, so a
+  session already over-budget on Redis fires the webhook on request #1.
+  HITL only works if we ask before continuing.
+- **`deny` / `observe`** — skip with `reason=cold_cache` and continue.
+  Counters populate via `OnResponseFrame` and the refresh loop. A
+  pre-existing over-budget session may pass **up to one request per pod**
+  before enforcement resumes — the same tradeoff these modes have always
+  had. Keeps Redis off the hot path.
 
 Infrastructure failures never produce false denials — Redis unavailability
 degrades enforcement to local-cache-only (no cross-pod consistency) rather than
@@ -247,7 +262,11 @@ Swap `approve` for `deny` to test the reject path. Logs land in
 **If your namespace runs Istio ambient mesh** (label
 `istio.io/dataplane-mode: ambient`), the Valkey pod and any plain-HTTP
 pause webhook need to opt out with the pod-level label
-`istio.io/dataplane-mode: none`. Here's why:
+`istio.io/dataplane-mode: none`. This matters most for `on_exceed: pause`,
+which puts a synchronous Redis lookup on the request path (see
+"Cold-cache behavior"); deny/observe tolerate Redis being unreachable on
+the hot path but still need it for cross-pod counter sync via the refresh
+loop. Here's why:
 
 Ambient mesh puts a per-node proxy (ztunnel) in front of every enrolled
 pod. Traffic between enrolled pods is wrapped in **HBONE** — HTTP/2

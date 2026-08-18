@@ -35,6 +35,33 @@ func newE2EPlugin(t *testing.T, maxTokens int64, store *memStore) *SessionBudget
 	return p
 }
 
+// newE2EPluginPause builds a plugin in on_exceed=pause mode so cold-cache
+// hydrate runs on the OnRequest path (see plugin.go). The caller supplies a
+// webhook URL — pass a deny-returning stub if you want breaches to reject.
+func newE2EPluginPause(t *testing.T, maxTokens int64, store *memStore, webhookURL string) *SessionBudget {
+	t.Helper()
+	p := New()
+	cfg, _ := json.Marshal(config{
+		RedisURL:           "mem://test",
+		MaxTokens:          maxTokens,
+		OnExceed:           "pause",
+		PauseWebhook:       webhookURL,
+		PauseTimeout:       "2s",
+		PauseTimeoutAction: "deny",
+		PauseGracePeriod:   "0s",
+		RefreshInterval:    "30ms",
+		RedisUnavailable:   "fail_open",
+	})
+	if err := p.Configure(cfg); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	p.store = store
+	p.httpClient = &http.Client{Timeout: 0}
+	go p.refreshLoop(30 * time.Millisecond)
+	t.Cleanup(func() { close(p.stopCh); <-p.stopped })
+	return p
+}
+
 func respond(p *SessionBudget, sessionID string, tokens int) {
 	p.OnResponseFrame(context.Background(), makePctx(sessionID, tokens), nil, true)
 }
@@ -182,11 +209,19 @@ func TestE2E_RefreshRecovery(t *testing.T) {
 }
 
 // TestE2E_PodRestart verifies that a fresh plugin with an empty cache
-// enforces on the first request via synchronous Redis hydrate — no
-// cold-cache overshoot for sessions already over-budget on Redis.
+// hydrates from Redis on the first request in pause mode — no cold-cache
+// overshoot for sessions already over-budget on Redis. Only pause mode
+// hydrates on the request path (see plugin.go OnRequest); deny and observe
+// intentionally skip on cold cache and let OnResponseFrame + the refresh
+// loop populate counters, at the cost of a one-request-per-pod overshoot
+// for pre-existing sessions.
 func TestE2E_PodRestart(t *testing.T) {
 	store := newMemStore()
-	p := newE2EPlugin(t, 200, store)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"action":"deny"}`))
+	}))
+	defer webhook.Close()
+	p := newE2EPluginPause(t, 200, store, webhook.URL)
 
 	ctx := context.Background()
 	// Pre-seed Redis above the limit (210 > 200).
@@ -194,7 +229,8 @@ func TestE2E_PodRestart(t *testing.T) {
 	store.HashIncr(ctx, "session-budget:s", "calls", 8)
 	store.HashSetNX(ctx, "session-budget:s", "started_at", "1700000000")
 
-	// Cold cache — first request hydrates from Redis and rejects.
+	// Cold cache — first request hydrates from Redis, fires the webhook,
+	// gets a deny, and rejects.
 	if a := request(p, "s"); a.Type != pipeline.Reject {
 		t.Fatalf("cold cache with over-budget Redis: expected Reject, got %v", a.Type)
 	}
@@ -202,10 +238,16 @@ func TestE2E_PodRestart(t *testing.T) {
 
 // TestE2E_HydrateSingleflight verifies concurrent cold-cache requests
 // for the same session share one Redis lookup instead of stampeding.
+// Uses pause mode because that's the only mode where OnRequest hydrates
+// (deny/observe intentionally skip cold-cache to keep Redis off the hot path).
 func TestE2E_HydrateSingleflight(t *testing.T) {
 	inner := newMemStore()
 	cs := &controllableStore{inner: inner, hashGetDelay: 50 * time.Millisecond}
-	p := newE2EPlugin(t, 200, newMemStore())
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"action":"deny"}`))
+	}))
+	defer webhook.Close()
+	p := newE2EPluginPause(t, 200, newMemStore(), webhook.URL)
 	p.store = cs
 
 	ctx := context.Background()
@@ -213,15 +255,17 @@ func TestE2E_HydrateSingleflight(t *testing.T) {
 	inner.HashIncr(ctx, "session-budget:s", "calls", 8)
 	inner.HashSetNX(ctx, "session-budget:s", "started_at", "1700000000")
 
+	// This test asserts singleflight dedup on hydrate — it counts HashGet
+	// calls, not per-request outcomes. Pause-mode concurrent breaches
+	// piggyback on pendingApproval (one leader gets Reject, others continue
+	// via pause_pending_approval), so we don't assert per-request Reject.
 	const N = 20
 	var wg sync.WaitGroup
 	wg.Add(N)
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
-			if a := request(p, "s"); a.Type != pipeline.Reject {
-				t.Errorf("expected Reject, got %v", a.Type)
-			}
+			_ = request(p, "s")
 		}()
 	}
 	wg.Wait()
@@ -286,51 +330,6 @@ func (c *controllableStore) Expire(ctx context.Context, key string, ttl time.Dur
 	return c.inner.Expire(ctx, key, ttl)
 }
 func (c *controllableStore) Close() error { return nil }
-
-// TestE2E_ShadowMode verifies that on_exceed=observe allows requests
-// through even when budget is exceeded, while still accumulating.
-func TestE2E_ShadowMode(t *testing.T) {
-	p := New()
-	cfg, _ := json.Marshal(config{
-		RedisURL:        "mem://test",
-		MaxTokens:       150,
-		OnExceed:        "observe",
-		RefreshInterval: "30ms",
-		RedisUnavailable: "fail_open",
-	})
-	if err := p.Configure(cfg); err != nil {
-		t.Fatalf("Configure: %v", err)
-	}
-	store := newMemStore()
-	p.store = store
-	go p.refreshLoop(30 * time.Millisecond)
-	t.Cleanup(func() { close(p.stopCh); <-p.stopped })
-
-	for i := 0; i < 3; i++ {
-		respond(p, "sess", 60) // 180 total > 150 limit
-	}
-
-	// In observe mode, request should continue (not reject).
-	action := request(p, "sess")
-	if action.Type != pipeline.Continue {
-		t.Fatalf("shadow mode: expected Continue, got %v", action.Type)
-	}
-
-	// Counters should still accumulate past the limit.
-	respond(p, "sess", 20) // 200 total
-	p.mu.RLock()
-	c := p.cache["sess"]
-	p.mu.RUnlock()
-	if c.tokens != 200 {
-		t.Errorf("tokens = %d, want 200 (accumulation continues in shadow mode)", c.tokens)
-	}
-
-	// Subsequent requests also continue.
-	action = request(p, "sess")
-	if action.Type != pipeline.Continue {
-		t.Fatalf("shadow mode (2nd request): expected Continue, got %v", action.Type)
-	}
-}
 
 // TestE2E_PauseMode covers the full lifecycle for both webhook outcomes.
 // The 'approve' row also verifies the request body carries session_id;

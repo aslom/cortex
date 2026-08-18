@@ -377,6 +377,18 @@ func TestOnRequest_ShadowMode(t *testing.T) {
 	if calls != 2 {
 		t.Errorf("calls after shadow OnRequest = %d, want 2 (from 2 OnResponseFrame calls)", calls)
 	}
+
+	// Accumulation continues past the limit — observe never blocks writes.
+	p.OnResponseFrame(context.Background(), makePctx("sess-1", 60), nil, true)
+	p.mu.RLock()
+	tokens := p.cache["sess-1"].tokens
+	p.mu.RUnlock()
+	if tokens != 180 {
+		t.Errorf("tokens after post-limit response = %d, want 180", tokens)
+	}
+	if a := p.OnRequest(context.Background(), makePctx("sess-1", 0)); a.Type != pipeline.Continue {
+		t.Fatalf("shadow mode (2nd request past limit): expected Continue, got %v", a.Type)
+	}
 }
 
 // TestOnRequest_RejectsAtCallLimit verifies that once cache reflects
@@ -665,6 +677,42 @@ func TestOnRequest_PausePendingApprovalSentinel(t *testing.T) {
 
 	if c := atomic.LoadInt32(&webhookCalls); c != 1 {
 		t.Errorf("webhook called %d times, want exactly 1 (sentinel prevents thundering herd)", c)
+	}
+}
+
+// TestOnRequest_ColdCacheModeGating pins the documented contract: cold-cache
+// hydrates from Redis on the OnRequest path only in pause mode. deny and
+// observe skip cold-cache and let counters populate via OnResponseFrame +
+// refresh loop — accepting one-request-per-pod overshoot for pre-existing
+// over-budget sessions. See docs/session-budget-plugin.md "Cold-cache
+// behavior".
+func TestOnRequest_ColdCacheModeGating(t *testing.T) {
+	for _, mode := range []string{"deny", "observe"} {
+		t.Run(mode, func(t *testing.T) {
+			p := New()
+			cfg, _ := json.Marshal(config{
+				RedisURL:         "mem://test",
+				MaxTokens:        100,
+				OnExceed:         mode,
+				RefreshInterval:  "1s",
+				RedisUnavailable: "fail_open",
+			})
+			if err := p.Configure(cfg); err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
+			// Pre-seed Redis above budget. If cold-cache hydrated, evaluate()
+			// would fire. deny/observe must NOT hydrate — request continues.
+			store := newMemStore()
+			ctx := context.Background()
+			store.HashIncr(ctx, "session-budget:s", "tokens", 500)
+			store.HashIncr(ctx, "session-budget:s", "calls", 9)
+			p.store = store
+
+			a := p.OnRequest(ctx, makePctx("s", 0))
+			if a.Type != pipeline.Continue {
+				t.Fatalf("%s cold cache: expected Continue (no hydrate on request path), got %v", mode, a.Type)
+			}
+		})
 	}
 }
 

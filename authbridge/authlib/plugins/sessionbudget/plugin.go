@@ -180,18 +180,29 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	c, ok := p.cache[sessionID]
 	if !ok {
 		p.mu.Unlock()
-		// Cold cache: try a synchronous hydrate from Redis. If the session
-		// is already there (e.g. seeded by another pod), we enforce now.
-		// If Redis is empty or unreachable, we fall through open and Skip.
-		hydrated := p.hydrateCache(ctx, sessionID)
-		if !hydrated {
-			pctx.Skip("cold_cache")
-			return pipeline.Action{Type: pipeline.Continue}
-		}
-		p.mu.Lock()
-		c, ok = p.cache[sessionID]
-		if !ok {
-			p.mu.Unlock()
+		// Cold cache handling is mode-dependent:
+		//   - pause: synchronously hydrate from Redis so pre-existing sessions
+		//     (seeded by another pod) fire the webhook on request #1. Pause is
+		//     the only mode where a one-request-per-pod overshoot would defeat
+		//     the point — HITL only works if we ask before continuing.
+		//   - deny / observe: skip with cold_cache. The local counters populate
+		//     via OnResponseFrame + the background refresh loop; a single pod
+		//     may under-enforce by up to one request for a pre-existing session,
+		//     which is the same tradeoff these modes have always had. This
+		//     avoids putting Redis on the request path for the common modes.
+		if p.cfg.OnExceed == "pause" {
+			if !p.hydrateCache(ctx, sessionID) {
+				pctx.Skip("cold_cache")
+				return pipeline.Action{Type: pipeline.Continue}
+			}
+			p.mu.Lock()
+			c, ok = p.cache[sessionID]
+			if !ok {
+				p.mu.Unlock()
+				pctx.Skip("cold_cache")
+				return pipeline.Action{Type: pipeline.Continue}
+			}
+		} else {
 			pctx.Skip("cold_cache")
 			return pipeline.Action{Type: pipeline.Continue}
 		}

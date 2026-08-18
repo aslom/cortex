@@ -6,16 +6,16 @@ configuration and mode semantics, see
 
 ## `k8s/pause-webhook-stub.yaml`
 
-Minimal HITL webhook that returns `{"action":"approve"}` for every POST — enough
-to smoke-test `on_exceed: pause` end-to-end. Also logs each incoming request
-body so you can see exactly what session-budget sent.
+Minimal HITL webhook that returns `{"action":"approve"}` for every POST —
+enough to smoke-test `on_exceed: pause` end-to-end. Also logs each
+incoming request body so you can see exactly what session-budget sent.
 
 ```bash
 kubectl apply -f k8s/pause-webhook-stub.yaml
 ```
 
-To exercise the deny path, edit the inline Python in the manifest to return
-`{"action":"deny"}` and re-apply.
+To exercise the deny path, edit the inline Python in the manifest to
+return `{"action":"deny"}` and re-apply.
 
 Follow the webhook stub:
 
@@ -32,16 +32,16 @@ kubectl logs -n team1 deploy/pause-webhook-stub -f
   authbridge demo — see the
   [weather-agent demo](../weather-agent/) for the standard inbound
   validation setup, and
-  [token-exchange-routes](../token-exchange-routes/) for outbound
-  route configuration. This demo assumes those are already in place and
-  focuses on adding `session-budget` to the outbound pipeline.
+  [token-exchange-routes](../token-exchange-routes/) for outbound route
+  configuration. This demo assumes those are already in place and focuses
+  on adding `session-budget` to the outbound pipeline.
 
 **Ambient-mesh note:** if your namespace has
-`istio.io/dataplane-mode: ambient`, the datastore pod needs the pod-level
-label `istio.io/dataplane-mode: none`. Ambient's ztunnel drops non-HBONE
-connections with `Connection reset by peer`, and Redis RESP is raw TCP —
-it can't ride HBONE. The pause webhook stub manifest already carries the
-exemption.
+`istio.io/dataplane-mode: ambient`, the datastore pod needs the
+pod-level label `istio.io/dataplane-mode: none`. Ambient's ztunnel drops
+non-HBONE connections with `Connection reset by peer`, and Redis RESP is
+raw TCP — it can't ride HBONE. The pause webhook stub manifest already
+carries the exemption.
 
 ## Configuring the plugin
 
@@ -69,7 +69,7 @@ pipeline:
       - name: inference-parser
 ```
 
-**`a2a-parser` on inbound is not optional.** Without it, every request lands
-in the `default` session bucket (no `Rekey` from `contextId`), so
-session-budget can never distinguish sessions and cold-cache hydrate looks
-for the wrong key.
+**`a2a-parser` on inbound is not optional.** Without it, every request
+lands in the `default` session bucket (no `Rekey` from `contextId`), so
+session-budget can never distinguish sessions and cold-cache hydrate
+looks for the wrong key.
