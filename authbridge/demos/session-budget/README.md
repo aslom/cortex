@@ -27,14 +27,7 @@ kubectl logs -n team1 deploy/pause-webhook-stub -f
 
 - **A Redis-wire-compatible store** reachable from the agent pod. Any
   Valkey/Redis deployment works; point `redis_url` at its Service.
-- **An agent with `jwt-validation` and (optionally) `token-exchange`
-  configured on its authbridge sidecar.** These are shared across every
-  authbridge demo — see the
-  [weather-agent demo](../weather-agent/) for the standard inbound
-  validation setup, and
-  [token-exchange-routes](../token-exchange-routes/) for outbound route
-  configuration. This demo assumes those are already in place and focuses
-  on adding `session-budget` to the outbound pipeline.
+- **`a2a-parser` on the inbound pipeline** — see the note below.
 
 **Ambient-mesh note:** if your namespace has
 `istio.io/dataplane-mode: ambient`, the datastore pod needs the
@@ -45,17 +38,15 @@ carries the exemption.
 
 ## Configuring the plugin
 
+Minimum pipeline for session-budget:
+
 ```yaml
 pipeline:
   inbound:
     plugins:
-      - name: jwt-validation
-        config: { ... }
       - name: a2a-parser         # REQUIRED — parses contextId → Session.ID
   outbound:
     plugins:
-      - name: token-exchange
-        config: { ... }
       - name: session-budget
         config:
           redis_url: "redis://valkey.team1.svc:6379"
@@ -66,7 +57,7 @@ pipeline:
           pause_timeout: 10s
           pause_timeout_action: deny
           pause_grace_period: 5m
-      - name: inference-parser
+      - name: inference-parser   # supplies token counts to session-budget
 ```
 
 **`a2a-parser` on inbound is not optional.** Without it, every request
@@ -88,7 +79,7 @@ SESSION=demo-$RANDOM
 
 # 1. Seed Redis so this session is already over budget.
 kubectl -n $NS exec valkey -- valkey-cli HSET \
-  session-budget:$SESSION calls 99 tokens 0 started_at $(date +%s)
+  session-budget:$SESSION calls 99 started_at $(date +%s)
 
 # 2. Fire one A2A request with contextId = seeded session.
 #    (Any callable agent works; adjust auth + payload to fit yours.)
