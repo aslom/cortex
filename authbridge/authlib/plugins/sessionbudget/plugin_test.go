@@ -339,6 +339,8 @@ func TestConfigure_Validation(t *testing.T) {
 		{"pause missing webhook", `{"redis_url":"redis://localhost","max_calls":10,"on_exceed":"pause"}`, true},
 		{"pause invalid timeout", `{"redis_url":"redis://localhost","max_calls":10,"on_exceed":"pause","pause_webhook":"http://x","pause_timeout":"nope"}`, true},
 		{"pause invalid timeout_action", `{"redis_url":"redis://localhost","max_calls":10,"on_exceed":"pause","pause_webhook":"http://x","pause_timeout_action":"maybe"}`, true},
+		{"ttl below max_duration rejected", `{"redis_url":"redis://localhost","max_duration_seconds":3600,"session_ttl_seconds":300}`, true},
+		{"ttl equal to max_duration accepted", `{"redis_url":"redis://localhost","max_duration_seconds":3600,"session_ttl_seconds":3600}`, false},
 	}
 
 	for _, tt := range tests {
@@ -928,4 +930,37 @@ func TestOnRequest_PauseWebhookPanicClearsFlight(t *testing.T) {
 	// follower-wait on the dead channel and the test would deadlock
 	// (caught by go test -timeout). Returning at all proves the fix.
 	call()
+}
+
+// TestOnRequest_PauseWebhookSurvivesClientCancel proves callPauseWebhook
+// runs against a context derived from context.Background(), not the
+// caller's request ctx: even after the caller cancels, the webhook
+// handler's r.Context() stays live so the reviewer's verdict can land.
+// All synchronization is channel-based — no sleeps or timers.
+func TestOnRequest_PauseWebhookSurvivesClientCancel(t *testing.T) {
+	callerCtx, cancelCaller := context.WithCancel(context.Background())
+	handlerErr := make(chan error, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancelCaller()
+		<-callerCtx.Done() // happens-before edge: cancel has propagated
+		handlerErr <- r.Context().Err()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"action":"approve"}`))
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "deny")
+	p.mu.Lock()
+	p.cache["sess"] = &counters{tokens: 0, calls: 3}
+	p.mu.Unlock()
+
+	done := make(chan pipeline.ActionType, 1)
+	go func() { done <- p.OnRequest(callerCtx, makePctx("sess", 0)).Type }()
+
+	if got := <-handlerErr; got != nil {
+		t.Fatalf("webhook handler ctx cancelled (%v) — callPauseWebhook must not inherit request ctx", got)
+	}
+	if got := <-done; got != pipeline.Continue {
+		t.Errorf("got %v, want Continue — approve verdict must land despite caller cancel", got)
+	}
 }

@@ -53,7 +53,7 @@ pipeline:
 | `pause_timeout` | `30s` | Max wait for webhook response |
 | `pause_timeout_action` | `deny` | Fallback on timeout/error: `deny` or `allow` |
 | `pause_grace_period` | `5m` | Suppress repeat webhooks after approval. `0s` disables the grace window (webhook fires on every breach). |
-| `session_ttl_seconds` | 7200 | Redis key TTL; must be ≥ `max_duration_seconds` |
+| `session_ttl_seconds` | 7200 | Redis key TTL. Must be ≥ `max_duration_seconds` when the latter is set (rejected at Configure time otherwise). |
 | `refresh_interval` | `5s` | Local-cache sync interval |
 | `redis_unavailable` | `fail_open` | Only `fail_open` supported today |
 
@@ -160,9 +160,12 @@ call and honor its outcome — all approved together, or all denied
 together.
 
 **On timeout / non-200 / bad JSON / unreachable:** falls back to
-`pause_timeout_action` (`deny` returns 403; `allow` continues). If your
-webhook can be unhealthy and `pause_timeout_action: deny`, an outage
-turns budget breaches into hard 403s.
+`pause_timeout_action` (`deny` returns 403; `allow` continues). Client
+disconnect mid-wait does **not** trigger this fallback — the webhook is
+bounded only by `pause_timeout`, so its verdict still lands for any
+followers on the same flight. If your webhook can be unhealthy and
+`pause_timeout_action: deny`, an outage turns budget breaches into hard
+403s.
 
 If a human is in the loop, bump `pause_timeout` to minutes so the
 request can wait for a real approval decision.

@@ -182,7 +182,7 @@ Enforces per-session token, call-count, and duration budgets via Redis. Opt-in a
 - `pause_timeout` (string) — how long to wait for webhook response. Default `30s`.
 - `pause_timeout_action` (string) — fallback on timeout/error: `deny` (default) or `allow`.
 - `pause_grace_period` (string) — suppress repeated webhooks after approval. Default `5m`.
-- `session_ttl_seconds` (int) — Redis key TTL; should be ≥ `max_duration_seconds`. Default 7200.
+- `session_ttl_seconds` (int) — Redis key TTL; must be ≥ `max_duration_seconds` when the latter is set (enforced at Configure time). Default 7200.
 - `refresh_interval` (string) — how often the local cache syncs from Redis. Default `5s`.
 - `redis_unavailable` (string) — only `fail_open` (default) is implemented; `fail_closed` is rejected at Configure time.
 

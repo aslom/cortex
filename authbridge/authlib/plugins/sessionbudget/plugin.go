@@ -120,6 +120,10 @@ func (p *SessionBudget) Configure(raw json.RawMessage) error {
 	if p.cfg.MaxTokens <= 0 && p.cfg.MaxCalls <= 0 && p.cfg.MaxDurationSeconds <= 0 {
 		return fmt.Errorf("session-budget: at least one limit (max_tokens, max_calls, max_duration_seconds) must be > 0")
 	}
+	if p.cfg.MaxDurationSeconds > 0 && int64(p.cfg.SessionTTLSeconds) < p.cfg.MaxDurationSeconds {
+		return fmt.Errorf("session-budget: session_ttl_seconds (%d) must be >= max_duration_seconds (%d); Redis would expire counters mid-session and reopen enforcement gaps",
+			p.cfg.SessionTTLSeconds, p.cfg.MaxDurationSeconds)
+	}
 	switch p.cfg.OnExceed {
 	case "deny", "observe", "pause":
 	default:
@@ -400,8 +404,10 @@ type pauseResponse struct {
 	Action string `json:"action"`
 }
 
-func (p *SessionBudget) callPauseWebhook(ctx context.Context, sessionID, reason string, snap *counters) bool {
-	ctx, cancel := context.WithTimeout(ctx, p.pauseTimeout)
+func (p *SessionBudget) callPauseWebhook(_ context.Context, sessionID, reason string, snap *counters) bool {
+	// Decouple from the inbound request ctx so a client disconnect can't
+	// cancel the webhook out from under waiting followers.
+	ctx, cancel := context.WithTimeout(context.Background(), p.pauseTimeout)
 	defer cancel()
 
 	body := pauseRequest{
