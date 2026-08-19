@@ -3,6 +3,7 @@ package extproc
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"testing"
 
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -24,6 +25,7 @@ type traceRewriterPlugin struct {
 	tracestate  string
 	set         map[string]string
 	del         []string
+	setNil      []string // pctx.Headers[k] = nil — a delete spelled without Del
 	readsBody   bool
 }
 
@@ -43,6 +45,9 @@ func (p *traceRewriterPlugin) OnRequest(_ context.Context, pctx *pipeline.Contex
 	}
 	for _, k := range p.del {
 		pctx.Headers.Del(k)
+	}
+	for _, k := range p.setNil {
+		pctx.Headers[http.CanonicalHeaderKey(k)] = nil
 	}
 	return pipeline.Action{Type: pipeline.Continue}
 }
@@ -284,5 +289,149 @@ func TestExtProc_Outbound_PseudoHeadersNeverEmitted(t *testing.T) {
 		if mutationRemovesHeader(rh.Response.HeaderMutation, pseudo) {
 			t.Errorf("pseudo-header %s emitted in RemoveHeaders", pseudo)
 		}
+	}
+}
+
+// TestExtProc_Outbound_NilValueHeaderIsRemoved: pctx.Headers[k] = nil is a
+// delete spelled without Del(k). It must land in RemoveHeaders, not as an
+// empty SetHeaders value — Envoy drops empty values only when
+// keep_empty_value is unset, which would make the outcome config-dependent.
+func TestExtProc_Outbound_NilValueHeaderIsRemoved(t *testing.T) {
+	srv := traceRewriterServer(t, &traceRewriterPlugin{setNil: []string{"x-drop-me"}})
+
+	stream := &mockStream{
+		ctx: context.Background(),
+		requests: []*extprocv3.ProcessingRequest{
+			outboundRequest(makeHeaders(":authority", "fanin-echo", "x-drop-me", "present")),
+		},
+	}
+	_ = srv.Process(stream)
+
+	if len(stream.responses) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(stream.responses))
+	}
+	rh := stream.responses[0].GetRequestHeaders()
+	if rh == nil || rh.Response == nil || rh.Response.HeaderMutation == nil {
+		t.Fatalf("expected HeadersResponse with header mutation, got %+v", stream.responses[0])
+	}
+	hm := rh.Response.HeaderMutation
+	if !mutationRemovesHeader(hm, "x-drop-me") {
+		t.Errorf("expected x-drop-me in RemoveHeaders, got %+v", hm)
+	}
+	for _, sh := range hm.SetHeaders {
+		if sh.Header != nil && sh.Header.Key == "x-drop-me" {
+			t.Errorf("x-drop-me emitted as SetHeaders %q — must be a removal", string(sh.Header.RawValue))
+		}
+	}
+}
+
+// inboundRewriterServer wires the rewriter plugin into the INBOUND pipeline.
+// handleInbound/handleInboundBody took the same withHeaderMutation change as
+// the outbound handlers; before these tests their only mutation coverage was
+// placeholder_test.go's Authorization case — the one header that already
+// worked.
+func inboundRewriterServer(t *testing.T, plugin pipeline.Plugin) *Server {
+	t.Helper()
+	inbound, err := pipeline.New([]pipeline.Plugin{plugin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Server{InboundPipeline: pipeline.NewHolder(inbound)}
+}
+
+// TestExtProc_Inbound_ArbitraryHeaderReachesWire: the inbound twin of
+// TestExtProc_Outbound_ArbitraryHeaderReachesWire.
+func TestExtProc_Inbound_ArbitraryHeaderReachesWire(t *testing.T) {
+	srv := inboundRewriterServer(t, &traceRewriterPlugin{
+		set: map[string]string{"x-api-key": "secret-value"},
+	})
+
+	stream := &mockStream{
+		ctx: context.Background(),
+		requests: []*extprocv3.ProcessingRequest{
+			inboundRequest(makeHeaders("x-authbridge-direction", "inbound", ":path", "/")),
+		},
+	}
+	_ = srv.Process(stream)
+
+	if len(stream.responses) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(stream.responses))
+	}
+	rh := stream.responses[0].GetRequestHeaders()
+	if rh == nil || rh.Response == nil || rh.Response.HeaderMutation == nil {
+		t.Fatalf("expected HeadersResponse with header mutation, got %+v", stream.responses[0])
+	}
+	if got := mutationHeaderValue(rh.Response.HeaderMutation, "x-api-key"); got != "secret-value" {
+		t.Errorf("x-api-key mutation = %q, want %q (injected header dropped inbound)", got, "secret-value")
+	}
+}
+
+// TestExtProc_Inbound_DeletedHeaderIsRemoved: the inbound twin of
+// TestExtProc_Outbound_DeletedHeaderIsRemoved. The removal must compose with
+// allowResponse's own x-authbridge-direction removal rather than replace it.
+func TestExtProc_Inbound_DeletedHeaderIsRemoved(t *testing.T) {
+	srv := inboundRewriterServer(t, &traceRewriterPlugin{del: []string{"x-drop-me"}})
+
+	stream := &mockStream{
+		ctx: context.Background(),
+		requests: []*extprocv3.ProcessingRequest{
+			inboundRequest(makeHeaders("x-authbridge-direction", "inbound", ":path", "/", "x-drop-me", "present")),
+		},
+	}
+	_ = srv.Process(stream)
+
+	if len(stream.responses) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(stream.responses))
+	}
+	rh := stream.responses[0].GetRequestHeaders()
+	if rh == nil || rh.Response == nil || rh.Response.HeaderMutation == nil {
+		t.Fatalf("expected HeadersResponse with header mutation, got %+v", stream.responses[0])
+	}
+	hm := rh.Response.HeaderMutation
+	if !mutationRemovesHeader(hm, "x-drop-me") {
+		t.Errorf("expected x-drop-me in RemoveHeaders, got %+v", hm)
+	}
+	if !mutationRemovesHeader(hm, "x-authbridge-direction") {
+		t.Errorf("plugin removal clobbered allowResponse's x-authbridge-direction removal: %+v", hm)
+	}
+}
+
+// TestExtProc_InboundBody_ArbitraryHeaderReachesWire: the inbound twin of
+// TestExtProc_OutboundBody_TraceRewriteReachesWire. A ReadsBody plugin
+// defers the inbound pipeline to the body message, so the header diff has
+// to ride the RequestBody response instead of the headers one. Before this,
+// the only inbound-body coverage was placeholder_test.go's Authorization
+// case — the one header the old special case already forwarded.
+func TestExtProc_InboundBody_ArbitraryHeaderReachesWire(t *testing.T) {
+	srv := inboundRewriterServer(t, &traceRewriterPlugin{
+		set:       map[string]string{"x-api-key": "secret-value"},
+		readsBody: true,
+	})
+
+	body := []byte(`{"jsonrpc":"2.0"}`)
+	stream := &mockStream{
+		ctx: context.Background(),
+		requests: []*extprocv3.ProcessingRequest{
+			inboundRequest(makeHeaders(
+				"x-authbridge-direction", "inbound",
+				":path", "/",
+				"content-length", fmt.Sprintf("%d", len(body)),
+			)),
+			{Request: &extprocv3.ProcessingRequest_RequestBody{
+				RequestBody: &extprocv3.HttpBody{Body: body},
+			}},
+		},
+	}
+	_ = srv.Process(stream)
+
+	if len(stream.responses) != 2 {
+		t.Fatalf("expected 2 responses, got %d", len(stream.responses))
+	}
+	rb := stream.responses[1].GetRequestBody()
+	if rb == nil || rb.Response == nil || rb.Response.HeaderMutation == nil {
+		t.Fatalf("expected RequestBody response with header mutation, got %+v", stream.responses[1])
+	}
+	if got := mutationHeaderValue(rb.Response.HeaderMutation, "x-api-key"); got != "secret-value" {
+		t.Errorf("x-api-key mutation = %q, want %q (injected header lost on the inbound body path)", got, "secret-value")
 	}
 }

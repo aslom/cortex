@@ -343,6 +343,10 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		if skip(k) {
 			continue
 		}
+		if len(vv) == 0 {
+			r.Header.Del(k) // pctx.Headers[k] = nil is a delete, same as Del(k)
+			continue
+		}
 		r.Header[k] = append([]string(nil), vv...) // set / overwrite
 	}
 

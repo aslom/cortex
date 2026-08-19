@@ -161,7 +161,6 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 		Direction: pipeline.Inbound,
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
-		Host:      authorityOf(headers),
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
@@ -187,7 +186,6 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 		Direction: pipeline.Inbound,
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
-		Host:      authorityOf(headers),
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
@@ -709,12 +707,22 @@ func withHeaderMutation(resp *extprocv3.ProcessingResponse, pctx *pipeline.Conte
 		if skip(k) || slices.Equal(orig[k], vv) {
 			continue
 		}
+		if len(vv) == 0 {
+			// pctx.Headers[k] = nil is a delete, same as Del(k). Emitting
+			// an empty SetHeaders value instead would leave the outcome to
+			// Envoy's keep_empty_value setting.
+			del = append(del, strings.ToLower(k))
+			continue
+		}
 		// Wire header names are lowercase; pctx.Headers keys were
-		// canonicalised by http.Header.Set in headerMapToHTTP.
-		// Multi-value join uses ",": correct per RFC 9110 for every header a
-		// plugin realistically rewrites, and known-wrong only for Cookie
-		// (whose separator is "; ") — no plugin rewrites Cookie today, and
-		// one that does must split this out rather than discover it here.
+		// canonicalised by http.Header.Set in headerMapToHTTP — which also
+		// collapses duplicate wire entries to their last value, so a header
+		// a plugin mutates is emitted as one value even if it arrived as
+		// several. Multi-value join uses ",": correct per RFC 9110 for every
+		// header a plugin realistically rewrites, and known-wrong only for
+		// Cookie (whose separator is "; ") — no plugin rewrites Cookie
+		// today, and one that does must split this out rather than discover
+		// it here.
 		set = append(set, &corev3.HeaderValueOption{
 			Header: &corev3.HeaderValue{Key: strings.ToLower(k), RawValue: []byte(strings.Join(vv, ","))},
 		})
@@ -753,9 +761,13 @@ func withHeaderMutation(resp *extprocv3.ProcessingResponse, pctx *pipeline.Conte
 }
 
 // authorityOf returns the request's authority: the HTTP/2 :authority
-// pseudo-header, falling back to the HTTP/1 Host header. Both directions
-// need it — outbound it names the service being called, inbound the address
-// this workload was reached on (see pipeline.SessionEvent.Host).
+// pseudo-header, falling back to the HTTP/1 Host header. Outbound only —
+// there it names the service being called (pipeline.SessionEvent.Host).
+// The inbound handlers deliberately leave pctx.Host empty: the inbound
+// authority is caller-controlled and pctx.Host feeds enforcement decisions
+// (ibac's host-bypass skip, opa's policy input, per-host JWT audiences),
+// so a spoofed Host header must not reach them. See cpex's outbound-only
+// host-bypass guard for the same rule stated plugin-side.
 func authorityOf(headers *corev3.HeaderMap) string {
 	if a := getHeader(headers, ":authority"); a != "" {
 		return a

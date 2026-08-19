@@ -11,8 +11,11 @@ import (
 )
 
 // hostCapture records the pctx.Host the listener built, so a test can assert
-// what plugins actually see (Host is what SessionEvent.Host and the lineage
-// plugin's lineage.peer.host fact are derived from).
+// what plugins actually see. Outbound, Host is what SessionEvent.Host and
+// telemetry consumers (e.g. the lineage plugin's peer-host fact) derive from.
+// Inbound, Host also feeds enforcement (ibac host-bypass, opa policy input,
+// per-host JWT audiences) — which is exactly why the listener must NOT
+// populate it from the caller-controlled authority; see authorityOf.
 type hostCapture struct {
 	host string
 }
@@ -52,10 +55,12 @@ func runOne(t *testing.T, srv *Server, req *extprocv3.ProcessingRequest) {
 	_ = srv.Process(&mockStream{ctx: context.Background(), requests: []*extprocv3.ProcessingRequest{req}})
 }
 
-// TestExtProc_Authority asserts both directions carry the request authority on
-// pctx.Host, from either the HTTP/2 pseudo-header or the HTTP/1 Host header.
-// Inbound used to be left empty, which cost every inbound observation the
-// address the workload was reached on.
+// TestExtProc_Authority asserts outbound carries the request authority on
+// pctx.Host, from either the HTTP/2 pseudo-header or the HTTP/1 Host header —
+// and that inbound deliberately does NOT. A caller who controls inbound
+// pctx.Host controls ibac's host-bypass skip, opa's policy input, and
+// per-host JWT audience derivation (e.g. "Host: keycloak..." would skip IBAC
+// entirely), so the inbound cases pin Host to empty as a security property.
 func TestExtProc_Authority(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -64,16 +69,16 @@ func TestExtProc_Authority(t *testing.T) {
 		wantHost string
 	}{
 		{
-			name:     "inbound from :authority",
+			name:     "inbound never trusts :authority",
 			inbound:  true,
-			headers:  []string{"x-authbridge-direction", "inbound", ":authority", "weather-service.team1.svc.cluster.local:8000", ":path", "/"},
-			wantHost: "weather-service.team1.svc.cluster.local:8000",
+			headers:  []string{"x-authbridge-direction", "inbound", ":authority", "keycloak.keycloak.svc.cluster.local:8080", ":path", "/"},
+			wantHost: "",
 		},
 		{
-			name:     "inbound falls back to the host header",
+			name:     "inbound never trusts the host header",
 			inbound:  true,
-			headers:  []string{"x-authbridge-direction", "inbound", "host", "weather-service:8000", ":path", "/"},
-			wantHost: "weather-service:8000",
+			headers:  []string{"x-authbridge-direction", "inbound", "host", "keycloak:8080", ":path", "/"},
+			wantHost: "",
 		},
 		{
 			name:     "outbound from :authority",
