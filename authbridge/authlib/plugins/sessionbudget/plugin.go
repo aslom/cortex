@@ -69,11 +69,12 @@ type counters struct {
 // SessionBudget is the plugin state. Redis provides cross-pod durability;
 // the local cache provides zero-I/O enforcement on the request path.
 type SessionBudget struct {
-	cfg         config
-	store       storage.Store
-	log         *slog.Logger
-	httpClient  *http.Client
-	gracePeriod time.Duration
+	cfg          config
+	store        storage.Store
+	log          *slog.Logger
+	httpClient   *http.Client
+	gracePeriod  time.Duration
+	pauseTimeout time.Duration
 
 	mu       sync.RWMutex
 	cache    map[string]*counters
@@ -131,8 +132,12 @@ func (p *SessionBudget) Configure(raw json.RawMessage) error {
 		if p.cfg.PauseTimeout == "" {
 			p.cfg.PauseTimeout = "30s"
 		}
-		if _, err := time.ParseDuration(p.cfg.PauseTimeout); err != nil {
+		if d, err := time.ParseDuration(p.cfg.PauseTimeout); err != nil {
 			return fmt.Errorf("session-budget: invalid pause_timeout %q: %w", p.cfg.PauseTimeout, err)
+		} else if d <= 0 {
+			return fmt.Errorf("session-budget: pause_timeout must be > 0 (got %q)", p.cfg.PauseTimeout)
+		} else {
+			p.pauseTimeout = d
 		}
 		if p.cfg.PauseTimeoutAction == "" {
 			p.cfg.PauseTimeoutAction = "deny"
@@ -394,8 +399,7 @@ type pauseResponse struct {
 }
 
 func (p *SessionBudget) callPauseWebhook(ctx context.Context, sessionID, reason string, snap *counters) bool {
-	timeout, _ := time.ParseDuration(p.cfg.PauseTimeout)
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, p.pauseTimeout)
 	defer cancel()
 
 	body := pauseRequest{
@@ -427,7 +431,8 @@ func (p *SessionBudget) callPauseWebhook(ctx context.Context, sessionID, reason 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		p.log.Warn("pause webhook non-200", "session", sessionID, "status", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		p.log.Warn("pause webhook non-200", "session", sessionID, "status", resp.StatusCode, "body", string(body))
 		return p.cfg.PauseTimeoutAction == "allow"
 	}
 
@@ -436,7 +441,15 @@ func (p *SessionBudget) callPauseWebhook(ctx context.Context, sessionID, reason 
 		p.log.Warn("pause webhook response decode failed", "session", sessionID, "err", err)
 		return p.cfg.PauseTimeoutAction == "allow"
 	}
-	return result.Action == "approve"
+	switch result.Action {
+	case "approve":
+		return true
+	case "deny":
+		return false
+	default:
+		p.log.Warn("pause webhook unknown action; treating as deny", "session", sessionID, "action", result.Action)
+		return false
+	}
 }
 
 func (p *SessionBudget) evaluate(c *counters) string {

@@ -150,9 +150,9 @@ or
 **On approval:** the request continues; subsequent requests from the
 same session skip the webhook for `pause_grace_period` (default `5m`,
 pod-local — each pod fires one webhook before its own grace kicks in).
-Concurrent breaches during an in-flight webhook piggyback on the
-pending call and continue optimistically; if that call ultimately
-denies, those extra requests have already passed.
+Concurrent breaches during an in-flight webhook wait on the pending
+call and honor its outcome — all approved together, or all denied
+together.
 
 **On timeout / non-200 / bad JSON / unreachable:** falls back to
 `pause_timeout_action` (`deny` returns 403; `allow` continues). If your
