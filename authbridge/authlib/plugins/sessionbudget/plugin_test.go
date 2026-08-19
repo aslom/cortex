@@ -463,6 +463,14 @@ func TestOnRequest_PauseWebhookFailureFallback(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`not json`))
 		}, "deny", pipeline.Reject},
+		// Well-formed JSON with an action the plugin doesn't recognize
+		// must deny (protocol-safe default) regardless of pause_timeout_action —
+		// unlike the transport/decode failures above, this is not a webhook
+		// outage, so pause_timeout_action does not apply.
+		{"unknown_action_deny", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"action":"maybe"}`))
+		}, "allow", pipeline.Reject},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -215,7 +215,8 @@ docker run -d --name valkey -p 6379:6379 valkey/valkey:latest
 request — enough to smoke-test `on_exceed: pause` end-to-end:
 
 ```bash
-docker run -d --name pause-webhook -p 8888:8888 python:3.12-alpine \
+docker run -d --name pause-webhook -p 8888:8888 \
+  python:3.12-alpine@sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31 \
   python -c "import http.server,json; \
 h=type('H',(http.server.BaseHTTPRequestHandler,),{ \
 'do_POST':lambda s:(s.send_response(200), \
