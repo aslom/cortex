@@ -535,9 +535,13 @@ func (p *SessionBudget) refreshLoop(interval time.Duration) {
 
 // hydrateCache pulls one session's counters from Redis on cold-cache miss.
 // Concurrent callers for the same session share one Redis lookup via singleflight.
-func (p *SessionBudget) hydrateCache(ctx context.Context, sessionID string) bool {
+func (p *SessionBudget) hydrateCache(_ context.Context, sessionID string) bool {
 	v, _, _ := p.hydrateG.Do(sessionID, func() (any, error) {
-		lookupCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		// Decouple from the caller's ctx: singleflight shares one flight
+		// across concurrent callers, so a leader's client disconnect would
+		// otherwise cancel the lookup for every follower and let a burst
+		// of pause-mode requests skip enforcement together.
+		lookupCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 		fields, err := p.store.HashGet(lookupCtx, p.redisKey(sessionID))
 		if err != nil {
