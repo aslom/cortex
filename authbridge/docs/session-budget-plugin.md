@@ -52,7 +52,7 @@ pipeline:
 | `pause_webhook` | — | URL to POST on breach (required when `on_exceed=pause`) |
 | `pause_timeout` | `30s` | Max wait for webhook response |
 | `pause_timeout_action` | `deny` | Fallback on timeout/error: `deny` or `allow` |
-| `pause_grace_period` | `5m` | Suppress repeat webhooks after approval |
+| `pause_grace_period` | `5m` | Suppress repeat webhooks after approval. `0s` disables the grace window (webhook fires on every breach). |
 | `session_ttl_seconds` | 7200 | Redis key TTL; must be ≥ `max_duration_seconds` |
 | `refresh_interval` | `5s` | Local-cache sync interval |
 | `redis_unavailable` | `fail_open` | Only `fail_open` supported today |
@@ -98,6 +98,11 @@ calibrate limits before enforcing:
 3. Adjust `max_tokens` / `max_calls` / `max_duration_seconds` to fit real
    workloads.
 4. Flip to `on_exceed: deny` (or `pause`) once confident.
+
+Call accounting is response-driven: `max_calls` is checked against the
+count of completed inference responses, so under bursty concurrency
+`max_calls` breach logs may lag actual in-flight calls by up to one per
+concurrent request.
 
 ### `pause` (HITL webhook)
 
