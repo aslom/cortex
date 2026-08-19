@@ -281,17 +281,28 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			p.log.Info("budget exceeded, requesting approval",
 				"session", sessionID,
 				"reason", reason)
-			approved := p.callPauseWebhook(ctx, sessionID, reason, &snap)
-			flight.approved = approved
-			p.mu.Lock()
-			if cc, ok := p.cache[sessionID]; ok {
-				cc.pendingApproval = nil
-				if approved {
-					cc.lastApprovedAt = time.Now()
+			// Deferred cleanup so a panic (or runtime.Goexit) in
+			// callPauseWebhook can't wedge the session: without this,
+			// pendingApproval would stay non-nil forever and every
+			// future request for this session would block on the dead
+			// flight.done. Order matters: publish outcome to the flight
+			// object first, then close done (channel-close is the
+			// happens-before edge for followers), then clear
+			// pendingApproval under the lock.
+			approved := false
+			defer func() {
+				flight.approved = approved
+				close(flight.done)
+				p.mu.Lock()
+				if cc, ok := p.cache[sessionID]; ok {
+					cc.pendingApproval = nil
+					if approved {
+						cc.lastApprovedAt = time.Now()
+					}
 				}
-			}
-			p.mu.Unlock()
-			close(flight.done)
+				p.mu.Unlock()
+			}()
+			approved = p.callPauseWebhook(ctx, sessionID, reason, &snap)
 			if approved {
 				pctx.Allow("pause_approved")
 				return pipeline.Action{Type: pipeline.Continue}

@@ -881,3 +881,43 @@ func (s *closeRecordingStore) Close() error {
 	s.closes.Add(1)
 	return s.Store.Close()
 }
+
+// panicTransport panics from RoundTrip so the panic surfaces inside
+// p.httpClient.Do(req) — i.e. inside callPauseWebhook after
+// pendingApproval is published. Simulates a runtime crash mid-webhook.
+type panicTransport struct{}
+
+func (panicTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	panic("simulated webhook client panic")
+}
+
+// TestOnRequest_PauseWebhookPanicClearsFlight proves the deferred cleanup
+// in OnRequest's pause branch: if callPauseWebhook panics, the defer must
+// clear pendingApproval so a follow-up request re-enters as a new leader
+// instead of following a dead flight forever. No sleeps, no timers — a
+// follow-up call that returned proves the defer ran.
+func TestOnRequest_PauseWebhookPanicClearsFlight(t *testing.T) {
+	p := newPausePlugin(t, 3, "http://unused.invalid", "deny")
+	p.httpClient = &http.Client{Transport: panicTransport{}}
+	p.mu.Lock()
+	p.cache["sess"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	call := func() {
+		defer func() { _ = recover() }()
+		_ = p.OnRequest(context.Background(), makePctx("sess", 0))
+	}
+	call()
+
+	p.mu.RLock()
+	pending := p.cache["sess"].pendingApproval
+	p.mu.RUnlock()
+	if pending != nil {
+		t.Fatal("pendingApproval not cleared after panic — session would wedge")
+	}
+
+	// If the defer had NOT closed flight.done, this second call would
+	// follower-wait on the dead channel and the test would deadlock
+	// (caught by go test -timeout). Returning at all proves the fix.
+	call()
+}
