@@ -186,7 +186,7 @@ Enforces per-session token, call-count, and duration budgets via Redis. Opt-in a
 - `refresh_interval` (string) — how often the local cache syncs from Redis. Default `5s`.
 - `redis_unavailable` (string) — only `fail_open` (default) is implemented; `fail_closed` is rejected at Configure time.
 
-Note that enforcement uses a zero-I/O local cache. After a pod restart, the first request can pass while the cache is cold, before Redis refresh restores the counters.
+Cold-cache behavior is mode-dependent. In `deny` and `observe` modes, enforcement uses a zero-I/O local cache: after a pod restart, the first request per session can pass while the cache is cold, before the background Redis refresh restores the counters. In `pause` mode, an incoming request on an empty cache synchronously loads the session's counters from Redis before deciding, so an over-budget session fires the webhook on the first request after a restart.
 
 
 ## `token-broker`
