@@ -114,8 +114,11 @@ whichever the host kernel exposes. Override with `IPTABLES_CMD` (and
 | `SIDECAR_PORTS_EXCLUDE` | `8081,9091,9093,9094` | enforce-redirect + inbound | AuthBridge's own listeners, exempted from the inbound REDIRECT. Override when the forward proxy is not on 8081. |
 | `OUTBOUND_PORTS_EXCLUDE` | (empty) | redirect | Comma-separated outbound port list to skip (e.g. `8080`) |
 | `INBOUND_PORTS_EXCLUDE` | (empty) | redirect + enforce-redirect w/ inbound | Comma-separated inbound app-port list to skip validation for (e.g. an oauth-proxy doing its own auth) |
-| `POD_IP` | required in `redirect`, and in `enforce-redirect` when `INBOUND_TRANSPARENT_PORT` is set | both | Set via Downward API (`status.podIP`); DNAT target for ambient-mesh inbound |
+| `POD_IP` | required in `redirect` | both | Set via Downward API (`status.podIP`); DNAT target for ambient-mesh inbound |
 | `POD_IPS` | falls back to `POD_IP` | enforce-redirect w/ inbound | Set via Downward API (`status.podIPs`). Supplies a per-family DNAT target so a dual-stack pod covers ambient on BOTH families — `POD_IP` alone is the primary address, leaving the other family's HBONE delivery unvalidated |
+
+With `INBOUND_TRANSPARENT_PORT` set, **either** `POD_IP` or `POD_IPS` satisfies the
+requirement (the guard tests the resolved list). Supplying neither is fail-closed.
 | `RESOLV_CONF` | `/etc/resolv.conf` | enforce-redirect | Path read at init for `nameserver` IPs; DNS (`tcp/53` + `udp/53`) to those IPs is left direct (IPv4→`iptables`, IPv6→`ip6tables`). Override mainly for tests. |
 | `IPTABLES_CMD` | auto-detected | all | Override iptables binary (`iptables-legacy` / `iptables-nft`) |
 | `IP6TABLES_CMD` | derived from `IPTABLES_CMD` | enforce-redirect | Override ip6tables binary |

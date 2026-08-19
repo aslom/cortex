@@ -390,7 +390,7 @@ func main() {
 		//   reverse-proxy — the default; one fixed reverse_proxy_backend, reached
 		//                   because the operator stole the agent's port.
 		if cfg.Listener.InboundTransparent() {
-			rpSrv, rerr := reverseproxy.NewTransparentServer(inboundH, sessions, "", rpMTLS)
+			rpSrv, rerr := reverseproxy.NewTransparentServer(inboundH, sessions, rpMTLS)
 			if rerr != nil {
 				log.Fatalf("creating transparent inbound proxy: %v", rerr)
 			}

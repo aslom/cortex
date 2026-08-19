@@ -329,11 +329,15 @@ fi
 # mesh-delivered request, since ztunnel re-originates inbound locally through
 # OUTPUT and never traverses PREROUTING. A pod that validates direct traffic but
 # waves through all mesh traffic is far worse than a failed init container.
-if [ -n "${INBOUND_TRANSPARENT_PORT}" ] && [ -z "${POD_IP}" ]; then
-  echo "ERROR: POD_IP is not set but INBOUND_TRANSPARENT_PORT=${INBOUND_TRANSPARENT_PORT} requests inbound interception." >&2
+# Tests the RESOLVED address list, not POD_IP alone: a deployment that injects
+# only status.podIPs has everything the ambient DNAT needs (for both families),
+# and aborting on the absence of the singular field would reject a strictly
+# better-specified pod.
+if [ -n "${INBOUND_TRANSPARENT_PORT}" ] && [ -z "${POD_IPS}" ]; then
+  echo "ERROR: neither POD_IP nor POD_IPS is set, but INBOUND_TRANSPARENT_PORT=${INBOUND_TRANSPARENT_PORT} requests inbound interception." >&2
   echo "ERROR: without it the Istio ambient inbound path (ztunnel -> OUTPUT, not PREROUTING) cannot be captured," >&2
   echo "ERROR: so mesh traffic would bypass inbound validation entirely. Refusing to start half-enforced." >&2
-  echo "Set POD_IP via the Kubernetes Downward API (status.podIP)." >&2
+  echo "Set POD_IP (status.podIP) or POD_IPS (status.podIPs) via the Kubernetes Downward API." >&2
   exit 1
 fi
 

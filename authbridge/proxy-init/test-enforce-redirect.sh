@@ -335,6 +335,35 @@ if [ -n "${ds6}" ]; then
   fi
 fi
 
+echo "### POD_IPS alone must satisfy the inbound guard (POD_IP not required)"
+# A deployment that injects only status.podIPs has everything the ambient DNAT
+# needs for both families; aborting on the absence of the singular field would
+# reject a strictly better-specified pod.
+if env MODE=enforce-redirect PROXY_UID=1337 RESOLV_CONF="${RESOLV_MOCK}" \
+       TRANSPARENT_PORT="${TPORT}" INBOUND_TRANSPARENT_PORT="${IN_TPORT}" \
+       POD_IPS="${POD_IP_MOCK}" \
+       IPTABLES_CMD="${IPT}" IP6TABLES_CMD=ip6tables-nft \
+       sh "${INIT}" >/dev/null 2>&1; then
+  only6=$("${IPT}" -t nat -S 2>/dev/null || true)
+  if echo "${only6}" | grep -qE "AB_REDIRECT.*-j DNAT --to-destination ${POD_IP_MOCK}:${IN_TPORT}"; then
+    echo "PASS: POD_IPS alone satisfies the guard and yields the ambient DNAT"
+  else
+    echo "FAIL: init accepted POD_IPS but installed no ambient DNAT"; fail=1
+  fi
+else
+  echo "FAIL: init rejected a pod that supplied POD_IPS but not POD_IP"; fail=1
+fi
+
+echo "### Neither POD_IP nor POD_IPS must still be fail-closed"
+if env MODE=enforce-redirect PROXY_UID=1337 RESOLV_CONF="${RESOLV_MOCK}" \
+       TRANSPARENT_PORT="${TPORT}" INBOUND_TRANSPARENT_PORT="${IN_TPORT}" \
+       IPTABLES_CMD="${IPT}" IP6TABLES_CMD=ip6tables-nft \
+       sh "${INIT}" >/dev/null 2>&1; then
+  echo "FAIL: init succeeded with neither POD_IP nor POD_IPS"; fail=1
+else
+  echo "PASS: init still aborts when no pod address is available at all"
+fi
+
 echo "### Malformed exclude list must not abort init (set -e trap)"
 # A trailing comma yields an empty field. If the port loop used `[ -n ] && cmd`
 # as its last statement, the loop would exit non-zero and `set -e` would abort

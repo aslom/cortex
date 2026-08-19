@@ -121,6 +121,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # This job runs a repo script as root via `sudo -E` and needs no git
+          # access afterwards, so don't leave the job token in .git/config.
+          persist-credentials: false
 
       # The harness builds its rules inside `unshare --net`, so it never touches
       # the runner's own networking. It needs root for unshare + iptables, the

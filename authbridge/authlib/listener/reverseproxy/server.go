@@ -58,20 +58,17 @@ type Server struct {
 	proxy           *httputil.ReverseProxy
 	backend         string
 
-	// transparentInbound enables the Director's per-connection target rewrite.
-	// Set by NewTransparentServer only. Without it the rewrite would be live on
-	// EVERY server NewServer builds, including fixed-backend ones — safe today
-	// only because nothing populates the context key without an InboundListener,
-	// an invariant nothing enforces. Deliberately separate from perConnBackend,
-	// which is false when a fallback backend is configured even though such a
-	// server still wants the rewrite.
+	// transparentInbound marks this as the transparent inbound shape. It does two
+	// things, and they are deliberately one flag: the Director resolves the
+	// forwarding target per connection from SO_ORIGINAL_DST, and a request with no
+	// recovered destination fails closed (502) rather than being forwarded
+	// anywhere. Set by NewTransparentServer only.
+	//
+	// The Director gate is not optional hygiene: that closure is installed by
+	// NewServer, so without it the rewrite would be live on every fixed-backend
+	// server too — safe only while nothing populates the context key without an
+	// InboundListener, which nothing enforces.
 	transparentInbound bool
-
-	// perConnBackend additionally makes the target REQUIRED rather than merely
-	// preferred: with no configured fallback, a request arriving without a
-	// recovered destination fails closed (502) instead of being forwarded to a
-	// guessed target.
-	perConnBackend bool
 
 	// mtlsCfg is the *tls.Config wrapping the local SVID for inbound
 	// mTLS, or nil when mTLS is disabled. mtlsMode is consulted by
@@ -198,38 +195,38 @@ func NewServer(inbound *pipeline.Holder, sessions *session.Store, backendURL str
 
 // NewTransparentServer creates a reverse proxy whose forwarding target is
 // resolved per connection from the original destination recovered by
-// transparentproxy.InboundListener, rather than from a fixed backend URL.
+// transparentproxy.InboundListener, rather than from a fixed backend URL. A
+// request arriving without a recovered destination is rejected with 502.
 //
-// fallbackBackend may be empty. When it is, a request that arrives with no
-// recovered destination is rejected with 502 instead of being forwarded
-// somewhere unintended — the transparent listener exists to be a hard inbound
-// boundary, so an unattributable request must not be forwarded at all.
-func NewTransparentServer(inbound *pipeline.Holder, sessions *session.Store, fallbackBackend string, mtls *MTLSOptions) (*Server, error) {
-	backend := fallbackBackend
-	if backend == "" {
-		// url.Parse("") yields a URL with an empty Host, which would make the
-		// default Director emit a request with no target. Park the fixed target
-		// on a sentinel that can never be dialed by accident; the Director
-		// overrides it whenever a destination was recovered, and handleRequest
-		// fails closed when one wasn't.
-		backend = "http://" + unresolvableBackend
-	}
-	s, err := NewServer(inbound, sessions, backend, mtls)
+// There is deliberately no fallback-backend parameter. An earlier draft took one
+// and disarmed the 502 whenever it was non-empty, which made "unattributable
+// inbound request is rejected" flip to "forwarded to the fallback" as a side
+// effect of an argument that reads like it only adds a backend — a security
+// posture change hidden behind unrelated-looking config, on the one listener
+// whose entire purpose is to be a hard inbound boundary.
+//
+// Nothing needed it: the only caller passed "", and the case it would serve is
+// close to unreachable anyway, since InboundListener rejects unrecoverable and
+// self-referential destinations at Accept time. If a fallback is ever genuinely
+// wanted, it should return as an options struct with a separate, explicit
+// fail-closed field, so a caller has to weaken the boundary on purpose.
+func NewTransparentServer(inbound *pipeline.Holder, sessions *session.Store, mtls *MTLSOptions) (*Server, error) {
+	// url.Parse("") yields a URL with an empty Host, which would make the default
+	// Director emit a request with no target. Park the fixed target on a sentinel
+	// that can never be dialed by accident; the Director overrides it whenever a
+	// destination was recovered, and handleRequest fails closed when one wasn't.
+	s, err := NewServer(inbound, sessions, "http://"+unresolvableBackend, mtls)
 	if err != nil {
 		return nil, err
 	}
-	// Enables the Director's rewrite. Set unconditionally, unlike
-	// perConnBackend: a transparent server WITH a fallback backend still resolves
-	// the target per connection whenever one was recovered.
 	s.transparentInbound = true
-	s.perConnBackend = fallbackBackend == ""
 	return s, nil
 }
 
-// unresolvableBackend is the parked fixed target for a transparent server with
-// no configured fallback. 127.0.0.1:0 is not dialable (port 0 is "pick one" for
-// bind, not connect), so a bug that let a request through without a recovered
-// destination fails loudly instead of reaching a real service.
+// unresolvableBackend is the parked fixed target for a transparent server.
+// 127.0.0.1:0 is not dialable (port 0 is "pick one" for bind, not connect), so a
+// bug that let a request through without a recovered destination fails loudly
+// instead of reaching a real service.
 const unresolvableBackend = "127.0.0.1:0"
 
 // Listen returns a net.Listener bound to addr. When mTLS is configured
@@ -293,7 +290,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// is deliberately undialable. Reject here rather than let it reach the
 	// pipeline — a request we can't attribute to a captured destination is one
 	// this listener has no business forwarding.
-	if s.perConnBackend {
+	if s.transparentInbound {
 		if _, ok := transparentproxy.OrigDstFromContext(r.Context()); !ok {
 			slog.Warn("reverse-proxy: rejecting request with no recovered destination",
 				"remote", r.RemoteAddr, "host", r.Host, "path", r.URL.Path)
