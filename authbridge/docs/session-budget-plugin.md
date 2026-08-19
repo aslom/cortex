@@ -159,8 +159,8 @@ denies, those extra requests have already passed.
 webhook can be unhealthy and `pause_timeout_action: deny`, an outage
 turns budget breaches into hard 403s.
 
-If a human is in the loop, either bump `pause_timeout` to minutes or
-have the webhook return `deny` immediately and approve out-of-band.
+If a human is in the loop, bump `pause_timeout` to minutes so the
+request can wait for a real approval decision.
 
 ## Failure Modes
 
@@ -195,7 +195,7 @@ OpenAI, and Azure OpenAI include usage in streaming responses and work fully.
 
 ## Redis Keys
 
-```
+```text
 session-budget:<session-id>   (Hash, TTL = session_ttl_seconds)
   tokens       cumulative token count
   calls        inference call count

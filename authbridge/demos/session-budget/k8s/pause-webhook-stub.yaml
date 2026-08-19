@@ -34,9 +34,20 @@ spec:
       annotations:
         ambient.istio.io/redirection: disabled
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: stub
           image: python:3.12-alpine
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           command: ["python", "-c"]
           args:
             - |

@@ -38,11 +38,20 @@ type config struct {
 }
 
 type counters struct {
-	tokens           int64
-	calls            int64
-	startedAt        time.Time
-	lastApprovedAt   time.Time
-	pendingApproval  bool
+	tokens         int64
+	calls          int64
+	startedAt      time.Time
+	lastApprovedAt time.Time
+	// pendingApproval is non-nil while a webhook call for this session is in
+	// flight. Concurrent breaches wait on the channel; the leader closes it
+	// after publishing the outcome to pendingResult, then clears both fields.
+	pendingApproval chan struct{}
+	pendingResult   bool
+	// pendingWrites counts in-flight accumulate goroutines whose Redis writes
+	// haven't landed yet. refreshCache leaves the local entry alone (rather
+	// than deleting a Redis-missing session) while this is > 0, so a race
+	// between accumulate and a refresh tick can't erase local counters.
+	pendingWrites int
 }
 
 // SessionBudget is the plugin state. Redis provides cross-pod durability;
@@ -158,9 +167,16 @@ func (p *SessionBudget) Init(_ context.Context) error {
 }
 
 // In-flight accumulate goroutines get ErrClosed after store.Close — bounded by their 2s ctx.
-func (p *SessionBudget) Shutdown(_ context.Context) error {
+func (p *SessionBudget) Shutdown(ctx context.Context) error {
 	close(p.stopCh)
-	<-p.stopped
+	select {
+	case <-p.stopped:
+	case <-ctx.Done():
+		if p.store != nil {
+			_ = p.store.Close()
+		}
+		return ctx.Err()
+	}
 	if p.store != nil {
 		return p.store.Close()
 	}
@@ -221,19 +237,36 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			return pipeline.Action{Type: pipeline.Continue}
 
 		case "pause":
-			// Grace window: skip webhook if recently approved or another request is already waiting.
+			// Grace window: skip webhook if recently approved.
 			if p.gracePeriod > 0 && !c.lastApprovedAt.IsZero() && time.Since(c.lastApprovedAt) < p.gracePeriod {
 				p.mu.Unlock()
 				pctx.Allow("pause_grace_window")
 				return pipeline.Action{Type: pipeline.Continue}
 			}
-			if c.pendingApproval {
-				// Another goroutine is already calling the webhook — piggyback on grace.
+			if c.pendingApproval != nil {
+				// Another goroutine is already calling the webhook — wait for
+				// its outcome so followers honor a deny instead of racing past.
+				waitCh := c.pendingApproval
 				p.mu.Unlock()
-				pctx.Allow("pause_pending_approval")
-				return pipeline.Action{Type: pipeline.Continue}
+				select {
+				case <-waitCh:
+				case <-ctx.Done():
+					pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "pause_wait_canceled"})
+					return pipeline.DenyWithDetails("budget.exceeded", reason+" (client canceled during pause)", p.buildDetails(&snap))
+				}
+				p.mu.RLock()
+				cc, ok := p.cache[sessionID]
+				approved := ok && cc.pendingResult
+				p.mu.RUnlock()
+				if approved {
+					pctx.Allow("pause_follower_approved")
+					return pipeline.Action{Type: pipeline.Continue}
+				}
+				pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "pause_follower_denied"})
+				return pipeline.DenyWithDetails("budget.exceeded", reason+" (approval denied)", p.buildDetails(&snap))
 			}
-			c.pendingApproval = true
+			waitCh := make(chan struct{})
+			c.pendingApproval = waitCh
 			p.mu.Unlock()
 			p.log.Info("budget exceeded, requesting approval",
 				"session", sessionID,
@@ -241,12 +274,14 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			approved := p.callPauseWebhook(ctx, sessionID, reason, &snap)
 			p.mu.Lock()
 			if cc, ok := p.cache[sessionID]; ok {
-				cc.pendingApproval = false
+				cc.pendingResult = approved
+				cc.pendingApproval = nil
 				if approved {
 					cc.lastApprovedAt = time.Now()
 				}
 			}
 			p.mu.Unlock()
+			close(waitCh)
 			if approved {
 				pctx.Allow("pause_approved")
 				return pipeline.Action{Type: pipeline.Continue}
@@ -292,8 +327,6 @@ func (p *SessionBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Contex
 
 	tokens := int64(inf.TotalTokens)
 
-	go p.accumulate(sessionID, tokens)
-
 	p.mu.Lock()
 	c, ok := p.cache[sessionID]
 	if !ok {
@@ -302,7 +335,10 @@ func (p *SessionBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Contex
 	}
 	c.tokens += tokens
 	c.calls++
+	c.pendingWrites++
 	p.mu.Unlock()
+
+	go p.accumulate(sessionID, tokens)
 
 	return pipeline.Action{Type: pipeline.Continue}
 }
@@ -400,6 +436,14 @@ func (p *SessionBudget) evaluate(c *counters) string {
 
 // accumulate writes counters to Redis. On failure, writes are dropped (fail-open).
 func (p *SessionBudget) accumulate(sessionID string, tokens int64) {
+	defer func() {
+		p.mu.Lock()
+		if cc, ok := p.cache[sessionID]; ok && cc.pendingWrites > 0 {
+			cc.pendingWrites--
+		}
+		p.mu.Unlock()
+	}()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -488,7 +532,12 @@ func (p *SessionBudget) refreshCache() {
 
 		if len(fields) == 0 {
 			p.mu.Lock()
-			delete(p.cache, sessionID)
+			// Only delete when there are no in-flight accumulate goroutines —
+			// otherwise a slow Redis write racing with a refresh tick would
+			// wipe the local entry before its counters land in Redis.
+			if existing, ok := p.cache[sessionID]; !ok || existing.pendingWrites == 0 {
+				delete(p.cache, sessionID)
+			}
 			p.mu.Unlock()
 			continue
 		}
@@ -502,7 +551,9 @@ func (p *SessionBudget) refreshCache() {
 
 		p.mu.Lock()
 		var lastApprovedAt time.Time
-		var pendingApproval bool
+		var pendingApproval chan struct{}
+		var pendingResult bool
+		var pendingWrites int
 		if existing, ok := p.cache[sessionID]; ok {
 			// Take the max of local and Redis to avoid regressing counters when
 			// in-flight accumulate goroutines haven't committed to Redis yet.
@@ -518,8 +569,18 @@ func (p *SessionBudget) refreshCache() {
 			lastApprovedAt = existing.lastApprovedAt
 			// Preserve mid-webhook: dropping would let a concurrent breach fire a duplicate.
 			pendingApproval = existing.pendingApproval
+			pendingResult = existing.pendingResult
+			pendingWrites = existing.pendingWrites
 		}
-		p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt, lastApprovedAt: lastApprovedAt, pendingApproval: pendingApproval}
+		p.cache[sessionID] = &counters{
+			tokens:          tokens,
+			calls:           calls,
+			startedAt:       startedAt,
+			lastApprovedAt:  lastApprovedAt,
+			pendingApproval: pendingApproval,
+			pendingResult:   pendingResult,
+			pendingWrites:   pendingWrites,
+		}
 		p.mu.Unlock()
 	}
 }

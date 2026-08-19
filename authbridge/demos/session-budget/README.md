@@ -20,7 +20,7 @@ return `{"action":"deny"}` and re-apply.
 Follow the webhook stub:
 
 ```bash
-kubectl logs -n team1 deploy/pause-webhook-stub -f
+kubectl logs -n "$NS" deploy/pause-webhook-stub -f
 ```
 
 ## Prerequisites
@@ -73,26 +73,35 @@ above. Substitute your own agent, session id, and A2A payload.
 
 ```bash
 NS=team1
-AGENT_POD=$(kubectl -n $NS get pod -l app.kubernetes.io/name=<your-agent> \
+AGENT_POD=$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=<your-agent> \
   -o jsonpath='{.items[0].metadata.name}')
 SESSION=demo-$RANDOM
 
+# Substitute your Redis/Valkey pod + CLI. E.g. REDIS_POD=valkey and
+# REDIS_CLI=valkey-cli, or REDIS_POD=redis-0 and REDIS_CLI=redis-cli.
+REDIS_POD=valkey
+REDIS_CLI=valkey-cli
+
 # 1. Seed Redis so this session is already over budget.
-kubectl -n $NS exec valkey -- valkey-cli HSET \
-  session-budget:$SESSION calls 99 started_at $(date +%s)
+kubectl -n "$NS" exec "$REDIS_POD" -- "$REDIS_CLI" HSET \
+  "session-budget:$SESSION" calls 99 started_at "$(date +%s)"
 
 # 2. Fire one A2A request with contextId = seeded session.
 #    (Any callable agent works; adjust auth + payload to fit yours.)
-kubectl -n $NS port-forward pod/$AGENT_POD 8000:8000 &
+#    $TOKEN is a Keycloak-issued bearer for the agent's inbound audience —
+#    obtain via the same setup script you use for the rest of your demos
+#    (see e.g. authbridge/demos/weather-agent). If your agent's inbound
+#    plugin chain has no jwt-validation, omit the Authorization header.
+kubectl -n "$NS" port-forward pod/"$AGENT_POD" 8000:8000 &
 curl -sS -X POST http://localhost:8000/ \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{
        "message":{"messageId":"m1","role":"user",
        "parts":[{"kind":"text","text":"hi"}],
-       "contextId":"'$SESSION'"}}}'
+       "contextId":"'"$SESSION"'"}}}'
 
 # 3. Confirm the webhook was called with the right session_id.
-kubectl -n $NS logs deploy/pause-webhook-stub | grep $SESSION
+kubectl -n "$NS" logs deploy/pause-webhook-stub | grep "$SESSION"
 ```
 
 Expected: the request returns 200 (stub approves), and the webhook log

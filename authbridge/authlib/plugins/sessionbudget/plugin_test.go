@@ -115,13 +115,25 @@ var _ storage.Store = (*memStore)(nil)
 // failingStore always returns errors (simulates total store unavailability).
 type failingStore struct{}
 
-func (failingStore) Get(context.Context, string) (string, error)              { return "", context.DeadlineExceeded }
-func (failingStore) Set(context.Context, string, string, time.Duration) error { return context.DeadlineExceeded }
-func (failingStore) Incr(context.Context, string, int64) (int64, error)       { return 0, context.DeadlineExceeded }
-func (failingStore) HashIncr(context.Context, string, string, int64) (int64, error) { return 0, context.DeadlineExceeded }
-func (failingStore) HashGet(context.Context, string) (map[string]string, error) { return nil, context.DeadlineExceeded }
-func (failingStore) HashSetNX(context.Context, string, string, string) (bool, error) { return false, context.DeadlineExceeded }
-func (failingStore) Expire(context.Context, string, time.Duration) error { return context.DeadlineExceeded }
+func (failingStore) Get(context.Context, string) (string, error) { return "", context.DeadlineExceeded }
+func (failingStore) Set(context.Context, string, string, time.Duration) error {
+	return context.DeadlineExceeded
+}
+func (failingStore) Incr(context.Context, string, int64) (int64, error) {
+	return 0, context.DeadlineExceeded
+}
+func (failingStore) HashIncr(context.Context, string, string, int64) (int64, error) {
+	return 0, context.DeadlineExceeded
+}
+func (failingStore) HashGet(context.Context, string) (map[string]string, error) {
+	return nil, context.DeadlineExceeded
+}
+func (failingStore) HashSetNX(context.Context, string, string, string) (bool, error) {
+	return false, context.DeadlineExceeded
+}
+func (failingStore) Expire(context.Context, string, time.Duration) error {
+	return context.DeadlineExceeded
+}
 func (failingStore) Close() error { return nil }
 
 func init() {
@@ -170,7 +182,6 @@ func TestOnRequest_UnderLimit(t *testing.T) {
 		t.Fatalf("expected Continue, got %v", action.Type)
 	}
 }
-
 
 func TestOnResponseFrame_Accumulates(t *testing.T) {
 	p := newTestPlugin(1000, 0, 0)
@@ -489,9 +500,9 @@ func TestOnRequest_PauseWebhookUnreachable(t *testing.T) {
 }
 
 func TestRefreshCache_PreservesLastApprovedAt(t *testing.T) {
-	webhookCalls := 0
+	var webhookCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		webhookCalls++
+		webhookCalls.Add(1)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"action":"approve"}`))
 	}))
@@ -524,8 +535,8 @@ func TestRefreshCache_PreservesLastApprovedAt(t *testing.T) {
 	if action.Type != pipeline.Continue {
 		t.Fatalf("expected Continue after approval, got %v", action.Type)
 	}
-	if webhookCalls != 1 {
-		t.Fatalf("expected 1 webhook call, got %d", webhookCalls)
+	if c := webhookCalls.Load(); c != 1 {
+		t.Fatalf("expected 1 webhook call, got %d", c)
 	}
 
 	// Simulate Redis having authoritative counters.
@@ -542,15 +553,15 @@ func TestRefreshCache_PreservesLastApprovedAt(t *testing.T) {
 	if action.Type != pipeline.Continue {
 		t.Fatalf("expected Continue within grace after refresh, got %v", action.Type)
 	}
-	if webhookCalls != 1 {
-		t.Fatalf("expected still 1 webhook call after refresh, got %d", webhookCalls)
+	if c := webhookCalls.Load(); c != 1 {
+		t.Fatalf("expected still 1 webhook call after refresh, got %d", c)
 	}
 }
 
 func TestOnRequest_PauseGraceWindow(t *testing.T) {
-	webhookCalls := 0
+	var webhookCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		webhookCalls++
+		webhookCalls.Add(1)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"action":"approve"}`))
 	}))
@@ -582,8 +593,8 @@ func TestOnRequest_PauseGraceWindow(t *testing.T) {
 	if action.Type != pipeline.Continue {
 		t.Fatalf("first request: expected Continue, got %v", action.Type)
 	}
-	if webhookCalls != 1 {
-		t.Fatalf("expected 1 webhook call, got %d", webhookCalls)
+	if c := webhookCalls.Load(); c != 1 {
+		t.Fatalf("expected 1 webhook call, got %d", c)
 	}
 
 	// Second request within grace window skips the webhook.
@@ -591,15 +602,15 @@ func TestOnRequest_PauseGraceWindow(t *testing.T) {
 	if action.Type != pipeline.Continue {
 		t.Fatalf("second request (grace): expected Continue, got %v", action.Type)
 	}
-	if webhookCalls != 1 {
-		t.Fatalf("expected still 1 webhook call after grace, got %d", webhookCalls)
+	if c := webhookCalls.Load(); c != 1 {
+		t.Fatalf("expected still 1 webhook call after grace, got %d", c)
 	}
 }
 
 func TestOnRequest_PauseGraceExpired(t *testing.T) {
-	webhookCalls := 0
+	var webhookCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		webhookCalls++
+		webhookCalls.Add(1)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"action":"approve"}`))
 	}))
@@ -632,19 +643,25 @@ func TestOnRequest_PauseGraceExpired(t *testing.T) {
 	}
 	p.mu.Unlock()
 
-	// Request after grace expired fires webhook.
-	p.OnRequest(context.Background(), makePctx("sess", 0))
-	if webhookCalls != 1 {
-		t.Fatalf("expected 1 webhook call after grace expired, got %d", webhookCalls)
+	// Request after grace expired fires webhook and continues on approve.
+	action := p.OnRequest(context.Background(), makePctx("sess", 0))
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue after grace expired + approve, got %v", action.Type)
+	}
+	if c := webhookCalls.Load(); c != 1 {
+		t.Fatalf("expected 1 webhook call after grace expired, got %d", c)
 	}
 }
 
+// TestOnRequest_PausePendingApprovalSentinel verifies that concurrent
+// breaches share one webhook call AND that the follower waits for the
+// leader's outcome (rather than racing past optimistically).
 func TestOnRequest_PausePendingApprovalSentinel(t *testing.T) {
-	var webhookCalls int32
+	var webhookCalls atomic.Int32
 	started := make(chan struct{})
 	proceed := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&webhookCalls, 1)
+		webhookCalls.Add(1)
 		close(started)
 		<-proceed
 		w.WriteHeader(http.StatusOK)
@@ -657,26 +674,70 @@ func TestOnRequest_PausePendingApprovalSentinel(t *testing.T) {
 	p.cache["sess"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
 	p.mu.Unlock()
 
-	// First goroutine fires the webhook and blocks.
+	// Two concurrent requests: leader fires the webhook, follower must wait.
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		p.OnRequest(context.Background(), makePctx("sess", 0))
-	}()
-	<-started // webhook is in-flight
-
-	// Second concurrent request should piggyback (pendingApproval=true).
-	action := p.OnRequest(context.Background(), makePctx("sess", 0))
-	if action.Type != pipeline.Continue {
-		t.Fatalf("concurrent request: expected Continue (piggyback), got %v", action.Type)
+	results := make([]pipeline.ActionType, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			a := p.OnRequest(context.Background(), makePctx("sess", 0))
+			results[idx] = a.Type
+		}(i)
 	}
+	<-started // leader's webhook is in-flight; follower is now waiting on the channel
 
-	close(proceed) // unblock the webhook
+	// Unblock the webhook — both goroutines should complete after leader returns.
+	close(proceed)
 	wg.Wait()
 
-	if c := atomic.LoadInt32(&webhookCalls); c != 1 {
+	if c := webhookCalls.Load(); c != 1 {
 		t.Errorf("webhook called %d times, want exactly 1 (sentinel prevents thundering herd)", c)
+	}
+	for i, got := range results {
+		if got != pipeline.Continue {
+			t.Errorf("request %d: got %v, want Continue (webhook approved)", i, got)
+		}
+	}
+}
+
+// TestOnRequest_PauseFollowerHonorsDeny verifies that a follower waiting
+// on the leader's webhook call gets Reject when the leader is denied,
+// instead of racing past optimistically.
+func TestOnRequest_PauseFollowerHonorsDeny(t *testing.T) {
+	started := make(chan struct{})
+	proceed := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-proceed
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"action":"deny"}`))
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "deny")
+	p.mu.Lock()
+	p.cache["sess"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	var wg sync.WaitGroup
+	results := make([]pipeline.ActionType, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			a := p.OnRequest(context.Background(), makePctx("sess", 0))
+			results[idx] = a.Type
+		}(i)
+	}
+	<-started
+	close(proceed)
+	wg.Wait()
+
+	for i, got := range results {
+		if got != pipeline.Reject {
+			t.Errorf("request %d: got %v, want Reject (webhook denied)", i, got)
+		}
 	}
 }
 
@@ -720,8 +781,8 @@ func TestEvaluate_MultipleLimits(t *testing.T) {
 	p := newTestPlugin(100, 10, 60)
 
 	tests := []struct {
-		name    string
-		c       *counters
+		name     string
+		c        *counters
 		wantDeny bool
 	}{
 		{"all under", &counters{tokens: 50, calls: 5, startedAt: time.Now()}, false},
