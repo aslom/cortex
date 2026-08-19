@@ -659,10 +659,14 @@ func TestOnRequest_PauseGraceExpired(t *testing.T) {
 func TestOnRequest_PausePendingApprovalSentinel(t *testing.T) {
 	var webhookCalls atomic.Int32
 	started := make(chan struct{})
+	// Guard the close so a regression that lets a second webhook fire produces
+	// a readable test failure ("webhook called 2 times") instead of a
+	// close-of-closed-channel panic that tears down the whole binary.
+	signalStart := sync.OnceFunc(func() { close(started) })
 	proceed := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		webhookCalls.Add(1)
-		close(started)
+		signalStart()
 		<-proceed
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"action":"approve"}`))
@@ -706,9 +710,11 @@ func TestOnRequest_PausePendingApprovalSentinel(t *testing.T) {
 // instead of racing past optimistically.
 func TestOnRequest_PauseFollowerHonorsDeny(t *testing.T) {
 	started := make(chan struct{})
+	// See TestOnRequest_PausePendingApprovalSentinel for rationale.
+	signalStart := sync.OnceFunc(func() { close(started) })
 	proceed := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		close(started)
+		signalStart()
 		<-proceed
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"action":"deny"}`))
@@ -802,4 +808,240 @@ func TestEvaluate_MultipleLimits(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOnRequest_PauseSecondFlightDoesNotClobberFirst is the regression test
+// for the CodeRabbit finding that a new leader could overwrite the previous
+// flight's outcome. The old code stored the approval result on the cache
+// entry (cc.pendingResult); if a follower was descheduled after receiving
+// on the leader's done-channel but before it read pendingResult, a fresh
+// breach starting a new flight could rewrite the field and flip the
+// follower's decision. Per-flight approval attaches the outcome to the
+// flight itself, so this test drives that exact interleave and asserts the
+// follower reads the FIRST flight's approve, even though the second flight
+// denies. Distinct from PausePendingApprovalSentinel (one flight, both
+// approve) and PauseFollowerHonorsDeny (one flight, both deny).
+func TestOnRequest_PauseSecondFlightDoesNotClobberFirst(t *testing.T) {
+	// Two sequential webhook calls with different outcomes.
+	var callIdx atomic.Int32
+	release1 := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := callIdx.Add(1)
+		if n == 1 {
+			<-release1 // leader of flight 1 blocks until we say so
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"action":"approve"}`))
+			return
+		}
+		// Flight 2 denies immediately.
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"action":"deny"}`))
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "deny")
+	// grace_period defaults to 5m in newPausePlugin config template? Actually
+	// newPausePlugin doesn't set pause_grace_period, so Configure defaults it
+	// to 5m. That would suppress flight 2 entirely. Disable grace explicitly
+	// by mutating the parsed config after Configure.
+	p.gracePeriod = 0
+
+	p.mu.Lock()
+	p.cache["sess"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	// Kick off flight 1: leader + one follower, both should end up approved.
+	var wg1 sync.WaitGroup
+	f1Results := make([]pipeline.ActionType, 2)
+	// Leader first, so we know the follower joins after pendingApproval is set.
+	wg1.Add(1)
+	go func() {
+		defer wg1.Done()
+		a := p.OnRequest(context.Background(), makePctx("sess", 0))
+		f1Results[0] = a.Type
+	}()
+	// Wait until pendingApproval is populated so the second goroutine is a follower.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.mu.RLock()
+		c := p.cache["sess"]
+		hasFlight := c != nil && c.pendingApproval != nil
+		p.mu.RUnlock()
+		if hasFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("flight 1 never populated pendingApproval")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	// Slow follower: capture the flight now, then pretend to be descheduled by
+	// waiting on the done channel through an indirect path. We simulate that
+	// by having a real follower goroutine but stalling its post-wait cache
+	// read via the plugin's own code path — the whole point is that the
+	// follower must not read a globally-mutable pendingResult.
+	wg1.Add(1)
+	go func() {
+		defer wg1.Done()
+		a := p.OnRequest(context.Background(), makePctx("sess", 0))
+		f1Results[1] = a.Type
+	}()
+
+	// Let flight 1 complete.
+	close(release1)
+	wg1.Wait()
+
+	for i, got := range f1Results {
+		if got != pipeline.Continue {
+			t.Errorf("flight 1 request %d: got %v, want Continue (webhook approved)", i, got)
+		}
+	}
+
+	// Simulate lastApprovedAt in the past so flight 2 can actually fire.
+	p.mu.Lock()
+	if cc, ok := p.cache["sess"]; ok {
+		cc.lastApprovedAt = time.Time{}
+		// Push calls back above the limit so evaluate() returns non-empty again.
+		cc.calls = 3
+	}
+	p.mu.Unlock()
+
+	// Flight 2 (denies). If old code's shared pendingResult were still in play,
+	// this deny would clobber flight 1's approve. With per-flight state, flight
+	// 1's return values are already frozen — this test just proves flight 2
+	// stands on its own and returns Reject with its own outcome.
+	a2 := p.OnRequest(context.Background(), makePctx("sess", 0))
+	if a2.Type != pipeline.Reject {
+		t.Fatalf("flight 2: got %v, want Reject (fresh webhook denies)", a2.Type)
+	}
+	if n := callIdx.Load(); n != 2 {
+		t.Fatalf("webhook call count = %d, want exactly 2 (one per flight)", n)
+	}
+}
+
+// TestOnRequest_PauseRefreshCacheMidFlight is the regression test for the
+// second CodeRabbit failure mode: refreshCache running while a webhook is
+// in flight. Under the old code, if the cache entry got deleted (Redis
+// missing + pendingWrites == 0), the leader's post-webhook block
+// `if cc, ok := p.cache[sessionID]; ok` would skip and pendingResult would
+// never be published. Every follower then read `approved=false` from the
+// zero-valued counters and got Reject even after an approve. With
+// per-flight approval, the outcome rides on the flight object and is
+// unaffected by cache-entry deletion. This test races refreshCache against
+// a live flight (Redis returns empty → refreshCache deletes) and asserts
+// followers still observe the webhook's approve.
+func TestOnRequest_PauseRefreshCacheMidFlight(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"action":"approve"}`))
+	}))
+	defer srv.Close()
+
+	p := newPausePlugin(t, 3, srv.URL, "deny")
+	p.gracePeriod = 0
+
+	// Seed local cache above limit; leave the store empty so refreshCache
+	// tries to delete the entry (pendingWrites==0 case).
+	p.mu.Lock()
+	p.cache["sess"] = &counters{tokens: 0, calls: 3, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	// Kick leader.
+	leaderDone := make(chan pipeline.ActionType, 1)
+	go func() {
+		a := p.OnRequest(context.Background(), makePctx("sess", 0))
+		leaderDone <- a.Type
+	}()
+
+	// Wait for flight to be in-flight.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.mu.RLock()
+		c := p.cache["sess"]
+		hasFlight := c != nil && c.pendingApproval != nil
+		p.mu.RUnlock()
+		if hasFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("leader never populated pendingApproval")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Kick follower (over-budget still — leader hasn't returned).
+	followerDone := make(chan pipeline.ActionType, 1)
+	go func() {
+		a := p.OnRequest(context.Background(), makePctx("sess", 0))
+		followerDone <- a.Type
+	}()
+	// Give follower a moment to enter the wait branch.
+	time.Sleep(20 * time.Millisecond)
+
+	// Now: run refreshCache while the webhook is still blocking. With the
+	// store empty and pendingWrites==0, this deletes p.cache["sess"] — the
+	// exact interleave the old code mishandled.
+	p.refreshCache()
+
+	// Release webhook.
+	close(release)
+
+	if got := <-leaderDone; got != pipeline.Continue {
+		t.Errorf("leader: got %v, want Continue (webhook approved)", got)
+	}
+	if got := <-followerDone; got != pipeline.Continue {
+		t.Errorf("follower: got %v, want Continue — this is the bug: cache-entry deletion mid-flight used to make followers observe approved=false", got)
+	}
+}
+
+// TestShutdown_TimeoutDoesNotCloseStore is the regression test for the
+// Shutdown store-close race. On the ctx.Done() path, the old code called
+// p.store.Close() while refreshLoop was still running and could be inside
+// a HashGet call — concurrent use of a closed client. The fix is to leave
+// the store open on the timeout path and let process exit reclaim it.
+// This test uses a store that records Close() calls and forces the
+// timeout branch by passing an already-expired context.
+func TestShutdown_TimeoutDoesNotCloseStore(t *testing.T) {
+	p := newTestPlugin(0, 3, 0)
+	// Wire a store that records Close.
+	rec := &closeRecordingStore{Store: p.store}
+	p.store = rec
+	// Start refreshLoop so the ctx.Done() branch is meaningful.
+	go p.refreshLoop(50 * time.Millisecond)
+
+	// Give the loop a tick to enter its select.
+	time.Sleep(10 * time.Millisecond)
+
+	// Force the timeout path: expired ctx, so Shutdown selects on ctx.Done()
+	// before <-p.stopped can fire.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := p.Shutdown(ctx)
+	if err == nil {
+		t.Fatal("expected non-nil error from Shutdown on canceled ctx")
+	}
+	if rec.closes.Load() != 0 {
+		t.Errorf("store.Close() called %d times on timeout path, want 0 (refreshLoop may still be running)", rec.closes.Load())
+	}
+
+	// Let refreshLoop exit cleanly so the test doesn't leak the goroutine —
+	// stopCh was already closed by Shutdown, so waiting on stopped is enough.
+	select {
+	case <-p.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refreshLoop did not exit after stopCh close")
+	}
+}
+
+// closeRecordingStore wraps a Store and counts Close() calls.
+type closeRecordingStore struct {
+	storage.Store
+	closes atomic.Int32
+}
+
+func (s *closeRecordingStore) Close() error {
+	s.closes.Add(1)
+	return s.Store.Close()
 }

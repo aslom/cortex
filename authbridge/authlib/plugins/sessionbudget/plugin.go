@@ -37,16 +37,28 @@ type config struct {
 	RedisUnavailable   string `json:"redis_unavailable" description:"Behavior when Redis is unreachable. Only fail_open is supported; fail_closed is reserved." default:"fail_open"`
 }
 
+// approvalFlight carries the outcome of one webhook call. The leader writes
+// approved before closing done; followers read it only after receiving from
+// done, so the happens-before edge is safe without further synchronization.
+// Attaching the result to the flight (instead of the cache entry) makes each
+// waiter observe the outcome of the flight it actually waited on — a new
+// leader that starts a second webhook after this one closes cannot clobber
+// this flight's approved, and a refreshCache that deletes the cache entry
+// mid-flight cannot make followers read a stale zero value.
+type approvalFlight struct {
+	done     chan struct{}
+	approved bool
+}
+
 type counters struct {
 	tokens         int64
 	calls          int64
 	startedAt      time.Time
 	lastApprovedAt time.Time
 	// pendingApproval is non-nil while a webhook call for this session is in
-	// flight. Concurrent breaches wait on the channel; the leader closes it
-	// after publishing the outcome to pendingResult, then clears both fields.
-	pendingApproval chan struct{}
-	pendingResult   bool
+	// flight. Concurrent breaches wait on flight.done; the leader publishes
+	// flight.approved before closing done, then clears this field.
+	pendingApproval *approvalFlight
 	// pendingWrites counts in-flight accumulate goroutines whose Redis writes
 	// haven't landed yet. refreshCache leaves the local entry alone (rather
 	// than deleting a Redis-missing session) while this is > 0, so a race
@@ -172,9 +184,11 @@ func (p *SessionBudget) Shutdown(ctx context.Context) error {
 	select {
 	case <-p.stopped:
 	case <-ctx.Done():
-		if p.store != nil {
-			_ = p.store.Close()
-		}
+		// refreshLoop is still running and calls p.store.HashGet; closing the
+		// store here would race that call. Leave the store open and let the
+		// process exit reclaim it — refreshLoop terminates when p.stopCh
+		// closes, and the shutdown-deadline is already exceeded.
+		p.log.Warn("shutdown timed out waiting for refresh loop; leaving store open")
 		return ctx.Err()
 	}
 	if p.store != nil {
@@ -246,42 +260,38 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			if c.pendingApproval != nil {
 				// Another goroutine is already calling the webhook — wait for
 				// its outcome so followers honor a deny instead of racing past.
-				waitCh := c.pendingApproval
+				flight := c.pendingApproval
 				p.mu.Unlock()
 				select {
-				case <-waitCh:
+				case <-flight.done:
 				case <-ctx.Done():
 					pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "pause_wait_canceled"})
 					return pipeline.DenyWithDetails("budget.exceeded", reason+" (client canceled during pause)", p.buildDetails(&snap))
 				}
-				p.mu.RLock()
-				cc, ok := p.cache[sessionID]
-				approved := ok && cc.pendingResult
-				p.mu.RUnlock()
-				if approved {
+				if flight.approved {
 					pctx.Allow("pause_follower_approved")
 					return pipeline.Action{Type: pipeline.Continue}
 				}
 				pctx.Record(pipeline.Invocation{Action: pipeline.ActionDeny, Reason: "pause_follower_denied"})
 				return pipeline.DenyWithDetails("budget.exceeded", reason+" (approval denied)", p.buildDetails(&snap))
 			}
-			waitCh := make(chan struct{})
-			c.pendingApproval = waitCh
+			flight := &approvalFlight{done: make(chan struct{})}
+			c.pendingApproval = flight
 			p.mu.Unlock()
 			p.log.Info("budget exceeded, requesting approval",
 				"session", sessionID,
 				"reason", reason)
 			approved := p.callPauseWebhook(ctx, sessionID, reason, &snap)
+			flight.approved = approved
 			p.mu.Lock()
 			if cc, ok := p.cache[sessionID]; ok {
-				cc.pendingResult = approved
 				cc.pendingApproval = nil
 				if approved {
 					cc.lastApprovedAt = time.Now()
 				}
 			}
 			p.mu.Unlock()
-			close(waitCh)
+			close(flight.done)
 			if approved {
 				pctx.Allow("pause_approved")
 				return pipeline.Action{Type: pipeline.Continue}
@@ -551,8 +561,7 @@ func (p *SessionBudget) refreshCache() {
 
 		p.mu.Lock()
 		var lastApprovedAt time.Time
-		var pendingApproval chan struct{}
-		var pendingResult bool
+		var pendingApproval *approvalFlight
 		var pendingWrites int
 		if existing, ok := p.cache[sessionID]; ok {
 			// Take the max of local and Redis to avoid regressing counters when
@@ -569,7 +578,6 @@ func (p *SessionBudget) refreshCache() {
 			lastApprovedAt = existing.lastApprovedAt
 			// Preserve mid-webhook: dropping would let a concurrent breach fire a duplicate.
 			pendingApproval = existing.pendingApproval
-			pendingResult = existing.pendingResult
 			pendingWrites = existing.pendingWrites
 		}
 		p.cache[sessionID] = &counters{
@@ -578,7 +586,6 @@ func (p *SessionBudget) refreshCache() {
 			startedAt:       startedAt,
 			lastApprovedAt:  lastApprovedAt,
 			pendingApproval: pendingApproval,
-			pendingResult:   pendingResult,
 			pendingWrites:   pendingWrites,
 		}
 		p.mu.Unlock()
