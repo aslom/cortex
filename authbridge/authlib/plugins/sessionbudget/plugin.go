@@ -150,6 +150,8 @@ func (p *SessionBudget) Configure(raw json.RawMessage) error {
 		}
 		if d, err := time.ParseDuration(p.cfg.PauseGracePeriod); err != nil {
 			return fmt.Errorf("session-budget: invalid pause_grace_period %q: %w", p.cfg.PauseGracePeriod, err)
+		} else if d < 0 {
+			return fmt.Errorf("session-budget: pause_grace_period must be >= 0 (got %q); use \"0s\" to fire the webhook on every breach", p.cfg.PauseGracePeriod)
 		} else {
 			p.gracePeriod = d
 		}
@@ -431,8 +433,8 @@ func (p *SessionBudget) callPauseWebhook(ctx context.Context, sessionID, reason 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		p.log.Warn("pause webhook non-200", "session", sessionID, "status", resp.StatusCode, "body", string(body))
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		p.log.Warn("pause webhook non-200", "session", sessionID, "status", resp.StatusCode, "response_bytes", len(responseBody))
 		return p.cfg.PauseTimeoutAction == "allow"
 	}
 
