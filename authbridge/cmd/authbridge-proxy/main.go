@@ -384,16 +384,40 @@ func main() {
 	defer sharedStore.Close() // stop the TTL janitor on normal main return
 
 	if roles[config.RoleReverse] {
-		rpSrv, rerr := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
-		if rerr != nil {
-			log.Fatalf("creating reverse proxy: %v", rerr)
+		// Two inbound shapes, selected by listener.inbound_interception:
+		//   transparent   — iptables PREROUTING REDIRECTs here; the forwarding
+		//                   target is per-connection, from SO_ORIGINAL_DST.
+		//   reverse-proxy — the default; one fixed reverse_proxy_backend, reached
+		//                   because the operator stole the agent's port.
+		if cfg.Listener.InboundTransparent() {
+			rpSrv, rerr := reverseproxy.NewTransparentServer(inboundH, sessions, rpMTLS)
+			if rerr != nil {
+				log.Fatalf("creating transparent inbound proxy: %v", rerr)
+			}
+			rpSrv.Shared = sharedStore
+			// Skipped in --demo: there is no iptables there, so nothing would ever
+			// be REDIRECTed to the listener and every request would fail closed.
+			if demoMode {
+				slog.Warn("demo mode: transparent inbound listener not started (no iptables to REDIRECT to it)")
+			} else {
+				rpHTTP, rerr := runtimeutil.StartTransparentInboundServer("transparent-inbound", rpSrv, cfg.Listener.TransparentInboundAddr)
+				if rerr != nil {
+					log.Fatalf("transparent-inbound listen: %v", rerr)
+				}
+				httpServers = append(httpServers, rpHTTP)
+			}
+		} else {
+			rpSrv, rerr := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
+			if rerr != nil {
+				log.Fatalf("creating reverse proxy: %v", rerr)
+			}
+			rpSrv.Shared = sharedStore
+			rpHTTP, rerr := runtimeutil.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr)
+			if rerr != nil {
+				log.Fatalf("reverse-proxy listen: %v", rerr)
+			}
+			httpServers = append(httpServers, rpHTTP)
 		}
-		rpSrv.Shared = sharedStore
-		rpHTTP, rerr := runtimeutil.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr)
-		if rerr != nil {
-			log.Fatalf("reverse-proxy listen: %v", rerr)
-		}
-		httpServers = append(httpServers, rpHTTP)
 	}
 
 	// The transparent (enforce-redirect) listener rides with the forward proxy;
