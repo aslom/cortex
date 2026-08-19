@@ -232,14 +232,24 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		//     which is the same tradeoff these modes have always had. This
 		//     avoids putting Redis on the request path for the common modes.
 		if p.cfg.OnExceed == "pause" {
-			if !p.hydrateCache(ctx, sessionID) {
-				pctx.Skip("cold_cache")
-				return pipeline.Action{Type: pipeline.Continue}
-			}
-			p.mu.Lock()
-			c, ok = p.cache[sessionID]
-			if !ok {
+			// Hydrate returns true when Redis had the session; the second
+			// cache lookup can still miss if refreshCache raced in and
+			// evicted the freshly-hydrated entry between the two locks.
+			// One retry closes that window without unbounded looping —
+			// singleflight ensures both hydrate calls share one Redis read.
+			for attempt := 0; attempt < 2; attempt++ {
+				if !p.hydrateCache(ctx, sessionID) {
+					pctx.Skip("cold_cache")
+					return pipeline.Action{Type: pipeline.Continue}
+				}
+				p.mu.Lock()
+				c, ok = p.cache[sessionID]
+				if ok {
+					break
+				}
 				p.mu.Unlock()
+			}
+			if !ok {
 				pctx.Skip("cold_cache")
 				return pipeline.Action{Type: pipeline.Continue}
 			}
@@ -574,10 +584,13 @@ func (p *SessionBudget) refreshCache() {
 
 		if len(fields) == 0 {
 			p.mu.Lock()
-			// Only delete when there are no in-flight accumulate goroutines —
-			// otherwise a slow Redis write racing with a refresh tick would
-			// wipe the local entry before its counters land in Redis.
-			if existing, ok := p.cache[sessionID]; !ok || existing.pendingWrites == 0 {
+			// Preserve entries with in-flight work — deleting mid-flight would
+			// lose state the flight's completion writes back:
+			//   - pendingWrites > 0: a slow accumulate is about to land counters
+			//   - pendingApproval != nil: a webhook is mid-call; its defer will
+			//     write lastApprovedAt, and dropping the entry would defeat
+			//     pause_grace_period for the next request post-approval.
+			if existing, ok := p.cache[sessionID]; !ok || (existing.pendingWrites == 0 && existing.pendingApproval == nil) {
 				delete(p.cache, sessionID)
 			}
 			p.mu.Unlock()
