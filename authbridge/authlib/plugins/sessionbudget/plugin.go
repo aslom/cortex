@@ -25,7 +25,7 @@ import (
 type config struct {
 	RedisURL           string `json:"redis_url" required:"true" description:"Redis/Valkey connection URL."`
 	MaxTokens          int64  `json:"max_tokens" description:"Cumulative token ceiling per session. 0 = no limit."`
-	MaxCalls           int64  `json:"max_calls" description:"Max LLM/inference calls per session (counted from inference-parser output; MCP tool calls and other outbound traffic do not count). 0 = no limit."`
+	MaxCalls           int64  `json:"max_calls" description:"Max LLM/inference calls per session. Only inference-parser output increments this counter; MCP tool calls and other outbound traffic do not. Once the limit is reached, all subsequent outbound requests (including MCP tool calls) are blocked until the session resets. 0 = no limit."`
 	MaxDurationSeconds int64  `json:"max_duration_seconds" description:"Wall-clock session lifetime in seconds. 0 = no limit."`
 	OnExceed           string `json:"on_exceed" description:"Action on breach: deny, observe (shadow), or pause (HITL webhook approval)." default:"deny" enum:"deny,observe,pause"`
 	PauseWebhook       string `json:"pause_webhook" description:"URL to POST for approval when on_exceed=pause. Required when on_exceed=pause."`
@@ -565,6 +565,8 @@ func (p *SessionBudget) hydrateCache(_ context.Context, sessionID string) bool {
 			startedAt = time.Unix(ts, 0)
 		}
 		p.mu.Lock()
+		// Do not overwrite: OnResponseFrame may have seeded an entry between
+		// our HashGet and this lock. Its counters are fresher than Redis.
 		if _, exists := p.cache[sessionID]; !exists {
 			p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt}
 		}

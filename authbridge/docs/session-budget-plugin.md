@@ -105,10 +105,12 @@ calibrate limits before enforcing:
    workloads.
 4. Flip to `on_exceed: deny` (or `pause`) once confident.
 
-Call accounting is response-driven: `max_calls` is checked against the
-count of completed inference responses, so under bursty concurrency
-`max_calls` breach logs may lag actual in-flight calls by up to one per
-concurrent request.
+Call accounting is response-driven: `max_calls` increments when
+inference responses complete, not on request entry. Cache-at-limit is
+reliably rejected, but requests racing against `calls == max_calls - 1`
+can both pass before either response increments — a
+one-per-concurrent-request overshoot at the boundary. Set `max_calls`
+one lower than your true ceiling if you need strict enforcement.
 
 ### `pause` (HITL webhook)
 
