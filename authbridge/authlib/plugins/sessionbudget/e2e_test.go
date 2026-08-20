@@ -407,12 +407,12 @@ func TestE2E_PauseMode(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var req map[string]any
-				json.NewDecoder(r.Body).Decode(&req)
+				_ = json.NewDecoder(r.Body).Decode(&req)
 				if req["session_id"] != "sess" {
 					t.Errorf("webhook got session_id=%v, want sess", req["session_id"])
 				}
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(tt.response))
+				_, _ = w.Write([]byte(tt.response))
 			}))
 			defer srv.Close()
 
@@ -449,7 +449,7 @@ func TestE2E_PauseMode(t *testing.T) {
 					t.Errorf("status = %d, want 403", status)
 				}
 				var parsed map[string]any
-				json.Unmarshal(body, &parsed)
+				_ = json.Unmarshal(body, &parsed)
 				if parsed["error"] != "budget.exceeded" {
 					t.Errorf("error = %v, want budget.exceeded", parsed["error"])
 				}
