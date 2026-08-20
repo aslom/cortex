@@ -182,7 +182,10 @@ func startMTLSInbound(t *testing.T, strict bool, a *auth.Auth, dstHost string, a
 		t.Fatalf("NewTransparentServer: %v", err)
 	}
 
-	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	// ListenTCP, matching what the production path binds: the transparent inbound
+	// listener needs a *net.TCPListener to recover SO_ORIGINAL_DST before any
+	// bytes are read.
+	tcpLn, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -238,6 +241,44 @@ func (h *inboundHarness) tlsClient(t *testing.T) *http.Client {
 	}
 }
 
+// requireTLSTerminates completes one handshake with a valid SVID.
+//
+// Every rejection test below concludes something from a handshake that failed,
+// and a listener serving plaintext — the exact regression
+// TestWrapListener_MTLSOnWraps guards — fails those handshakes too, for the
+// opposite reason. Proving the port terminates TLS first is what makes the
+// later failure attributable to the client's own certificate.
+func (h *inboundHarness) requireTLSTerminates(t *testing.T) {
+	t.Helper()
+	valid, err := authtls.ClientConfig(h.src)
+	if err != nil {
+		t.Fatalf("ClientConfig: %v", err)
+	}
+	c, err := tls.Dial("tcp", h.addr, valid)
+	if err != nil {
+		t.Fatalf("a valid SVID could not complete a handshake: %v", err)
+	}
+	_ = c.Close()
+}
+
+// expectPeerRejected asserts the server never answers a client dialing with cfg.
+//
+// Under TLS 1.3 the client finishes its side before the server evaluates the
+// client certificate, so the rejection surfaces either at Dial or on the first
+// read. Both are the same verdict, and which one happens is a timing detail.
+func (h *inboundHarness) expectPeerRejected(t *testing.T, cfg *tls.Config, peer string) {
+	t.Helper()
+	c, err := tls.Dial("tcp", h.addr, cfg)
+	if err != nil {
+		// Rejected during the handshake — the strongest form of the same result.
+		return
+	}
+	defer func() { _ = c.Close() }()
+	if resp, _ := rawExchange(t, c); resp != "" {
+		t.Errorf("server answered %s: %q", peer, resp)
+	}
+}
+
 // rawExchange writes a minimal HTTP/1.1 request over an already-connected conn
 // and returns whatever came back before the server closed.
 //
@@ -276,13 +317,13 @@ func TestWrapListener_MTLSOnWraps(t *testing.T) {
 	if !srv.MTLSEnabled() {
 		t.Error("MTLSEnabled() = false with a source configured")
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
 
-	if got := srv.WrapListener(ln); got == ln {
+	if got := srv.WrapListener(ln); got == net.Listener(ln) {
 		t.Error("WrapListener with mTLS on returned the bare listener — plaintext would be served on the mTLS port")
 	}
 }
@@ -318,46 +359,63 @@ func TestTransparentInboundMTLS_StrictRejectsPlaintext(t *testing.T) {
 	}
 }
 
-// TestTransparentInboundMTLS_StrictRejectsPeerWithoutCert covers the other
-// transport rejection: TLS alone is not enough, the peer must present a cert the
-// trust bundle validates. This is what makes the inbound port unusable to a pod
-// outside the trust domain.
+// TestTransparentInboundMTLS_StrictRejectsPeerWithoutCert covers the narrowest
+// of the transport rejections: TLS alone is not enough, the peer must present a
+// certificate at all. ServerConfig sets RequireAndVerifyClientCert, and this is
+// the assertion that the transparent path inherits it.
 func TestTransparentInboundMTLS_StrictRejectsPeerWithoutCert(t *testing.T) {
 	h := startMTLSInbound(t, true, allowAllAuth(), "10.244.0.5", unreachableApp(t))
-
-	// Establish that the port terminates TLS at all before drawing any conclusion
-	// from a failed handshake below. Without this, a listener serving plaintext —
-	// the exact regression TestWrapListener_MTLSOnWraps guards — would also fail
-	// the no-cert dial, and this test would pass for the opposite reason.
-	valid, err := authtls.ClientConfig(h.src)
-	if err != nil {
-		t.Fatalf("ClientConfig: %v", err)
-	}
-	probe, err := tls.Dial("tcp", h.addr, valid)
-	if err != nil {
-		t.Fatalf("a valid SVID could not complete a handshake: %v", err)
-	}
-	_ = probe.Close()
+	h.requireTLSTerminates(t)
 
 	// Server verification is deliberately skipped: this client's *own* missing
 	// certificate is the subject of the test.
 	//nolint:gosec // G402: test client asserts server-side client-cert enforcement
-	c, err := tls.Dial("tcp", h.addr, &tls.Config{
+	h.expectPeerRejected(t, &tls.Config{
 		InsecureSkipVerify: true,
 		MinVersion:         tls.VersionTLS13,
-	})
-	if err != nil {
-		// Rejected during the handshake — the strongest form of the same result.
-		return
-	}
-	defer func() { _ = c.Close() }()
+	}, "a peer with no client certificate")
+}
 
-	// Under TLS 1.3 the client finishes its side before the server evaluates the
-	// (absent) client certificate, so the rejection surfaces on the first read.
-	resp, _ := rawExchange(t, c)
-	if resp != "" {
-		t.Errorf("server answered a peer with no client certificate: %q", resp)
+// TestTransparentInboundMTLS_StrictRejectsForeignTrustDomain is what actually
+// makes the inbound port unusable to a workload outside the trust domain. Such a
+// workload does not arrive with no certificate — it arrives with a perfectly
+// valid one that its own CA signed.
+//
+// authtls.verifyPeerChain checks the chain against the trust bundle and nothing
+// else: no SPIFFE-ID or trust-domain comparison, because the bundle *is* the
+// policy (authbridge/CLAUDE.md, "Trust model"). That single check is therefore
+// the whole boundary, and until now nothing drove it through the assembled
+// listener. newTestSVIDSource mints a fresh CA per call, so a second source is
+// an independent trust domain by construction.
+func TestTransparentInboundMTLS_StrictRejectsForeignTrustDomain(t *testing.T) {
+	h := startMTLSInbound(t, true, allowAllAuth(), "10.244.0.5", unreachableApp(t))
+	h.requireTLSTerminates(t)
+
+	foreign := newTestSVIDSource(t, "spiffe://foreign.example/ns/other/sa/attacker")
+	foreignCert, err := foreign.Certificate()
+	if err != nil {
+		t.Fatalf("foreign Certificate: %v", err)
 	}
+
+	// Hand-built rather than authtls.ClientConfig(foreign), and GetClientCertificate
+	// rather than Certificates, because both defaults would make the *client* the
+	// one that refuses:
+	//   - ClientConfig verifies the server against the foreign bundle, which has
+	//     never seen our CA, so the handshake would fail before the server ever
+	//     evaluated the client certificate;
+	//   - the Certificates path filters candidates against the CertificateRequest's
+	//     acceptable-CA list (ServerConfig populates ClientCAs), so the client
+	//     would send an empty certificate and this would collapse into the
+	//     no-certificate test above. GetClientCertificate is returned as-is.
+	//nolint:gosec // G402: test client asserts the server's verdict on a foreign chain
+	cfg := &tls.Config{
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS13,
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return foreignCert, nil
+		},
+	}
+	h.expectPeerRejected(t, cfg, "a peer holding a certificate from a foreign trust domain")
 }
 
 // TestTransparentInboundMTLS_ValidPeerForwardsToRecoveredPort is the whole
@@ -386,9 +444,14 @@ func TestTransparentInboundMTLS_ValidPeerForwardsToRecoveredPort(t *testing.T) {
 		t.Errorf("app saw Host = %q, want %q (loopback, recovered port)", gotHost, want)
 	}
 	// REDIRECT preserves the client's source IP; it must still reach the app
-	// after the loopback hop, and TLS termination must not have erased it.
-	if gotXFF == "" {
-		t.Error("X-Forwarded-For did not survive TLS termination + the loopback hop")
+	// after the loopback hop, and TLS termination must not have erased it. The
+	// client dialed over IPv4 loopback and sent no XFF of its own, so the Director
+	// must have appended exactly that address — asserting the value rather than
+	// mere non-emptiness, because an XFF carrying the wrong address is a
+	// different bug from an absent one and only one of the two survives a
+	// non-empty check.
+	if wantXFF := "127.0.0.1"; gotXFF != wantXFF {
+		t.Errorf("app saw X-Forwarded-For = %q, want %q (client IP through TLS termination + the loopback hop)", gotXFF, wantXFF)
 	}
 	if got := h.metrics.InboundTLSAccepted.Load(); got != 1 {
 		t.Errorf("InboundTLSAccepted = %d, want 1", got)
@@ -417,8 +480,12 @@ func TestTransparentInboundMTLS_ValidPeerStillValidatesJWT(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == http.StatusOK {
-		t.Fatal("status = 200: a valid peer certificate must not substitute for request validation")
+	// Exactly 401, not merely "not 200". Anything else on this path means the
+	// request never reached the validator — a transport or forwarding failure
+	// reads as a pass under a `!= 200` check while proving nothing about whether
+	// the token was examined.
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: a valid peer certificate must not substitute for request validation", resp.StatusCode)
 	}
 }
 
