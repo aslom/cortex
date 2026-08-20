@@ -457,3 +457,63 @@ func TestE2E_PauseMode(t *testing.T) {
 		})
 	}
 }
+
+// TestE2E_ConcurrentDenyOvershootBound pins the documented "overshoot by up to
+// the in-flight count" bound. Call accounting is response-driven, so N
+// concurrent OnRequest calls with the cache at (limit-1) all evaluate before
+// any of them completes. In the worst case all N pass; enforcement resumes on
+// the next request once responses have accumulated.
+func TestE2E_ConcurrentDenyOvershootBound(t *testing.T) {
+	const limit = 10
+	const N = 8
+
+	p := New()
+	cfg, _ := json.Marshal(config{
+		RedisURL:         "mem://test",
+		MaxCalls:         limit,
+		OnExceed:         "deny",
+		RefreshInterval:  "30ms",
+		RedisUnavailable: "fail_open",
+	})
+	if err := p.Configure(cfg); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	p.store = newMemStore()
+	go p.refreshLoop(30 * time.Millisecond)
+	t.Cleanup(func() { close(p.stopCh); <-p.stopped })
+
+	// Seed the cache one call below the limit. With no OnResponseFrame calls
+	// interleaved into the burst, every concurrent OnRequest snapshots
+	// calls=limit-1 (< limit) and MUST pass — this is deterministic under
+	// the plugin's read-snapshot-then-evaluate design, no scheduling luck.
+	p.mu.Lock()
+	p.cache["sess"] = &counters{calls: limit - 1}
+	p.mu.Unlock()
+
+	var wg sync.WaitGroup
+	results := make([]pipeline.ActionType, N)
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func(i int) {
+			defer wg.Done()
+			results[i] = request(p, "sess").Type
+		}(i)
+	}
+	wg.Wait()
+
+	for i, r := range results {
+		if r != pipeline.Continue {
+			t.Fatalf("result[%d] = %v, want Continue (no response landed during burst, so every snapshot sees calls=%d < limit=%d)",
+				i, r, limit-1, limit)
+		}
+	}
+	// Simulate the responses that would have followed the in-flight requests.
+	// Once accounting catches up, the next request must deny.
+	for i := 0; i < N; i++ {
+		respond(p, "sess", 0)
+	}
+	if a := request(p, "sess"); a.Type != pipeline.Reject {
+		t.Fatalf("post-burst request: expected Reject (calls now %d > limit=%d), got %v",
+			p.cache["sess"].calls, limit, a.Type)
+	}
+}
