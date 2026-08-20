@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -341,6 +343,7 @@ func TestConfigure_Validation(t *testing.T) {
 		{"pause invalid timeout_action", `{"redis_url":"redis://localhost","max_calls":10,"on_exceed":"pause","pause_webhook":"http://x","pause_timeout_action":"maybe"}`, true},
 		{"ttl below max_duration rejected", `{"redis_url":"redis://localhost","max_duration_seconds":3600,"session_ttl_seconds":300}`, true},
 		{"ttl equal to max_duration accepted", `{"redis_url":"redis://localhost","max_duration_seconds":3600,"session_ttl_seconds":3600}`, false},
+		{"negative ttl rejected", `{"redis_url":"redis://localhost","max_tokens":100,"session_ttl_seconds":-1}`, true},
 	}
 
 	for _, tt := range tests {
@@ -932,24 +935,48 @@ func TestOnRequest_PauseWebhookPanicClearsFlight(t *testing.T) {
 	call()
 }
 
+// cancelOnRoundTripTransport cancels the supplied context synchronously
+// during RoundTrip and asserts the outbound request's own context is
+// unaffected — proving callPauseWebhook decoupled from the caller ctx
+// without depending on transport-cancellation timing.
+type cancelOnRoundTripTransport struct {
+	cancelCaller context.CancelFunc
+	reqCtxErr    chan error
+}
+
+func (t *cancelOnRoundTripTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.cancelCaller()
+	// If callPauseWebhook inherited callerCtx, req.Context() would now be
+	// cancelled synchronously (context cancellation propagates to children
+	// on the same goroutine before the next read). Capture the state the
+	// test asserts on.
+	t.reqCtxErr <- req.Context().Err()
+	body := `{"action":"approve"}`
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Request:    req,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1, ProtoMinor: 1,
+		ContentLength: int64(len(body)),
+	}, nil
+}
+
 // TestOnRequest_PauseWebhookSurvivesClientCancel proves callPauseWebhook
 // runs against a context derived from context.Background(), not the
-// caller's request ctx: even after the caller cancels, the webhook
-// handler's r.Context() stays live so the reviewer's verdict can land.
-// All synchronization is channel-based — no sleeps or timers.
+// caller's request ctx: even after the caller cancels mid-flight, the
+// outbound webhook request's ctx stays live so the reviewer's verdict
+// can land. The custom RoundTripper makes the assertion deterministic —
+// it cancels the caller ctx and reads req.Context().Err() on the same
+// goroutine, before any transport-level propagation could race.
 func TestOnRequest_PauseWebhookSurvivesClientCancel(t *testing.T) {
 	callerCtx, cancelCaller := context.WithCancel(context.Background())
-	handlerErr := make(chan error, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cancelCaller()
-		<-callerCtx.Done() // happens-before edge: cancel has propagated
-		handlerErr <- r.Context().Err()
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"action":"approve"}`))
-	}))
-	defer srv.Close()
+	reqCtxErr := make(chan error, 1)
+	rt := &cancelOnRoundTripTransport{cancelCaller: cancelCaller, reqCtxErr: reqCtxErr}
 
-	p := newPausePlugin(t, 3, srv.URL, "deny")
+	p := newPausePlugin(t, 3, "http://webhook.invalid", "deny")
+	p.httpClient = &http.Client{Transport: rt}
 	p.mu.Lock()
 	p.cache["sess"] = &counters{tokens: 0, calls: 3}
 	p.mu.Unlock()
@@ -957,8 +984,8 @@ func TestOnRequest_PauseWebhookSurvivesClientCancel(t *testing.T) {
 	done := make(chan pipeline.ActionType, 1)
 	go func() { done <- p.OnRequest(callerCtx, makePctx("sess", 0)).Type }()
 
-	if got := <-handlerErr; got != nil {
-		t.Fatalf("webhook handler ctx cancelled (%v) — callPauseWebhook must not inherit request ctx", got)
+	if got := <-reqCtxErr; got != nil {
+		t.Fatalf("webhook req ctx cancelled (%v) — callPauseWebhook must not inherit request ctx", got)
 	}
 	if got := <-done; got != pipeline.Continue {
 		t.Errorf("got %v, want Continue — approve verdict must land despite caller cancel", got)

@@ -120,6 +120,13 @@ func (p *SessionBudget) Configure(raw json.RawMessage) error {
 	if p.cfg.MaxTokens <= 0 && p.cfg.MaxCalls <= 0 && p.cfg.MaxDurationSeconds <= 0 {
 		return fmt.Errorf("session-budget: at least one limit (max_tokens, max_calls, max_duration_seconds) must be > 0")
 	}
+	if p.cfg.SessionTTLSeconds < 0 {
+		return fmt.Errorf("session-budget: session_ttl_seconds must be > 0 (got %d)", p.cfg.SessionTTLSeconds)
+	}
+	if p.cfg.SessionTTLSeconds == 0 {
+		// Explicit 0 (or unset via struct-marshal) — restore default.
+		p.cfg.SessionTTLSeconds = 7200
+	}
 	if p.cfg.MaxDurationSeconds > 0 && int64(p.cfg.SessionTTLSeconds) < p.cfg.MaxDurationSeconds {
 		return fmt.Errorf("session-budget: session_ttl_seconds (%d) must be >= max_duration_seconds (%d); Redis would expire counters mid-session and reopen enforcement gaps",
 			p.cfg.SessionTTLSeconds, p.cfg.MaxDurationSeconds)

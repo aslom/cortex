@@ -46,7 +46,7 @@ pipeline:
 |-------|---------|-------------|
 | `redis_url` | — (required) | Redis/Valkey URL |
 | `max_tokens` | 0 | Token ceiling (0 = no limit) |
-| `max_calls` | 0 | LLM/inference call cap. Counts calls surfaced by `inference-parser`; MCP, A2A, and other outbound traffic do NOT count toward the counter. 0 = no limit. **The limit check runs on every outbound request**, though — once the LLM counter crosses `max_calls`, the next outbound of any kind (MCP tool call, A2A message, etc.) is the one that gets the 403. |
+| `max_calls` | 0 | LLM/inference call cap (from `inference-parser`); MCP, A2A, and other outbound traffic do not count. 0 = no limit. See note below on enforcement scope. |
 | `max_duration_seconds` | 0 | Session lifetime cap (0 = no limit) |
 | `on_exceed` | `deny` | `deny` (403), `observe` (log only), or `pause` (webhook) |
 | `pause_webhook` | — | URL to POST on breach (required when `on_exceed=pause`) |
@@ -58,6 +58,12 @@ pipeline:
 | `redis_unavailable` | `fail_open` | Only `fail_open` supported today |
 
 At least one of `max_tokens`, `max_calls`, `max_duration_seconds` must be > 0.
+
+**`max_calls` enforcement scope.** Only inference calls surfaced by
+`inference-parser` increment the counter, but the limit check runs on
+every outbound request. Once the LLM counter crosses `max_calls`, the
+next outbound of any kind (MCP tool call, A2A message, etc.) is the one
+that gets the 403.
 
 **Pipeline position:** must appear **before** `inference-parser` on the outbound
 pipeline. Both must be present for token counting (inference-parser supplies the
