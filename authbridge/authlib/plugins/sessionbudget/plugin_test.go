@@ -953,12 +953,13 @@ func (t *cancelOnRoundTripTransport) RoundTrip(req *http.Request) (*http.Respons
 	t.reqCtxErr <- req.Context().Err()
 	body := `{"action":"approve"}`
 	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Request:    req,
-		Proto:      "HTTP/1.1",
-		ProtoMajor: 1, ProtoMinor: 1,
+		StatusCode:    http.StatusOK,
+		Body:          io.NopCloser(strings.NewReader(body)),
+		Header:        http.Header{"Content-Type": []string{"application/json"}},
+		Request:       req,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
 		ContentLength: int64(len(body)),
 	}, nil
 }
