@@ -185,6 +185,7 @@ request can wait for a real approval decision.
 | Redis fails mid-session | Local cache keeps enforcing; writes dropped |
 | Pod restart, `pause` | Request #1 hydrates from Redis synchronously |
 | Pod restart, `deny` / `observe` | Request #1 skips (`cold_cache`); see below |
+| Hydrate timeout in `pause` (Redis p99 > 200ms) | Logs WARN, falls through to `cold_cache`; one request per pod may pass before counters populate |
 | Webhook unreachable | Falls back to `pause_timeout_action` |
 
 ### Cold-cache behavior

@@ -552,7 +552,7 @@ func (p *SessionBudget) hydrateCache(_ context.Context, sessionID string) bool {
 		defer cancel()
 		fields, err := p.store.HashGet(lookupCtx, p.redisKey(sessionID))
 		if err != nil {
-			p.log.Debug("hydrate: redis lookup failed", "session", sessionID, "err", err)
+			p.log.Warn("hydrate: redis lookup failed", "session", sessionID, "err", err)
 			return false, nil
 		}
 		if len(fields) == 0 {
