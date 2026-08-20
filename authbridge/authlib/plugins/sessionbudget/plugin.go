@@ -245,7 +245,7 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			// One retry closes that window without unbounded looping —
 			// singleflight ensures both hydrate calls share one Redis read.
 			for attempt := 0; attempt < 2; attempt++ {
-				if !p.hydrateCache(ctx, sessionID) {
+				if !p.hydrateCache(sessionID) {
 					pctx.Skip("cold_cache")
 					return pipeline.Action{Type: pipeline.Continue}
 				}
@@ -330,7 +330,7 @@ func (p *SessionBudget) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 				}
 				p.mu.Unlock()
 			}()
-			approved = p.callPauseWebhook(ctx, sessionID, reason, &snap)
+			approved = p.callPauseWebhook(sessionID, reason, &snap)
 			if approved {
 				pctx.Allow("pause_approved")
 				return pipeline.Action{Type: pipeline.Continue}
@@ -421,7 +421,7 @@ type pauseResponse struct {
 	Action string `json:"action"`
 }
 
-func (p *SessionBudget) callPauseWebhook(_ context.Context, sessionID, reason string, snap *counters) bool {
+func (p *SessionBudget) callPauseWebhook(sessionID, reason string, snap *counters) bool {
 	// Decouple from the inbound request ctx so a client disconnect can't
 	// cancel the webhook out from under waiting followers.
 	ctx, cancel := context.WithTimeout(context.Background(), p.pauseTimeout)
@@ -542,7 +542,7 @@ func (p *SessionBudget) refreshLoop(interval time.Duration) {
 
 // hydrateCache pulls one session's counters from Redis on cold-cache miss.
 // Concurrent callers for the same session share one Redis lookup via singleflight.
-func (p *SessionBudget) hydrateCache(_ context.Context, sessionID string) bool {
+func (p *SessionBudget) hydrateCache(sessionID string) bool {
 	v, _, _ := p.hydrateG.Do(sessionID, func() (any, error) {
 		// Decouple from the caller's ctx: singleflight shares one flight
 		// across concurrent callers, so a leader's client disconnect would
