@@ -860,56 +860,6 @@ func allowBodyResponse() *extprocv3.ProcessingResponse {
 	}
 }
 
-func replaceTokenBodyResponse(token string) *extprocv3.ProcessingResponse {
-	return &extprocv3.ProcessingResponse{
-		Response: &extprocv3.ProcessingResponse_RequestBody{
-			RequestBody: &extprocv3.BodyResponse{
-				Response: &extprocv3.CommonResponse{
-					HeaderMutation: &extprocv3.HeaderMutation{
-						SetHeaders: []*corev3.HeaderValueOption{
-							{
-								Header: &corev3.HeaderValue{
-									Key:      "authorization",
-									RawValue: []byte("Bearer " + token),
-								},
-							},
-						},
-						// Strip the internal direction header before forwarding,
-						// matching allowResponse/allowBodyResponse — otherwise
-						// Envoy leaks x-authbridge-direction to the agent/target.
-						RemoveHeaders: []string{"x-authbridge-direction"},
-					},
-				},
-			},
-		},
-	}
-}
-
-func replaceTokenResponse(token string) *extprocv3.ProcessingResponse {
-	return &extprocv3.ProcessingResponse{
-		Response: &extprocv3.ProcessingResponse_RequestHeaders{
-			RequestHeaders: &extprocv3.HeadersResponse{
-				Response: &extprocv3.CommonResponse{
-					HeaderMutation: &extprocv3.HeaderMutation{
-						SetHeaders: []*corev3.HeaderValueOption{
-							{
-								Header: &corev3.HeaderValue{
-									Key:      "authorization",
-									RawValue: []byte("Bearer " + token),
-								},
-							},
-						},
-						// Strip the internal direction header before forwarding,
-						// matching allowResponse/allowBodyResponse — otherwise
-						// Envoy leaks x-authbridge-direction to the agent/target.
-						RemoveHeaders: []string{"x-authbridge-direction"},
-					},
-				},
-			},
-		},
-	}
-}
-
 // rejectFromActionForRequest is the MCP-aware sibling of rejectFromAction.
 // When pctx carries an MCP JSON-RPC request shape (Method + non-nil RPCID),
 // the response is an HTTP 200 carrying a JSON-RPC 2.0 error frame so the
