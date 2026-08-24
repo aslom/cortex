@@ -11,11 +11,11 @@ import (
 )
 
 // hostCapture records the pctx.Host the listener built, so a test can assert
-// what plugins actually see. Outbound, Host is what SessionEvent.Host and
-// telemetry consumers (e.g. the lineage plugin's peer-host fact) derive from.
-// Inbound, Host also feeds enforcement (ibac host-bypass, opa policy input,
-// per-host JWT audiences) — which is exactly why the listener must NOT
-// populate it from the caller-controlled authority; see authorityOf.
+// what plugins actually see. Outbound, Host is what SessionEvent.Host and any
+// host-derived telemetry consumers derive from. Inbound, Host also feeds
+// enforcement (ibac host-bypass, opa policy input, per-host JWT audiences) —
+// which is exactly why the listener must NOT populate it from the
+// caller-controlled authority; see authorityOf.
 type hostCapture struct {
 	host string
 }

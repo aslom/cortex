@@ -13,13 +13,12 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins/plugintesting"
 )
 
-// traceRewriterPlugin mimics a pipeline plugin's header writes — the lineage
-// plugin's tracestate stamp today (wire contract v1.5), a traceparent rewrite
-// to prove the mechanism is not stamp-specific, and arbitrary set/delete to
-// prove it is not trace-specific either (static-inject's x-api-key is the
-// upstream case). Used to assert the listener forwards plugin header writes
-// as mutations: before withHeaderMutation everything but Authorization died
-// in pctx.Headers (inert on the wire — the phantom-root forests).
+// traceRewriterPlugin mimics a pipeline plugin's header writes — a tracestate
+// stamp (wire contract v1.5), a traceparent rewrite to prove the mechanism is
+// not stamp-specific, and arbitrary set/delete to prove it is not trace-specific
+// either (static-inject's x-api-key is the upstream case). Used to assert the
+// listener forwards plugin header writes as mutations: before withHeaderMutation
+// everything but Authorization died in pctx.Headers (inert on the wire).
 type traceRewriterPlugin struct {
 	traceparent string
 	tracestate  string
@@ -86,7 +85,7 @@ func mutationHeaderValue(hm *extprocv3.HeaderMutation, key string) string {
 
 // TestExtProc_Outbound_TraceRewriteReachesWire: a plugin rewrite of the outbound
 // traceparent/tracestate must be emitted as SetHeaders on the headers-phase
-// response — this is what puts the lineage stamp on the wire.
+// response — this is what puts the plugin's stamp on the wire.
 func TestExtProc_Outbound_TraceRewriteReachesWire(t *testing.T) {
 	const newTP = "00-4bf92f3577b34da6a3ce929d0e0e4736-aaaaaaaaaaaaaaaa-01"
 	const newTS = "dg-parent=aaaaaaaaaaaaaaaa"
