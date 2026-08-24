@@ -1,6 +1,6 @@
 module github.com/rossoctl/cortex/authbridge/cmd/authbridge-proxy
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/rossoctl/cortex/authbridge/authlib v0.0.0

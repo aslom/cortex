@@ -1,6 +1,6 @@
 module github.com/rossoctl/cortex/authbridge/cmd/authbridge-envoy
 
-go 1.26.4
+go 1.26.5
 
 replace (
 	github.com/rossoctl/cortex/authbridge/authlib => ../../authlib

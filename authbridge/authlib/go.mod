@@ -1,6 +1,6 @@
 module github.com/rossoctl/cortex/authbridge/authlib
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/contextforge-org/cpex/go/cpex v0.2.2
