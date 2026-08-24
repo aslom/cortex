@@ -107,12 +107,24 @@ In **`team1`**: `authbridge-config`, `authbridge-runtime-config`, `spiffe-helper
 `envoy-config`. No extra Secrets or ConfigMaps are required for this demo (outbound
 passthrough; inbound JWT uses issuer/signature checks).
 
-**`keycloak-admin-secret` is not in `team1`.** Operator 0.2+ keeps it in
-**`rossoctl-system`** for client registration. `NotFound` in `team1` is expected:
+**No `keycloak-admin-secret` is required — in `team1` or `rossoctl-system`.** On the
+current operator (v0.7.0) the operator registers Keycloak clients using its own **SPIFFE
+workload identity** (federated into Keycloak by the `rossoctl-operator-client-bootstrap`
+post-install job in the `keycloak` namespace), not an admin username/password Secret.
+A `NotFound` for `keycloak-admin-secret` in **either** namespace is expected. Confirm
+registration by the per-workload client credentials the operator writes instead:
 
 ```bash
-kubectl get secret keycloak-admin-secret -n rossoctl-system
+# One Secret per registered workload:
+kubectl get secret -n team1 | grep rossoctl-keycloak-client-credentials
+# ...and/or watch the operator apply registrations:
+kubectl logs -n rossoctl-system deployment/rossoctl-controller-manager \
+  | grep "client registration applied" | tail
 ```
+
+> Older docs (operator 0.2+) referenced a `keycloak-admin-secret` in `rossoctl-system`.
+> The Helm install no longer creates or uses it; the admin credentials the bootstrap job
+> needs are read from `keycloak-initial-admin` in the `keycloak` namespace.
 
 UI login: secret **`rossoctl-test-user`** in namespace **`keycloak`** (`admin` + password).
 Realm **`rossoctl`** is created by the platform installer.
@@ -567,15 +579,19 @@ kubectl delete pod test-client -n team1 --ignore-not-found
 
 **Symptom:** `{"error":"invalid_client","error_description":"Invalid client or Invalid client credentials"}`
 
-**Cause:** The `keycloak-admin-secret` Secret or `authbridge-config` ConfigMap was missing
-or incorrect at startup, so the operator's `ClientRegistrationReconciler` couldn't reach
-Keycloak to register the client.
+**Cause:** The operator's `ClientRegistrationReconciler` couldn't complete registration —
+usually because the `authbridge-config` ConfigMap had the wrong realm, or the operator's
+SPIFFE identity was not yet federated into Keycloak (the `rossoctl-operator-client-bootstrap`
+job). On v0.7.0 the operator authenticates via its SPIFFE workload identity, so there is
+**no** `keycloak-admin-secret` to check.
 
 **Fix:**
 
 ```bash
-# 1. Verify the keycloak-admin-secret exists (operator 0.2+ keeps it in rossoctl-system)
-kubectl get secret keycloak-admin-secret -n rossoctl-system
+# 1. Confirm the operator registered a client for the workload
+kubectl get secret -n team1 | grep rossoctl-keycloak-client-credentials
+kubectl logs -n rossoctl-system deployment/rossoctl-controller-manager \
+  | grep -iE "clientregistration|client registration applied" | tail
 
 # 2. Verify the authbridge-config ConfigMap has the correct realm
 kubectl get configmap authbridge-config -n team1 -o jsonpath='{.data.KEYCLOAK_REALM}'
