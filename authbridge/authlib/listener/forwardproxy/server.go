@@ -330,7 +330,9 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 	// x-api-key). Content-Length / Content-Encoding are managed by the
 	// body-rewrite block below and the transport, so leave them untouched.
 	// Mirrors reverseproxy's forwarded-request header sync.
-	skip := func(k string) bool { return k == "Content-Length" || k == "Content-Encoding" }
+	skip := func(k string) bool {
+		return strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding")
+	}
 	for k := range r.Header {
 		if skip(k) {
 			continue

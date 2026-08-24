@@ -273,7 +273,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Authorization used to be forwarded, silently dropping any other injected header
 	// (e.g. static-inject's x-api-key). Content-Length / Content-Encoding are managed
 	// by the body-rewrite block above and the transport, so leave them untouched.
-	skip := func(k string) bool { return k == "Content-Length" || k == "Content-Encoding" }
+	skip := func(k string) bool {
+		return strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding")
+	}
 	for k := range r.Header {
 		if skip(k) {
 			continue

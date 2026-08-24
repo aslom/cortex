@@ -699,7 +699,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 func withHeaderMutation(resp *extprocv3.ProcessingResponse, pctx *pipeline.Context, orig http.Header) *extprocv3.ProcessingResponse {
 	skip := func(k string) bool {
 		return strings.HasPrefix(k, ":") ||
-			k == "Content-Length" || k == "Content-Encoding"
+			strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding")
 	}
 	var set []*corev3.HeaderValueOption
 	var del []string

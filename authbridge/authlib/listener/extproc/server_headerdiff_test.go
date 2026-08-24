@@ -24,7 +24,8 @@ type traceRewriterPlugin struct {
 	tracestate  string
 	set         map[string]string
 	del         []string
-	setNil      []string // pctx.Headers[k] = nil — a delete spelled without Del
+	setNil      []string          // pctx.Headers[k] = nil — a delete spelled without Del
+	setRaw      map[string]string // direct map assignment, key stored verbatim (no canonicalisation)
 	readsBody   bool
 }
 
@@ -47,6 +48,9 @@ func (p *traceRewriterPlugin) OnRequest(_ context.Context, pctx *pipeline.Contex
 	}
 	for _, k := range p.setNil {
 		pctx.Headers[http.CanonicalHeaderKey(k)] = nil
+	}
+	for k, v := range p.setRaw {
+		pctx.Headers[k] = []string{v} // verbatim key — bypasses http.Header canonicalisation
 	}
 	return pipeline.Action{Type: pipeline.Continue}
 }
@@ -287,6 +291,45 @@ func TestExtProc_Outbound_PseudoHeadersNeverEmitted(t *testing.T) {
 		}
 		if mutationRemovesHeader(rh.Response.HeaderMutation, pseudo) {
 			t.Errorf("pseudo-header %s emitted in RemoveHeaders", pseudo)
+		}
+	}
+}
+
+// TestExtProc_Outbound_LowercaseContentHeaderStillSkipped: the transport-header
+// exclusion must be case-insensitive. Content-Length / Content-Encoding are
+// owned by the body-rewrite block and the transport, so the sync must never
+// forward them regardless of key casing. Every production caller reaches
+// pctx.Headers through http.Header, which canonicalises to "Content-Encoding",
+// so a plugin writing the key verbatim by raw map assignment is the only way a
+// non-canonical spelling arrives — exactly the case an exact-string compare
+// would miss and strings.EqualFold catches.
+func TestExtProc_Outbound_LowercaseContentHeaderStillSkipped(t *testing.T) {
+	srv := traceRewriterServer(t, &traceRewriterPlugin{
+		setRaw: map[string]string{"content-encoding": "gzip"},
+	})
+
+	stream := &mockStream{
+		ctx: context.Background(),
+		requests: []*extprocv3.ProcessingRequest{
+			outboundRequest(makeHeaders(
+				":authority", "fanin-echo",
+				":path", "/rpc",
+			)),
+		},
+	}
+	_ = srv.Process(stream)
+
+	rh := stream.responses[0].GetRequestHeaders()
+	if rh == nil {
+		t.Fatal("expected HeadersResponse")
+	}
+	if rh.Response != nil && rh.Response.HeaderMutation != nil {
+		hm := rh.Response.HeaderMutation
+		if v := mutationHeaderValue(hm, "content-encoding"); v != "" {
+			t.Errorf("lowercase content-encoding emitted as %q — transport header leaked past the skip filter", v)
+		}
+		if mutationRemovesHeader(hm, "content-encoding") {
+			t.Error("lowercase content-encoding emitted in RemoveHeaders — transport header should be left untouched")
 		}
 	}
 }
