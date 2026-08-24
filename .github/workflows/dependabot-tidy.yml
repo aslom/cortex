@@ -10,14 +10,19 @@ name: Dependabot go mod tidy
 on:
   pull_request:
     paths:
-      - "authbridge/authlib/go.mod"
-      - "authbridge/authlib/go.sum"
-      - "authbridge/cmd/*/go.mod"
-      - "authbridge/cmd/*/go.sum"
+      - "authbridge/**/go.mod"
+      - "authbridge/**/go.sum"
 
 permissions:
   contents: write
   pull-requests: write
+
+# A Dependabot force-push (rebase) landing while a tidy is in flight would
+# otherwise produce two jobs racing to push the same ref; the loser fails
+# non-fast-forward. Cancel the older run — its tidy is already superseded.
+concurrency:
+  group: dependabot-tidy-${{ github.head_ref }}
+  cancel-in-progress: true
 
 jobs:
   tidy:
@@ -39,17 +44,12 @@ jobs:
       - name: Run go mod tidy in every module
         run: |
           set -euo pipefail
-          for mod in \
-            authbridge/authlib \
-            authbridge/cmd/authbridge-proxy \
-            authbridge/cmd/authbridge-envoy \
-            authbridge/cmd/abctl; do
-            if [ -f "$mod/go.mod" ]; then
-              echo "::group::go mod tidy in $mod"
-              (cd "$mod" && go mod tidy)
-              echo "::endgroup::"
-            fi
-          done
+          while IFS= read -r -d '' go_mod; do
+            mod=$(dirname "$go_mod")
+            echo "::group::go mod tidy in $mod"
+            (cd "$mod" && go mod tidy)
+            echo "::endgroup::"
+          done < <(find authbridge -name go.mod -not -path '*/demos/*' -print0 | sort -z)
 
       - name: Commit and push if changed
         id: commit
