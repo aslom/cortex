@@ -8,7 +8,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gobwas/glob v0.2.3
 	github.com/lestrrat-go/jwx/v2 v2.1.7
-	github.com/maximhq/bifrost/core v1.7.0
+	github.com/maximhq/bifrost/core v1.7.13
 	github.com/open-policy-agent/opa v1.19.1
 	github.com/rossoctl/context-guru v0.1.0
 	github.com/spiffe/go-spiffe/v2 v2.8.1
@@ -41,7 +41,7 @@ require (
 	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/buger/jsonparser v1.1.2 // indirect
+	github.com/buger/jsonparser v1.2.0 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.15.1 // indirect
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
