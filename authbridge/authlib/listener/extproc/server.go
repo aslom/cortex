@@ -715,14 +715,26 @@ func withHeaderMutation(resp *extprocv3.ProcessingResponse, pctx *pipeline.Conte
 			continue
 		}
 		// Wire header names are lowercase; pctx.Headers keys were
-		// canonicalised by http.Header.Set in headerMapToHTTP — which also
-		// collapses duplicate wire entries to their last value, so a header
-		// a plugin mutates is emitted as one value even if it arrived as
-		// several. Multi-value join uses ",": correct per RFC 9110 for every
-		// header a plugin realistically rewrites, and known-wrong only for
-		// Cookie (whose separator is "; ") — no plugin rewrites Cookie
-		// today, and one that does must split this out rather than discover
-		// it here.
+		// canonicalised by headerMapToHTTP. That helper uses http.Header.Set,
+		// not Add, so a header that arrived with several wire entries is
+		// already collapsed to its last value in pctx.Headers — a lossiness
+		// bug one layer down, not a property to rely on here. Before this PR
+		// the collapse had no wire-facing consequence (mutations were never
+		// emitted); now a mutated header is emitted as a single SetHeaders,
+		// which overwrites every wire entry, so a multi-valued header a plugin
+		// touches loses all but the last. Reachable, not theoretical: cpex's
+		// applyExtensionChanges (plugins/cpex/manager_cpex.go:492) does
+		// pctx.Headers.Set(k, v) for arbitrary CPEX-supplied keys, so a policy
+		// naming a repeated header (X-Forwarded-For in a proxy chain) gets
+		// here. The one-line root fix is Add-not-Set in headerMapToHTTP, which
+		// would make pctx.Headers faithful to the wire and let the join below
+		// produce the full value — a follow-up, not part of this header-
+		// propagation PR.
+		//
+		// Multi-value join uses ",": correct per RFC 9110 for every header a
+		// plugin realistically rewrites, and known-wrong only for Cookie
+		// (whose separator is "; ") — no plugin rewrites Cookie today, and one
+		// that does must split this out rather than discover it here.
 		set = append(set, &corev3.HeaderValueOption{
 			Header: &corev3.HeaderValue{Key: strings.ToLower(k), RawValue: []byte(strings.Join(vv, ","))},
 		})
