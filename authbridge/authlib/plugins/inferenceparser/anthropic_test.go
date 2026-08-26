@@ -112,6 +112,11 @@ func TestInferenceParser_AnthropicMessages_NonStreamingResponse(t *testing.T) {
 		t.Errorf("tokens = prompt %d / completion %d / total %d, want 27/8/35",
 			ext.PromptTokens, ext.CompletionTokens, ext.TotalTokens)
 	}
+	// The cached share of the prompt is recorded separately: 2 read, no writes.
+	if ext.CacheReadTokens != 2 || ext.CacheWriteTokens != 0 {
+		t.Errorf("cache = write %d / read %d, want 0/2",
+			ext.CacheWriteTokens, ext.CacheReadTokens)
+	}
 }
 
 func TestInferenceParser_AnthropicMessages_StreamFoldsEvents(t *testing.T) {
@@ -193,6 +198,152 @@ func TestInferenceParser_AnthropicMessages_StreamBetaPathUsage(t *testing.T) {
 	}
 	if ext.FinishReason != "end_turn" {
 		t.Errorf("FinishReason = %q, want end_turn", ext.FinishReason)
+	}
+	// The same event carries how the cached 33,763 split between writes and
+	// reads. A write bills 1.25x base and a read 0.1x, so collapsing both into
+	// PromptTokens leaves a 12.5x spread invisible: this turn cost roughly
+	// eleven times what the same prompt costs once the entry is warm.
+	if ext.CacheWriteTokens != 3755 || ext.CacheReadTokens != 30008 {
+		t.Errorf("cache = write %d / read %d, want 3755/30008",
+			ext.CacheWriteTokens, ext.CacheReadTokens)
+	}
+}
+
+// TestInferenceParser_AnthropicMessages_StreamToolUse covers a streamed tool
+// call. The pieces arrive across three event types — id and name on
+// content_block_start, arguments as input_json_delta fragments that are only
+// valid JSON once concatenated — so no single frame carries the call. Before
+// this was folded in, a streaming turn recorded finishReason "tool_use" with an
+// empty toolCalls list, while the equivalent non-streaming response recorded
+// the call in full.
+func TestInferenceParser_AnthropicMessages_StreamToolUse(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{Path: "/v1/messages"}
+	pctx.Extensions.Inference = &pipeline.InferenceExtension{Model: "claude-haiku-4-5", Stream: true, IsAction: true}
+
+	frames := [][]byte{
+		[]byte(`{"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":1}}}`),
+		[]byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Checking."}}`),
+		[]byte(`{"type":"content_block_stop","index":0}`),
+		[]byte(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}}`),
+		[]byte(`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_pa"}}`),
+		[]byte(`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"th\":\"/etc/hosts\"}"}}`),
+		[]byte(`{"type":"content_block_stop","index":1}`),
+		[]byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":40}}`),
+		[]byte(`{"type":"message_stop"}`),
+	}
+	for _, f := range frames {
+		p.OnResponseFrame(context.Background(), pctx, f, false)
+	}
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	ext := pctx.Extensions.Inference
+	if len(ext.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %+v, want one call", ext.ToolCalls)
+	}
+	tc := ext.ToolCalls[0]
+	if tc.ID != "toolu_1" || tc.Name != "Read" {
+		t.Errorf("tool call id/name = %q/%q, want toolu_1/Read", tc.ID, tc.Name)
+	}
+	// The two partial_json fragments concatenate into the complete arguments.
+	if tc.Arguments != `{"file_path":"/etc/hosts"}` {
+		t.Errorf("Arguments = %q, want {\"file_path\":\"/etc/hosts\"}", tc.Arguments)
+	}
+	// The text block is unaffected — only text_delta feeds the completion.
+	if ext.Completion != "Checking." {
+		t.Errorf("Completion = %q, want \"Checking.\"", ext.Completion)
+	}
+	if ext.FinishReason != "tool_use" {
+		t.Errorf("FinishReason = %q, want tool_use", ext.FinishReason)
+	}
+}
+
+// TestInferenceParser_AnthropicMessages_StreamToolUseInterleaved proves the
+// fragments are routed by block index rather than by arrival order. The two
+// calls' deltas alternate here, which is the shape that would silently
+// concatenate one call's arguments into the other if index were ignored.
+func TestInferenceParser_AnthropicMessages_StreamToolUseInterleaved(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{Path: "/v1/messages"}
+	pctx.Extensions.Inference = &pipeline.InferenceExtension{Model: "claude-haiku-4-5", Stream: true, IsAction: true}
+
+	frames := [][]byte{
+		[]byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"Bash","input":{}}}`),
+		[]byte(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_b","name":"Grep","input":{}}}`),
+		[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":"}}`),
+		[]byte(`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"pattern\":"}}`),
+		[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"ls\"}"}}`),
+		[]byte(`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"TODO\"}"}}`),
+		[]byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":60}}`),
+	}
+	for _, f := range frames {
+		p.OnResponseFrame(context.Background(), pctx, f, false)
+	}
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	ext := pctx.Extensions.Inference
+	if len(ext.ToolCalls) != 2 {
+		t.Fatalf("ToolCalls = %+v, want two calls", ext.ToolCalls)
+	}
+	// Order follows the opening frames, not the delta ordering.
+	if ext.ToolCalls[0].Name != "Bash" || ext.ToolCalls[1].Name != "Grep" {
+		t.Errorf("names = %q/%q, want Bash/Grep", ext.ToolCalls[0].Name, ext.ToolCalls[1].Name)
+	}
+	if ext.ToolCalls[0].Arguments != `{"cmd":"ls"}` {
+		t.Errorf("Bash Arguments = %q, want {\"cmd\":\"ls\"}", ext.ToolCalls[0].Arguments)
+	}
+	if ext.ToolCalls[1].Arguments != `{"pattern":"TODO"}` {
+		t.Errorf("Grep Arguments = %q, want {\"pattern\":\"TODO\"}", ext.ToolCalls[1].Arguments)
+	}
+}
+
+// TestInferenceParser_AnthropicMessages_RequestContentBytes covers the sizes of
+// messages the text flattening discards. In an agent loop those are most of the
+// conversation: a tool_result block flattens to "" and reads as free, while the
+// model was billed for every byte of it.
+func TestInferenceParser_AnthropicMessages_RequestContentBytes(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{
+		Path: "/v1/messages",
+		Body: []byte(`{
+			"model": "claude-haiku-4-5",
+			"max_tokens": 64,
+			"system": [{"type": "text", "text": "You are Claude Code."}],
+			"messages": [
+				{"role": "user", "content": "read /etc/hosts"},
+				{"role": "assistant", "content": [
+					{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "/etc/hosts"}}
+				]},
+				{"role": "user", "content": [
+					{"type": "tool_result", "tool_use_id": "toolu_1", "content": "127.0.0.1 localhost"}
+				]}
+			]
+		}`),
+	}
+	p.OnRequest(context.Background(), pctx)
+
+	ext := pctx.Extensions.Inference
+	if ext == nil || len(ext.Messages) != 4 {
+		t.Fatalf("Messages = %+v, want [system, user, assistant, user]", ext)
+	}
+	for i, m := range ext.Messages {
+		if m.ContentBytes <= 0 {
+			t.Errorf("Messages[%d] (%s) ContentBytes = %d, want > 0", i, m.Role, m.ContentBytes)
+		}
+	}
+	// The two block-array messages carry no text, so Content is empty while
+	// ContentBytes still reports what the request spent on them.
+	for _, i := range []int{2, 3} {
+		if ext.Messages[i].Content != "" {
+			t.Errorf("Messages[%d] Content = %q, want empty (no text blocks)", i, ext.Messages[i].Content)
+		}
+	}
+	// The tool_result payload is the larger of the two — a real one is a whole
+	// file, which is exactly the cost this field exists to make visible.
+	if ext.Messages[3].ContentBytes <= ext.Messages[1].ContentBytes {
+		t.Errorf("tool_result ContentBytes (%d) should exceed the plain user turn (%d)",
+			ext.Messages[3].ContentBytes, ext.Messages[1].ContentBytes)
 	}
 }
 

@@ -531,6 +531,44 @@ func TestInferenceParser_MultipartContent(t *testing.T) {
 	}
 }
 
+// TestInferenceParser_ContentBytes covers the OpenAI dialect's own
+// ContentBytes accounting — a separate UnmarshalJSON from the Anthropic path.
+// A tool-result message whose content is an array flattens to text only for
+// the text parts; the dropped parts (images, tool payloads) still cost prompt
+// tokens, and ContentBytes is what they contribute.
+func TestInferenceParser_ContentBytes(t *testing.T) {
+	p := NewInferenceParser()
+	body := `{
+		"model": "gpt-4",
+		"messages": [
+			{"role": "user", "content": "hi"},
+			{"role": "tool", "content": [{"type":"image_url","image_url":{"url":"http://x/very/long/path"}}]},
+			{"role": "assistant", "content": null, "tool_calls": []}
+		]
+	}`
+	pctx := &pipeline.Context{Path: "/v1/chat/completions", Body: []byte(body)}
+	p.OnRequest(context.Background(), pctx)
+
+	msgs := pctx.Extensions.Inference.Messages
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+	// `"hi"` on the wire — the quotes are part of the JSON value.
+	if msgs[0].ContentBytes != 4 {
+		t.Errorf("msgs[0].ContentBytes = %d, want 4", msgs[0].ContentBytes)
+	}
+	// No text parts, so Content is empty — but the message is far from free.
+	if msgs[1].Content != "" || msgs[1].ContentBytes <= msgs[0].ContentBytes {
+		t.Errorf("msgs[1] = %q / %d bytes, want empty text and > %d bytes",
+			msgs[1].Content, msgs[1].ContentBytes, msgs[0].ContentBytes)
+	}
+	// content: null has no content to size — reporting the 4 bytes of the
+	// literal would make an empty assistant turn look like a small payload.
+	if msgs[2].ContentBytes != 0 {
+		t.Errorf("msgs[2].ContentBytes = %d, want 0 for null content", msgs[2].ContentBytes)
+	}
+}
+
 func TestInferenceParser_NullContent(t *testing.T) {
 	// Assistant messages that only carry tool_calls have content: null.
 	p := NewInferenceParser()
