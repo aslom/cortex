@@ -253,3 +253,125 @@ func TestConcurrentOnResponse(t *testing.T) {
 		t.Errorf("TotalSpend = %v, want ~0.50", got)
 	}
 }
+
+// --- streaming (SSE usage) tests ---
+
+// configurePriced builds a plugin with per-token streaming prices set.
+func configurePriced(t *testing.T, maxBudget, inPer, outPer float64) *BudgetTrack {
+	t.Helper()
+	p := New()
+	raw, _ := json.Marshal(budgetTrackConfig{
+		SpendFile:          filepath.Join(t.TempDir(), "spend.json"),
+		MaxBudget:          maxBudget,
+		InputCostPerToken:  inPer,
+		OutputCostPerToken: outPer,
+	})
+	if err := p.Configure(raw); err != nil {
+		t.Fatalf("Configure() error = %v", err)
+	}
+	return p
+}
+
+// Anthropic-style streamed /v1/messages frames: input in message_start,
+// cumulative output in message_delta, both in message_stop.
+const (
+	frameMessageStart = "event: message_start\n" +
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":1}}}` + "\n"
+	frameContentDelta = "event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}` + "\n"
+	frameMessageDelta = "event: message_delta\n" +
+		`data: {"type":"message_delta","usage":{"input_tokens":0,"output_tokens":40}}` + "\n"
+)
+
+// TestStreamingPricesFromUsage: header cost is absent/0 (streaming), so cost is
+// computed from the parsed usage and the configured per-token rates.
+func TestStreamingPricesFromUsage(t *testing.T) {
+	p := configurePriced(t, 5.00, 1e-6, 5e-6) // $1/1M in, $5/1M out
+	ctx := context.Background()
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{}} // streamed: no cost header
+
+	p.OnResponseFrame(ctx, pctx, []byte(frameMessageStart), false)
+	p.OnResponseFrame(ctx, pctx, []byte(frameContentDelta), false)
+	p.OnResponseFrame(ctx, pctx, []byte(frameMessageDelta), false)
+	p.OnResponseFrame(ctx, pctx, nil, true) // terminal frame settles cost
+
+	want := 100*1e-6 + 40*5e-6 // 0.0001 + 0.0002 = 0.0003
+	if got := p.ledger.TotalSpend; got < want-1e-12 || got > want+1e-12 {
+		t.Errorf("TotalSpend = %v, want %v", got, want)
+	}
+	if p.ledger.TotalCalls != 1 {
+		t.Errorf("TotalCalls = %d, want 1", p.ledger.TotalCalls)
+	}
+}
+
+// TestStreamingWithoutPricesRecordsZero: no per-token rates configured -> a
+// streamed response cannot be priced and must not corrupt the ledger.
+func TestStreamingWithoutPricesRecordsZero(t *testing.T) {
+	p := configure(t, 5.00) // no prices
+	ctx := context.Background()
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{}}
+	p.OnResponseFrame(ctx, pctx, []byte(frameMessageStart), false)
+	p.OnResponseFrame(ctx, pctx, []byte(frameMessageDelta), false)
+	p.OnResponseFrame(ctx, pctx, nil, true)
+	if p.ledger.TotalSpend != 0 || p.ledger.TotalCalls != 0 {
+		t.Errorf("ledger mutated without prices: spend=%v calls=%d", p.ledger.TotalSpend, p.ledger.TotalCalls)
+	}
+}
+
+// TestHeaderCostWinsOverUsage: when the terminal frame has a real header cost
+// (non-streaming buffered path delivered as a single frame), it is used and the
+// per-token pricing is ignored.
+func TestHeaderCostWinsOverUsage(t *testing.T) {
+	p := configurePriced(t, 5.00, 1e-6, 5e-6)
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{responseCostHeader: {"0.02"}}}
+	// single-frame buffered json also carries usage, which must be ignored
+	body := []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":40}}`)
+	p.OnResponseFrame(context.Background(), pctx, body, true)
+	if got := p.ledger.TotalSpend; got != 0.02 {
+		t.Errorf("TotalSpend = %v, want 0.02 (header cost must win)", got)
+	}
+}
+
+// TestOnResponseFrameOriginalFallback: streamed header 0 but non-streaming
+// -original present on the terminal frame is still honored.
+func TestOnResponseFrameOriginalFallback(t *testing.T) {
+	p := configurePriced(t, 5.00, 1e-6, 5e-6)
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{responseCostOriginalHeader: {"6.688e-05"}}}
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+	if got := p.ledger.TotalSpend; got < 6.687e-05 || got > 6.689e-05 {
+		t.Errorf("TotalSpend = %v, want 6.688e-05", got)
+	}
+}
+
+// TestParseFrameUsageOpenAI covers the OpenAI terminal usage chunk shape.
+func TestParseFrameUsageOpenAI(t *testing.T) {
+	frame := []byte(`data: {"choices":[],"usage":{"prompt_tokens":30,"completion_tokens":12}}`)
+	in, out, ok := parseFrameUsage(frame)
+	if !ok || in != 30 || out != 12 {
+		t.Errorf("parseFrameUsage = (%d,%d,%v), want (30,12,true)", in, out, ok)
+	}
+}
+
+// TestStreamingBareFrames reflects reality: the sseframe reader strips the
+// "data:" prefix, so OnResponseFrame receives bare JSON payloads.
+func TestStreamingBareFrames(t *testing.T) {
+	p := configurePriced(t, 5.00, 1e-6, 5e-6)
+	ctx := context.Background()
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{}}
+	// bare-JSON frames (no "data:" prefix), as ReadFrame returns them
+	p.OnResponseFrame(ctx, pctx, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":1}}}`), false)
+	p.OnResponseFrame(ctx, pctx, []byte(`{"type":"message_delta","usage":{"output_tokens":40}}`), false)
+	p.OnResponseFrame(ctx, pctx, nil, true)
+	want := 100*1e-6 + 40*5e-6
+	if got := p.ledger.TotalSpend; got < want-1e-12 || got > want+1e-12 {
+		t.Errorf("TotalSpend = %v, want %v (bare-JSON frames)", got, want)
+	}
+}
+
+// TestParseFrameUsageBareJSON unit-checks the bare-payload path directly.
+func TestParseFrameUsageBareJSON(t *testing.T) {
+	in, out, ok := parseFrameUsage([]byte(`{"type":"message_delta","usage":{"input_tokens":14,"output_tokens":8}}`))
+	if !ok || in != 14 || out != 8 {
+		t.Errorf("parseFrameUsage(bare) = (%d,%d,%v), want (14,8,true)", in, out, ok)
+	}
+}
