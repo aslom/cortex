@@ -6,16 +6,12 @@ replace (
 	github.com/rossoctl/cortex/authbridge/authlib => ../../authlib
 	github.com/rossoctl/cortex/authbridge/storage/redis => ../../storage/redis
 )
-replace (
-	github.com/rossoctl/cortex/authbridge/authlib => ../../authlib
-	github.com/rossoctl/cortex/authbridge/storage/redis => ../../storage/redis
-)
 
 require (
-	github.com/envoyproxy/go-control-plane/envoy v1.37.0
+	github.com/envoyproxy/go-control-plane/envoy v1.39.0
 	github.com/rossoctl/cortex/authbridge/authlib v0.0.0
 	github.com/rossoctl/cortex/authbridge/storage/redis v0.0.0
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.83.1
 )
 
 require (
@@ -47,7 +43,6 @@ require (
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
-	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
