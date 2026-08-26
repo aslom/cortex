@@ -31,13 +31,31 @@ func (p *InferenceParser) Capabilities() pipeline.PluginCapabilities {
 	}
 }
 
+// endpointPath returns pctx.Path with any query string removed.
+//
+// The listeners disagree on what Path holds, and dialect dispatch below is
+// exact-match, so this has to be normalised in one place. The HTTP listeners
+// set Path from r.URL.Path, which already excludes the query; extproc sets it
+// from the HTTP/2 :path pseudo-header, which per RFC 9113 §8.3.1 includes it.
+//
+// Claude Code posts to /v1/messages?beta=true, so without this the request
+// falls to the default arm on the envoy-sidecar path and the parser records no
+// inference telemetry at all — and once OnRequest did match, the four
+// dialect-selection sites below would send an Anthropic stream to the OpenAI
+// parser. Both failure modes are silent, which is why every site normalises
+// rather than only the dispatch switch.
+func endpointPath(pctx *pipeline.Context) string {
+	path, _, _ := strings.Cut(pctx.Path, "?")
+	return path
+}
+
 func (p *InferenceParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	// Dispatch by endpoint dialect: OpenAI chat/completions vs Anthropic
 	// Messages. No Invocation is recorded when the parser doesn't apply
 	// (unrecognized path, empty body, or non-JSON body) — operators infer
 	// "inference-parser is in this pipeline" from config, not per-event rows.
 	var ext *pipeline.InferenceExtension
-	switch pctx.Path {
+	switch endpointPath(pctx) {
 	case "/v1/chat/completions", "/v1/completions":
 		ext = parseOpenAIRequest(pctx.Body)
 	case anthropicMessagesPath:
@@ -124,13 +142,13 @@ func (p *InferenceParser) OnResponse(_ context.Context, pctx *pipeline.Context) 
 	}
 
 	if ext.Stream {
-		if pctx.Path == anthropicMessagesPath {
+		if endpointPath(pctx) == anthropicMessagesPath {
 			parseAnthropicSSE(pctx.ResponseBody, ext)
 		} else {
 			parseInferenceSSE(pctx.ResponseBody, ext)
 		}
 	} else {
-		if pctx.Path == anthropicMessagesPath {
+		if endpointPath(pctx) == anthropicMessagesPath {
 			parseAnthropicJSON(pctx.ResponseBody, ext)
 		} else {
 			parseInferenceJSON(pctx.ResponseBody, ext)
@@ -179,7 +197,7 @@ func (p *InferenceParser) OnResponseFrame(_ context.Context, pctx *pipeline.Cont
 			pctx.Skip("no_response_body")
 			return pipeline.Action{Type: pipeline.Continue}
 		}
-		if pctx.Path == anthropicMessagesPath {
+		if endpointPath(pctx) == anthropicMessagesPath {
 			parseAnthropicJSON(frame, ext)
 		} else {
 			parseInferenceJSON(frame, ext)
@@ -194,7 +212,7 @@ func (p *InferenceParser) OnResponseFrame(_ context.Context, pctx *pipeline.Cont
 	state := getOrCreateStreamState(pctx)
 
 	if len(frame) > 0 {
-		if pctx.Path == anthropicMessagesPath {
+		if endpointPath(pctx) == anthropicMessagesPath {
 			foldAnthropicFrame(frame, state, ext)
 		} else {
 			foldOpenAIFrame(frame, state, ext)
