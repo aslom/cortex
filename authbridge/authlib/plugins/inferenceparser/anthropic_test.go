@@ -164,8 +164,10 @@ func TestInferenceParser_AnthropicMessages_StreamFoldsEvents(t *testing.T) {
 // message_start alone recorded that turn as 9 tokens instead of 33,772.
 func TestInferenceParser_AnthropicMessages_StreamBetaPathUsage(t *testing.T) {
 	p := NewInferenceParser()
-	// Path has no query string: the HTTP listeners populate Context.Path from
-	// r.URL.Path, so a POST to /v1/messages?beta=true arrives here as /v1/messages.
+	// Query-free Path: the HTTP listeners (forwardproxy, reverseproxy) populate
+	// Context.Path from r.URL.Path, so /v1/messages?beta=true arrives here as
+	// /v1/messages. extproc does NOT — it uses the :path pseudo-header, query
+	// included; TestInferenceParser_AnthropicMessages_QueryStringPath covers that.
 	pctx := &pipeline.Context{Path: "/v1/messages"}
 	pctx.Extensions.Inference = &pipeline.InferenceExtension{Model: "claude-haiku-4-5", Stream: true, IsAction: true}
 
@@ -188,6 +190,63 @@ func TestInferenceParser_AnthropicMessages_StreamBetaPathUsage(t *testing.T) {
 	if ext.CompletionTokens != 399 || ext.TotalTokens != 34171 {
 		t.Errorf("tokens = completion %d / total %d, want 399/34171",
 			ext.CompletionTokens, ext.TotalTokens)
+	}
+	if ext.FinishReason != "end_turn" {
+		t.Errorf("FinishReason = %q, want end_turn", ext.FinishReason)
+	}
+}
+
+// TestInferenceParser_AnthropicMessages_QueryStringPath pins dialect dispatch
+// when Context.Path carries a query string. extproc populates Path from the
+// HTTP/2 :path pseudo-header, which includes the query, so Claude Code's
+// POST /v1/messages?beta=true arrives here as "/v1/messages?beta=true" — while
+// the HTTP listeners strip it via r.URL.Path.
+//
+// Two distinct failure modes are covered, both previously silent:
+//
+//   - OnRequest's exact-match switch fell to default, leaving
+//     Extensions.Inference nil so the whole exchange went unrecorded;
+//   - had dispatch matched but the four dialect-selection sites not been
+//     normalised, an Anthropic stream would have been folded by the OpenAI
+//     handler, which does not understand message_delta and would report zero
+//     tokens rather than fail.
+//
+// Asserting the token counts therefore checks the routing, not just the match.
+func TestInferenceParser_AnthropicMessages_QueryStringPath(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{
+		Path: "/v1/messages?beta=true",
+		Body: []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}
+
+	if action := p.OnRequest(context.Background(), pctx); action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue, got %v", action.Type)
+	}
+	ext := pctx.Extensions.Inference
+	if ext == nil {
+		t.Fatal("Extensions.Inference is nil — query string defeated the dispatch switch")
+	}
+	if ext.Model != "claude-haiku-4-5" {
+		t.Errorf("Model = %q, want claude-haiku-4-5", ext.Model)
+	}
+
+	frames := [][]byte{
+		[]byte(`{"type":"message_start","message":{"id":"msg_q1","type":"message","role":"assistant","usage":{"input_tokens":11,"output_tokens":0}}}`),
+		[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`),
+		[]byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":500}}`),
+	}
+	for _, f := range frames {
+		p.OnResponseFrame(context.Background(), pctx, f, false)
+	}
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	// 11 + 500 cached input; the OpenAI folder would leave these at 0.
+	if ext.PromptTokens != 511 || ext.CompletionTokens != 7 || ext.TotalTokens != 518 {
+		t.Errorf("tokens = prompt %d / completion %d / total %d, want 511/7/518 (wrong dialect?)",
+			ext.PromptTokens, ext.CompletionTokens, ext.TotalTokens)
+	}
+	if ext.Completion != "ok" {
+		t.Errorf("Completion = %q, want \"ok\"", ext.Completion)
 	}
 	if ext.FinishReason != "end_turn" {
 		t.Errorf("FinishReason = %q, want end_turn", ext.FinishReason)
