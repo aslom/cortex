@@ -269,6 +269,17 @@ func (s *inferenceStreamState) closeAnthropicTool() {
 	s.openTool = nil
 }
 
+// totalAnthropicUsage derives the running total from the parts it was given.
+// It runs after every usage update rather than only when output tokens arrive,
+// because TotalTokens is the gate finalize uses to decide whether any count is
+// worth recording — so leaving it at zero discards a prompt size already known.
+// Two streams hit that: a terminal message_delta reporting the prompt with
+// output_tokens == 0, and a turn the caller interrupted after message_start,
+// which never reaches a message_delta at all. Both were billed for the prompt.
+func (s *inferenceStreamState) totalAnthropicUsage() {
+	s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
+}
+
 // foldAnthropicFrame folds one Messages SSE event into the running stream state.
 // The prompt size is taken as the largest total seen, because different Messages
 // API paths report it on different events: message_start on the plain path,
@@ -287,6 +298,7 @@ func foldAnthropicFrame(frame []byte, state *inferenceStreamState, ext *pipeline
 			state.usage.PromptTokens = ev.Message.Usage.promptTotal()
 			state.usage.CacheWriteTokens = ev.Message.Usage.CacheCreationInputTokens
 			state.usage.CacheReadTokens = ev.Message.Usage.CacheReadInputTokens
+			state.totalAnthropicUsage()
 		}
 	case "content_block_start":
 		// A tool call opens here and is populated by later deltas. Text
@@ -331,12 +343,11 @@ func foldAnthropicFrame(frame []byte, state *inferenceStreamState, ext *pipeline
 				state.usage.CacheReadTokens = ev.Usage.CacheReadInputTokens
 			}
 			if ev.Usage.OutputTokens > 0 {
-				// usage.output_tokens in message_delta is cumulative — take the
-				// latest. TotalTokens must be non-zero for the shared finalize
-				// block to copy the counts onto the extension.
+				// usage.output_tokens in message_delta is cumulative — take
+				// the latest rather than accumulating.
 				state.usage.CompletionTokens = ev.Usage.OutputTokens
-				state.usage.TotalTokens = state.usage.PromptTokens + ev.Usage.OutputTokens
 			}
+			state.totalAnthropicUsage()
 		}
 	}
 }

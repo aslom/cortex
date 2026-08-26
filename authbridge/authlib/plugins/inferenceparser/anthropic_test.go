@@ -209,6 +209,83 @@ func TestInferenceParser_AnthropicMessages_StreamBetaPathUsage(t *testing.T) {
 	}
 }
 
+// TestInferenceParser_AnthropicMessages_StreamZeroOutputUsage covers a stream
+// whose terminal message_delta reports the prompt with output_tokens == 0 — a
+// refusal or an immediately-stopped generation. The prompt was billed, cache
+// reads included, so the counts must survive: recomputing the total only inside
+// the output_tokens > 0 arm left TotalTokens at zero, and finalize gates the
+// whole usage copy on that total being non-zero, so a 5,109-token prompt landed
+// on the extension as nothing at all.
+func TestInferenceParser_AnthropicMessages_StreamZeroOutputUsage(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{Path: "/v1/messages"}
+	pctx.Extensions.Inference = &pipeline.InferenceExtension{Model: "claude-haiku-4-5", Stream: true, IsAction: true}
+
+	frames := [][]byte{
+		[]byte(`{"type":"message_start","message":{"id":"msg_bdrk_2","type":"message","role":"assistant","usage":{"input_tokens":9,"output_tokens":0}}}`),
+		[]byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":9,"output_tokens":0,"cache_creation_input_tokens":100,"cache_read_input_tokens":5000}}`),
+		[]byte(`{"type":"message_stop"}`),
+	}
+	for _, f := range frames {
+		p.OnResponseFrame(context.Background(), pctx, f, false)
+	}
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	ext := pctx.Extensions.Inference
+	// 9 + 100 + 5000, all of it input the provider charged for.
+	if ext.PromptTokens != 5109 || ext.TotalTokens != 5109 {
+		t.Errorf("tokens = prompt %d / total %d, want 5109/5109 (usage discarded on the zero-output path?)",
+			ext.PromptTokens, ext.TotalTokens)
+	}
+	if ext.CompletionTokens != 0 {
+		t.Errorf("CompletionTokens = %d, want 0", ext.CompletionTokens)
+	}
+	if ext.CacheWriteTokens != 100 || ext.CacheReadTokens != 5000 {
+		t.Errorf("cache = write %d / read %d, want 100/5000",
+			ext.CacheWriteTokens, ext.CacheReadTokens)
+	}
+}
+
+// TestInferenceParser_AnthropicMessages_StreamInterruptedAfterStart covers a
+// stream the caller abandoned after message_start — the shape an agent produces
+// every time a user cancels a running turn. No message_delta ever arrives, so
+// message_start's input_tokens is the only usage the stream reported, and it is
+// the one the provider billed. The turn previously recorded skip/no_response_body
+// and no counts, making cancelled turns free in the accounting.
+//
+// Recovery is partial by construction: on the ?beta=true path the cache counts
+// ride on message_delta, so an interrupted turn can only ever report the
+// uncached input_tokens.
+func TestInferenceParser_AnthropicMessages_StreamInterruptedAfterStart(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{Path: "/v1/messages"}
+	pctx.Extensions.Inference = &pipeline.InferenceExtension{Model: "claude-haiku-4-5", Stream: true, IsAction: true}
+
+	p.OnResponseFrame(context.Background(), pctx,
+		[]byte(`{"type":"message_start","message":{"id":"msg_bdrk_3","type":"message","role":"assistant","usage":{"input_tokens":24000,"output_tokens":0}}}`), false)
+	// The connection ends here: no message_delta, no message_stop.
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	ext := pctx.Extensions.Inference
+	if ext.PromptTokens != 24000 || ext.TotalTokens != 24000 {
+		t.Errorf("tokens = prompt %d / total %d, want 24000/24000 (interrupted stream discarded?)",
+			ext.PromptTokens, ext.TotalTokens)
+	}
+	if ext.CompletionTokens != 0 {
+		t.Errorf("CompletionTokens = %d, want 0", ext.CompletionTokens)
+	}
+	// Having counts to record, the response must be a real row rather than the
+	// skip that stands in for a stream that reported nothing. Direction's zero
+	// value is Inbound, so this context's invocations land on the inbound list.
+	if invs := pctx.Extensions.Invocations; invs != nil {
+		for _, inv := range invs.Inbound {
+			if inv.Reason == "no_response_body" {
+				t.Errorf("recorded %s/%s, want a real response row", inv.Action, inv.Reason)
+			}
+		}
+	}
+}
+
 // TestInferenceParser_AnthropicMessages_StreamToolUse covers a streamed tool
 // call. The pieces arrive across three event types — id and name on
 // content_block_start, arguments as input_json_delta fragments that are only
