@@ -263,7 +263,15 @@ func (p *InferenceParser) OnResponseFrame(_ context.Context, pctx *pipeline.Cont
 		state.finalize(ext)
 		// Empty stream with no body and no chunks — record Skip to
 		// pair the response row with the request row.
-		if ext.Completion == "" && ext.FinishReason == "" && ext.TotalTokens == 0 {
+		//
+		// Tool calls count as a body. A turn cancelled while the model was
+		// still emitting tool arguments has no completion text, no finish
+		// reason, and no usage block, but finalize has captured the call —
+		// so skipping here would label a stream that demonstrably carried
+		// content as having none, and drop it out of any timeline filtered
+		// on observe.
+		if ext.Completion == "" && ext.FinishReason == "" && ext.TotalTokens == 0 &&
+			len(ext.ToolCalls) == 0 {
 			pctx.Skip("no_response_body")
 			return pipeline.Action{Type: pipeline.Continue}
 		}
@@ -294,8 +302,19 @@ func foldOpenAIFrame(frame []byte, state *inferenceStreamState, ext *pipeline.In
 			ext.FinishReason = c.FinishReason
 		}
 	}
+	// Copy the three wire-backed counts field by field rather than assigning
+	// the whole struct. inferenceUsage doubles as the dialect-neutral
+	// accumulator and its two cache fields are json:"-", so they are always
+	// zero in a freshly decoded chunk — a whole-struct assignment would clear
+	// whatever the accumulator held. Nothing on the OpenAI path fills them
+	// today, which is precisely why that clobber would be silent when
+	// something does. TotalTokens is taken off the wire rather than recomputed:
+	// the provider reports it, and it may legitimately differ from
+	// prompt+completion.
 	if chunk.Usage.TotalTokens > 0 {
-		state.usage = chunk.Usage
+		state.usage.PromptTokens = chunk.Usage.PromptTokens
+		state.usage.CompletionTokens = chunk.Usage.CompletionTokens
+		state.usage.TotalTokens = chunk.Usage.TotalTokens
 	}
 }
 
@@ -491,6 +510,12 @@ func (m *inferenceMessage) UnmarshalJSON(data []byte) error {
 // than the 4 bytes the literal `null` occupies — the field is a size signal
 // for content that exists, and an assistant turn that carries only tool_calls
 // has none.
+//
+// raw is the client's bytes verbatim, so the count includes any whitespace the
+// client's serializer emitted. That is deliberate: this measures what was
+// sent. Compacting first would buy comparability across clients at the cost of
+// an allocation per message on every request-body parse, and would no longer
+// answer "how big was this on the wire".
 func contentBytes(raw json.RawMessage) int {
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return 0

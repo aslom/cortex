@@ -375,6 +375,58 @@ func TestInferenceParser_AnthropicMessages_StreamToolUseInterleaved(t *testing.T
 	}
 }
 
+// TestInferenceParser_AnthropicMessages_StreamToolUseOnlyIsNotASkip pins the
+// finalize guard against the one stream shape where every other signal is
+// absent: a turn cancelled while the model was still emitting tool arguments.
+// There is no completion text, no stop_reason, and no usage block, so the
+// guard's other three terms all hold — and recording a skip here would label
+// a stream that carried a tool call as having had no response body, hiding it
+// from any timeline filtered on observe.
+//
+// A real Anthropic stream opens with message_start, whose input_tokens keeps
+// TotalTokens non-zero, so this is a latent case rather than a live one. It is
+// also what makes the interleaved test above fragile: drop its trailing
+// message_delta and the two calls it proves are captured would vanish into a
+// skip.
+func TestInferenceParser_AnthropicMessages_StreamToolUseOnlyIsNotASkip(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{Path: "/v1/messages"}
+	pctx.Extensions.Inference = &pipeline.InferenceExtension{Model: "claude-haiku-4-5", Stream: true, IsAction: true}
+
+	frames := [][]byte{
+		[]byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_x","name":"Read","input":{}}}`),
+		[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file\":"}}`),
+	}
+	for _, f := range frames {
+		p.OnResponseFrame(context.Background(), pctx, f, false)
+	}
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	ext := pctx.Extensions.Inference
+	// Preconditions: this is the shape the guard's other three terms match.
+	if ext.Completion != "" || ext.FinishReason != "" || ext.TotalTokens != 0 {
+		t.Fatalf("fixture no longer exercises the guard: Completion=%q FinishReason=%q TotalTokens=%d",
+			ext.Completion, ext.FinishReason, ext.TotalTokens)
+	}
+	if len(ext.ToolCalls) != 1 || ext.ToolCalls[0].Name != "Read" {
+		t.Fatalf("ToolCalls = %+v, want one Read call", ext.ToolCalls)
+	}
+	// Arguments stay as the model left them — truncated, not discarded.
+	if ext.ToolCalls[0].Arguments != `{"file":` {
+		t.Errorf("Arguments = %q, want the partial fragment", ext.ToolCalls[0].Arguments)
+	}
+
+	inv := pctx.Extensions.Invocations
+	if inv == nil || len(inv.Inbound) == 0 {
+		t.Fatalf("Invocations = %+v, want a recorded response row", inv)
+	}
+	last := inv.Inbound[len(inv.Inbound)-1]
+	if last.Action != pipeline.ActionObserve {
+		t.Errorf("action = %s/%s, want observe (a captured tool call is a response body)",
+			last.Action, last.Reason)
+	}
+}
+
 // TestInferenceParser_AnthropicMessages_RequestContentBytes covers the sizes of
 // messages the text flattening discards. In an agent loop those are most of the
 // conversation: a tool_result block flattens to "" and reads as free, while the

@@ -210,6 +210,12 @@ type InferenceMessage struct {
 	// messages contribute, without recording their contents: it is a byte
 	// count of the raw JSON (syntax and escapes included), not a token
 	// count, and is a size signal rather than an exact one.
+	//
+	// Whitespace counts too, because the measure is of what was sent, not of
+	// a normalized form of it. A client that pretty-prints its request bodies
+	// therefore reports a higher count than one sending compact JSON for the
+	// same content — tens of percent apart on a deeply nested tool result.
+	// Comparable across messages from one client; not across clients.
 	ContentBytes int `json:"contentBytes,omitempty"`
 }
 
