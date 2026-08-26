@@ -157,12 +157,24 @@ type InferenceExtension struct {
 	ToolChoice  any                `json:"toolChoice,omitempty"` // "auto" | "none" | {type,function:{name}}
 
 	// Response fields (populated after OnResponse runs).
-	Completion       string              `json:"completion,omitempty"`
-	FinishReason     string              `json:"finishReason,omitempty"`
-	PromptTokens     int                 `json:"promptTokens,omitempty"`
-	CompletionTokens int                 `json:"completionTokens,omitempty"`
-	TotalTokens      int                 `json:"totalTokens,omitempty"`
-	ToolCalls        []InferenceToolCall `json:"toolCalls,omitempty"`
+	Completion       string `json:"completion,omitempty"`
+	FinishReason     string `json:"finishReason,omitempty"`
+	PromptTokens     int    `json:"promptTokens,omitempty"`
+	CompletionTokens int    `json:"completionTokens,omitempty"`
+	TotalTokens      int    `json:"totalTokens,omitempty"`
+
+	// ToolCalls are the tool invocations the model requested. Populated on
+	// three of the four response paths — both non-streaming dialects and
+	// Anthropic streaming. An OpenAI *stream* leaves it empty: that dialect
+	// splits each call across `choices[].delta.tool_calls[]` fragments keyed
+	// by their own index, a shape the streaming chunk decoder does not read.
+	//
+	// So empty means "the model requested no tools" only for a non-streaming
+	// response or an Anthropic stream. A consumer that spans dialects — cost
+	// accounting, per-tool attribution — must not read absence as a negative
+	// on a streamed OpenAI turn, where it is indistinguishable from a turn
+	// whose calls were never captured.
+	ToolCalls []InferenceToolCall `json:"toolCalls,omitempty"`
 
 	// CacheWriteTokens and CacheReadTokens split the cached portion of
 	// PromptTokens by how it was billed. PromptTokens is the whole prompt
