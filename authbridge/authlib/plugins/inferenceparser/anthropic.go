@@ -177,9 +177,10 @@ func parseAnthropicJSON(body []byte, ext *pipeline.InferenceExtension) {
 
 // anthropicStreamEvent is one SSE event's data payload. The Messages stream is
 // a sequence of typed events (vs OpenAI's uniform chat.completion.chunk):
-// message_start (carries usage.input_tokens), content_block_delta (text_delta /
+// message_start (carries usage — but see below), content_block_delta (text_delta /
 // input_json_delta / thinking_delta), message_delta (delta.stop_reason +
-// cumulative usage.output_tokens), message_stop, plus ping/content_block_*.
+// cumulative usage.output_tokens, and on the ?beta=true path the prompt-cache
+// counts too), message_stop, plus ping/content_block_*.
 type anthropicStreamEvent struct {
 	Type    string `json:"type"`
 	Message *struct {
@@ -194,7 +195,9 @@ type anthropicStreamEvent struct {
 }
 
 // foldAnthropicFrame folds one Messages SSE event into the running stream state.
-// input_tokens come from message_start; the completion accumulates from
+// The prompt size is taken as the largest total seen, because different Messages
+// API paths report it on different events: message_start on the plain path,
+// message_delta on the ?beta=true path. The completion accumulates from
 // text_delta blocks; stop_reason and the cumulative output_tokens arrive in
 // message_delta. Unknown events (ping, content_block_start/stop, message_stop)
 // are ignored.
@@ -216,12 +219,27 @@ func foldAnthropicFrame(frame []byte, state *inferenceStreamState, ext *pipeline
 		if ev.Delta != nil && ev.Delta.StopReason != "" {
 			ext.FinishReason = ev.Delta.StopReason
 		}
-		if ev.Usage != nil && ev.Usage.OutputTokens > 0 {
-			// usage.output_tokens in message_delta is cumulative — take the
-			// latest. TotalTokens must be non-zero for the shared finalize
-			// block to copy the counts onto the extension.
-			state.usage.CompletionTokens = ev.Usage.OutputTokens
-			state.usage.TotalTokens = state.usage.PromptTokens + ev.Usage.OutputTokens
+		if ev.Usage != nil {
+			// The prompt side can arrive here rather than in message_start.
+			// Clients using the ?beta=true Messages path (Claude Code sends
+			// anthropic-beta: claude-code-*) get a message_start carrying only
+			// input_tokens, with cache_creation_input_tokens and
+			// cache_read_input_tokens deferred to message_delta — so reading
+			// the prompt size from message_start alone undercounts a cached
+			// agent request by orders of magnitude (a 33k-token turn recorded
+			// as 9). Take the larger value: on the non-beta path message_delta
+			// carries no input counts, and assigning unconditionally would
+			// clobber the correct message_start total with zero.
+			if p := ev.Usage.promptTotal(); p > state.usage.PromptTokens {
+				state.usage.PromptTokens = p
+			}
+			if ev.Usage.OutputTokens > 0 {
+				// usage.output_tokens in message_delta is cumulative — take the
+				// latest. TotalTokens must be non-zero for the shared finalize
+				// block to copy the counts onto the extension.
+				state.usage.CompletionTokens = ev.Usage.OutputTokens
+				state.usage.TotalTokens = state.usage.PromptTokens + ev.Usage.OutputTokens
+			}
 		}
 	}
 }

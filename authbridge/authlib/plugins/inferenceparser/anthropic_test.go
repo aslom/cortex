@@ -154,3 +154,42 @@ func TestInferenceParser_AnthropicMessages_StreamFoldsEvents(t *testing.T) {
 			ext.PromptTokens, ext.CompletionTokens, ext.TotalTokens)
 	}
 }
+
+// TestInferenceParser_AnthropicMessages_StreamBetaPathUsage covers the ?beta=true
+// Messages path, where the prompt-cache counts arrive in message_delta instead of
+// message_start. The frames below are the usage blocks captured verbatim from a
+// real Claude Code turn (anthropic-beta: claude-code-20250219) against an
+// Anthropic-compatible gateway: message_start carried only input_tokens, and the
+// 33,763 cached tokens appeared two events later. Reading the prompt size from
+// message_start alone recorded that turn as 9 tokens instead of 33,772.
+func TestInferenceParser_AnthropicMessages_StreamBetaPathUsage(t *testing.T) {
+	p := NewInferenceParser()
+	// Path has no query string: the HTTP listeners populate Context.Path from
+	// r.URL.Path, so a POST to /v1/messages?beta=true arrives here as /v1/messages.
+	pctx := &pipeline.Context{Path: "/v1/messages"}
+	pctx.Extensions.Inference = &pipeline.InferenceExtension{Model: "claude-haiku-4-5", Stream: true, IsAction: true}
+
+	frames := [][]byte{
+		[]byte(`{"type":"message_start","message":{"id":"msg_bdrk_1","type":"message","role":"assistant","usage":{"input_tokens":9,"output_tokens":0}}}`),
+		[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Done"}}`),
+		[]byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":9,"output_tokens":399,"cache_creation_input_tokens":3755,"cache_read_input_tokens":30008}}`),
+		[]byte(`{"type":"message_stop"}`),
+	}
+	for _, f := range frames {
+		p.OnResponseFrame(context.Background(), pctx, f, false)
+	}
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	ext := pctx.Extensions.Inference
+	// 9 + 3755 + 30008 — the cached context is still billed input.
+	if ext.PromptTokens != 33772 {
+		t.Errorf("PromptTokens = %d, want 33772 (message_delta usage ignored?)", ext.PromptTokens)
+	}
+	if ext.CompletionTokens != 399 || ext.TotalTokens != 34171 {
+		t.Errorf("tokens = completion %d / total %d, want 399/34171",
+			ext.CompletionTokens, ext.TotalTokens)
+	}
+	if ext.FinishReason != "end_turn" {
+		t.Errorf("FinishReason = %q, want end_turn", ext.FinishReason)
+	}
+}
