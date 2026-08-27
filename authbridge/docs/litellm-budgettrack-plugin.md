@@ -30,9 +30,25 @@ Agent → cortex.py → AuthBridge (litellm-budget-track) → LiteLLM upstream
                                            └── spend-authbridge.json (daily ledger)
 ```
 
-The plugin runs in the **inbound** pipeline direction:
+The plugin hooks:
 - `OnRequest` — pre-flight budget check (reject if over limit)
-- `OnResponse` — post-flight cost accumulation (read header, update ledger)
+- `OnResponse` — post-flight cost accumulation for buffered (non-streaming) responses (read header, update ledger)
+- `OnResponseFrame` — cost accumulation for **streamed** responses (see below)
+
+### Buffered vs streamed responses (outbound path)
+
+On the outbound/forward-proxy path the response shape decides which hook fires:
+
+- **Buffered** (`application/json`) — the listener runs `OnResponse`, which reads
+  the `x-litellm-response-cost` header (falling back to `-original`).
+- **Streamed** (`text/event-stream`, e.g. Claude Code's `/v1/messages`) — the
+  listener dispatches per-frame to `OnResponseFrame` **only because this plugin is
+  a `StreamingResponder`**; a streamed response otherwise never reaches
+  `OnResponse`. LiteLLM reports cost `0` in the header for streamed responses
+  (the total is unknown when headers are sent), so the plugin parses the token
+  usage from the terminal SSE events and prices it from the configured
+  `input_cost_per_token` / `output_cost_per_token` rates. Without those rates a
+  streamed response contributes `0`.
 
 ## Files
 
@@ -59,6 +75,8 @@ pipeline:
 |-------|------|----------|-------------|
 | `spend_file` | string | yes | Path to the JSON ledger file (created if missing) |
 | `max_budget` | float | yes | Daily budget in USD (must be > 0) |
+| `input_cost_per_token` | float | no | USD per input/prompt token; prices streamed responses (whose header cost is 0) from parsed usage |
+| `output_cost_per_token` | float | no | USD per output/completion token; prices streamed responses from parsed usage |
 
 ## Ledger Format
 

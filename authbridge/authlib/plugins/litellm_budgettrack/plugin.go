@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"sync"
@@ -170,8 +171,15 @@ func (p *BudgetTrack) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// accumulate adds one priced call to today's ledger and persists it.
+// accumulate adds one priced call to today's ledger and persists it. A
+// non-finite or non-positive cost is ignored: NaN/±Inf would poison
+// TotalSpend (making the budget check meaningless) and break the JSON
+// marshal, so this is the single chokepoint that guarantees the ledger
+// only ever holds finite money.
 func (p *BudgetTrack) accumulate(cost float64) {
+	if cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
+		return
+	}
 	p.mu.Lock()
 	p.resetIfNewDay()
 	p.ledger.TotalSpend += cost
@@ -192,7 +200,10 @@ func headerCost(pctx *pipeline.Context) float64 {
 		return 0
 	}
 	cost, err := strconv.ParseFloat(costStr, 64)
-	if err != nil || cost <= 0 {
+	// strconv.ParseFloat accepts "NaN" / "Inf"; reject non-finite (and
+	// non-positive) so a garbage header falls through to the usage path
+	// rather than poisoning the ledger.
+	if err != nil || cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
 		return 0
 	}
 	return cost
@@ -289,7 +300,13 @@ func (p *BudgetTrack) loadLedger() {
 }
 
 func (p *BudgetTrack) saveLedger() {
-	data, _ := json.MarshalIndent(p.ledger, "", "  ")
+	data, err := json.MarshalIndent(p.ledger, "", "  ")
+	if err != nil {
+		// Never overwrite a good ledger with a failed marshal (e.g. a
+		// non-finite TotalSpend that slipped through). accumulate already
+		// rejects non-finite costs; this is the belt-and-suspenders guard.
+		return
+	}
 	_ = os.WriteFile(p.cfg.SpendFile, data, 0644)
 }
 

@@ -139,8 +139,12 @@ func TestOnRequestEnforcesBudget(t *testing.T) {
 	if action.Type != pipeline.Reject {
 		t.Fatalf("OnRequest() over budget = %v, want Reject", action.Type)
 	}
-	if action.Violation == nil || action.Violation.Status != http.StatusTooManyRequests {
-		t.Errorf("Violation = %+v, want Status 429", action.Violation)
+	// Stop before dereferencing: a nil Violation must not panic the next lines.
+	if action.Violation == nil {
+		t.Fatal("Violation is nil, want 429 budget.exceeded")
+	}
+	if action.Violation.Status != http.StatusTooManyRequests {
+		t.Errorf("Violation.Status = %d, want 429", action.Violation.Status)
 	}
 	if action.Violation.Code != "budget.exceeded" {
 		t.Errorf("Violation.Code = %q, want budget.exceeded", action.Violation.Code)
@@ -373,5 +377,30 @@ func TestParseFrameUsageBareJSON(t *testing.T) {
 	in, out, ok := parseFrameUsage([]byte(`{"type":"message_delta","usage":{"input_tokens":14,"output_tokens":8}}`))
 	if !ok || in != 14 || out != 8 {
 		t.Errorf("parseFrameUsage(bare) = (%d,%d,%v), want (14,8,true)", in, out, ok)
+	}
+}
+
+// TestNonFiniteCostRejected guards the data-integrity fix from PR #815 review:
+// strconv.ParseFloat accepts "NaN"/"Inf", both slip past a bare `cost <= 0`
+// check, poison TotalSpend, and break the JSON marshal. The ledger must stay
+// clean and its file must not be overwritten with garbage.
+func TestNonFiniteCostRejected(t *testing.T) {
+	for _, hdr := range []string{"NaN", "Inf", "+Inf", "-Inf"} {
+		t.Run(hdr, func(t *testing.T) {
+			p := configure(t, 5.00)
+			p.OnResponse(context.Background(), &pipeline.Context{
+				ResponseHeaders: http.Header{responseCostHeader: {hdr}},
+			})
+			if p.ledger.TotalSpend != 0 || p.ledger.TotalCalls != 0 {
+				t.Errorf("%s: ledger mutated: spend=%v calls=%d", hdr, p.ledger.TotalSpend, p.ledger.TotalCalls)
+			}
+			// The spend file must remain valid JSON (not overwritten with garbage).
+			if data, err := os.ReadFile(p.cfg.SpendFile); err == nil && len(data) > 0 {
+				var l spendLedger
+				if json.Unmarshal(data, &l) != nil {
+					t.Errorf("%s: spend file corrupted: %s", hdr, data)
+				}
+			}
+		})
 	}
 }
