@@ -406,3 +406,62 @@ func TestNonFiniteCostRejected(t *testing.T) {
 		})
 	}
 }
+
+// TestCapabilitiesDeclaresReadsBody is the must-fix from PR #816 review: the
+// plugin parses the response body, so it must declare ReadsBody or the extproc
+// listener won't buffer the body (streamed accounting records nothing).
+func TestCapabilitiesDeclaresReadsBody(t *testing.T) {
+	if !New().Capabilities().ReadsBody {
+		t.Error("Capabilities().ReadsBody = false; extproc will not buffer the body and streamed cost is lost")
+	}
+}
+
+// TestOnResponseFrameSettlesOnce guards the exactly-once contract: a second
+// terminal dispatch (e.g. extproc header + buffered-body phases) must not
+// double-charge the ledger.
+func TestOnResponseFrameSettlesOnce(t *testing.T) {
+	p := configurePriced(t, 5.00, 1e-6, 5e-6)
+	ctx := context.Background()
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{}}
+	p.OnResponseFrame(ctx, pctx, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":1}}}`), false)
+	p.OnResponseFrame(ctx, pctx, []byte(`{"type":"message_delta","usage":{"output_tokens":40}}`), false)
+	p.OnResponseFrame(ctx, pctx, nil, true) // first terminal — charges
+	p.OnResponseFrame(ctx, pctx, nil, true) // second terminal — must be a no-op
+	want := 100*1e-6 + 40*5e-6
+	if p.ledger.TotalCalls != 1 {
+		t.Errorf("TotalCalls = %d, want 1 (double terminal dispatch must not double-charge)", p.ledger.TotalCalls)
+	}
+	if got := p.ledger.TotalSpend; got < want-1e-12 || got > want+1e-12 {
+		t.Errorf("TotalSpend = %v, want %v", got, want)
+	}
+}
+
+// TestZeroCostHeaderNonStreamedNotRepriced: a genuine free call (cost header
+// "0", non-streamed) must be charged 0, not re-priced from its usage block.
+func TestZeroCostHeaderNonStreamedNotRepriced(t *testing.T) {
+	p := configurePriced(t, 5.00, 1e-6, 5e-6)
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{
+		responseCostHeader: {"0"},
+		"Content-Type":     {"application/json"},
+	}}
+	p.OnResponseFrame(context.Background(), pctx, []byte(`{"usage":{"input_tokens":100,"output_tokens":40}}`), true)
+	if p.ledger.TotalSpend != 0 || p.ledger.TotalCalls != 0 {
+		t.Errorf("free non-streamed call re-priced from usage: spend=%v calls=%d", p.ledger.TotalSpend, p.ledger.TotalCalls)
+	}
+}
+
+// TestZeroCostHeaderStreamedPricesFromUsage: streamed responses always report a
+// 0 cost header, so the usage fallback must still apply for text/event-stream.
+func TestZeroCostHeaderStreamedPricesFromUsage(t *testing.T) {
+	p := configurePriced(t, 5.00, 1e-6, 5e-6)
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{
+		responseCostHeader: {"0"},
+		"Content-Type":     {"text/event-stream; charset=utf-8"},
+	}}
+	p.OnResponseFrame(context.Background(), pctx, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":40}}}`), false)
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+	want := 100*1e-6 + 40*5e-6
+	if got := p.ledger.TotalSpend; got < want-1e-12 || got > want+1e-12 {
+		t.Errorf("streamed zero-header call not priced from usage: got %v want %v", got, want)
+	}
+}

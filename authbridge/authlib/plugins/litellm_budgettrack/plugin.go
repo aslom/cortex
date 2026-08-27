@@ -24,6 +24,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,7 @@ const stateKey = "litellm-budget-track"
 type usageState struct {
 	inputTokens  int
 	outputTokens int
+	settled      bool // terminal frame already priced this request (exactly-once)
 }
 
 type spendLedger struct {
@@ -92,6 +94,14 @@ func (p *BudgetTrack) Name() string { return "litellm-budget-track" }
 
 func (p *BudgetTrack) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
+		// ReadsBody: the plugin parses the response body (streamed usage). It
+		// makes Pipeline.NeedsBody() true so the extproc (envoy-sidecar) listener
+		// buffers the response body and takes its body-phase branch; without it
+		// that listener dispatches a single header-only RunResponseFrame and the
+		// streamed accounting silently records nothing (or double-charges if
+		// Envoy is statically configured BUFFERED). The proxy listeners gate on
+		// HasStreamingResponders() and are unaffected. Mirrors inference-parser.
+		ReadsBody:   true,
 		Description: "Track LLM cost (response header or streamed usage) and enforce a daily budget.",
 	}
 }
@@ -140,7 +150,7 @@ func (p *BudgetTrack) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 // so pipeline.RunResponse skips it and OnResponseFrame drives accumulation
 // instead; this remains for listeners that only call OnResponse.
 func (p *BudgetTrack) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
-	if cost := headerCost(pctx); cost > 0 {
+	if cost, _ := headerCost(pctx); cost > 0 {
 		p.accumulate(cost)
 	}
 	return pipeline.Action{Type: pipeline.Continue}
@@ -168,10 +178,28 @@ func (p *BudgetTrack) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	// Terminal frame: settle the cost exactly once.
-	cost := headerCost(pctx)
+	// Terminal frame: settle the cost exactly once. Materialize the scratch
+	// unconditionally (a header-only response never allocated it above) so the
+	// guard also covers that path — a listener that dispatches last=true twice
+	// (e.g. extproc header + buffered-body phases) must not double-charge.
+	st := pipeline.GetState[usageState](pctx, stateKey)
+	if st == nil {
+		st = &usageState{}
+		pipeline.SetState(pctx, stateKey, st)
+	}
+	if st.settled {
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+	st.settled = true
+
+	cost, present := headerCost(pctx)
 	if cost <= 0 {
-		if st := pipeline.GetState[usageState](pctx, stateKey); st != nil {
+		// Fall back to per-token pricing only when there is no authoritative
+		// header cost: the header is absent, or this is a streamed response
+		// (where LiteLLM always reports 0). A present "0" on a non-streamed
+		// response is a genuine free call (cache hit / error) — charge nothing,
+		// don't invent a cost from the usage block.
+		if !present || isEventStream(pctx) {
 			cost = float64(st.inputTokens)*p.cfg.InputCostPerToken +
 				float64(st.outputTokens)*p.cfg.OutputCostPerToken
 		}
@@ -199,25 +227,39 @@ func (p *BudgetTrack) accumulate(cost float64) {
 	p.mu.Unlock()
 }
 
-// headerCost returns the cost reported in the response headers, or 0 when
-// absent/zero/unparseable. Streamed responses report 0 here.
-func headerCost(pctx *pipeline.Context) float64 {
+// headerCost returns the usable positive cost reported in the response headers
+// and whether a cost header was present at all. present distinguishes "no
+// header" (fall back to usage pricing) from "header says 0" (a genuine free
+// call — cache hit / error — that must NOT be re-priced from usage). A present
+// but non-positive/non-finite header yields (0, true).
+func headerCost(pctx *pipeline.Context) (cost float64, present bool) {
 	costStr := pctx.ResponseHeaders.Get(responseCostHeader)
 	if costStr == "" {
 		// Anthropic /v1/messages (and newer LiteLLM) omit the bare header.
 		costStr = pctx.ResponseHeaders.Get(responseCostOriginalHeader)
 	}
 	if costStr == "" {
-		return 0
+		return 0, false
 	}
-	cost, err := strconv.ParseFloat(costStr, 64)
+	c, err := strconv.ParseFloat(costStr, 64)
 	// strconv.ParseFloat accepts "NaN" / "Inf"; reject non-finite (and
-	// non-positive) so a garbage header falls through to the usage path
-	// rather than poisoning the ledger.
-	if err != nil || cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
-		return 0
+	// non-positive) so a garbage or zero header does not poison the ledger. The
+	// header was still present, so report that.
+	if err != nil || c <= 0 || math.IsNaN(c) || math.IsInf(c, 0) {
+		return 0, true
 	}
-	return cost
+	return c, true
+}
+
+// isEventStream reports whether the response is a text/event-stream (SSE) — the
+// streamed shape where LiteLLM reports cost 0 in the header, so usage-based
+// pricing is the intended fallback.
+func isEventStream(pctx *pipeline.Context) bool {
+	ct := pctx.ResponseHeaders.Get("Content-Type")
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(ct), "text/event-stream")
 }
 
 // parseFrameUsage extracts token usage from a response frame, covering

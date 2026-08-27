@@ -31,24 +31,27 @@ Agent → cortex.py → AuthBridge (litellm-budget-track) → LiteLLM upstream
 ```
 
 The plugin hooks:
-- `OnRequest` — pre-flight budget check (reject if over limit)
-- `OnResponse` — post-flight cost accumulation for buffered (non-streaming) responses (read header, update ledger)
-- `OnResponseFrame` — cost accumulation for **streamed** responses (see below)
+- `OnRequest` — pre-flight budget check (reject if over limit).
+- `OnResponseFrame` — post-flight cost accounting for **every** response. Because the
+  plugin is a `StreamingResponder`, in-tree listeners route all responses through this
+  hook — a buffered `application/json` body as a single terminal frame, a streamed
+  `text/event-stream` body frame-by-frame — and `pipeline.RunResponse` skips the plugin
+  unconditionally. (`OnResponse` remains only as a fallback for a hypothetical listener
+  that calls it but never `OnResponseFrame`; no in-tree listener does.)
 
-### Buffered vs streamed responses (outbound path)
+### Cost source (what the terminal frame charges)
 
-On the outbound/forward-proxy path the response shape decides which hook fires:
+The cost is settled **once**, on the terminal frame, from one of two sources:
 
-- **Buffered** (`application/json`) — the listener runs `OnResponse`, which reads
-  the `x-litellm-response-cost` header (falling back to `-original`).
-- **Streamed** (`text/event-stream`, e.g. Claude Code's `/v1/messages`) — the
-  listener dispatches per-frame to `OnResponseFrame` **only because this plugin is
-  a `StreamingResponder`**; a streamed response otherwise never reaches
-  `OnResponse`. LiteLLM reports cost `0` in the header for streamed responses
-  (the total is unknown when headers are sent), so the plugin parses the token
-  usage from the terminal SSE events and prices it from the configured
-  `input_cost_per_token` / `output_cost_per_token` rates. Without those rates a
-  streamed response contributes `0`.
+- **Response header** — `x-litellm-response-cost`, falling back to the pre-discount
+  `-original` variant. Used whenever the header carries a usable positive cost. A
+  header of `0` on a non-streamed response is a genuine free call (cache hit / error)
+  and is charged `0` — it is **not** re-priced from usage.
+- **Parsed token usage × configured rates** — used only when the cost header is
+  **absent**, or the response is `text/event-stream` (LiteLLM always reports `0` in the
+  header for streams, e.g. Claude Code's `/v1/messages`). The plugin sums the token
+  usage from the terminal SSE events and multiplies by `input_cost_per_token` /
+  `output_cost_per_token`. Without those rates a streamed response contributes `0`.
 
 ## Files
 
