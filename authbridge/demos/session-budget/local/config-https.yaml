@@ -23,9 +23,6 @@ pipeline:
       - name: session-budget
         config:
           redis_url: "redis://localhost:6379"
-          # Token-focused: one Claude Code turn with cached context is
-          # easily 30k+ prompt tokens, so calls are a poor budget proxy.
-          # A trivial "hi" turn will clear ~40k; raise for real work.
           max_tokens: 40000
           max_calls: 1000000              # effectively unlimited; we
                                           # let max_tokens trigger first

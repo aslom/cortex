@@ -170,7 +170,10 @@ See [`hitl-local.md`](hitl-local.md) —
 [§ Auto modes for CI](hitl-local.md#auto-modes-for-ci),
 [§ Cleanup](hitl-local.md#cleanup). Add `rm -rf cortex-ca` in the
 directory the proxy ran from if you want to regenerate the CA on the
-next run.
+next run — the new `ca.crt` has a fresh serial, so re-point
+`NODE_EXTRA_CA_CERTS` in `.claude/settings.json` at it (same absolute
+path if you relaunch from the same directory) or `claude` will fail
+the TLS handshake against the proxy.
 
 ## Caveats
 
