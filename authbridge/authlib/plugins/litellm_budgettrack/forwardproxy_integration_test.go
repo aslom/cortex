@@ -73,12 +73,18 @@ func TestForwardProxyStreamedSSEUpdatesLedger(t *testing.T) {
 
 	pu, _ := url.Parse(proxy.URL)
 	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(pu)}}
-	resp, err := client.Get(upstream.URL + "/v1/messages")
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, upstream.URL+"/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request via proxy: %v", err)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("close body: %v", err)
+	}
 
 	// The terminal last=true dispatch runs in the handler's defer after the
 	// stream is forwarded, so poll briefly for the ledger to settle.

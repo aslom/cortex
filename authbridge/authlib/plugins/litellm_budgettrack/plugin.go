@@ -106,6 +106,17 @@ func (p *BudgetTrack) Configure(raw json.RawMessage) error {
 	if p.cfg.MaxBudget <= 0 {
 		return fmt.Errorf("litellm-budget-track: max_budget must be > 0")
 	}
+	// Per-token rates must be finite and non-negative. A negative rate would make
+	// a streamed request's cost negative, which accumulate() drops — so the request
+	// would silently neither charge budget nor record a call. Reject at config time.
+	for name, rate := range map[string]float64{
+		"input_cost_per_token":  p.cfg.InputCostPerToken,
+		"output_cost_per_token": p.cfg.OutputCostPerToken,
+	} {
+		if rate < 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
+			return fmt.Errorf("litellm-budget-track: %s must be finite and >= 0", name)
+		}
+	}
 	p.loadLedger()
 	return nil
 }

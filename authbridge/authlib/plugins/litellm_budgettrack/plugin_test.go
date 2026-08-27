@@ -184,6 +184,8 @@ func TestConfigureRejectsBadConfig(t *testing.T) {
 		{"empty spend_file", `{"max_budget": 5.0}`},
 		{"zero max_budget", fmt.Sprintf(`{"spend_file": %q, "max_budget": 0}`, spend)},
 		{"negative max_budget", fmt.Sprintf(`{"spend_file": %q, "max_budget": -1}`, spend)},
+		{"negative input rate", fmt.Sprintf(`{"spend_file": %q, "max_budget": 5, "input_cost_per_token": -0.001}`, spend)},
+		{"negative output rate", fmt.Sprintf(`{"spend_file": %q, "max_budget": 5, "output_cost_per_token": -0.001}`, spend)},
 		{"invalid json", `{`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
