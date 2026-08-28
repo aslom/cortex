@@ -50,8 +50,25 @@ The cost is settled **once**, on the terminal frame, from one of two sources:
 - **Parsed token usage × configured rates** — used only when the cost header is
   **absent**, or the response is `text/event-stream` (LiteLLM always reports `0` in the
   header for streams, e.g. Claude Code's `/v1/messages`). The plugin sums the token
-  usage from the terminal SSE events and multiplies by `input_cost_per_token` /
-  `output_cost_per_token`. Without those rates a streamed response contributes `0`.
+  usage from the terminal SSE events and prices each **prompt-cache tier separately**:
+  uncached input × `input_cost_per_token`, cache writes × `cache_write_cost_per_token`,
+  cache reads × `cache_read_cost_per_token`, output × `output_cost_per_token`. Without
+  any input rate a streamed response contributes `0`.
+
+  **Cache tiers matter.** Providers charge a premium to *write* a cache entry and a
+  steep discount to *read* one, so two requests with identical prompt-token counts can
+  differ ~10× in price. If `cache_write_cost_per_token` / `cache_read_cost_per_token`
+  are unset they default to `input_cost_per_token` (flat pricing), which **overstates
+  cache-heavy traffic like Claude Code by up to ~10×** and would trip the 429 that much
+  earlier. Set the two cache rates to your provider's real prices for accurate budgets.
+  (This only affects the usage-fallback path; when LiteLLM's `x-litellm-response-cost`
+  header is present it already accounts for cache tiers and wins.)
+
+> **envoy-sidecar note.** Because the plugin declares `ReadsBody`, the extproc listener
+> requests `ResponseBodyMode: BUFFERED` — so on the envoy-sidecar path the SSE body is
+> buffered (capped at that listener's 1 MB `maxBodySize`) and "frame-by-frame" means
+> re-parsed from the buffered body, not incrementally as events arrive. The proxy
+> (forward/reverse) listeners stream frame-by-frame as normal.
 
 ## Files
 
@@ -78,8 +95,10 @@ pipeline:
 |-------|------|----------|-------------|
 | `spend_file` | string | yes | Path to the JSON ledger file (created if missing) |
 | `max_budget` | float | yes | Daily budget in USD (must be > 0) |
-| `input_cost_per_token` | float | no | USD per input/prompt token; prices streamed responses (whose header cost is 0) from parsed usage |
+| `input_cost_per_token` | float | no | USD per **uncached** input token; prices streamed responses (whose header cost is 0) from parsed usage |
 | `output_cost_per_token` | float | no | USD per output/completion token; prices streamed responses from parsed usage |
+| `cache_write_cost_per_token` | float | no | USD per cache-write (creation) input token; defaults to `input_cost_per_token` when unset |
+| `cache_read_cost_per_token` | float | no | USD per cache-read input token; defaults to `input_cost_per_token` when unset |
 
 ## Ledger Format
 

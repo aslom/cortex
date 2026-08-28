@@ -186,6 +186,8 @@ func TestConfigureRejectsBadConfig(t *testing.T) {
 		{"negative max_budget", fmt.Sprintf(`{"spend_file": %q, "max_budget": -1}`, spend)},
 		{"negative input rate", fmt.Sprintf(`{"spend_file": %q, "max_budget": 5, "input_cost_per_token": -0.001}`, spend)},
 		{"negative output rate", fmt.Sprintf(`{"spend_file": %q, "max_budget": 5, "output_cost_per_token": -0.001}`, spend)},
+		{"negative cache write rate", fmt.Sprintf(`{"spend_file": %q, "max_budget": 5, "cache_write_cost_per_token": -0.001}`, spend)},
+		{"negative cache read rate", fmt.Sprintf(`{"spend_file": %q, "max_budget": 5, "cache_read_cost_per_token": -0.001}`, spend)},
 		{"invalid json", `{`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -352,9 +354,9 @@ func TestOnResponseFrameOriginalFallback(t *testing.T) {
 // TestParseFrameUsageOpenAI covers the OpenAI terminal usage chunk shape.
 func TestParseFrameUsageOpenAI(t *testing.T) {
 	frame := []byte(`data: {"choices":[],"usage":{"prompt_tokens":30,"completion_tokens":12}}`)
-	in, out, ok := parseFrameUsage(frame)
-	if !ok || in != 30 || out != 12 {
-		t.Errorf("parseFrameUsage = (%d,%d,%v), want (30,12,true)", in, out, ok)
+	fu, ok := parseFrameUsage(frame)
+	if !ok || fu.uncached != 30 || fu.output != 12 || fu.cacheWrite != 0 || fu.cacheRead != 0 {
+		t.Errorf("parseFrameUsage = %+v (found=%v), want uncached 30 / output 12", fu, ok)
 	}
 }
 
@@ -376,9 +378,63 @@ func TestStreamingBareFrames(t *testing.T) {
 
 // TestParseFrameUsageBareJSON unit-checks the bare-payload path directly.
 func TestParseFrameUsageBareJSON(t *testing.T) {
-	in, out, ok := parseFrameUsage([]byte(`{"type":"message_delta","usage":{"input_tokens":14,"output_tokens":8}}`))
-	if !ok || in != 14 || out != 8 {
-		t.Errorf("parseFrameUsage(bare) = (%d,%d,%v), want (14,8,true)", in, out, ok)
+	fu, ok := parseFrameUsage([]byte(`{"type":"message_delta","usage":{"input_tokens":14,"output_tokens":8}}`))
+	if !ok || fu.uncached != 14 || fu.output != 8 {
+		t.Errorf("parseFrameUsage(bare) = %+v (found=%v), want uncached 14 / output 8", fu, ok)
+	}
+}
+
+// TestCacheTierParsing verifies the three input tiers are parsed separately.
+func TestCacheTierParsing(t *testing.T) {
+	fu, ok := parseFrameUsage([]byte(`{"usage":{"input_tokens":9,"cache_creation_input_tokens":3755,"cache_read_input_tokens":30008,"output_tokens":100}}`))
+	if !ok || fu.uncached != 9 || fu.cacheWrite != 3755 || fu.cacheRead != 30008 || fu.output != 100 {
+		t.Errorf("parseFrameUsage = %+v, want uncached 9 / cacheWrite 3755 / cacheRead 30008 / output 100", fu)
+	}
+}
+
+// TestCacheTierPricing is the PR #816 must-fix: cache tiers must be priced
+// separately, not flat at input_cost_per_token. Uses the real Claude Code turn
+// from cortex#811 (input 9, cache_creation 3755, cache_read 30008).
+func TestCacheTierPricing(t *testing.T) {
+	p := New()
+	raw, _ := json.Marshal(budgetTrackConfig{
+		SpendFile:              filepath.Join(t.TempDir(), "spend.json"),
+		MaxBudget:              100,
+		InputCostPerToken:      1e-6,
+		OutputCostPerToken:     5e-6,
+		CacheWriteCostPerToken: 1.25e-6, // write premium
+		CacheReadCostPerToken:  0.1e-6,  // read discount
+	})
+	if err := p.Configure(raw); err != nil {
+		t.Fatal(err)
+	}
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{"Content-Type": {"text/event-stream"}}}
+	p.OnResponseFrame(context.Background(), pctx,
+		[]byte(`{"usage":{"input_tokens":9,"cache_creation_input_tokens":3755,"cache_read_input_tokens":30008,"output_tokens":100}}`), false)
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	want := 9*1e-6 + 3755*1.25e-6 + 30008*0.1e-6 + 100*5e-6
+	if got := p.ledger.TotalSpend; got < want-1e-12 || got > want+1e-12 {
+		t.Errorf("TotalSpend = %v, want %v (per-tier pricing)", got, want)
+	}
+	// Guard against a regression to flat pricing: flat would be far higher.
+	flat := (9+3755+30008)*1e-6 + 100*5e-6
+	if p.ledger.TotalSpend >= flat {
+		t.Errorf("priced flat (%v) — cache tiers not applied", flat)
+	}
+}
+
+// TestCacheRatesDefaultToInputRate: with cache rates unset, cached tokens are
+// priced at the input rate (backward-compatible with pre-#816 flat behavior).
+func TestCacheRatesDefaultToInputRate(t *testing.T) {
+	p := configurePriced(t, 100, 1e-6, 5e-6) // no cache rates
+	pctx := &pipeline.Context{ResponseHeaders: http.Header{"Content-Type": {"text/event-stream"}}}
+	p.OnResponseFrame(context.Background(), pctx,
+		[]byte(`{"usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40}}`), false)
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+	want := (10+20+30)*1e-6 + 40*5e-6 // all input tiers at input rate
+	if got := p.ledger.TotalSpend; got < want-1e-12 || got > want+1e-12 {
+		t.Errorf("TotalSpend = %v, want %v (cache rates default to input rate)", got, want)
 	}
 }
 

@@ -52,8 +52,31 @@ type budgetTrackConfig struct {
 	// header cost is 0 (the total is unknown when streaming headers are sent).
 	// USD per token; optional. When both are zero, streamed responses cannot be
 	// priced and contribute 0 to the ledger.
-	InputCostPerToken  float64 `json:"input_cost_per_token" description:"USD per input/prompt token, for pricing streamed responses."`
+	InputCostPerToken  float64 `json:"input_cost_per_token" description:"USD per uncached input token, for pricing streamed responses."`
 	OutputCostPerToken float64 `json:"output_cost_per_token" description:"USD per output/completion token, for pricing streamed responses."`
+	// Prompt-cache tiers are priced separately: providers charge a premium to
+	// WRITE a cache entry and a steep discount to READ one (see
+	// pipeline/extensions.go). When unset (0) each defaults to
+	// InputCostPerToken, reproducing a flat rate — which overstates cache-heavy
+	// traffic (e.g. Claude Code) by up to ~10×. Set them for accurate pricing.
+	CacheWriteCostPerToken float64 `json:"cache_write_cost_per_token" description:"USD per cache-write (creation) input token; defaults to input_cost_per_token."`
+	CacheReadCostPerToken  float64 `json:"cache_read_cost_per_token" description:"USD per cache-read input token; defaults to input_cost_per_token."`
+}
+
+// cacheWriteRate / cacheReadRate return the effective per-token rate for each
+// cache tier, defaulting to the uncached input rate when unset (0).
+func (c budgetTrackConfig) cacheWriteRate() float64 {
+	if c.CacheWriteCostPerToken > 0 {
+		return c.CacheWriteCostPerToken
+	}
+	return c.InputCostPerToken
+}
+
+func (c budgetTrackConfig) cacheReadRate() float64 {
+	if c.CacheReadCostPerToken > 0 {
+		return c.CacheReadCostPerToken
+	}
+	return c.InputCostPerToken
 }
 
 // stateKey names the per-request scratch holding token usage accumulated across
@@ -65,9 +88,11 @@ const stateKey = "litellm-budget-track"
 // output_tokens in the final message_delta, so taking the max of each yields
 // the final totals; OpenAI reports both together in its terminal usage chunk.
 type usageState struct {
-	inputTokens  int
-	outputTokens int
-	settled      bool // terminal frame already priced this request (exactly-once)
+	uncachedInputTokens int
+	cacheWriteTokens    int // cache_creation_input_tokens
+	cacheReadTokens     int // cache_read_input_tokens
+	outputTokens        int
+	settled             bool // terminal frame already priced this request (exactly-once)
 }
 
 type spendLedger struct {
@@ -120,8 +145,10 @@ func (p *BudgetTrack) Configure(raw json.RawMessage) error {
 	// a streamed request's cost negative, which accumulate() drops — so the request
 	// would silently neither charge budget nor record a call. Reject at config time.
 	for name, rate := range map[string]float64{
-		"input_cost_per_token":  p.cfg.InputCostPerToken,
-		"output_cost_per_token": p.cfg.OutputCostPerToken,
+		"input_cost_per_token":       p.cfg.InputCostPerToken,
+		"output_cost_per_token":      p.cfg.OutputCostPerToken,
+		"cache_write_cost_per_token": p.cfg.CacheWriteCostPerToken,
+		"cache_read_cost_per_token":  p.cfg.CacheReadCostPerToken,
 	} {
 		if rate < 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
 			return fmt.Errorf("litellm-budget-track: %s must be finite and >= 0", name)
@@ -161,17 +188,25 @@ func (p *BudgetTrack) OnResponse(_ context.Context, pctx *pipeline.Context) pipe
 // response-header cost when present (non-streaming), otherwise the parsed
 // usage times the configured per-token rates (streaming).
 func (p *BudgetTrack) OnResponseFrame(_ context.Context, pctx *pipeline.Context, frame []byte, last bool) pipeline.Action {
-	if in, out, ok := parseFrameUsage(frame); ok {
+	if u, ok := parseFrameUsage(frame); ok {
 		st := pipeline.GetState[usageState](pctx, stateKey)
 		if st == nil {
 			st = &usageState{}
 			pipeline.SetState(pctx, stateKey, st)
 		}
-		if in > st.inputTokens {
-			st.inputTokens = in
+		// Max per bucket across frames: Anthropic reports uncached input in
+		// message_start and the finalized cache counts + output in message_delta.
+		if u.uncached > st.uncachedInputTokens {
+			st.uncachedInputTokens = u.uncached
 		}
-		if out > st.outputTokens {
-			st.outputTokens = out
+		if u.cacheWrite > st.cacheWriteTokens {
+			st.cacheWriteTokens = u.cacheWrite
+		}
+		if u.cacheRead > st.cacheReadTokens {
+			st.cacheReadTokens = u.cacheRead
+		}
+		if u.output > st.outputTokens {
+			st.outputTokens = u.output
 		}
 	}
 	if !last {
@@ -200,7 +235,12 @@ func (p *BudgetTrack) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 		// response is a genuine free call (cache hit / error) — charge nothing,
 		// don't invent a cost from the usage block.
 		if !present || isEventStream(pctx) {
-			cost = float64(st.inputTokens)*p.cfg.InputCostPerToken +
+			// Price each prompt-cache tier at its own rate; cache rates default
+			// to the uncached input rate when unset. Flat pricing would overstate
+			// cache-heavy traffic (Claude Code) by up to ~10×.
+			cost = float64(st.uncachedInputTokens)*p.cfg.InputCostPerToken +
+				float64(st.cacheWriteTokens)*p.cfg.cacheWriteRate() +
+				float64(st.cacheReadTokens)*p.cfg.cacheReadRate() +
 				float64(st.outputTokens)*p.cfg.OutputCostPerToken
 		}
 	}
@@ -262,17 +302,27 @@ func isEventStream(pctx *pipeline.Context) bool {
 	return strings.EqualFold(strings.TrimSpace(ct), "text/event-stream")
 }
 
-// parseFrameUsage extracts token usage from a response frame, covering
-// Anthropic (usage, or message.usage in message_start) and OpenAI
-// (usage.prompt_tokens / completion_tokens). Returns the largest input/output
-// token counts found.
+// frameUsage is the per-prompt-cache-tier token breakdown extracted from a
+// response frame. Uncached input, cache writes, and cache reads are kept
+// separate because providers price them very differently.
+type frameUsage struct {
+	uncached   int // uncached input / OpenAI prompt tokens
+	cacheWrite int // cache_creation_input_tokens
+	cacheRead  int // cache_read_input_tokens
+	output     int // output / completion tokens
+}
+
+// parseFrameUsage extracts the token usage breakdown from a response frame,
+// covering Anthropic (usage, or message.usage in message_start) and OpenAI
+// (usage.prompt_tokens / completion_tokens). Returns the largest count seen per
+// bucket, and whether any usage was found.
 //
 // The listener's sseframe reader strips the "data:" prefix and returns the
 // bare payload, so a streamed frame arrives as raw JSON. The buffered
 // application/json path also delivers the whole body as one raw-JSON frame.
 // We therefore try the frame as JSON directly, and also scan any "data:"
 // lines for the case a frame still carries SSE framing.
-func parseFrameUsage(frame []byte) (in, out int, found bool) {
+func parseFrameUsage(frame []byte) (fu frameUsage, found bool) {
 	consider := func(b []byte) {
 		b = bytes.TrimSpace(b)
 		if len(b) == 0 || b[0] != '{' {
@@ -294,11 +344,17 @@ func parseFrameUsage(frame []byte) (in, out int, found bool) {
 		if u == nil {
 			return
 		}
-		if i := u.inputTotal(); i > in {
-			in, found = i, true
+		if v := u.uncachedInput(); v > fu.uncached {
+			fu.uncached, found = v, true
 		}
-		if o := u.outputTotal(); o > out {
-			out, found = o, true
+		if v := u.CacheCreationInputTokens; v > fu.cacheWrite {
+			fu.cacheWrite, found = v, true
+		}
+		if v := u.CacheReadInputTokens; v > fu.cacheRead {
+			fu.cacheRead, found = v, true
+		}
+		if v := u.outputTotal(); v > fu.output {
+			fu.output, found = v, true
 		}
 	}
 
@@ -308,7 +364,7 @@ func parseFrameUsage(frame []byte) (in, out int, found bool) {
 			consider(bytes.TrimPrefix(line, []byte("data:")))
 		}
 	}
-	return in, out, found
+	return fu, found
 }
 
 // usageJSON accepts both Anthropic and OpenAI usage shapes.
@@ -321,9 +377,10 @@ type usageJSON struct {
 	CompletionTokens         int `json:"completion_tokens"`
 }
 
-func (u usageJSON) inputTotal() int {
-	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens + u.PromptTokens
-}
+// uncachedInput is the input NOT served from / written to cache. Anthropic's
+// input_tokens excludes the cache_* counts; OpenAI's prompt_tokens carries no
+// cache split, so it counts as uncached.
+func (u usageJSON) uncachedInput() int { return u.InputTokens + u.PromptTokens }
 
 func (u usageJSON) outputTotal() int { return u.OutputTokens + u.CompletionTokens }
 
