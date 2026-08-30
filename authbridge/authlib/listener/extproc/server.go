@@ -669,6 +669,9 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
 				ResponseBody: &extprocv3.BodyResponse{
 					Response: &extprocv3.CommonResponse{
+						HeaderMutation: &extprocv3.HeaderMutation{
+							SetHeaders: []*corev3.HeaderValueOption{contentLength(pctx.ResponseBody)},
+						},
 						BodyMutation: &extprocv3.BodyMutation{
 							Mutation: &extprocv3.BodyMutation_Body{
 								Body: pctx.ResponseBody,
@@ -840,8 +843,9 @@ func passBodyResponse() *extprocv3.ProcessingResponse {
 
 // withBodyMutation optionally decorates a RequestBody ProcessingResponse
 // with an ext_proc BodyMutation when the pipeline rewrote pctx.Body.
-// Envoy replaces the buffered body with the new bytes and recomputes
-// Content-Length for the upstream. We also clear content-encoding
+// Envoy replaces the buffered body with the new bytes but, in BUFFERED +
+// SEND mode, leaves content-length to the processor (processing_mode.proto,
+// BodySendMode) and rejects a mismatch. We also clear content-encoding
 // because the plugin may have decompressed + rewritten in plaintext;
 // shipping plain bytes without the old encoding header is safer than
 // shipping a malformed archive.
@@ -867,7 +871,14 @@ func withBodyMutation(resp *extprocv3.ProcessingResponse, pctx *pipeline.Context
 		cr.HeaderMutation = &extprocv3.HeaderMutation{}
 	}
 	cr.HeaderMutation.RemoveHeaders = append(cr.HeaderMutation.RemoveHeaders, "content-encoding")
+	cr.HeaderMutation.SetHeaders = append(cr.HeaderMutation.SetHeaders, contentLength(pctx.Body))
 	return resp
+}
+
+// contentLength is the SetHeaders entry a body-mutation reply must carry in
+// BUFFERED + SEND mode (processing_mode.proto, BodySendMode).
+func contentLength(body []byte) *corev3.HeaderValueOption {
+	return &corev3.HeaderValueOption{Header: &corev3.HeaderValue{Key: "content-length", RawValue: []byte(strconv.Itoa(len(body)))}}
 }
 
 func allowBodyResponse() *extprocv3.ProcessingResponse {
