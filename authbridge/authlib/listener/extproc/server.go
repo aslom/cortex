@@ -670,7 +670,8 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 				ResponseBody: &extprocv3.BodyResponse{
 					Response: &extprocv3.CommonResponse{
 						HeaderMutation: &extprocv3.HeaderMutation{
-							SetHeaders: []*corev3.HeaderValueOption{contentLength(pctx.ResponseBody)},
+							SetHeaders:    []*corev3.HeaderValueOption{contentLength(pctx.ResponseBody)},
+							RemoveHeaders: []string{"content-encoding"},
 						},
 						BodyMutation: &extprocv3.BodyMutation{
 							Mutation: &extprocv3.BodyMutation_Body{
