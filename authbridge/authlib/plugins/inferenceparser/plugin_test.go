@@ -289,6 +289,50 @@ func TestInferenceParser_OnResponse_CapturesToolCalls(t *testing.T) {
 	}
 }
 
+// TestInferenceParser_VlessPath covers OpenAI-compatible proxies (e.g. opencode via
+// litellm) that strip the /v1 prefix and post directly to /chat/completions or
+// /completions. Without these path variants the parser falls to the default arm
+// and records no inference telemetry.
+func TestInferenceParser_VlessPath_ChatCompletions(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{
+		Path: "/chat/completions",
+		Body: []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":false}`),
+	}
+	action := p.OnRequest(context.Background(), pctx)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue, got %v", action.Type)
+	}
+	ext := pctx.Extensions.Inference
+	if ext == nil {
+		t.Fatal("Extensions.Inference is nil for /chat/completions")
+	}
+	if ext.Model != "gpt-4" {
+		t.Errorf("Model = %q, want gpt-4", ext.Model)
+	}
+	if !ext.IsAction {
+		t.Error("IsAction should be true")
+	}
+}
+
+func TestInferenceParser_VlessPath_Completions(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{
+		Path: "/completions",
+		Body: []byte(`{"model":"codellama","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	action := p.OnRequest(context.Background(), pctx)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue, got %v", action.Type)
+	}
+	if pctx.Extensions.Inference == nil {
+		t.Fatal("Extensions.Inference is nil for /completions")
+	}
+	if pctx.Extensions.Inference.Model != "codellama" {
+		t.Errorf("Model = %q, want codellama", pctx.Extensions.Inference.Model)
+	}
+}
+
 func TestInferenceParser_NonMatchingPath(t *testing.T) {
 	p := NewInferenceParser()
 	pctx := &pipeline.Context{

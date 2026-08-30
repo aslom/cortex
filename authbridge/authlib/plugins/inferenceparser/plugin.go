@@ -56,7 +56,7 @@ func (p *InferenceParser) OnRequest(_ context.Context, pctx *pipeline.Context) p
 	// "inference-parser is in this pipeline" from config, not per-event rows.
 	var ext *pipeline.InferenceExtension
 	switch endpointPath(pctx) {
-	case "/v1/chat/completions", "/v1/completions":
+	case "/v1/chat/completions", "/v1/completions", "/chat/completions", "/completions":
 		ext = parseOpenAIRequest(pctx.Body)
 	case anthropicMessagesPath:
 		ext = parseAnthropicRequest(pctx.Body)
