@@ -24,11 +24,12 @@ import (
 // MismatchedContentLengthAndBodyLength: BUFFERED + SEND, the processor
 // replaces "Replace this!" with "Hello, World!" and sets content-length to
 // the wrong value → the upstream is never reached, downstream gets 500. The
-// bodies below are the same, so the two tests read as one experiment.
+// original body below is the same; the replacement is deliberately longer,
+// so a reply that merely echoed the original length would fail too.
 
 func TestWithBodyMutation_SetsContentLength(t *testing.T) {
 	pctx := &pipeline.Context{Body: []byte("Replace this!")}
-	pctx.SetBody([]byte("Hello, World!"))
+	pctx.SetBody([]byte("Hello, World! (longer)"))
 
 	hm := withBodyMutation(passBodyResponse(), pctx).GetRequestBody().GetResponse().GetHeaderMutation()
 	if got, want := mutationHeaderValue(hm, "content-length"), strconv.Itoa(len(pctx.Body)); got != want {
@@ -37,7 +38,7 @@ func TestWithBodyMutation_SetsContentLength(t *testing.T) {
 }
 
 func TestHandleResponseBody_SetsContentLength(t *testing.T) {
-	newBody := []byte("Hello, World!")
+	newBody := []byte("Hello, World! (longer)")
 	p, err := pipeline.New([]pipeline.Plugin{&responseMutator{newBody}})
 	if err != nil {
 		t.Fatal(err)
