@@ -97,8 +97,10 @@ You should also have:
   - **Ollama** (default, easiest — no cloud key needed) running locally with the
     model the agent expects: `ollama pull llama3.2:3b-instruct-fp16`, and an Ollama
     server running (`ollama serve`), or
-  - **OpenAI API key** as an alternative (uses the `openai-secret` you configured at
-    install time in `deployments/envs/.secret_values.yaml`)
+  - **OpenAI API key** as an alternative, provided via a `team1` Secret named
+    `openai-secret`. This is created either at install time (from
+    `deployments/envs/.secret_values.yaml`) or manually in Step 2 — see the
+    OpenAI prerequisite note there.
 
 ---
 
@@ -333,7 +335,7 @@ kubectl logs -n rossoctl-system deployment/rossoctl-controller-manager \
 kubectl logs -n team1 -l app.kubernetes.io/name=weather-service -c agent
 ```
 
-Expected (the port may be 8000 or 8001 depending on the agent build):
+Expected:
 
 ```
 INFO:     Started server process [17]
@@ -341,6 +343,13 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
+
+> **Check the bound port matches the target port.** Step 9 maps the service's
+> target port to `8000`. Some agent builds bind Uvicorn on a different port
+> (e.g. `8001`). If the log line above shows a port other than `8000`, the
+> `weather-service:8080` requests below will not reach the agent — go back to
+> **Pod Configuration** and set the **Target Port** to the port actually shown
+> in the log.
 
 ### Check the service endpoint
 
@@ -362,6 +371,15 @@ The service maps **port 8080** to the agent's internal port 8000.
 
 The agent uses an LLM for inference. Follow the section that matches your chosen
 provider.
+
+> **If your agent runs as a `Sandbox` (the UI default):** the
+> `kubectl set env deployment/...`, `kubectl patch deployment ...`, and
+> `kubectl rollout restart|status deployment/...` commands in the sections below
+> assume a `Deployment` and will fail with `NotFound`. To change env vars or
+> restart a Sandbox-backed agent, edit the `Sandbox` CR's pod template
+> (`kubectl edit sandbox weather-service -n team1`) or re-import via the UI.
+> The `kubectl exec`/`kubectl logs` commands work as written (they use a label
+> selector / resolved pod name).
 
 ### Option A: Ollama (local models)
 
@@ -412,7 +430,7 @@ kubectl get secret openai-secret -n team1
 Verify the agent has the correct environment variables:
 
 ```bash
-kubectl exec deployment/weather-service -n team1 -c agent -- env | grep -E "LLM_|OPENAI"
+kubectl exec -n team1 "$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service -o jsonpath='{.items[0].metadata.name}')" -c agent -- env | grep -E "LLM_|OPENAI"
 ```
 
 Expected:
@@ -671,8 +689,8 @@ as described there).
 # AuthBridge sidecar — name depends on resolved mode:
 #   proxy-sidecar (default): authbridge-proxy
 #   envoy-sidecar:           envoy-proxy
-kubectl logs deployment/weather-service -n team1 -c authbridge-proxy
-kubectl logs deployment/weather-service -n team1 -c agent
+kubectl logs -n team1 -l app.kubernetes.io/name=weather-service -c authbridge-proxy
+kubectl logs -n team1 -l app.kubernetes.io/name=weather-service -c agent
 
 # If the issue is operator-managed client registration not finishing,
 # the workload pod waits on /shared/client-{id,secret}.txt. Inspect:
@@ -759,12 +777,15 @@ Send `SIGUSR1` to the authbridge process. The container image is minimal (no
 standalone `kill` or `grep` binaries), so use bash builtins to locate the PID:
 
 ```bash
+AGENT_POD=$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service \
+  -o jsonpath='{.items[0].metadata.name}')
+
 # For envoy-sidecar mode:
-kubectl exec deploy/weather-service -n team1 -c envoy-proxy -- \
+kubectl exec "$AGENT_POD" -n team1 -c envoy-proxy -- \
   bash -c 'for f in /proc/[0-9]*/cmdline; do [ -r "$f" ] || continue; c=$(<"$f"); [[ "$c" == /usr/local/bin/authbridge* ]] && kill -USR1 "${f//[!0-9]/}" && break; done'
 
 # For proxy-sidecar mode:
-kubectl exec deploy/weather-service -n team1 -c authbridge-proxy -- \
+kubectl exec "$AGENT_POD" -n team1 -c authbridge-proxy -- \
   bash -c 'for f in /proc/[0-9]*/cmdline; do [ -r "$f" ] || continue; c=$(<"$f"); [[ "$c" == /usr/local/bin/authbridge* ]] && kill -USR1 "${f//[!0-9]/}" && break; done'
 ```
 
