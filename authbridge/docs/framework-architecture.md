@@ -610,7 +610,7 @@ The flags (not byte-compare) are the source of truth. A rewrite that produces by
 
 | Listener | Request body | Response body |
 |---|---|---|
-| `extproc` | `withBodyMutation` helper wraps the `RequestBody ProcessingResponse` with an ext_proc `BodyMutation`. Envoy replaces the buffered body and recomputes `Content-Length`. | Same pattern in the response-body handler. |
+| `extproc` | `withBodyMutation` helper wraps the `RequestBody ProcessingResponse` with an ext_proc `BodyMutation`. Envoy replaces the buffered body; in BUFFERED + SEND mode the processor must set `Content-Length` itself (`processing_mode.proto`, `BodySendMode`), so the helper does. | Same pattern in the response-body handler. |
 | `forwardproxy` | On mutation, rebuild `r.Body` from `pctx.Body`, set `r.ContentLength` + `Content-Length` header. | Replace `resp.Body` + `resp.ContentLength` + `Content-Length`. |
 | `reverseproxy` | Same as forwardproxy on the inbound request before handing to `httputil.ReverseProxy`. | Same as forwardproxy on the response from the upstream. |
 
