@@ -94,10 +94,13 @@ including the Rossoctl UI.
 You should also have:
 - The Rossoctl UI running at `http://rossoctl-ui.localtest.me:8080`
 - An LLM provider — either:
-  - **Ollama** running locally with a model (e.g. `llama3.2:3b-instruct-fp16`), or
-  - **OpenAI API key** (recommended for most reliable results; see
-    [agent-examples#173](https://github.com/rossoctl/examples/issues/173) for
-    known Ollama + crewai compatibility issues)
+  - **Ollama** (default, easiest — no cloud key needed) running locally with the
+    model the agent expects: `ollama pull llama3.2:3b-instruct-fp16`, and an Ollama
+    server running (`ollama serve`), or
+  - **OpenAI API key** as an alternative, provided via a `team1` Secret named
+    `openai-secret`. This is created either at install time (from
+    `deployments/envs/.secret_values.yaml`) or manually in Step 2 — see the
+    OpenAI prerequisite note there.
 
 ---
 
@@ -111,13 +114,16 @@ passthrough; inbound JWT uses issuer/signature checks).
 current operator (v0.7.0) the operator registers Keycloak clients using its own **SPIFFE
 workload identity** (federated into Keycloak by the `rossoctl-operator-client-bootstrap`
 post-install job in the `keycloak` namespace), not an admin username/password Secret.
-A `NotFound` for `keycloak-admin-secret` in **either** namespace is expected. Confirm
-registration by the per-workload client credentials the operator writes instead:
+A `NotFound` for `keycloak-admin-secret` in **either** namespace is expected.
+
+The operator writes one per-workload client-credentials Secret
+(`rossoctl-keycloak-client-credentials-<hash>`) **when each workload registers** —
+so at install time, before you deploy anything in Steps 1-2, this Secret does not
+exist yet. That is expected, not a failure; you verify it in
+[Step 3](#check-operator-managed-client-registration) after the agent is deployed.
+To watch registrations as they happen once you start deploying:
 
 ```bash
-# One Secret per registered workload:
-kubectl get secret -n team1 | grep rossoctl-keycloak-client-credentials
-# ...and/or watch the operator apply registrations:
 kubectl logs -n rossoctl-system deployment/rossoctl-controller-manager \
   | grep "client registration applied" | tail
 ```
@@ -182,7 +188,9 @@ kubectl get pods -n team1 | grep weather-tool
 
 5. **Protocol**: `A2A`
 
-6. **Workload Type** select `Deployment`.
+6. **Workload Type**: leave the default `Sandbox (recommended)`. The agent then
+   runs as a bare pod owned by a `Sandbox` CR (verify/exec commands below use a
+   label selector rather than `deploy/...` for this reason).
 
 7. **Secure with AuthBridge** is checked by default for agents.
    Leave it checked.
@@ -291,13 +299,19 @@ kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service \
 # Expect a Secret name starting with: rossoctl-keycloak-client-credentials-
 ```
 
+> **Note:** the UI defaults **Workload Type** to `Sandbox`, so the agent runs as a
+> bare pod (owned by a `Sandbox` CR), not a `Deployment`. Address it by pod name or
+> label selector — `kubectl exec deploy/weather-service ...` fails with `NotFound`.
+
 Inspect the actual SPIFFE-derived client ID written to /shared/client-id.txt:
 
 ```bash
-SIDECAR=$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service \
-  -o jsonpath='{.items[0].spec.containers[*].name}' | tr ' ' '\n' \
+AGENT_POD=$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service \
+  -o jsonpath='{.items[0].metadata.name}')
+SIDECAR=$(kubectl get pod "$AGENT_POD" -n team1 \
+  -o jsonpath='{.spec.containers[*].name}' | tr ' ' '\n' \
   | grep -E '^(authbridge-proxy|envoy-proxy)$' | head -1)
-kubectl exec deploy/weather-service -n team1 -c "$SIDECAR" -- cat /shared/client-id.txt
+kubectl exec "$AGENT_POD" -n team1 -c "$SIDECAR" -- cat /shared/client-id.txt
 ```
 
 Expected — just the SPIFFE ID (the `Created Keycloak client …` log line
@@ -318,7 +332,7 @@ kubectl logs -n rossoctl-system deployment/rossoctl-controller-manager \
 ### Check agent logs
 
 ```bash
-kubectl logs deployment/weather-service -n team1 -c agent
+kubectl logs -n team1 -l app.kubernetes.io/name=weather-service -c agent
 ```
 
 Expected:
@@ -329,6 +343,13 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
+
+> **Check the bound port matches the target port.** Step 9 maps the service's
+> target port to `8000`. Some agent builds bind Uvicorn on a different port
+> (e.g. `8001`). If the log line above shows a port other than `8000`, the
+> `weather-service:8080` requests below will not reach the agent — go back to
+> **Pod Configuration** and set the **Target Port** to the port actually shown
+> in the log.
 
 ### Check the service endpoint
 
@@ -350,6 +371,15 @@ The service maps **port 8080** to the agent's internal port 8000.
 
 The agent uses an LLM for inference. Follow the section that matches your chosen
 provider.
+
+> **If your agent runs as a `Sandbox` (the UI default):** the
+> `kubectl set env deployment/...`, `kubectl patch deployment ...`, and
+> `kubectl rollout restart|status deployment/...` commands in the sections below
+> assume a `Deployment` and will fail with `NotFound`. To change env vars or
+> restart a Sandbox-backed agent, edit the `Sandbox` CR's pod template
+> (`kubectl edit sandbox weather-service -n team1`) or re-import via the UI.
+> The `kubectl exec`/`kubectl logs` commands work as written (they use a label
+> selector / resolved pod name).
 
 ### Option A: Ollama (local models)
 
@@ -400,7 +430,7 @@ kubectl get secret openai-secret -n team1
 Verify the agent has the correct environment variables:
 
 ```bash
-kubectl exec deployment/weather-service -n team1 -c agent -- env | grep -E "LLM_|OPENAI"
+kubectl exec -n team1 "$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service -o jsonpath='{.items[0].metadata.name}')" -c agent -- env | grep -E "LLM_|OPENAI"
 ```
 
 Expected:
@@ -454,8 +484,10 @@ and `/livez` by default:
 
 ```bash
 kubectl exec test-client -n team1 -- curl -s \
-  http://weather-service:8080/.well-known/agent.json | jq .name
-# Expected: "weather_service"
+  http://weather-service:8080/.well-known/agent-card.json | jq .name
+# Expected: "Weather Assistant"
+# (Both /.well-known/agent-card.json and /.well-known/agent.json are served —
+#  the bypass matches the /.well-known/ prefix, not a specific filename.)
 ```
 
 ### 6b. Inbound Rejection - No Token
@@ -465,7 +497,7 @@ Non-public endpoints require a valid JWT:
 ```bash
 kubectl exec test-client -n team1 -- curl -s \
   http://weather-service:8080/
-# Expected: {"error":"unauthorized","message":"missing Authorization header"}
+# Expected: {"error":"auth.unauthorized","message":"missing Authorization header","plugin":"jwt-validation"}
 ```
 
 ### 6c. Inbound Rejection - Invalid Token
@@ -476,7 +508,7 @@ A malformed or tampered token fails the JWKS signature check:
 kubectl exec test-client -n team1 -- curl -s \
   -H "Authorization: Bearer invalid-token" \
   http://weather-service:8080/
-# Expected: {"error":"unauthorized","message":"token validation failed: failed to parse/validate token: ..."}
+# Expected: {"error":"auth.unauthorized","message":"token validation failed","plugin":"jwt-validation"}
 ```
 
 ### 6d. End-to-End Test with Valid Token
@@ -550,10 +582,10 @@ Check the authbridge logs to confirm inbound validation is working:
 
 ```bash
 # For envoy-sidecar mode:
-kubectl logs deployment/weather-service -n team1 -c envoy-proxy 2>&1 | grep "inbound authorized"
+kubectl logs -n team1 -l app.kubernetes.io/name=weather-service -c envoy-proxy 2>&1 | grep "inbound authorized"
 
 # For proxy-sidecar mode:
-kubectl logs deployment/weather-service -n team1 -c authbridge-proxy 2>&1 | grep "inbound authorized"
+kubectl logs -n team1 -l app.kubernetes.io/name=weather-service -c authbridge-proxy 2>&1 | grep "inbound authorized"
 ```
 
 Expected:
@@ -657,8 +689,8 @@ as described there).
 # AuthBridge sidecar — name depends on resolved mode:
 #   proxy-sidecar (default): authbridge-proxy
 #   envoy-sidecar:           envoy-proxy
-kubectl logs deployment/weather-service -n team1 -c authbridge-proxy
-kubectl logs deployment/weather-service -n team1 -c agent
+kubectl logs -n team1 -l app.kubernetes.io/name=weather-service -c authbridge-proxy
+kubectl logs -n team1 -l app.kubernetes.io/name=weather-service -c agent
 
 # If the issue is operator-managed client registration not finishing,
 # the workload pod waits on /shared/client-{id,secret}.txt. Inspect:
@@ -745,12 +777,15 @@ Send `SIGUSR1` to the authbridge process. The container image is minimal (no
 standalone `kill` or `grep` binaries), so use bash builtins to locate the PID:
 
 ```bash
+AGENT_POD=$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service \
+  -o jsonpath='{.items[0].metadata.name}')
+
 # For envoy-sidecar mode:
-kubectl exec deploy/weather-service -n team1 -c envoy-proxy -- \
+kubectl exec "$AGENT_POD" -n team1 -c envoy-proxy -- \
   bash -c 'for f in /proc/[0-9]*/cmdline; do [ -r "$f" ] || continue; c=$(<"$f"); [[ "$c" == /usr/local/bin/authbridge* ]] && kill -USR1 "${f//[!0-9]/}" && break; done'
 
 # For proxy-sidecar mode:
-kubectl exec deploy/weather-service -n team1 -c authbridge-proxy -- \
+kubectl exec "$AGENT_POD" -n team1 -c authbridge-proxy -- \
   bash -c 'for f in /proc/[0-9]*/cmdline; do [ -r "$f" ] || continue; c=$(<"$f"); [[ "$c" == /usr/local/bin/authbridge* ]] && kill -USR1 "${f//[!0-9]/}" && break; done'
 ```
 
