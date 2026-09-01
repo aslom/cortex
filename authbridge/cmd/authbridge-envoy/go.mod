@@ -73,7 +73,7 @@ require (
 	github.com/mailru/easyjson v0.9.1 // indirect
 	github.com/mark3labs/mcp-go v0.43.2 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
-	github.com/maximhq/bifrost/core v1.7.13 // indirect
+	github.com/maximhq/bifrost/core v1.7.15 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/open-policy-agent/opa v1.20.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
