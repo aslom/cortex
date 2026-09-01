@@ -16,21 +16,48 @@ updates:
     directory: /authbridge/authlib
     schedule:
       interval: weekly
+    ignore:
+      # gobwas/glob v1 is a breaking API change, not just the engine rewrite
+      # its release notes describe: Compile went from returning the Glob
+      # interface to a concrete *Pattern, and Glob was removed. authlib
+      # declares glob.Glob in listener/skiphost, routing and
+      # plugins/tokenbroker — and OPA declares it too (v1/topdown/glob.go,
+      # v1/bundle/bundle.go, still true at 1.20.1), so v1 cannot be adopted
+      # here until OPA migrates. Blocked outside this repo; see #829.
+      #
+      # Matching semantics are NOT the blocker: a v0.2.3-vs-v1.0.0 diff over
+      # the repo's real pattern corpus (36 patterns x 29 hosts) differed only
+      # on the empty host, which skiphost never passes to glob. Drop this
+      # ignore once OPA is on the glob v1 API.
+      - dependency-name: "github.com/gobwas/glob"
+        update-types: ["version-update:semver-major"]
 
   # Go - mode-specific binaries
   - package-ecosystem: gomod
     directory: /authbridge/cmd/authbridge-proxy
     schedule:
       interval: weekly
+    ignore:
+      # See the authlib entry above for why glob v1 is blocked.
+      - dependency-name: "github.com/gobwas/glob"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: gomod
     directory: /authbridge/cmd/authbridge-envoy
     schedule:
       interval: weekly
+    ignore:
+      # See the authlib entry above for why glob v1 is blocked.
+      - dependency-name: "github.com/gobwas/glob"
+        update-types: ["version-update:semver-major"]
   # Go - abctl TUI
   - package-ecosystem: gomod
     directory: /authbridge/cmd/abctl
     schedule:
       interval: weekly
+    ignore:
+      # See the authlib entry above for why glob v1 is blocked.
+      - dependency-name: "github.com/gobwas/glob"
+        update-types: ["version-update:semver-major"]
 
   # Go - storage backends (direct deps: go-redis, miniredis)
   - package-ecosystem: gomod
