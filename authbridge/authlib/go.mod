@@ -8,7 +8,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gobwas/glob v0.2.3
 	github.com/lestrrat-go/jwx/v2 v2.1.7
-	github.com/maximhq/bifrost/core v1.7.13
+	github.com/maximhq/bifrost/core v1.7.15
 	github.com/open-policy-agent/opa v1.20.1
 	github.com/rossoctl/context-guru v0.1.0
 	github.com/spiffe/go-spiffe/v2 v2.8.1
