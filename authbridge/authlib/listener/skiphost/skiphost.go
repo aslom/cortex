@@ -9,10 +9,11 @@
 // before matching so operators write patterns against the hostname alone
 // regardless of which port the upstream listens on.
 //
-// The package is a leaf — no dependencies inside authlib — so both
-// listener implementations (extproc, forwardproxy) can import it without
-// risking an import cycle, and tests can exercise the matcher in
-// isolation from the listener machinery.
+// The package depends on nothing inside authlib except
+// authlib/internal/hostglob, itself a leaf, so both listener
+// implementations (extproc, forwardproxy) can import it without risking an
+// import cycle, and tests can exercise the matcher in isolation from the
+// listener machinery.
 package skiphost
 
 import (
@@ -21,6 +22,8 @@ import (
 	"strings"
 
 	"github.com/gobwas/glob"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/internal/hostglob"
 )
 
 // Matcher answers "does this host match any configured skip pattern?".
@@ -34,47 +37,6 @@ type compiled struct {
 	glob glob.Glob
 }
 
-// matchAllProbeHosts are single-label hostnames covering the shapes real
-// in-cluster traffic arrives with: short Kubernetes service names of
-// varying length. A pattern that matches every one of them exempts every
-// in-cluster outbound destination from the pipeline, which is the outcome
-// New's guard exists to prevent.
-//
-// This is a behavioural probe rather than a comparison against known-bad
-// strings, because the string comparison it replaces ("*" and "**" by
-// equality) only caught the two most obvious spellings. Under
-// `.`-delimited gobwas/glob these are all equally match-all and all
-// slipped through:
-//
-//	"***", "****", and any longer run of stars
-//	"{**}", "{*,**}"  — super-star wrapped in braces or alternation
-//	"?*"              — one character then anything, i.e. any non-empty label
-//
-// Any of those in listener.skip_hosts silently bypassed the plugin
-// pipeline AND session recording for every host.
-//
-// Single-label probes are sufficient: a pattern that matches everything
-// necessarily matches these too, and a pattern that requires a separator
-// ("*.*", "*.svc.cluster.local") is not match-all and must keep working —
-// TestNew_AcceptsLeadingStar pins that direction.
-var matchAllProbeHosts = []string{
-	"a",
-	"svc",
-	"otel-collector",
-	"github-tool-mcp",
-}
-
-// matchesEveryProbeHost reports whether g matches every probe host, i.e.
-// whether the pattern is match-all in practice however it is spelled.
-func matchesEveryProbeHost(g glob.Glob) bool {
-	for _, h := range matchAllProbeHosts {
-		if !g.Match(h) {
-			return false
-		}
-	}
-	return true
-}
-
 // New compiles a skip-host matcher from raw glob patterns. Returns an
 // error identifying the first invalid pattern so misconfigurations
 // surface at startup rather than at first request. An empty input is
@@ -86,15 +48,14 @@ func matchesEveryProbeHost(g glob.Glob) bool {
 //
 //   - empty / whitespace-only patterns: trivially-true matches with no
 //     intent expressed.
-//   - any pattern that matches every probe host in matchAllProbeHosts —
-//     i.e. anything that is match-all in practice. Under our
-//     `.`-delimited glob semantics that includes "*", which matches
-//     every single-label hostname, which is how every short Kubernetes
-//     service name reaches the listener (`Host: github-tool-mcp`,
-//     `Host: otel-collector`, etc.); "**", the unambiguous match-all;
-//     and every other spelling of the same thing (see
-//     matchAllProbeHosts for why this is a behavioural probe rather
-//     than a comparison against known-bad strings).
+//   - any pattern hostglob.MatchesEverySingleLabel flags — i.e. anything
+//     that covers every in-cluster destination. Under our `.`-delimited
+//     glob semantics that includes "*", which matches every single-label
+//     hostname, which is how every short Kubernetes service name reaches
+//     the listener (`Host: github-tool-mcp`, `Host: otel-collector`,
+//     etc.); "**", the unambiguous match-all; and every other spelling of
+//     the same thing (see hostglob for why this is a behavioural probe
+//     rather than a comparison against known-bad strings).
 //   - patterns containing ":" — Match strips the port from the
 //     incoming host before comparing, so colon-bearing patterns
 //     compile but never match. Almost certainly an operator typo.
@@ -121,11 +82,11 @@ func New(patterns []string) (*Matcher, error) {
 				"(Match strips the port from the incoming host before comparing, "+
 				"so a port-bearing pattern would never match)", p)
 		}
-		g, err := glob.Compile(p, '.')
+		g, err := hostglob.Compile(p)
 		if err != nil {
 			return nil, fmt.Errorf("skiphost: invalid pattern %q: %w", p, err)
 		}
-		if matchesEveryProbeHost(g) {
+		if hostglob.MatchesEverySingleLabel(g) {
 			return nil, fmt.Errorf("skiphost: pattern %q matches everything; "+
 				"if you mean to disable outbound enforcement, remove the "+
 				"relevant plugins from the pipeline instead", p)
