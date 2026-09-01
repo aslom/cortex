@@ -161,14 +161,14 @@ func (p *InferenceParser) OnResponse(_ context.Context, pctx *pipeline.Context) 
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// inferenceStreamState is the scratch state kept on the extension for
-// the duration of a streaming response. Lives in pctx.Extensions.Custom
-// under a private key — kept off the public InferenceExtension shape so
-// the API stays clean. The struct accumulates the in-progress
-// completion until last=true triggers finalization.
+// inferenceStreamState is the scratch state kept on pctx.Extensions.Custom
+// for the duration of a streaming response. Provider-specific fold
+// functions normalize their wire format into the neutral usage field;
+// hasUsage flags whether any event carried usage counts (some providers
+// omit the block unless the client opts in).
 //
-// A streamed tool call is spread over many frames — id and name on the
-// opening frame, arguments as fragments after it — so it has to be
+// A streamed Anthropic tool call is spread over many frames — id and name
+// on the opening frame, arguments as fragments after it — so it has to be
 // assembled here rather than read off any single frame. toolCalls keeps
 // emission order; toolsByIndex resolves a fragment to its call, since
 // interleaved blocks (a text block and two tool calls) are only
@@ -176,7 +176,8 @@ func (p *InferenceParser) OnResponse(_ context.Context, pctx *pipeline.Context) 
 // openTool is the fallback for a provider that omits the index.
 type inferenceStreamState struct {
 	completion strings.Builder
-	usage      inferenceUsage
+	usage      parsercommon.TokenUsage
+	hasUsage   bool
 
 	toolCalls    []*anthropicToolCallState
 	toolsByIndex map[int]*anthropicToolCallState
@@ -189,12 +190,8 @@ type inferenceStreamState struct {
 // after a streaming pass) is a no-op instead of a double-count.
 func (s *inferenceStreamState) finalize(ext *pipeline.InferenceExtension) {
 	ext.Completion = s.completion.String()
-	if s.usage.TotalTokens > 0 {
-		ext.PromptTokens = s.usage.PromptTokens
-		ext.CompletionTokens = s.usage.CompletionTokens
-		ext.TotalTokens = s.usage.TotalTokens
-		ext.CacheWriteTokens = s.usage.CacheWriteTokens
-		ext.CacheReadTokens = s.usage.CacheReadTokens
+	if s.hasUsage {
+		s.usage.Fill(ext)
 	}
 	if len(s.toolCalls) == 0 {
 		return
@@ -302,19 +299,14 @@ func foldOpenAIFrame(frame []byte, state *inferenceStreamState, ext *pipeline.In
 			ext.FinishReason = c.FinishReason
 		}
 	}
-	// Copy the three wire-backed counts field by field rather than assigning
-	// the whole struct. inferenceUsage doubles as the dialect-neutral
-	// accumulator and its two cache fields are json:"-", so they are always
-	// zero in a freshly decoded chunk — a whole-struct assignment would clear
-	// whatever the accumulator held. Nothing on the OpenAI path fills them
-	// today, which is precisely why that clobber would be silent when
-	// something does. TotalTokens is taken off the wire rather than recomputed:
-	// the provider reports it, and it may legitimately differ from
-	// prompt+completion.
-	if chunk.Usage.TotalTokens > 0 {
-		state.usage.PromptTokens = chunk.Usage.PromptTokens
-		state.usage.CompletionTokens = chunk.Usage.CompletionTokens
-		state.usage.TotalTokens = chunk.Usage.TotalTokens
+	// OpenAI streams cumulative usage: each usage-bearing chunk restates
+	// the full totals, so replacing state.usage with the latest chunk's
+	// neutral form is correct. Gate on hasAny so chunks with no usage
+	// block (every non-final chunk) don't clear an accumulator that a
+	// prior chunk populated.
+	if chunk.Usage.hasAny() {
+		state.usage = chunk.Usage.toNeutral()
+		state.hasUsage = true
 	}
 }
 
@@ -327,15 +319,27 @@ func getOrCreateStreamState(pctx *pipeline.Context) *inferenceStreamState {
 	return s
 }
 
-// logInferenceFinalized emits the operator-facing INFO log + Observe
-// once a response is finalized — shared by OnResponse and
-// OnResponseFrame so streaming and buffered finalize identically.
+// logInferenceFinalized emits the operator-facing INFO log once a
+// response is finalized; shared by the buffered and streaming paths.
+// Split counters render -1 when ext.PresentKinds says the provider
+// did not expose that sub-kind, distinct from a reported 0.
 func logInferenceFinalized(ext *pipeline.InferenceExtension) {
+	tok := func(bit parsercommon.Kind, v int) int {
+		if ext.PresentKinds&uint8(bit) == 0 {
+			return -1
+		}
+		return v
+	}
 	slog.Info("inference-parser: response",
 		"model", ext.Model,
 		"finishReason", ext.FinishReason,
 		"promptTokens", ext.PromptTokens,
 		"completionTokens", ext.CompletionTokens,
+		"inputTokens", tok(parsercommon.KindInput, ext.InputTokens),
+		"cacheReadTokens", tok(parsercommon.KindCacheRead, ext.CacheReadTokens),
+		"cacheWriteTokens", tok(parsercommon.KindCacheWrite, ext.CacheWriteTokens),
+		"outputTokens", tok(parsercommon.KindOutput, ext.OutputTokens),
+		"reasoningTokens", tok(parsercommon.KindReasoning, ext.ReasoningTokens),
 	)
 	slog.Debug("inference-parser: completion", "text", parsercommon.Truncate(ext.Completion, parsercommon.DebugBodyMax))
 }
@@ -359,16 +363,24 @@ func parseInferenceJSON(body []byte, ext *pipeline.InferenceExtension) {
 			})
 		}
 	}
-	ext.PromptTokens = resp.Usage.PromptTokens
-	ext.CompletionTokens = resp.Usage.CompletionTokens
-	ext.TotalTokens = resp.Usage.TotalTokens
+	// No usage block: leave PresentKinds at 0 (matches SSE path).
+	if resp.Usage.hasAny() {
+		resp.Usage.toNeutral().Fill(ext)
+	}
 }
 
 // parseInferenceSSE concatenates content deltas across SSE events and captures
 // the last finish_reason and usage block (sent when stream_options.include_usage
 // is set). The stream terminates with a "data: [DONE]" marker which is skipped.
+//
+// OpenAI streams cumulative usage: each usage-bearing chunk restates the full
+// totals, so the latest chunk's neutral form is authoritative. Accumulate into
+// a local TokenUsage and Fill once at the end — matching foldOpenAIFrame's
+// contract, so PresentKinds and ReportedTotal reflect only the final chunk.
 func parseInferenceSSE(body []byte, ext *pipeline.InferenceExtension) {
 	var completion strings.Builder
+	var usage parsercommon.TokenUsage
+	var hasUsage bool
 	for _, line := range bytes.Split(body, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if !bytes.HasPrefix(line, []byte("data:")) {
@@ -391,13 +403,15 @@ func parseInferenceSSE(body []byte, ext *pipeline.InferenceExtension) {
 				ext.FinishReason = c.FinishReason
 			}
 		}
-		if chunk.Usage.TotalTokens > 0 {
-			ext.PromptTokens = chunk.Usage.PromptTokens
-			ext.CompletionTokens = chunk.Usage.CompletionTokens
-			ext.TotalTokens = chunk.Usage.TotalTokens
+		if chunk.Usage.hasAny() {
+			usage = chunk.Usage.toNeutral()
+			hasUsage = true
 		}
 	}
 	ext.Completion = completion.String()
+	if hasUsage {
+		usage.Fill(ext)
+	}
 }
 
 type inferenceResponse struct {
@@ -446,21 +460,63 @@ type inferenceDelta struct {
 	Content string `json:"content"`
 }
 
-// inferenceUsage decodes the OpenAI usage block and doubles as the
-// dialect-neutral accumulator for a streaming response's token counts.
-//
-// The two cache fields are json:"-" because nothing on the wire fills them
-// in this shape: the Anthropic path sets them from its own usage struct
-// (see anthropicUsage), and the OpenAI dialect reports cached tokens under
-// a different key entirely. They live here so the shared finalize has one
-// place to read every count from.
+// inferenceUsage decodes the OpenAI usage block. All fields are pointers
+// so "key absent" is distinguishable from "key present with value 0" —
+// a total-only response must not assert KindInput/KindOutput.
 type inferenceUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens     *int `json:"prompt_tokens"`
+	CompletionTokens *int `json:"completion_tokens"`
+	TotalTokens      *int `json:"total_tokens"`
 
-	CacheWriteTokens int `json:"-"`
-	CacheReadTokens  int `json:"-"`
+	PromptTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
+}
+
+// hasAny reports whether any recognized field was on the wire. Call
+// sites gate toNeutral on this so an omitted or empty usage block
+// doesn't overwrite a prior chunk's state.
+func (u inferenceUsage) hasAny() bool {
+	return u.PromptTokens != nil || u.CompletionTokens != nil || u.TotalTokens != nil ||
+		u.PromptTokensDetails != nil || u.CompletionTokensDetails != nil
+}
+
+// toNeutral maps OpenAI's usage onto TokenUsage. prompt_tokens includes
+// cached_tokens on the wire — subtract to get uncached input and clamp
+// at 0 for malformed responses. CacheWrite stays absent (OpenAI bills
+// cache writes as ordinary input). Each Present bit is set only when
+// its key was on the wire, so an absent key stays "not exposed"
+// (-1 sentinel) rather than "reported zero."
+func (u inferenceUsage) toNeutral() parsercommon.TokenUsage {
+	usage := parsercommon.TokenUsage{}
+	if u.TotalTokens != nil {
+		usage.ReportedTotal = *u.TotalTokens
+	}
+	if u.PromptTokens != nil {
+		usage.Input = *u.PromptTokens
+		usage.Present |= parsercommon.KindInput
+	}
+	if u.CompletionTokens != nil {
+		usage.Output = *u.CompletionTokens
+		usage.Present |= parsercommon.KindOutput
+	}
+	if u.PromptTokensDetails != nil {
+		cached := u.PromptTokensDetails.CachedTokens
+		usage.Input -= cached
+		if usage.Input < 0 {
+			usage.Input = 0
+		}
+		usage.CacheRead = cached
+		usage.Present |= parsercommon.KindCacheRead
+	}
+	if u.CompletionTokensDetails != nil {
+		usage.Reasoning = u.CompletionTokensDetails.ReasoningTokens
+		usage.Present |= parsercommon.KindReasoning
+	}
+	return usage
 }
 
 type inferenceRequest struct {
