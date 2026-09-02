@@ -1,5 +1,17 @@
 # Sub-PRD: AIAC Agent — Policy Conflict Check (pre-commit diagnostic)
 
+> **⚠️ RETIRED / SUPERSEDED (#2500, #2503).** The standalone read-only `POST /policy/check`
+> route described below **no longer exists**. `/apply` is now the **sole** policy entry point:
+> the rich conflict diagnostic (verbatim-quoted `ConflictReport`) is folded directly into the
+> apply path and returned as an HTTP 422 body on a genuine grant/deny conflict — whether a
+> cross-pass structural conflict (`PolicyConflictError`, quote-enriched) or the intra-pass LLM
+> auditor's `PolicyContradictionError` (re-shaped into the **same** `ConflictReport`). The
+> `PolicyCheckRequest` model and the `check_policy_conflicts(...)` function are
+> removed; the survey orchestrator was re-homed into `policy_rules_builder/diagnostic_survey.py`
+> and reused by the apply path. See [`../../../adr/0001-identify-never-reconcile.md`](../../../adr/0001-identify-never-reconcile.md)
+> (the `#2503` addendum). This document is kept for historical context only — treat the
+> interface section below as describing a retired route, not a shipped contract.
+
 > **Depends on:** [`../aiac-agent.md`](../aiac-agent.md) — Controller, Shared Module, Configuration, Error Handling, Runtime.
 
 > **Sits next to the live PRB contradiction path.** This diagnostic reuses the Policy Rules Builder machinery specified in [`policy-rules-builder.md`](policy-rules-builder.md), but is a **separate, read-only** path. The live `/apply` → `PolicyContradictionError` → HTTP 422 contract documented there is **UNCHANGED** by this feature.
@@ -23,8 +35,8 @@ report. It does **not** replace or modify the live `/apply` → 422 path.
 
 ## Interface
 
-- **New Controller route** — `POST /policy/check` (**recommended**; the exact path is a #154 open item,
-  `/policy/check` vs `/policy/conflicts`). The route is a **thin serialization shell** over a testable
+- **New Controller route** — `POST /policy/check` (**final** — shipped path; the earlier
+  `/policy/check` vs `/policy/conflicts` open item is settled). The route is a **thin serialization shell** over a testable
   plain function:
 
   ```python
@@ -255,7 +267,6 @@ seam; the opt-in `-m llm` suite runs the real model — see [`policy-rules-build
   per-service check** — a **separate effort**, not this work.
 - **Survey concurrency:** assume **sequential** (matches `builder.py`); parallelize only if latency
   demands.
-- **Route path name:** decide at implementation (`/policy/check` vs `/policy/conflicts`).
 - **Subtle-prose robustness / PRB precedence tuning** (explicit prohibition vs description-derived
   grant): a separate PRB-quality concern, not a correctness gate for this feature.
 - **ALLOW-vs-DENY precedence / tie-break at enforcement time:** a distinct PCE/Rego concern (tracked in

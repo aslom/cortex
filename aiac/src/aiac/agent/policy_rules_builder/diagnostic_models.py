@@ -1,7 +1,7 @@
 """Structured models for the read-only policy **conflict-check** diagnostic (feature #154).
 
-This module defines ONLY the stable serialization shape shared by the diagnostic engine, the
-survey use-case, and the ``POST /policy/check`` route — no pipeline logic. The live ``/apply``
+This module defines ONLY the stable serialization shape shared by the diagnostic engine and the
+survey orchestrator — no pipeline logic. The live ``/apply``
 path and its models (``PolicyRule``, ``Contradiction``, ``AuditVerdict`` in ``graph.py`` /
 ``policy.model.models``) are deliberately untouched (decision D11): the typed conflict ``kind``
 lives here, produced by the diagnostic's ``explain`` node, rather than being bolted onto the
@@ -48,11 +48,15 @@ class ConflictStatus(str, Enum):
 
 
 class UnevaluatedReason(str, Enum):
-    """Why a focal entity could not be evaluated. Currently a single value: ``nonconvergence``
-    (the entity exhausted the audit retry budget without a verdict). Kept as an enum so callers
-    switch on a stable token, with the free-text ``detail`` carrying specifics."""
+    """Why a focal entity could not be evaluated. ``nonconvergence`` — the entity exhausted the
+    audit retry budget without a verdict. ``unjoinable_candidate`` — the auditor confirmed a
+    contradiction against a ``candidate_name`` that does not join to this run's typed candidate
+    set, so the conflict cannot be emitted with a real id yet must not be dropped (else a
+    confirmed contradiction could let the report reach ``no_conflict``). Kept as an enum so
+    callers switch on a stable token, with the free-text ``detail`` carrying specifics."""
 
     NONCONVERGENCE = "nonconvergence"
+    UNJOINABLE_CANDIDATE = "unjoinable_candidate"
 
 
 class EntityRef(BaseModel):
