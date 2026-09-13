@@ -178,6 +178,22 @@ type Settled struct {
 	// gateway's.
 	PromptUSD float64
 	HasPrompt bool
+
+	// OutputUSD is the OUTPUT half, the same way round: generated tokens at the output
+	// rate, prompt tiers excluded. It exists so a response row can show what THAT row
+	// cost rather than what the exchange cost, which is the only reading under which a
+	// per-row column is row-local.
+	//
+	// Priced from the table for the same reason PromptUSD is, and NOT as CostUSD minus
+	// PromptUSD: the two are not guaranteed to share a source — CostUSD may be the
+	// gateway's while PromptUSD is always the table's — so their difference concentrates
+	// every modelling error into the completion figure and can go negative.
+	//
+	// PromptUSD + OutputUSD is therefore still not CostUSD. The pair are two breakdowns
+	// of one call, not two addends; when the gateway reported the total, comparing their
+	// sum against it measures the table's drift, which is what ModelledUSD is for.
+	OutputUSD float64
+	HasOutput bool
 }
 
 // Settle prices one response.
@@ -220,6 +236,14 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	promptOnly.Output = 0
 	if micros, _, ok := modelledCost(rates, pctx.Host, model, promptOnly); ok {
 		out.PromptUSD, out.HasPrompt = float64(micros)/1e6, true
+	}
+
+	// The output half, for a response row, by the same construction: zero the prompt
+	// tiers instead of subtracting the prompt figure from the total.
+	outputOnly := usage
+	outputOnly.Input, outputOnly.CacheWrite, outputOnly.CacheRead = 0, 0, 0
+	if micros, _, ok := modelledCost(rates, pctx.Host, model, outputOnly); ok {
+		out.OutputUSD, out.HasOutput = float64(micros)/1e6, true
 	}
 
 	streamedPlaceholder := state == headerZero && IsEventStream(pctx)
@@ -334,6 +358,7 @@ func NewRecord(s Settled, avoided []costevent.Saving) costevent.Event {
 		Provenance: s.Provenance.String(),
 		Settled:    s.Priced,
 		PromptUSD:  s.PromptUSD,
+		OutputUSD:  s.OutputUSD,
 		Avoided:    avoided,
 	}
 }

@@ -18,6 +18,7 @@ import (
 // cells below are unchanged by the move. That is the point: same output, one owner.
 const costWire = `{"cost_usd":0.2824,"source":"gateway-header",
   "daily_total_usd":1.4207,"daily_max_usd":5,"prompt_usd":0.26334,
+  "output_usd":0.03515,
   "avoided":[{"component":"tool-prune","tokensAvoided":9899,"usd":0.0038,
   "tier":"cache_read","estimated":true}]}`
 
@@ -155,13 +156,30 @@ func TestCostCellPhases(t *testing.T) {
 	if got := m.costCell(rows, partner, 0, req); got != "$0.2633(−$0.0038)" {
 		t.Errorf("request COST = %q, want %q", got, "$0.2633(−$0.0038)")
 	}
-	if got := m.costCell(rows, partner, 1, resp); got != "$0.2824" {
-		t.Errorf("response COST = %q, want %q", got, "$0.2824")
+	// Output: 1,850 × 1.9e-5 = 0.03515. NOT the 0.2824 exchange total also on that
+	// record — the response row answers for the response, and 0.2824 beside 1,850
+	// output tokens implies a $153/MTok output rate to anyone reading the row alone.
+	if got := m.costCell(rows, partner, 1, resp); got != "$0.0352" {
+		t.Errorf("response COST = %q, want %q", got, "$0.0352")
+	}
+	// And the column must not read as cumulative: the response cell is strictly less
+	// than the prompt cell for this turn, where the old total was greater.
+	respUSD, _ := outputCost(resp)
+	promptUSD, _ := promptCost(resp)
+	if respUSD >= promptUSD {
+		t.Errorf("response %v is not below prompt %v; the cell is still a total", respUSD, promptUSD)
 	}
 	// Without the budget-track event nobody reported a cost, so the response cell
 	// is blank rather than modelled from the request's rates.
 	if got := m.costCell(rows, partner, 1, respEvent("", inf)); got != "" {
 		t.Errorf("unpriced response COST = %q, want empty", got)
+	}
+	// An older proxy publishes a total but no output figure. The cell stays blank
+	// instead of falling back to that total, which is the regression this guards.
+	old := recordEvent(t, costevent.Event{CostUSD: 0.2824, Settled: true, PromptUSD: 0.26334})
+	old.Inference = inf
+	if got := m.costCell(rows, partner, 1, old); got != "" {
+		t.Errorf("response COST without output_usd = %q, want empty (not the total)", got)
 	}
 }
 
@@ -195,6 +213,38 @@ func TestPromptCost_ReadsThePublishedFigure(t *testing.T) {
 	}
 	if _, ok := promptCost(recordEvent(t, costevent.Event{CostUSD: 0.05, Settled: true})); ok {
 		t.Error("a record with no prompt figure produced one")
+	}
+}
+
+// TestOutputCost_ReadsThePublishedFigure is promptCost's mirror: the output half is
+// published by the proxy too, so abctl reads it rather than deriving it from the total.
+//
+// The derivation it must not do is CostUSD − PromptUSD. Here that difference is 0.0086
+// while the modelled output is 0.0352 — the gap is the gateway's discount against the rate
+// table, and subtracting would report it as the completion's cost. It can also go negative,
+// which is why the figure is priced rather than differenced.
+func TestOutputCost_ReadsThePublishedFigure(t *testing.T) {
+	e := recordEvent(t, costevent.Event{
+		CostUSD: 0.2719, Settled: true, PromptUSD: 0.26334, OutputUSD: 0.03515,
+	})
+	e.Inference = agentTurn()
+	got, ok := outputCost(e)
+	if !ok {
+		t.Fatal("no output figure")
+	}
+	if got != 0.03515 {
+		t.Errorf("outputCost = %v, want the published 0.03515", got)
+	}
+	if diff := 0.2719 - 0.26334; got <= diff {
+		t.Errorf("outputCost %v is the total-minus-prompt %v; it must be priced, not differenced", got, diff)
+	}
+	// No record, and a record with no output figure, both decline rather than showing 0
+	// or the exchange total.
+	if _, ok := outputCost(respEvent("", agentTurn())); ok {
+		t.Error("a response with no record produced an output figure")
+	}
+	if _, ok := outputCost(recordEvent(t, costevent.Event{CostUSD: 0.05, Settled: true})); ok {
+		t.Error("a record with no output figure produced one")
 	}
 }
 

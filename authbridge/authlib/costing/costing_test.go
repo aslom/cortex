@@ -1,6 +1,7 @@
 package costing
 
 import (
+	"math"
 	"net/http"
 	"testing"
 
@@ -134,6 +135,76 @@ func TestSettle_CarriesBothFigures(t *testing.T) {
 	}
 	if got.ModelledProv != pricing.ProvConfigured {
 		t.Errorf("ModelledProv = %v, want configured", got.ModelledProv)
+	}
+}
+
+// Each half is priced on its own tiers, so a per-row consumer can render a row-local
+// figure instead of a running total.
+//
+// The flat one-micro-per-token table the other tests share cannot catch an output half
+// priced at the input rate, or a prompt half that quietly includes the completion, so this
+// one gives every tier a distinct rate — the shape of a real Opus card, where a cache read
+// is 0.1x input and a write 1.25x. The usage is the turn that motivated the split: a
+// long-running agent's cold cache write, where the prompt is four orders of magnitude more
+// expensive than the completion and a cumulative cell hides that.
+func TestSettle_PricesPromptAndOutputHalvesSeparately(t *testing.T) {
+	var r pricing.Rates
+	for _, tr := range []struct {
+		tier pricing.Tier
+		per  float64
+	}{
+		{pricing.TierInput, 5e-6}, {pricing.TierCacheWrite, 6.25e-6},
+		{pricing.TierCacheRead, 0.5e-6}, {pricing.TierOutput, 25e-6},
+	} {
+		r.Base[tr.tier], r.Set[tr.tier] = tr.per, true
+	}
+	tab, err := pricing.NewTable([]pricing.Entry{{Host: "*", Model: "*", Rates: r, Prov: pricing.ProvConfigured}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pctx := &pipeline.Context{
+		Host:            "gw.internal",
+		ResponseHeaders: http.Header{},
+		Extensions: pipeline.Extensions{Inference: &pipeline.InferenceExtension{
+			Model: "claude-opus-5", InputTokens: 26,
+			CacheWriteTokens: 640_985, OutputTokens: 1_075,
+		}},
+	}
+	got := Settle(pctx, pricing.NewRegistry(tab))
+
+	// 26x5 + 640,985x6.25 micros. Nothing of the output: at the output rate those 1,075
+	// tokens would add 26,875 micros, which is what a prompt half must not contain.
+	if wantPrompt := (26*5 + 640_985*625/100) / 1e6; !got.HasPrompt || got.PromptUSD != wantPrompt {
+		t.Errorf("PromptUSD = %v (has=%v), want %v", got.PromptUSD, got.HasPrompt, wantPrompt)
+	}
+	// 1,075x25 micros, at the OUTPUT rate. Priced at the input rate this would be 5,375
+	// micros, and at the cache-write rate the prompt landed in, 6,718.
+	if wantOutput := (1_075 * 25) / 1e6; !got.HasOutput || got.OutputUSD != wantOutput {
+		t.Errorf("OutputUSD = %v (has=%v), want %v", got.OutputUSD, got.HasOutput, wantOutput)
+	}
+	// The halves partition the modelled total: neither double-counts a tier, and nothing
+	// falls between them. Compared with a tolerance because the two halves are rounded to
+	// micros independently before being summed here.
+	if sum := got.PromptUSD + got.OutputUSD; !got.HasModelled || math.Abs(sum-got.ModelledUSD) > 1e-9 {
+		t.Errorf("halves sum to %v, want the modelled total %v (has=%v)", sum, got.ModelledUSD, got.HasModelled)
+	}
+
+	// With the gateway's own total winning, both halves stay the TABLE's. A consumer
+	// showing a row-local figure must never end up with a share of the header, and the
+	// difference proves why: the gateway charged 3.0652 against a modelled 4.033161, so
+	// total-minus-prompt would report the completion as a negative cost.
+	pctx.ResponseHeaders.Set("Content-Type", "application/json")
+	pctx.ResponseHeaders.Set(ResponseCostHeader, "3.0652")
+	withHeader := Settle(pctx, pricing.NewRegistry(tab))
+	if withHeader.Source != costevent.SourceGatewayHeader {
+		t.Fatalf("Source = %q, want the header to win", withHeader.Source)
+	}
+	if withHeader.PromptUSD != got.PromptUSD || withHeader.OutputUSD != got.OutputUSD {
+		t.Errorf("halves moved with the header: prompt %v output %v, want %v and %v",
+			withHeader.PromptUSD, withHeader.OutputUSD, got.PromptUSD, got.OutputUSD)
+	}
+	if diff := withHeader.CostUSD - withHeader.PromptUSD; diff >= 0 {
+		t.Errorf("total-minus-prompt is %v; this fixture exists because that is negative", diff)
 	}
 }
 

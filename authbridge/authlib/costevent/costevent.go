@@ -99,9 +99,22 @@ type Event struct {
 	//
 	// A breakdown, not a component of a sum: it is the table's figure even when CostUSD
 	// is the gateway's, so PromptUSD + anything is not a total of anything. It exists so
-	// a request row can show what that request cost while the response row shows the
-	// call's total, which is a question the gateway's single number cannot answer.
+	// a request row can show what that request cost while the response row shows what
+	// the response cost, which is a question the gateway's single number cannot answer.
 	PromptUSD float64 `json:"prompt_usd,omitempty"`
+
+	// OutputUSD is the modelled cost of the OUTPUT alone, prompt excluded — the other
+	// half of the same breakdown, so that a per-row column can be row-local.
+	//
+	// Not CostUSD minus PromptUSD. That difference mixes a possibly-authoritative total
+	// with a modelled half, so it concentrates the table's whole error into the
+	// completion figure and can go negative; this is the table pricing the generated
+	// tokens directly.
+	//
+	// ADDITIVE and omitempty, like Provenance: an event from an older producer decodes
+	// here with OutputUSD zero, which a consumer must read as "no figure" rather than as
+	// a free completion.
+	OutputUSD float64 `json:"output_usd,omitempty"`
 
 	// Avoided is cost that was NOT incurred. Nothing in here is spend.
 	//
