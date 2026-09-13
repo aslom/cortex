@@ -17,8 +17,8 @@ import "github.com/charmbracelet/bubbles/table"
 // rendered, the highlight is drawn on it, and it is off the bottom edge.
 //
 // MoveUp cannot recover from that state either — its three cases are start == 0,
-// start < height, and YOffset ≥ 1, and in it none of them match — so YOffset stays
-// 0 while start walks up with the cursor. The rows scroll one at a time under an
+// start < height, and YOffset ≥ 1, and in that state none of them match — so YOffset
+// stays 0 while start walks up with the cursor. The rows scroll one at a time under an
 // arrow key and no row is ever highlighted, which is how this reached us: "the
 // lines are getting scrolled up, but the highlight disappears".
 //
