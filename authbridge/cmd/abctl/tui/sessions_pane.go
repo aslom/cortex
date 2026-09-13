@@ -73,18 +73,18 @@ func (m *model) rebuildSessionsTable() {
 	}
 	m.sessionsTbl.SetRows(rows)
 
-	// Restore cursor position if possible.
+	// Restore cursor position if possible. Through setCursorVisible: a restored row
+	// past the first screenful would otherwise land one line below the rendered
+	// window, leaving the pane with no highlight — see setCursorVisible.
 	if prev != "" {
 		for i, r := range rows {
 			if r[0] == prev {
-				m.sessionsTbl.SetCursor(i)
+				setCursorVisible(&m.sessionsTbl, i)
 				return
 			}
 		}
 	}
-	if len(rows) > 0 {
-		m.sessionsTbl.SetCursor(0)
-	}
+	setCursorVisible(&m.sessionsTbl, 0)
 }
 
 // cachedOnlySessionIDs lists sessions abctl has events for that the server's

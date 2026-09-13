@@ -49,9 +49,10 @@ func (m *model) rebuildPipelineTable() {
 		rows = append(rows, pipelineRow(p, counts[p.Name], m.pipeline.Outbound))
 	}
 	m.pipelineTbl.SetRows(rows)
-	// If cursor is on the divider row, nudge to the next plugin.
+	// If cursor is on the divider row, nudge to the next plugin. A relative move so
+	// the viewport offset stays reconciled — see setCursorVisible.
 	if isDividerRow(rows, m.pipelineTbl.Cursor()) {
-		m.pipelineTbl.SetCursor(m.pipelineTbl.Cursor() + 1)
+		m.pipelineTbl.MoveDown(1)
 	}
 }
 

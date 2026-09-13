@@ -154,11 +154,24 @@ func (m *model) rebuildEventsTable() {
 
 	// Auto-follow: if user was at the bottom, stay at the bottom. Otherwise
 	// preserve position so reading isn't disturbed by new events.
-	if wasAtEnd && len(rows) > 0 {
-		m.eventsTbl.SetCursor(len(rows) - 1)
-	} else if prevRow < len(rows) {
-		m.eventsTbl.SetCursor(prevRow)
+	//
+	// Unconditional now, and through setCursorVisible rather than SetCursor. Two
+	// reasons, both about the highlight rather than the index:
+	//
+	//   - SetCursor does not reconcile the viewport's offset, so restoring any row
+	//     at or past one screenful left the cursor one line below the rendered
+	//     window. On a live session that meant the highlight disappeared on the very
+	//     next event, for every session long enough to scroll. setCursorVisible
+	//     carries the mechanics.
+	//   - the old `else if prevRow < len(rows)` skipped the restore entirely when
+	//     the rows SHRANK under the cursor — a filter typed, hideInactive toggled.
+	//     SetRows had clamped the index by then, so the cursor was left wherever
+	//     that landed, with an offset nobody reconciled.
+	target := prevRow
+	if wasAtEnd {
+		target = len(rows) - 1
 	}
+	setCursorVisible(&m.eventsTbl, target)
 }
 
 // selectedEvent returns the event at the cursor row, or nil. The cursor
