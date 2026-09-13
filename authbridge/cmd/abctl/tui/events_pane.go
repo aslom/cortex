@@ -63,10 +63,11 @@ func (m *model) rebuildEventsTable() {
 	events := m.events[m.selectedSess]
 
 	if m.bodyHeight > 0 {
-		h := m.bodyHeight
-		if len(distinctInboundIdentities(events)) > 0 {
-			h -= identityBannerHeight
-		}
+		// Measured, not declared: identityBannerHeightFor renders the banner at this
+		// terminal's width and reports what it costs. The old form subtracted a constant
+		// and an over-wide banner then wrapped in the terminal, taking rows the table had
+		// already claimed.
+		h := m.bodyHeight - identityBannerHeightFor(events, m.width)
 		if h < 3 {
 			h = 3
 		}
@@ -787,21 +788,53 @@ var identityBannerStyle = lipgloss.NewStyle().
 	BorderForeground(lipgloss.AdaptiveColor{Light: "#94A3B8", Dark: "#475569"}).
 	Padding(0, 1)
 
-// identityBannerHeight is the rendered height of the banner — four lines
-// of content plus two border lines. layout() subtracts this from the
-// events-table height so the banner doesn't push rows off-screen.
+// identityBannerHeight is the banner's height when nothing wraps: four lines of content plus
+// two border lines.
+//
+// Not what layout reserves — identityBannerHeightFor measures the rendered banner instead.
+// A constant was the whole defect: it stayed 6 no matter what the banner did, and the banner
+// had no Width, so a long subject or several distinct callers produced a line 109 to 624
+// columns long. lipgloss.Height still reported 6 (it counts newlines, and without a Width
+// nothing wrapped), the accounting looked correct, and the TERMINAL wrapped the line into 1-7
+// extra screen rows that the events table had already claimed. Rows fell off the bottom, which
+// is indistinguishable from the cursor bug this pane also had.
 const identityBannerHeight = 6
+
+// identityBannerHeightFor is how many rows layout must give up for the banner: the height of
+// the thing that will actually be rendered, at the width it will be rendered at. Zero when
+// there is no banner.
+//
+// Measured rather than declared, so the two cannot drift again. It costs one banner render per
+// rebuild, against a session's worth of identities that are already deduped.
+func identityBannerHeightFor(events []pipeline.SessionEvent, width int) int {
+	banner := identityBanner(events, width)
+	if banner == "" {
+		return 0
+	}
+	return lipgloss.Height(banner)
+}
 
 // identityBanner renders a compact "IDENTITY" box summarizing the caller
 // of this session's inbound events. If callers diverge across the
 // session, it reports the count so the operator knows to check detail
 // rows. Returns an empty string when no inbound identity is present
 // (e.g. outbound-only buckets).
-func identityBanner(events []pipeline.SessionEvent) string {
+// width is the terminal width; every content line is truncated to what fits inside the border
+// and padding. Without it the banner was unbounded — the multi-caller branch joins EVERY
+// distinct subject into one line — and nothing downstream clips, so an over-wide line reached
+// the terminal and wrapped. Truncating here keeps the banner exactly as tall as it claims.
+func identityBanner(events []pipeline.SessionEvent, width int) string {
 	idents := distinctInboundIdentities(events)
 	if len(idents) == 0 {
 		return ""
 	}
+
+	// The border costs one column each side and the style pads one more: four in total.
+	inner := width - borderWidth - 2
+	if inner < 8 {
+		inner = 8
+	}
+	line := func(s string) string { return trunc(s, inner) }
 
 	var b strings.Builder
 	b.WriteString(styleTitle.Render("IDENTITY"))
@@ -809,9 +842,9 @@ func identityBanner(events []pipeline.SessionEvent) string {
 
 	if len(idents) == 1 {
 		id := idents[0]
-		b.WriteString(fmt.Sprintf("subject  %s\n", nonEmpty(id.Subject, "—")))
-		b.WriteString(fmt.Sprintf("client   %s\n", nonEmpty(id.ClientID, "—")))
-		b.WriteString(fmt.Sprintf("scopes   %s", nonEmpty(truncateScopes(id.Scopes, 3), "—")))
+		b.WriteString(line(fmt.Sprintf("subject  %s", nonEmpty(id.Subject, "—"))) + "\n")
+		b.WriteString(line(fmt.Sprintf("client   %s", nonEmpty(id.ClientID, "—"))) + "\n")
+		b.WriteString(line(fmt.Sprintf("scopes   %s", nonEmpty(truncateScopes(id.Scopes, 3), "—"))))
 	} else {
 		// Multiple distinct callers — surface the count; detail rows
 		// carry the full identity for drill-down.
@@ -819,7 +852,8 @@ func identityBanner(events []pipeline.SessionEvent) string {
 		for _, id := range idents {
 			subjects = append(subjects, nonEmpty(id.Subject, "—"))
 		}
-		b.WriteString(fmt.Sprintf("subjects  %d distinct: %s\n", len(idents), strings.Join(subjects, ", ")))
+		b.WriteString(line(fmt.Sprintf("subjects  %d distinct: %s",
+			len(idents), strings.Join(subjects, ", "))) + "\n")
 		b.WriteString("client    (see individual events)\n")
 		b.WriteString("scopes    (see individual events)")
 	}
