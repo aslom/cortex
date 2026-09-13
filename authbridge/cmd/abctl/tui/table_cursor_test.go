@@ -515,3 +515,39 @@ func assertPipelineSelectionVisible(t *testing.T, m *model, label string) {
 		t.Errorf("%s: selected row %d (%q) is off screen", label, m.pipelineTbl.Cursor(), name)
 	}
 }
+
+// TestEventsTable_TailWithArrivingEventsKeepsSelectionVisible is the live-session shape:
+// parked on the last row while the pane keeps rebuilding as events arrive.
+//
+// Reported as "it highlights the last row, then a second later deselects it, goes one line
+// up, and the highlight disappears". The cursor does NOT actually move — what moves is the
+// rendered window, by exactly one row, which takes the selected row off the bottom edge. So
+// the index stays right while the screen looks deselected, and both halves are asserted here.
+func TestEventsTable_TailWithArrivingEventsKeepsSelectionVisible(t *testing.T) {
+	m := cursorModel(t, 40)
+	for i := 0; i < 40; i++ { // arrive at the tail the way an operator does
+		m.eventsTbl, _ = m.eventsTbl.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	assertSelectionVisible(t, m.eventsTbl, "at the tail by arrow key")
+
+	// Each tick: one more event, then a rebuild. Auto-follow must keep the selection on
+	// the new last row AND on screen.
+	for tick := 1; tick <= 4; tick++ {
+		next := len(m.events["s"])
+		m.events["s"] = append(m.events["s"], pipeline.SessionEvent{
+			Direction: pipeline.Outbound, Phase: pipeline.SessionRequest,
+			Host:      hostToken(next),
+			Inference: &pipeline.InferenceExtension{Model: "m"},
+		})
+		m.rebuildEventsTable()
+		label := fmt.Sprintf("tick %d", tick)
+		if got, want := m.eventsTbl.Cursor(), len(m.eventsTbl.Rows())-1; got != want {
+			t.Errorf("%s: cursor = %d, want the new last row %d", label, got, want)
+		}
+		assertSelectionVisible(t, m.eventsTbl, label)
+	}
+
+	// And a tick that adds nothing still must not drop the highlight.
+	m.rebuildEventsTable()
+	assertSelectionVisible(t, m.eventsTbl, "idle tick at the tail")
+}
