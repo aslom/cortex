@@ -180,18 +180,28 @@ type Settled struct {
 	HasPrompt bool
 
 	// OutputUSD is the OUTPUT half, the same way round: generated tokens at the output
-	// rate, prompt tiers excluded. It exists so a response row can show what THAT row
-	// cost rather than what the exchange cost, which is the only reading under which a
-	// per-row column is row-local.
+	// rate, prompt tiers excluded, resolved at the REQUEST's prompt size so a
+	// long-context premium reaches the completion too. It exists so a response row can
+	// show what THAT row cost rather than what the exchange cost, which is the only
+	// reading under which a per-row column is row-local.
 	//
-	// Priced from the table for the same reason PromptUSD is, and NOT as CostUSD minus
-	// PromptUSD: the two are not guaranteed to share a source — CostUSD may be the
-	// gateway's while PromptUSD is always the table's — so their difference concentrates
-	// every modelling error into the completion figure and can go negative.
+	// Specifically NOT CostUSD minus PromptUSD. Those two need not share a source —
+	// CostUSD may be the gateway's post-discount figure while PromptUSD is always the
+	// table's — so their difference is a gateway-vs-table delta wearing a completion's
+	// name, and it can go negative: a gateway charging 3.0652 against a modelled 4.0063
+	// prompt differences to -0.94.
 	//
-	// PromptUSD + OutputUSD is therefore still not CostUSD. The pair are two breakdowns
-	// of one call, not two addends; when the gateway reported the total, comparing their
-	// sum against it measures the table's drift, which is what ModelledUSD is for.
+	// ModelledUSD minus PromptUSD would in fact be sound — same table, same prompt size,
+	// complementary tiers — so the objection is to mixing sources, not to subtraction as
+	// such. Pricing directly is still preferred: it keeps HasOutput independent of
+	// HasModelled, so a response row can show its own cost on a call where the total came
+	// from the gateway and the table has no opinion on the whole.
+	//
+	// PromptUSD + OutputUSD == ModelledUSD to the micro, by construction: both halves
+	// resolve at the same prompt size over a complementary tier partition, and each rounds
+	// to micros on its own, so the partition can differ from the whole in the last place.
+	// Neither sums to CostUSD, which may be the gateway's; comparing their sum against a
+	// reported total is a drift measurement, and ModelledUSD is the figure kept for it.
 	OutputUSD float64
 	HasOutput bool
 }
@@ -225,7 +235,13 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	if pctx.Extensions.Inference != nil {
 		model = pctx.Extensions.Inference.Model
 	}
-	if micros, prov, ok := modelledCost(rates, pctx.Host, model, usage); ok {
+	// promptTotal is the request's own prompt size, and every figure below resolves its
+	// rates at it — the whole request and both halves alike. That is what makes the two
+	// halves a partition of the total instead of three unrelated lookups: a long-context
+	// threshold flattens the same way for all three, so no premium can land on one and
+	// miss another.
+	promptTotal := usage.PromptTotal()
+	if micros, prov, ok := modelledCost(rates, pctx.Host, model, usage, promptTotal); ok {
 		out.ModelledUSD, out.HasModelled, out.ModelledProv = float64(micros)/1e6, true, prov
 	}
 
@@ -234,7 +250,7 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	// presented as a whole one is worse than none.
 	promptOnly := usage
 	promptOnly.Output = 0
-	if micros, _, ok := modelledCost(rates, pctx.Host, model, promptOnly); ok {
+	if micros, _, ok := modelledCost(rates, pctx.Host, model, promptOnly, promptTotal); ok {
 		out.PromptUSD, out.HasPrompt = float64(micros)/1e6, true
 	}
 
@@ -242,7 +258,7 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	// tiers instead of subtracting the prompt figure from the total.
 	outputOnly := usage
 	outputOnly.Input, outputOnly.CacheWrite, outputOnly.CacheRead = 0, 0, 0
-	if micros, _, ok := modelledCost(rates, pctx.Host, model, outputOnly); ok {
+	if micros, _, ok := modelledCost(rates, pctx.Host, model, outputOnly, promptTotal); ok {
 		out.OutputUSD, out.HasOutput = float64(micros)/1e6, true
 	}
 
@@ -267,15 +283,24 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 
 // modelledCost prices usage through the rate table.
 //
+// promptTotal is THE REQUEST'S prompt size, passed separately from u rather than derived
+// from it. A context threshold is a property of the request — Rates.At puts it that way:
+// the premium is priced on how much prompt was sent, not on what came back — and u is
+// often not the whole request. It may be one half of it (prompt or output), or a
+// counterfactual (the tokens a plugin avoided). Deriving the threshold from u.PromptTotal()
+// looked right and silently dropped the premium for every such slice: an output half has no
+// prompt tokens at all, so it resolved at At(0) and priced a 641k-token turn's completion at
+// the base output rate while the whole-request figure used the above-200k one.
+//
 // The nil guard is on the INTERFACE, which is the trap: an un-injected consumer holds a
 // nil interface and calling a method on it panics, where a nil *pricing.Registry would
 // have been safe. tool-prune hit exactly this and its fail-open masked the panic, so
 // pruning silently stopped.
-func modelledCost(rates pricing.Resolver, host, model string, u pricing.Usage) (int64, pricing.Provenance, bool) {
+func modelledCost(rates pricing.Resolver, host, model string, u pricing.Usage, promptTotal int) (int64, pricing.Provenance, bool) {
 	if rates == nil || u == (pricing.Usage{}) {
 		return 0, pricing.ProvNone, false
 	}
-	r, prov := rates.Resolve(host, model, u.PromptTotal())
+	r, prov := rates.Resolve(host, model, promptTotal)
 	if prov == pricing.ProvNone {
 		return 0, pricing.ProvNone, false
 	}
