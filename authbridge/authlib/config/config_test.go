@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
 
 // --- Preset Tests ---
@@ -503,6 +506,52 @@ func TestSessionConfig_SessionEnabled(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSessionConfig_SessionIDHeaders covers the nil-versus-empty distinction
+// that decides whether per-session bucketing is on. Unset must default to the
+// Claude Code header — the feature is useless to the operator who never heard
+// of it if they have to name a header first. An explicit empty list is the off
+// switch, mirroring how tls_bridge.passthrough_hosts treats an empty list as a
+// deliberate instruction rather than "unset".
+func TestSessionConfig_SessionIDHeaders(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  SessionConfig
+		want []string
+	}{
+		{"unset defaults to the Claude Code header", SessionConfig{}, []string{session.ClaudeCodeSessionHeader}},
+		{"explicit empty list disables bucketing", SessionConfig{IDHeaders: []string{}}, nil},
+		{"explicit list is used verbatim", SessionConfig{IDHeaders: []string{"X-Other-Agent-Session"}}, []string{"X-Other-Agent-Session"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.SessionIDHeaders()
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestSessionConfig_IDHeadersParsesFromYAML pins the YAML key name, since an
+// operator's config file is the only interface to this and a renamed key fails
+// silently as "unset".
+func TestSessionConfig_IDHeadersParsesFromYAML(t *testing.T) {
+	var cfg Config
+	src := "session:\n  id_headers:\n    - X-Claude-Code-Session-Id\n    - X-Other-Agent-Session\n"
+	if err := yaml.Unmarshal([]byte(src), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	got := cfg.Session.SessionIDHeaders()
+	if len(got) != 2 || got[0] != session.ClaudeCodeSessionHeader || got[1] != "X-Other-Agent-Session" {
+		t.Fatalf("session.id_headers parsed as %v, want both headers in order", got)
 	}
 }
 

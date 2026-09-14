@@ -233,6 +233,10 @@ func main() {
 	defer sharedStore.Close()
 	rpSrv.Shared = sharedStore
 	fpSrv.Shared = sharedStore
+	// Same per-session bucketing as authbridge-proxy: a client-supplied session
+	// id beats the global ActiveSession(), so concurrent agent sessions stay
+	// separable. Falls back to the previous behavior when absent.
+	fpSrv.SessionIDHeaders = cfg.Session.SessionIDHeaders()
 	rpHTTP, err := runtimeutil.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr)
 	if err != nil {
 		log.Fatalf("reverse-proxy listen: %v", err)
