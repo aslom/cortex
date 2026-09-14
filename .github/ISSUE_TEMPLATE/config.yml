@@ -1,0 +1,5 @@
+# Keep the blank-issue option available. The Laptop feedback form is
+# laptop-specific; anything else (operator, Helm, platform) should not be forced
+# through it, so a blank issue must stay reachable rather than inheriting the
+# default, which a later template addition could flip.
+blank_issues_enabled: true
