@@ -143,10 +143,11 @@ func TestParity_OutboundReadsBodyBufferedJSON(t *testing.T) {
 	assertParity(t, f, pipeline.SessionResponse, outboundListeners)
 }
 
-// TestParity_ReadsBodySSE: an SSE upstream yields the same accumulated
-// frame bytes and exactly one terminal frame on every listener. The
-// assertion is on cumulative bytes; frame counts vary by listener
-// (extproc buffered, proxies streamed).
+// TestParity_ReadsBodySSE: an SSE upstream yields the same reassembled
+// payload bytes and exactly one terminal-frame dispatch on every
+// listener. Frame counts legitimately vary (extproc buffered, proxies
+// streamed) and are intentionally NOT asserted — the anchors are
+// reassembled-content parity and exactly-once terminal semantics.
 func TestParity_ReadsBodySSE(t *testing.T) {
 	// The listener framework's sseframe reader strips `data: ` and the
 	// `\n\n` separators before dispatching frames, so the plugin sees
@@ -195,6 +196,7 @@ func TestParity_InboundRequestBodyOverflow(t *testing.T) {
 		name:                  "inbound-request-body-overflow",
 		direction:             pipeline.Inbound,
 		pipelineRefusedPreRun: true,
+		expectedWireStatus:    413,
 		entries: []config.PluginEntry{spyEntry(spyPluginA, spyConfig{
 			ReadsBody: true,
 		})},
@@ -278,6 +280,18 @@ func assertParity(t *testing.T, f fixture, wantPhase pipeline.SessionPhase, list
 	}
 	if len(got) < 2 {
 		return // one or more legs failed in the subtest; presence drift already reported.
+	}
+
+	// Wire-status anchor: pin the transport code when the fixture
+	// declares one, so a shared regression (both listeners stop
+	// enforcing the cap and return 200) fails against the expectation
+	// rather than passing parity.
+	if f.expectedWireStatus != 0 {
+		for _, g := range got {
+			if g.observed.WireStatus != f.expectedWireStatus {
+				t.Errorf("fixture %q listener %s: WireStatus = %d, want %d", f.name, g.listener, g.observed.WireStatus, f.expectedWireStatus)
+			}
+		}
 	}
 
 	// Correctness anchors: validate each listener against the fixture's

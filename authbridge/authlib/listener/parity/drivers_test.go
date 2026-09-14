@@ -46,9 +46,15 @@ type fixture struct {
 	upstreamBody        []byte
 	upstreamContentType string
 
-	// pipelineRefusedPreRun opts into "missing session event is OK"
-	// (e.g. body overflow). Default false: every listener must record.
+	// pipelineRefusedPreRun asserts the listener refused before the
+	// pipeline (e.g. body overflow). Default false: every listener must
+	// record. Combine with expectedWireStatus to pin the wire code.
 	pipelineRefusedPreRun bool
+
+	// expectedWireStatus, when non-zero, is asserted against every
+	// listener's wire status. Used with pipelineRefusedPreRun to pin
+	// (e.g.) 413 rather than only agreeing pairwise.
+	expectedWireStatus int
 
 	// expectedPluginEvents anchors correctness — maps each expected
 	// SessionEvent.Plugins key to its exact JSON. Empty means "don't
@@ -327,8 +333,10 @@ func extprocWireStatus(stream *mockStream) int {
 }
 
 // finalizeObservation stamps PipelineRan + WireStatus onto an
-// observation. A missing event is only legal when the fixture opted
-// into pipelineRefusedPreRun; otherwise it's a real bug and we fail.
+// observation. pipelineRefusedPreRun is a strict expectation: the
+// listener MUST refuse before the pipeline. A missing event when the
+// fixture didn't opt in is a bug; an event present when it did is
+// also a bug (the listener silently stopped enforcing the cap).
 func finalizeObservation(t *testing.T, f fixture, obs *observation, wireStatus int) *observation {
 	t.Helper()
 	if obs == nil {
@@ -337,6 +345,9 @@ func finalizeObservation(t *testing.T, f fixture, obs *observation, wireStatus i
 			return nil
 		}
 		return &observation{PipelineRan: false, WireStatus: wireStatus}
+	}
+	if f.pipelineRefusedPreRun {
+		t.Errorf("fixture %q expected the listener to refuse before the pipeline, but an event was recorded (wireStatus=%d)", f.name, wireStatus)
 	}
 	obs.PipelineRan = true
 	obs.WireStatus = wireStatus
