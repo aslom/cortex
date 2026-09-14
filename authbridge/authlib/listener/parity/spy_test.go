@@ -78,7 +78,7 @@ func (s *spyPlugin) Configure(raw json.RawMessage) error {
 
 func (s *spyPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	if s.cfg.RecordRequestBody {
-		s.publish(pctx, "/req-body/event", bodyObservation{Body: string(pctx.Body)})
+		s.publish(pctx, bodyReqStrippedSuffix+pipeline.PluginEventSuffix, bodyObservation{Body: string(pctx.Body)})
 	}
 	if !s.cfg.DenyOnRequest {
 		return pipeline.Action{Type: pipeline.Continue}
@@ -131,7 +131,7 @@ func (s *spyStreamingPlugin) OnResponseFrame(_ context.Context, pctx *pipeline.C
 	st.bytes = append(st.bytes, frame...)
 	if last {
 		st.terminals++
-		s.publish(pctx, "/resp-body/event", bodyObservation{
+		s.publish(pctx, bodyRespStrippedSuffix+pipeline.PluginEventSuffix, bodyObservation{
 			Body:           string(st.bytes),
 			TerminalFrames: st.terminals,
 		})
@@ -160,6 +160,13 @@ const (
 	spyPluginA          = "parity-spy-a"
 	spyPluginB          = "parity-spy-b"
 	spyPluginAStreaming = "parity-spy-a-streaming"
+)
+
+// Body-observation event keys in stripped form — the shape
+// SessionEvent.Plugins uses after SnapshotPlugins removes PluginEventSuffix.
+const (
+	bodyReqStrippedSuffix  = "/req-body"
+	bodyRespStrippedSuffix = "/resp-body"
 )
 
 func init() {

@@ -109,11 +109,38 @@ func TestParity_ReadsBodyBufferedJSON(t *testing.T) {
 		upstreamStatus: 200,
 		upstreamBody:   respBody,
 		expectedPluginEvents: map[string]string{
-			spyPluginAStreaming + "/req-body":  jsonOf(bodyObservation{Body: string(reqBody)}),
-			spyPluginAStreaming + "/resp-body": jsonOf(bodyObservation{Body: string(respBody), TerminalFrames: 1}),
+			spyPluginAStreaming + bodyReqStrippedSuffix:  jsonOf(bodyObservation{Body: string(reqBody)}),
+			spyPluginAStreaming + bodyRespStrippedSuffix: jsonOf(bodyObservation{Body: string(respBody), TerminalFrames: 1}),
 		},
 	}
 	assertParity(t, f, pipeline.SessionResponse, inboundListeners)
+}
+
+// TestParity_OutboundReadsBodyBufferedJSON: the outbound-side mirror of
+// TestParity_ReadsBodyBufferedJSON. Exercises forwardproxy's body path
+// (agent egress in proxy-sidecar mode) against extproc.
+func TestParity_OutboundReadsBodyBufferedJSON(t *testing.T) {
+	reqBody := []byte(`{"prompt":"hello"}`)
+	respBody := []byte(`{"reply":"ok"}`)
+	f := fixture{
+		name:      "outbound-reads-body-buffered-json",
+		direction: pipeline.Outbound,
+		entries: []config.PluginEntry{spyEntry(spyPluginAStreaming, spyConfig{
+			ReadsBody:            true,
+			RecordRequestBody:    true,
+			RecordResponseFrames: true,
+		})},
+		method:         "POST",
+		path:           "/parity/echo",
+		reqBody:        reqBody,
+		upstreamStatus: 200,
+		upstreamBody:   respBody,
+		expectedPluginEvents: map[string]string{
+			spyPluginAStreaming + bodyReqStrippedSuffix:  jsonOf(bodyObservation{Body: string(reqBody)}),
+			spyPluginAStreaming + bodyRespStrippedSuffix: jsonOf(bodyObservation{Body: string(respBody), TerminalFrames: 1}),
+		},
+	}
+	assertParity(t, f, pipeline.SessionResponse, outboundListeners)
 }
 
 // TestParity_ReadsBodySSE: an SSE upstream yields the same accumulated
@@ -150,7 +177,7 @@ func TestParity_ReadsBodySSE(t *testing.T) {
 		upstreamBody:        []byte(sse.String()),
 		upstreamContentType: "text/event-stream",
 		expectedPluginEvents: map[string]string{
-			spyPluginAStreaming + "/resp-body": jsonOf(bodyObservation{Body: payloads.String(), TerminalFrames: 1}),
+			spyPluginAStreaming + bodyRespStrippedSuffix: jsonOf(bodyObservation{Body: payloads.String(), TerminalFrames: 1}),
 		},
 	}
 	assertParity(t, f, pipeline.SessionResponse, inboundListeners)
