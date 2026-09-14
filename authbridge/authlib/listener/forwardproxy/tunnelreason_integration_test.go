@@ -37,7 +37,7 @@ func bridgeForRejectTest(t *testing.T) (*Server, *session.Store, string) {
 	if err != nil {
 		t.Fatalf("NewEphemeralSource: %v", err)
 	}
-	up, err := tlsbridge.NewUpstreamClient(originCAPEM)
+	up, err := tlsbridge.NewUpstreamClient(originCAPEM, false)
 	if err != nil {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
