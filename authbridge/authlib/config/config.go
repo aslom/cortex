@@ -233,10 +233,13 @@ type SessionConfig struct {
 	// assigning a default at load time.
 	//
 	// The ids these headers carry are client-asserted and unauthenticated: a
-	// client can name any bucket, including another session's. Set this to an
+	// client can name any bucket, including another session's. The store is
+	// in-process, so the reach of that is every client that can reach this proxy
+	// — one workload for a sidecar, but all of them for a shared or standalone
+	// forward proxy, which binds a wildcard address by default. Set this to an
 	// empty list in any deployment where telemetry attribution is a trust
 	// boundary rather than a convenience. See session.IDFromHeaders for the full
-	// reasoning and why the blast radius is one sidecar's own telemetry.
+	// reasoning.
 	IDHeaders []string `yaml:"id_headers" json:"id_headers"`
 }
 

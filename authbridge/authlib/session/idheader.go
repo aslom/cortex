@@ -35,16 +35,26 @@ const ClaudeCodeSessionHeader = "X-Claude-Code-Session-Id"
 // indistinguishable from unattributed traffic. Since these buckets now feed cost
 // attribution, a poisoned key mis-attributes spend, not just a TUI row.
 //
-// That is acceptable where this runs today. On a laptop the user owns every
-// session. In-cluster the forward proxy exists only in proxy-sidecar mode
-// (config.RoleForward) with an in-process store, so a workload can only
-// mis-file its OWN pod's telemetry — there is no path to a neighbour's bucket.
-// The residual, and the reason this is written down: within one pod, an agent
+// The blast radius is set by one property only: the session store is
+// in-process, so the bucket namespace is shared by exactly those clients that
+// can reach this proxy. Nothing here narrows that further — the listener role
+// says which pipeline runs, not how many workloads a process serves, and
+// in-cluster the forward proxy binds a wildcard address by default
+// (ListenerConfig.BindLoopbackOnly is off), so "only my own pod reaches it" is a
+// property of the deployment — network namespace, NetworkPolicy, who sets
+// HTTP_PROXY — and not of this code.
+//
+// So: a laptop with bind_loopback_only is a single trust domain and the user owns
+// every session. A sidecar serving one workload confines mis-filing to that
+// workload's own telemetry. A shared or standalone forward proxy serving several
+// workloads shares one bucket namespace, and there a poisoned id does cross
+// workloads. Even within a single pod there is a residual worth naming: an agent
 // serving several users can redirect telemetry away from the inbound A2A turn
 // that caused it, and that A2A correlation is the trustworthy signal in-cluster.
-// Deployments where that matters should set session.id_headers to an empty list.
-// Compare DefaultSessionID, which carries the mirror-image caveat for the shared
-// bucket.
+//
+// Set session.id_headers to an empty list wherever attribution is a trust
+// boundary rather than a convenience. Compare DefaultSessionID, which carries the
+// mirror-image caveat for the shared bucket.
 func IDFromHeaders(h http.Header, names []string) string {
 	for _, name := range names {
 		id := h.Get(name)
