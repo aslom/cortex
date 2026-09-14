@@ -109,10 +109,9 @@ func (s *spyPlugin) publish(pctx *pipeline.Context, suffix string, v any) {
 }
 
 // spyStreamingPlugin wraps spyPlugin and adds OnResponseFrame, making it
-// a pipeline.StreamingResponder. Pipeline.RunResponse SKIPS streaming
-// responders and dispatches only via OnResponseFrame, so exposing this
-// method unconditionally on spyPlugin would break OnResponse-based
-// fixtures. Body-recording fixtures use this variant instead.
+// a pipeline.StreamingResponder. Pipeline.RunResponse skips streaming
+// responders and dispatches only via OnResponseFrame; body-recording
+// fixtures use this variant, other fixtures use the base spyPlugin.
 type spyStreamingPlugin struct {
 	spyPlugin
 }

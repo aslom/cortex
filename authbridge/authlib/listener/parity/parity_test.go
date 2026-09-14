@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
@@ -92,6 +93,8 @@ func TestParity_OutboundDenyOnRequest(t *testing.T) {
 // despite extproc's two-phase handshake vs. the proxies' in-process
 // buffering.
 func TestParity_ReadsBodyBufferedJSON(t *testing.T) {
+	reqBody := []byte(`{"prompt":"hello"}`)
+	respBody := []byte(`{"reply":"ok"}`)
 	f := fixture{
 		name:      "reads-body-buffered-json",
 		direction: pipeline.Inbound,
@@ -102,24 +105,38 @@ func TestParity_ReadsBodyBufferedJSON(t *testing.T) {
 		})},
 		method:         "POST",
 		path:           "/parity/echo",
-		reqBody:        []byte(`{"prompt":"hello"}`),
+		reqBody:        reqBody,
 		upstreamStatus: 200,
-		upstreamBody:   []byte(`{"reply":"ok"}`),
+		upstreamBody:   respBody,
+		expectedPluginEvents: map[string]string{
+			spyPluginAStreaming + "/req-body":  jsonOf(bodyObservation{Body: string(reqBody)}),
+			spyPluginAStreaming + "/resp-body": jsonOf(bodyObservation{Body: string(respBody), TerminalFrames: 1}),
+		},
 	}
 	assertParity(t, f, pipeline.SessionResponse, inboundListeners)
 }
 
 // TestParity_ReadsBodySSE: an SSE upstream yields the same accumulated
-// frame bytes and exactly one terminal frame on every listener. Frame
-// counts differ (extproc buffered, proxies streamed) — that's fine and
-// intentionally not asserted.
+// frame bytes and exactly one terminal frame on every listener. The
+// assertion is on cumulative bytes; frame counts vary by listener
+// (extproc buffered, proxies streamed).
 func TestParity_ReadsBodySSE(t *testing.T) {
-	sse := []byte(
-		"data: {\"type\":\"message_start\"}\n\n" +
-			"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n" +
-			"data: {\"type\":\"message_stop\"}\n\n" +
-			"data: [DONE]\n\n",
-	)
+	// The listener framework's sseframe reader strips `data: ` and the
+	// `\n\n` separators before dispatching frames, so the plugin sees
+	// the concatenated event payloads, not the raw wire bytes.
+	events := []string{
+		`{"type":"message_start"}`,
+		`{"type":"message_delta","usage":{"output_tokens":7}}`,
+		`{"type":"message_stop"}`,
+		`[DONE]`,
+	}
+	var sse, payloads strings.Builder
+	for _, e := range events {
+		sse.WriteString("data: ")
+		sse.WriteString(e)
+		sse.WriteString("\n\n")
+		payloads.WriteString(e)
+	}
 	f := fixture{
 		name:      "reads-body-sse",
 		direction: pipeline.Inbound,
@@ -130,40 +147,36 @@ func TestParity_ReadsBodySSE(t *testing.T) {
 		method:              "POST",
 		path:                "/parity/sse",
 		upstreamStatus:      200,
-		upstreamBody:        sse,
+		upstreamBody:        []byte(sse.String()),
 		upstreamContentType: "text/event-stream",
+		expectedPluginEvents: map[string]string{
+			spyPluginAStreaming + "/resp-body": jsonOf(bodyObservation{Body: payloads.String(), TerminalFrames: 1}),
+		},
 	}
 	assertParity(t, f, pipeline.SessionResponse, inboundListeners)
 }
 
 // TestParity_InboundRequestBodyOverflow: a body exceeding both
 // listeners' 1 MiB cap must be rejected before the pipeline runs, with
-// the same wire status. Forwardproxy's 10 MiB cap is a documented
-// divergence; outbound-overflow parity belongs to a follow-up.
+// the same wire status.
 func TestParity_InboundRequestBodyOverflow(t *testing.T) {
 	big := make([]byte, (1<<20)+1) // 1 MiB + 1 byte — one over the cap
 	for i := range big {
 		big[i] = 'x'
 	}
 	f := fixture{
-		name:      "inbound-request-body-overflow",
-		direction: pipeline.Inbound,
-		// ReadsBody without any Record* knobs: the spy MUST NOT record
-		// anything because the pipeline must not run. Any observed
-		// plugin event on either listener would surface as a parity
-		// diff on PluginKeys / PluginEventJSON.
+		name:                  "inbound-request-body-overflow",
+		direction:             pipeline.Inbound,
+		pipelineRefusedPreRun: true,
 		entries: []config.PluginEntry{spyEntry(spyPluginA, spyConfig{
 			ReadsBody: true,
 		})},
 		method:  "POST",
 		path:    "/parity/big",
 		reqBody: big,
-		// upstreamStatus deliberately 0: the listener must reject
-		// before ever reaching an upstream.
 	}
-	// wantPhase is unused for overflow — the pipeline never runs so no
-	// session event of any phase is recorded. Pass SessionRequest as a
-	// placeholder; assertParity short-circuits on PipelineRan == false.
+	// wantPhase is a placeholder — pipelineRefusedPreRun short-circuits
+	// the phase check.
 	assertParity(t, f, pipeline.SessionRequest, inboundListeners)
 }
 
@@ -206,7 +219,7 @@ func TestParity_RequiresLaterOrderingRejected(t *testing.T) {
 func assertParity(t *testing.T, f fixture, wantPhase pipeline.SessionPhase, listeners []listenerRun) {
 	t.Helper()
 
-	// A single-listener call would pass vacuously with nothing to compare.
+	// Refuse a single-listener call: parity needs a pair to compare.
 	if len(listeners) < 2 {
 		t.Fatalf("assertParity: fixture %q was given %d listener(s); need at least 2", f.name, len(listeners))
 	}
@@ -238,6 +251,23 @@ func assertParity(t *testing.T, f fixture, wantPhase pipeline.SessionPhase, list
 	}
 	if len(got) < 2 {
 		return // one or more legs failed in the subtest; presence drift already reported.
+	}
+
+	// Correctness anchors: validate each listener against the fixture's
+	// expected plugin events before the pairwise diff, so a shared-drop
+	// bug (both listeners omit the event) fails against the fixture
+	// rather than passing parity.
+	for _, g := range got {
+		for key, wantJSON := range f.expectedPluginEvents {
+			gotJSON, ok := g.observed.PluginEventJSON[key]
+			if !ok {
+				t.Errorf("fixture %q listener %s: missing expected plugin event %q", f.name, g.listener, key)
+				continue
+			}
+			if !jsonEqual(gotJSON, wantJSON) {
+				t.Errorf("fixture %q listener %s: plugin event %q\n  got:  %s\n  want: %s", f.name, g.listener, key, gotJSON, wantJSON)
+			}
+		}
 	}
 
 	// Pairwise compare against the first listener. All observations must
@@ -325,6 +355,13 @@ func jsonPretty(v any) string {
 	if err != nil {
 		return "<unmarshalable>"
 	}
+	return string(b)
+}
+
+// jsonOf marshals fixture-time data (bodyObservation etc.) to its
+// SessionEvent.Plugins JSON. Matches spyEntry's swallow-error pattern.
+func jsonOf(v any) string {
+	b, _ := json.Marshal(v)
 	return string(b)
 }
 

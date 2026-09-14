@@ -45,6 +45,16 @@ type fixture struct {
 	upstreamStatus      int
 	upstreamBody        []byte
 	upstreamContentType string
+
+	// pipelineRefusedPreRun opts into "missing session event is OK"
+	// (e.g. body overflow). Default false: every listener must record.
+	pipelineRefusedPreRun bool
+
+	// expectedPluginEvents anchors correctness — maps each expected
+	// SessionEvent.Plugins key to its exact JSON. Empty means "don't
+	// assert content beyond the pairwise diff." Fixtures that want
+	// bug-catching (not just drift-catching) fill this in.
+	expectedPluginEvents map[string]string
 }
 
 // contentType returns the fixture's response content-type or a sensible
@@ -301,7 +311,7 @@ func runExtproc(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *obser
 		}
 	}
 
-	return finalizeObservation(observe(t, store, f.direction, wantPhase), extprocWireStatus(stream))
+	return finalizeObservation(t, f, observe(t, store, f.direction, wantPhase), extprocWireStatus(stream))
 }
 
 // extprocWireStatus reads the HTTP status from an ImmediateResponse if
@@ -317,12 +327,15 @@ func extprocWireStatus(stream *mockStream) int {
 }
 
 // finalizeObservation stamps PipelineRan + WireStatus onto an
-// observation, creating a stub when observe() found no session event
-// (pipeline refused the request pre-record). This keeps the overflow
-// fixture assertable — a nil return would collapse "no event" with
-// "listener bailed."
-func finalizeObservation(obs *observation, wireStatus int) *observation {
+// observation. A missing event is only legal when the fixture opted
+// into pipelineRefusedPreRun; otherwise it's a real bug and we fail.
+func finalizeObservation(t *testing.T, f fixture, obs *observation, wireStatus int) *observation {
+	t.Helper()
 	if obs == nil {
+		if !f.pipelineRefusedPreRun {
+			t.Errorf("no session event recorded for fixture %q; set pipelineRefusedPreRun=true if expected", f.name)
+			return nil
+		}
 		return &observation{PipelineRan: false, WireStatus: wireStatus}
 	}
 	obs.PipelineRan = true
@@ -395,7 +408,7 @@ func runReverseProxy(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *
 		t.Errorf("reverseproxy: fixture %q asked for deny but upstream was reached", f.name)
 	}
 
-	return finalizeObservation(observe(t, store, pipeline.Inbound, wantPhase), resp.StatusCode)
+	return finalizeObservation(t, f, observe(t, store, pipeline.Inbound, wantPhase), resp.StatusCode)
 }
 
 // --- forwardproxy driver -------------------------------------------------
@@ -468,7 +481,7 @@ func runForwardProxy(t *testing.T, f fixture, wantPhase pipeline.SessionPhase) *
 		t.Errorf("forwardproxy: fixture %q asked for deny but upstream was reached", f.name)
 	}
 
-	return finalizeObservation(observe(t, store, pipeline.Outbound, wantPhase), resp.StatusCode)
+	return finalizeObservation(t, f, observe(t, store, pipeline.Outbound, wantPhase), resp.StatusCode)
 }
 
 // --- construction-only helpers -------------------------------------------
