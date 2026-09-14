@@ -45,11 +45,14 @@ store; agents themselves keep working without restarting, because the CA in
 `~/.cortex/ca` is reused rather than re-minted.
 
 `PROFILE` has to satisfy the config you are running. `~/.cortex/config.yaml` names the
-plugins it wants, and a profile that omits one is a fatal startup error the supervisor
-then retries every 30s — `PROFILE=lite` against a config using `inference-parser` leaves
-the service crash-looping, not degraded. The proxy names the missing plugin and the set
-it does have in the log, so `abctl service status` says what happened; the default
-`full` avoids the question.
+plugins it wants, and a profile that omits one is a fatal error at startup rather than a
+reduced feature set — `PROFILE=lite` against a config using `inference-parser` will not
+start at all. What you find afterwards differs by platform: macOS restarts it
+indefinitely (the plist supervises the proxy, which backs off between attempts), while
+Linux gives up after five failures inside five minutes and leaves the unit `failed`, so
+there you get a stopped service rather than a looping one. Either way the proxy logs the
+missing plugin and the set it does have, and `abctl service status` shows the last log
+lines; the default `full` avoids the question.
 
 ## Deployment Modes
 

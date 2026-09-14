@@ -113,7 +113,6 @@ func renderUnitFor(goos string, p servicePaths) string {
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>AbctlVersion</key><string>` + xmlStr(version) + `</string>
-  <key>AbctlProxySHA256</key><string>` + xmlStr(binarySHA256(p.binary)) + `</string>
   <key>StandardOutPath</key><string>` + xmlStr(p.logFile) + `</string>
   <key>StandardErrorPath</key><string>` + xmlStr(p.logFile) + `</string>
   <key>ProcessType</key><string>Background</string>
@@ -133,7 +132,6 @@ func renderUnitFor(goos string, p servicePaths) string {
 Description=Cortex local proxy (authbridge-proxy)
 Documentation=https://github.com/rossoctl/cortex
 X-AbctlVersion=` + version + `
-X-AbctlProxySHA256=` + binarySHA256(p.binary) + `
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -549,33 +547,12 @@ func rotateLog(path string, maxBytes int64) {
 // "unknown subcommand" — so the launchd artifact is live and unmanageable, with no
 // hint anywhere that the two disagree. Observed on a real machine.
 func unitWriterVersion(unitFile string) string {
-	return unitStamp(unitFile, "AbctlVersion", "X-AbctlVersion")
-}
-
-// unitProxySHA256 reports the hash of the proxy binary as it stood when the unit
-// was written, or "" for a unit that carries no such stamp.
-//
-// This is what lets serviceIsCurrent tell "the unit names the right path" from "that
-// path still holds the bytes we installed". Those are different questions, and a dev
-// loop makes the difference routine: rebuilding over the same path leaves every other
-// clause satisfied while the running process is the old code.
-func unitProxySHA256(unitFile string) string {
-	return unitStamp(unitFile, "AbctlProxySHA256", "X-AbctlProxySHA256")
-}
-
-// unitStamp reads one stamped field out of an installed unit, accepting either
-// spelling so one reader serves both platforms' renderings.
-//
-// Generic over the key because there are now two stamps and a third is plausible.
-// The alternative — a copy of this scan per field — is where the plist and systemd
-// spellings drift apart, since only one of them is exercised on any given machine.
-func unitStamp(unitFile, plistKey, iniKey string) string {
 	b, err := os.ReadFile(unitFile) //nolint:gosec // path we wrote
 	if err != nil {
 		return ""
 	}
 	body := string(b)
-	for _, marker := range []string{"<key>" + plistKey + "</key><string>", iniKey + "="} {
+	for _, marker := range []string{"<key>AbctlVersion</key><string>", "X-AbctlVersion="} {
 		i := strings.Index(body, marker)
 		if i < 0 {
 			continue
@@ -590,72 +567,41 @@ func unitStamp(unitFile, plistKey, iniKey string) string {
 	return ""
 }
 
-// refreshUnitProxyStamp rewrites the unit's recorded proxy hash to match the binary
-// on disk, leaving the rest of the unit alone.
+// writeProxyStamp records the hash of the binary about to be, or just, launched.
 //
-// Called after a start or restart, which is what makes the stamp mean "the bytes the
-// supervisor last launched" rather than "the bytes present at the last install". Those
-// diverge the moment anyone replaces the binary and restarts without reinstalling —
-// the manual flow `make dev-install` replaces, and one that scripts may still use. The
-// stamp would then name bytes that are neither on disk nor running, so the next
-// install would find itself not-current and restart a service that was already
-// serving the right code. That would make an installer re-run cost every attached
-// session, which is exactly the property serviceInstall's no-op check exists to
-// protect.
+// Called after the unit is written and after every start or restart, which is what
+// makes the stamp mean "the bytes the supervisor last launched" rather than "the bytes
+// present at the last install". Those are the same on the install path and diverge on
+// every other one — replace the binary, restart, and only this file moves.
 //
-// Every failure is silent and leaves the old stamp in place. A stale stamp costs one
-// unnecessary restart; a half-written unit costs the service, so this must never be
-// the thing that breaks it. The supervisor has already read the unit by now, so
-// editing the file cannot disturb the running job — and on systemd the field is
-// X-prefixed, which the spec reserves for exactly this kind of third-party data.
-func refreshUnitProxyStamp(p servicePaths) {
-	want := binarySHA256(p.binary)
-	if want == "" {
+// Silent on failure, and deliberately so: a missing or stale stamp costs one
+// unnecessary restart on the next install, which is the safe direction. Nothing here
+// may be the reason a service fails to come up.
+func writeProxyStamp(p servicePaths) {
+	h := binarySHA256(p.binary)
+	if h == "" || p.stampFile == "" {
 		return
 	}
-	b, err := os.ReadFile(p.unitFile) //nolint:gosec // path we wrote
-	if err != nil {
-		return
-	}
-	out, ok := replaceUnitStamp(string(b), "AbctlProxySHA256", "X-AbctlProxySHA256", want)
-	if !ok || out == string(b) {
-		return
-	}
-	// Written via a temp file and renamed: a truncated unit is unbootable, and this
-	// runs on a path whose whole job is that the service comes back.
-	mode := os.FileMode(0o644)
-	if fi, serr := os.Stat(p.unitFile); serr == nil {
-		mode = fi.Mode().Perm()
-	}
-	tmp := p.unitFile + ".stamp.tmp"
-	if err := os.WriteFile(tmp, []byte(out), mode); err != nil {
+	tmp := p.stampFile + ".tmp"
+	if err := os.WriteFile(tmp, []byte(h+"\n"), 0o600); err != nil {
 		_ = os.Remove(tmp) //nolint:errcheck // best effort
 		return
 	}
-	if err := os.Rename(tmp, p.unitFile); err != nil {
+	if err := os.Rename(tmp, p.stampFile); err != nil {
 		_ = os.Remove(tmp) //nolint:errcheck // best effort
 	}
 }
 
-// replaceUnitStamp swaps one stamped field's value, accepting either spelling.
-//
-// Deliberately the mirror image of unitStamp's scan, so the two cannot disagree about
-// where a field ends: a reader that stops at "<" or "\n" and a writer that assumed
-// something else is how a stamp becomes unreadable while still looking present.
-func replaceUnitStamp(body, plistKey, iniKey, want string) (string, bool) {
-	for _, marker := range []string{"<key>" + plistKey + "</key><string>", iniKey + "="} {
-		i := strings.Index(body, marker)
-		if i < 0 {
-			continue
-		}
-		rest := body[i+len(marker):]
-		end := strings.IndexAny(rest, "<\n")
-		if end < 0 {
-			continue
-		}
-		return body[:i+len(marker)] + want + rest[end:], true
+// readProxyStamp returns the recorded hash, or "" when there is none to read.
+func readProxyStamp(p servicePaths) string {
+	if p.stampFile == "" {
+		return ""
 	}
-	return body, false
+	b, err := os.ReadFile(p.stampFile) //nolint:gosec // path we wrote
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // binarySHA256 hashes the file at path, or returns "" when it cannot be read.

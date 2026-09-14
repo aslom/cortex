@@ -84,7 +84,17 @@ type servicePaths struct {
 	configFile string // ~/.cortex/config.yaml
 	logFile    string
 	pidFile    string
-	healthURL  string
+	// stampFile records the SHA-256 of the proxy binary the supervisor last launched.
+	//
+	// A sidecar beside proxy.pid rather than a field in the unit, and for the same
+	// reason: it is LAUNCH state, not unit content. The unit's AbctlVersion says which
+	// abctl wrote it, which is a fact about the file; this says which bytes are running,
+	// which changes without the file changing. Writing it into the unit also meant
+	// touching the unit on every restart, and systemd reports a unit whose mtime moved
+	// as "changed on disk, run daemon-reload" — a message this whole command exists so
+	// nobody has to see.
+	stampFile string
+	healthURL string
 	// forwardAddr is the proxy port clients point at, used only to count attached
 	// sessions before a stop.
 	forwardAddr string
@@ -163,6 +173,7 @@ func resolveServicePaths(cortexCfg, unitOverride, proxyOverride string) (service
 	p.configFile = cortexCfg
 	p.logFile = filepath.Join(filepath.Dir(cortexCfg), "proxy.log")
 	p.pidFile = filepath.Join(filepath.Dir(cortexCfg), "proxy.pid")
+	p.stampFile = filepath.Join(filepath.Dir(cortexCfg), "proxy.sha256")
 
 	// An absolute binary path: a supervisor has no shell PATH to search.
 	//
@@ -405,6 +416,10 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 		fmt.Fprintf(stderr, "abctl: writing %s: %v\n", p.unitFile, err)
 		return 1
 	}
+	// Recorded here as well as on start/restart. loadService below may fail after this
+	// point, and a stamp naming the binary we are about to launch is still the right
+	// answer for the next install: it reflects the unit that was just written.
+	writeProxyStamp(p)
 	// The path is not printed on the happy path: it is one more line of output on an
 	// install that already says what happened, and `abctl service status` reports it
 	// whenever someone actually needs it.
@@ -506,6 +521,12 @@ func serviceUninstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "abctl: removing %s: %v\n", p.unitFile, err)
 		return 1
 	}
+	// Launch state, so it goes with the unit rather than surviving in ~/.cortex beside
+	// the config and CA the message below promises are untouched. Left behind, it would
+	// describe a service that no longer exists.
+	if err := os.Remove(p.stampFile); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "abctl: could not remove %s: %v\n", p.stampFile, err)
+	}
 	// Not "start it yourself with a backgrounded proxy": running unsupervised is no
 	// longer a mode this tool offers, and on macOS a hand-started proxy gets no crash
 	// recovery at all. Point back at the supported path.
@@ -602,10 +623,10 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 	}
 	if action == "start" || action == "restart" {
 		// The supervisor has just launched whatever p.binary holds now, so this is the
-		// moment the unit's record of those bytes is either confirmed or out of date.
-		// See refreshUnitProxyStamp for why leaving it stale would make the next
-		// install cut every attached session for nothing.
-		refreshUnitProxyStamp(p)
+		// moment to record those bytes. Without it, replacing the binary and restarting
+		// would leave the stamp naming something neither on disk nor running, and the
+		// next install would restart a service that was already serving the right code.
+		writeProxyStamp(p)
 	}
 	switch action {
 	case "stop":
@@ -794,11 +815,11 @@ func serviceIsCurrent(p servicePaths) bool {
 // running under launchd and healthy" while the running process was the previous
 // build. True of the unit, false of the service, and silent either way.
 //
-// A unit with no stamp counts as changed, which costs exactly one restart on the
-// upgrade that introduces the stamp and then never again. The opposite default would
-// make the first dev install after upgrading silently skip its restart.
+// A missing stamp counts as changed, which costs exactly one restart on the upgrade
+// that introduces it and then never again. The opposite default would make the first
+// dev install after upgrading silently skip its restart.
 func proxyBinaryUnchanged(p servicePaths) bool {
-	want := unitProxySHA256(p.unitFile)
+	want := readProxyStamp(p)
 	return want != "" && want == binarySHA256(p.binary)
 }
 

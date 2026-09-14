@@ -2,33 +2,67 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestUnitStampsRoundTrip covers both renderings, because only one of them runs on
-// any given machine and the two spellings are the obvious place for them to drift.
-func TestUnitStampsRoundTrip(t *testing.T) {
+// TestProxyStampRoundTrip is the basic contract: what we record is what we read back.
+func TestProxyStampRoundTrip(t *testing.T) {
 	p := servicePathsFixture(t)
 	want := binarySHA256(p.binary)
 	if want == "" {
 		t.Fatal("the fixture binary did not hash; the rest of this proves nothing")
 	}
+	writeProxyStamp(p)
+	if got := readProxyStamp(p); got != want {
+		t.Errorf("readProxyStamp = %q, want %q", got, want)
+	}
+	if !proxyBinaryUnchanged(p) {
+		t.Error("a freshly recorded stamp does not match its own binary")
+	}
+}
 
+// TestProxyStamp_LeavesTheUnitAlone is the fix for the second review finding.
+//
+// The hash used to live in the unit, so recording it rewrote the unit — and systemd
+// flags a unit whose mtime moved as "changed on disk, run daemon-reload", which is
+// exactly the message `abctl service` exists so nobody has to see. Launch state now
+// lives beside proxy.pid instead, so the unit is untouched on every platform and no
+// daemon-reload is owed.
+func TestProxyStamp_LeavesTheUnitAlone(t *testing.T) {
 	for _, goos := range []string{"darwin", "linux"} {
 		t.Run(goos, func(t *testing.T) {
+			p := servicePathsFixture(t)
 			unit := renderUnitFor(goos, p)
-			if !strings.Contains(unit, want) {
-				t.Errorf("unit carries no proxy hash:\n%s", unit)
+			if strings.Contains(unit, binarySHA256(p.binary)) {
+				t.Error("the unit still embeds the proxy hash; recording it would churn the unit's mtime")
 			}
-			if err := os.WriteFile(p.unitFile, []byte(unit), 0o600); err != nil {
+			if err := os.WriteFile(p.unitFile, []byte(unit), 0o644); err != nil { //nolint:gosec // matches the install path's mode
 				t.Fatal(err)
 			}
-			if got := unitProxySHA256(p.unitFile); got != want {
-				t.Errorf("unitProxySHA256 = %q, want %q", got, want)
+			before, err := os.Stat(p.unitFile)
+			if err != nil {
+				t.Fatal(err)
 			}
-			// The version stamp still reads, so generalizing the scanner did not
-			// break the field it was written for.
+
+			writeProxyStamp(p)
+
+			after, err := os.Stat(p.unitFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !after.ModTime().Equal(before.ModTime()) {
+				t.Error("recording the stamp changed the unit's mtime; systemd would ask for a daemon-reload")
+			}
+			body, err := os.ReadFile(p.unitFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) != unit {
+				t.Error("the unit's content changed")
+			}
+			// The version stamp is unit content and stays in the unit.
 			if got := unitWriterVersion(p.unitFile); got != version {
 				t.Errorf("unitWriterVersion = %q, want %q", got, version)
 			}
@@ -36,23 +70,16 @@ func TestUnitStampsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestProxyBinaryUnchanged_NoticesAReplacedBinary is the regression this stamp
-// exists for.
-//
-// Path, config, version and supervisor state all stay identical across a rebuild —
-// so before the hash, every clause of serviceIsCurrent passed and install reported
-// "Already current" while the old build kept serving. That is the exact failure a dev
-// loop hits on every iteration.
+// TestProxyBinaryUnchanged_NoticesAReplacedBinary is the regression the stamp exists
+// for. Path, config, version and supervisor state are all identical across a rebuild,
+// so before the stamp every clause of serviceIsCurrent passed and install reported
+// "Already current" while the old build kept serving.
 func TestProxyBinaryUnchanged_NoticesAReplacedBinary(t *testing.T) {
 	p := servicePathsFixture(t)
-	if err := os.WriteFile(p.unitFile, []byte(renderUnit(p)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
+	writeProxyStamp(p)
 	if !proxyBinaryUnchanged(p) {
-		t.Fatal("freshly written unit does not match its own binary")
+		t.Fatal("baseline does not match")
 	}
-
 	// Rebuild: same path, different bytes.
 	if err := os.WriteFile(p.binary, []byte("#!/bin/sh\nsleep 31\n"), 0o755); err != nil { //nolint:gosec // test fixture
 		t.Fatal(err)
@@ -60,22 +87,22 @@ func TestProxyBinaryUnchanged_NoticesAReplacedBinary(t *testing.T) {
 	if proxyBinaryUnchanged(p) {
 		t.Error("a replaced binary still reads as unchanged; install would skip the restart")
 	}
+	// ...and recording it again — which is what start/restart does — makes an
+	// installer re-run free once more. Without that, the manual `cp` + `restart` flow
+	// left every later install restarting a service already serving the right code.
+	writeProxyStamp(p)
+	if !proxyBinaryUnchanged(p) {
+		t.Error("re-recording after a launch did not restore the match")
+	}
 }
 
-// TestProxyBinaryUnchanged_TreatsAnUnstampedUnitAsChanged pins the direction of the
-// default. Reading an absent stamp as "unchanged" would make the first dev install
-// after this upgrade silently skip its restart — the one run where the binary has
-// certainly moved.
-func TestProxyBinaryUnchanged_TreatsAnUnstampedUnitAsChanged(t *testing.T) {
+// TestProxyBinaryUnchanged_NoStampIsChanged pins the direction of the default. Reading
+// an absent stamp as "unchanged" would make the first dev install after this upgrade
+// silently skip its restart — the one run where the binary has certainly moved.
+func TestProxyBinaryUnchanged_NoStampIsChanged(t *testing.T) {
 	p := servicePathsFixture(t)
-	legacy := "<?xml version=\"1.0\"?>\n<plist><dict>\n" +
-		"  <key>AbctlVersion</key><string>" + version + "</string>\n" +
-		"</dict></plist>\n"
-	if err := os.WriteFile(p.unitFile, []byte(legacy), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if proxyBinaryUnchanged(p) {
-		t.Error("a unit with no proxy hash read as unchanged")
+		t.Error("a missing stamp file read as unchanged")
 	}
 }
 
@@ -84,9 +111,7 @@ func TestProxyBinaryUnchanged_TreatsAnUnstampedUnitAsChanged(t *testing.T) {
 // equal would call a vanished binary current.
 func TestProxyBinaryUnchanged_MissingBinaryIsChanged(t *testing.T) {
 	p := servicePathsFixture(t)
-	if err := os.WriteFile(p.unitFile, []byte(renderUnit(p)), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeProxyStamp(p)
 	if err := os.Remove(p.binary); err != nil {
 		t.Fatal(err)
 	}
@@ -95,116 +120,38 @@ func TestProxyBinaryUnchanged_MissingBinaryIsChanged(t *testing.T) {
 	}
 }
 
-// TestRefreshUnitProxyStamp_KeepsAnInstallerRerunFree is the regression review found.
-//
-// The stamp used to be written only where the unit was written, i.e. by install. So
-// replacing the binary and restarting — no reinstall — left the stamp naming bytes that
-// were neither on disk nor running, and the NEXT install then found itself not-current
-// and restarted a service already serving the right code. That turns an installer
-// re-run into a cut of every attached session, which is the exact property
-// serviceInstall's no-op check exists to protect.
-func TestRefreshUnitProxyStamp_KeepsAnInstallerRerunFree(t *testing.T) {
-	for _, goos := range []string{"darwin", "linux"} {
-		t.Run(goos, func(t *testing.T) {
-			p := servicePathsFixture(t)
-			if err := os.WriteFile(p.unitFile, []byte(renderUnitFor(goos, p)), 0o644); err != nil { //nolint:gosec // matches the install path's mode
-				t.Fatal(err)
-			}
-			// Replace the binary the way a manual flow does, without reinstalling.
-			if err := os.WriteFile(p.binary, []byte("#!/bin/sh\nsleep 32\n"), 0o755); err != nil { //nolint:gosec // test fixture
-				t.Fatal(err)
-			}
-			if proxyBinaryUnchanged(p) {
-				t.Fatal("the fixture did not actually change the binary")
-			}
-
-			refreshUnitProxyStamp(p)
-
-			if !proxyBinaryUnchanged(p) {
-				t.Error("stamp not refreshed after a restart; the next install would restart for nothing")
-			}
-			// The rest of the unit has to survive: this edits one value, it does not
-			// re-render, so a botched splice would take the service down at next load.
-			body, err := os.ReadFile(p.unitFile)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := unitWriterVersion(p.unitFile); got != version {
-				t.Errorf("version stamp lost: %q", got)
-			}
-			if !strings.Contains(string(body), p.configFile) {
-				t.Error("config path lost from the unit")
-			}
-			if goos == "darwin" && !strings.Contains(string(body), "<key>KeepAlive</key><true/>") {
-				t.Error("plist body damaged by the stamp rewrite")
-			}
-			if goos == "linux" && !strings.Contains(string(body), "WantedBy=default.target") {
-				t.Error("systemd body damaged by the stamp rewrite")
-			}
-		})
-	}
-}
-
-// TestRefreshUnitProxyStamp_LeavesAnUnstampedUnitAlone keeps the refresh from
-// inventing a field. A unit written before stamping should stay as it is and be
-// handled by a reinstall, not be edited in place into a half-modern shape.
-func TestRefreshUnitProxyStamp_LeavesAnUnstampedUnitAlone(t *testing.T) {
+// TestWriteProxyStamp_MissingBinaryKeepsTheOldStamp: hashing "" must never be written,
+// or a vanished binary would leave a stamp that matches nothing readable.
+func TestWriteProxyStamp_MissingBinaryKeepsTheOldStamp(t *testing.T) {
 	p := servicePathsFixture(t)
-	legacy := "[Unit]\nX-AbctlVersion=" + version + "\n\n[Service]\nExecStart=" + p.binary + "\n"
-	if err := os.WriteFile(p.unitFile, []byte(legacy), 0o644); err != nil { //nolint:gosec // matches the install path's mode
-		t.Fatal(err)
-	}
-	refreshUnitProxyStamp(p)
-	got, err := os.ReadFile(p.unitFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != legacy {
-		t.Errorf("an unstamped unit was rewritten:\n%s", got)
-	}
-}
-
-// TestRefreshUnitProxyStamp_MissingBinaryLeavesTheStamp: hashing "" must not be
-// written as a stamp, or a binary that vanished would read as matching an unstamped
-// unit.
-func TestRefreshUnitProxyStamp_MissingBinaryLeavesTheStamp(t *testing.T) {
-	p := servicePathsFixture(t)
-	unit := renderUnit(p)
-	if err := os.WriteFile(p.unitFile, []byte(unit), 0o644); err != nil { //nolint:gosec // matches the install path's mode
-		t.Fatal(err)
-	}
+	writeProxyStamp(p)
+	want := readProxyStamp(p)
 	if err := os.Remove(p.binary); err != nil {
 		t.Fatal(err)
 	}
-	refreshUnitProxyStamp(p)
-	got, err := os.ReadFile(p.unitFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != unit {
-		t.Error("unit rewritten for a binary that could not be hashed")
+	writeProxyStamp(p)
+	if got := readProxyStamp(p); got != want {
+		t.Errorf("stamp overwritten for an unhashable binary: %q, want %q", got, want)
 	}
 }
 
-// TestReplaceUnitStamp_MirrorsTheReader pins the two halves against each other. A
-// writer that disagreed with unitStamp about where a value ends would leave a stamp
-// that is present but unreadable.
-func TestReplaceUnitStamp_MirrorsTheReader(t *testing.T) {
-	p := servicePathsFixture(t)
-	const want = "deadbeef"
-	for _, goos := range []string{"darwin", "linux"} {
-		t.Run(goos, func(t *testing.T) {
-			out, ok := replaceUnitStamp(renderUnitFor(goos, p), "AbctlProxySHA256", "X-AbctlProxySHA256", want)
-			if !ok {
-				t.Fatal("no stamp found to replace")
-			}
-			if err := os.WriteFile(p.unitFile, []byte(out), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if got := unitProxySHA256(p.unitFile); got != want {
-				t.Errorf("read back %q, want %q", got, want)
-			}
-		})
+// TestResolveServicePaths_StampSitsBesideThePid keeps launch state together in
+// ~/.cortex rather than drifting to a second location.
+func TestResolveServicePaths_StampSitsBesideThePid(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfg, []byte("mode: proxy-sidecar\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := resolveServicePaths(cfg, filepath.Join(dir, "unit"), filepath.Join(dir, "proxy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "proxy.sha256"); p.stampFile != want {
+		t.Errorf("stampFile = %q, want %q", p.stampFile, want)
+	}
+	if filepath.Dir(p.stampFile) != filepath.Dir(p.pidFile) {
+		t.Errorf("stamp %q and pid %q are not in the same directory", p.stampFile, p.pidFile)
 	}
 }
 
