@@ -488,6 +488,9 @@ func (m *model) backToPodsPane() {
 	m.selectedSess = ""
 	m.filter = ""
 	m.filtering = false
+	// The filter's line comes off the height budget while it is open, so dropping the flag
+	// has to give it back — see layout().
+	m.layout()
 	// The input too, not just the value. Since the input is seeded from saved
 	// settings it is a second source of truth, and leaving it behind meant that after
 	// backing out and entering the next pod, `/` presented the OLD filter text
@@ -1218,7 +1221,7 @@ func (m *model) paneView() string {
 	case paneEvents:
 		title = fmt.Sprintf("abctl · %s", trunc(m.selectedSess, 36))
 		body = m.eventsTbl.View()
-		if banner := identityBanner(m.events[m.selectedSess]); banner != "" {
+		if banner := identityBanner(m.events[m.selectedSess], m.width); banner != "" {
 			body = banner + "\n" + body
 		}
 	case paneDetail:

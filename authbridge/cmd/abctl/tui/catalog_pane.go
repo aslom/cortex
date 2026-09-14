@@ -8,16 +8,23 @@ import (
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
 )
 
+// catalogColumns is the full-width column set, fitted to the terminal by layout(). 110
+// declared plus bubbles' two per cell is 116 rendered columns — wider than any default
+// terminal — and DESCRIPTION is the column with room to give.
+func catalogColumns() []table.Column {
+	return []table.Column{
+		{Title: "NAME", Width: 22},
+		{Title: "REQUIRES", Width: 28},
+		{Title: "DESCRIPTION", Width: 60},
+	}
+}
+
 // newCatalogTable builds the registered-plugin catalog table. Same
 // styling as the pipeline table for visual consistency when switching
 // between them via the `P` keybind.
 func newCatalogTable() table.Model {
 	t := table.New(
-		table.WithColumns([]table.Column{
-			{Title: "NAME", Width: 22},
-			{Title: "REQUIRES", Width: 28},
-			{Title: "DESCRIPTION", Width: 60},
-		}),
+		table.WithColumns(catalogColumns()),
 		table.WithFocused(true),
 	)
 	t.SetStyles(tableStyles())

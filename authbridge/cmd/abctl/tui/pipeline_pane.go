@@ -11,16 +11,26 @@ import (
 // newPipelineTable builds the plugins table shown on the Pipeline top-level
 // view. Columns are sized to match the sessions table's compact width so
 // Tab-switching doesn't feel layout-jarring.
+// pipelineColumns is the full-width column set, fitted to the terminal by layout().
+//
+// The cell COUNT here is load-bearing beyond width: rebuildPipelineTable writes its divider as
+// a six-cell literal and bubbles' renderRow indexes columns by cell position, so adding a
+// column without adding a cell there panics. Fitting changes widths only, never the count,
+// which is what makes it safe to re-apply on every resize.
+func pipelineColumns() []table.Column {
+	return []table.Column{
+		{Title: "#", Width: 3},
+		{Title: "DIRECTION", Width: 10},
+		{Title: "PLUGIN", Width: 22},
+		{Title: "DEPS", Width: 5},
+		{Title: "BODY", Width: 6},
+		{Title: "EVENTS", Width: 8},
+	}
+}
+
 func newPipelineTable() table.Model {
 	t := table.New(
-		table.WithColumns([]table.Column{
-			{Title: "#", Width: 3},
-			{Title: "DIRECTION", Width: 10},
-			{Title: "PLUGIN", Width: 22},
-			{Title: "DEPS", Width: 5},
-			{Title: "BODY", Width: 6},
-			{Title: "EVENTS", Width: 8},
-		}),
+		table.WithColumns(pipelineColumns()),
 		table.WithFocused(true),
 	)
 	t.SetStyles(tableStyles())
