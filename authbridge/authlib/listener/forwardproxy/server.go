@@ -93,6 +93,14 @@ type Server struct {
 
 	TLSBridge *tlsbridge.Engine // nil = disabled; set by caller after NewServer
 
+	// SessionIDHeaders are the request headers consulted, in order, for a
+	// client-supplied session id to bucket events under. The first one
+	// present and usable wins; when none is, bucketing falls back to
+	// ActiveSession() and then the default bucket, exactly as before.
+	// Empty disables header-based bucketing. See config.SessionConfig
+	// SessionIDHeaders for the default and how to turn it off.
+	SessionIDHeaders []string
+
 	// bufferedFallbackOnce keeps the SSE-buffered-path notice to one line per
 	// process; the condition is a supported chain shape, not an error.
 	bufferedFallbackOnce sync.Once
@@ -335,10 +343,7 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 	}
 
 	if !skipped && s.Sessions != nil {
-		sid := s.Sessions.ActiveSession()
-		if sid == "" {
-			sid = session.DefaultSessionID
-		}
+		sid := s.resolveOutboundSessionID(pctx)
 		// Pin this session so the paired response event records into the
 		// same bucket. Without it, recordOutboundResponseEvent re-resolves
 		// ActiveSession() at response time, which interleaving traffic (a
@@ -713,6 +718,28 @@ func (s *Server) bridgeServe(client net.Conn, authority, host string, rec tunnel
 	return true
 }
 
+// resolveOutboundSessionID picks the bucket an outbound event is recorded
+// under, in descending order of trustworthiness:
+//
+//  1. A session id the client put on the request (SessionIDHeaders). This is
+//     the only source that can tell two concurrent agent sessions apart:
+//     ActiveSession() is a single global "most recently updated" id, so with
+//     two Claude Code windows open, whichever spoke last would swallow the
+//     other's events.
+//  2. ActiveSession(), which correlates an agent's outbound calls with the
+//     inbound A2A turn that caused them — the in-cluster case, where the
+//     agent is not the one holding the session id.
+//  3. The default bucket, for traffic belonging to neither.
+func (s *Server) resolveOutboundSessionID(pctx *pipeline.Context) string {
+	if sid := session.IDFromHeaders(pctx.Headers, s.SessionIDHeaders); sid != "" {
+		return sid
+	}
+	if sid := s.Sessions.ActiveSession(); sid != "" {
+		return sid
+	}
+	return session.DefaultSessionID
+}
+
 // recordOutboundResponseEvent emits the SessionResponse event for a
 // completed outbound response. Extracted from handleRequest so the
 // streaming path can call it once at end-of-stream and the buffered
@@ -1035,10 +1062,9 @@ func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Ac
 	if s.Sessions == nil || pctx.Extensions.Invocations == nil {
 		return
 	}
-	sid := s.Sessions.ActiveSession()
-	if sid == "" {
-		sid = session.DefaultSessionID
-	}
+	// Same resolution as the accept path: a rejected request belongs to the
+	// session that made it, or the operator sees a block with no owner.
+	sid := s.resolveOutboundSessionID(pctx)
 	var status int
 	var code, message string
 	if action.Violation != nil {

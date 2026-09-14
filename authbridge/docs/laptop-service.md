@@ -44,6 +44,31 @@ it is about to cut.
 
 To restart deliberately: `abctl service restart`.
 
+## How traffic is grouped into sessions
+
+Each Claude Code session gets its own bucket, named with that session's id — the same
+UUID Claude Code uses for its own transcript, so `abctl` and
+`~/.claude/projects/<project>/<id>.jsonl` agree on what a session is. Two windows open in
+different repos are two buckets, and resuming a session (`claude --resume`) files back
+into the original one rather than starting a new one.
+
+This works because Claude Code puts `X-Claude-Code-Session-Id` on every inference
+request. Traffic that carries no such header falls back to the previous behavior — the
+most recently active session, or the `default` bucket. In practice `default` collects
+Claude Code's own connectivity probe (`HEAD /api/hello`) and anything else that egresses
+through the proxy without announcing a session.
+
+Two limitations worth knowing:
+
+- **Tool calls are attributed by timing, not identity.** MCP requests carry no session
+  header, so they are filed under whichever session was most recently active. That is
+  right when sessions take turns and can misattribute when two are genuinely
+  interleaved. Inference traffic — where the tokens and the cost are — is always exact.
+- **Other agents need to be named.** Set `session.id_headers` to a list of headers to
+  consult in precedence order if you run a client with its own session header. An
+  explicit empty list (`session.id_headers: []`) turns grouping off and puts everything
+  back in one bucket.
+
 ## Why traffic disappears from `abctl`
 
 Two limits, and neither is a clock:
@@ -52,6 +77,9 @@ Two limits, and neither is a clock:
 |---|---|---|
 | `session.max_events` | 500 per session | oldest events drop, the session stays |
 | `session.max_sessions` | 100 | whole sessions evicted, least-recently-used first |
+
+`max_events` is per bucket, so each Claude Code session gets its own 500 events rather
+than sharing one ring with every other session on the machine.
 
 Sessions do **not** expire on time. They used to, after 30 minutes idle, which read as
 data loss — traffic vanished because you stepped away, not because anything overflowed.
