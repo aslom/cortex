@@ -321,20 +321,16 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		slog.Debug("forward-proxy: buffered request body", "host", r.Host, "bodyLen", len(body))
 	}
 
-	// NOTE: this hydration is deliberately NOT resolveOutboundSessionID. The
-	// session identity handed to PLUGINS still comes from ActiveSession(), while
-	// event recording below resolves the client's session header — so within one
-	// request the two can disagree, and plugins keying on pctx.Session.ID
-	// (sessionbudget's Redis counters, contextguru's compaction state, sparc)
-	// still attribute two concurrent coding-agent sessions to whichever spoke
-	// last. Pre-existing, and not changed here: those keys drive enforcement
-	// rather than telemetry, and reading another session's View() by
-	// client-supplied id is a wider trust question than naming a write bucket —
-	// it feeds another session's state into plugin policy decisions. Tracked in
-	// #984, which has to settle that question before closing the gap.
+	// Establish the session identity ONCE, here, and pin it: the identity handed
+	// to plugins and the bucket the event is recorded under must be the same
+	// answer, not two rules that happen to agree. Plugins key on
+	// pctx.Session.ID (sessionbudget's Redis counters, contextguru's compaction
+	// state, sparc), so resolving this from ActiveSession() alone attributed two
+	// concurrent coding-agent sessions to whichever spoke last.
 	if !skipped && s.Sessions != nil {
-		if aid := s.Sessions.ActiveSession(); aid != "" {
-			pctx.Session = s.Sessions.View(aid)
+		if sid := s.resolvePluginSessionID(r.Header); sid != "" {
+			pctx.OutboundSessionID = sid
+			pctx.Session = s.sessionViewFor(sid)
 		}
 	}
 
@@ -354,7 +350,14 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 	}
 
 	if !skipped && s.Sessions != nil {
-		sid := s.resolveOutboundSessionID(r.Header)
+		// Reuse the identity pinned at hydration so the plugin that ran and the
+		// bucket this lands in cannot disagree. Falls back to full resolution
+		// only when nothing was pinned — hydration found no identity, so this
+		// applies the default bucket that recording (unlike a plugin) needs.
+		sid := pctx.OutboundSessionID
+		if sid == "" {
+			sid = s.resolveOutboundSessionID(r.Header)
+		}
 		// Pin this session so the paired response event records into the
 		// same bucket. Without it, recordOutboundResponseEvent re-resolves
 		// ActiveSession() at response time, which interleaving traffic (a
@@ -757,6 +760,24 @@ func (s *Server) bridgeServe(client net.Conn, authority, host string, rec tunnel
 // bucket is returned, so a future caller that forgets the nil check on Sessions
 // gets a usable answer rather than a panic.
 func (s *Server) resolveOutboundSessionID(clientHeaders http.Header) string {
+	if sid := s.resolvePluginSessionID(clientHeaders); sid != "" {
+		return sid
+	}
+	return session.DefaultSessionID
+}
+
+// resolvePluginSessionID is resolveOutboundSessionID without the default-bucket
+// fallback: it returns "" when neither a client header nor an active session
+// names one, and is the identity handed to plugins.
+//
+// The missing fallback is the point. Recording must file an event somewhere, so
+// "default" is the right last resort there. A plugin asking "which session is
+// this?" must be able to hear "nothing known" — handing it ID "default" would
+// silently satisfy sessionbudget's DefaultSessionFallback, an opt-in config, and
+// start enforcing budgets against a shared bucket where today it deliberately
+// skips (see its no_session_id path). Same precedence otherwise, so the two
+// answers cannot diverge on any request that has an identity at all.
+func (s *Server) resolvePluginSessionID(clientHeaders http.Header) string {
 	if sid := session.IDFromHeaders(clientHeaders, s.SessionIDHeaders); sid != "" {
 		return sid
 	}
@@ -765,7 +786,28 @@ func (s *Server) resolveOutboundSessionID(clientHeaders http.Header) string {
 			return sid
 		}
 	}
-	return session.DefaultSessionID
+	return ""
+}
+
+// sessionViewFor returns the recorded view for sid, or an empty view carrying
+// just the id when nothing has been recorded under it yet.
+//
+// Hydration runs BEFORE the request event is appended, so on a session's first
+// request Store.View returns nil even though the id is known. Passing that nil
+// through would tell every plugin "no session" on the first call of every
+// session, and sessionbudget skips enforcement entirely on an empty id — so a
+// client rotating session ids would never be metered. An empty Events slice is
+// also the truthful answer: the session exists, and nothing has been recorded
+// under it yet.
+//
+// Synthesizing rather than creating the bucket keeps this a read: hydration must
+// not have the side effect of minting store entries for traffic that may still
+// be rejected before anything is recorded.
+func (s *Server) sessionViewFor(sid string) *pipeline.SessionView {
+	if v := s.Sessions.View(sid); v != nil {
+		return v
+	}
+	return &pipeline.SessionView{ID: sid}
 }
 
 // recordOutboundResponseEvent emits the SessionResponse event for a
@@ -1178,14 +1220,15 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 			s.OutboundPipeline.RunFinish(r.Context(), pctx, pipeline.OutcomeFromContext(pctx))
 		}()
 
-		// Same plugin-versus-recording split as the request path, and reachable
-		// for CONNECT traffic the reject path below now DOES bucket by header:
-		// the denial event lands in the client's bucket while the plugins that
-		// produced it saw ActiveSession(). See the note at the request-path
-		// hydration and #984.
+		// Same one-identity rule as the request path: pin it here so the plugins
+		// that gate this tunnel and the bucket its denial records under are the
+		// same session. A CONNECT request carries the client's own headers, so a
+		// client that announces its session on CONNECT is honored; most do not,
+		// and those fall through to ActiveSession() exactly as before.
 		if s.Sessions != nil {
-			if aid := s.Sessions.ActiveSession(); aid != "" {
-				pctx.Session = s.Sessions.View(aid)
+			if sid := s.resolvePluginSessionID(r.Header); sid != "" {
+				pctx.OutboundSessionID = sid
+				pctx.Session = s.sessionViewFor(sid)
 			}
 		}
 

@@ -1181,3 +1181,58 @@ func TestOnRequest_PauseWebhookSurvivesClientCancel(t *testing.T) {
 		t.Errorf("got %v, want Continue — approve verdict must land despite caller cancel", got)
 	}
 }
+
+// TestOnRequest_BudgetsAreScopedPerSession pins the semantics the forward proxy
+// now feeds this plugin: a budget belongs to ONE session, so exhausting session
+// A's allowance must not throttle session B. This is a characterization test —
+// the plugin already keys on Session.ID and always did. What changed upstream is
+// that the listener now hands concurrent coding-agent sessions their own ids
+// instead of whichever spoke last, which is what makes the per-session key
+// meaningful rather than nominal. Guards against anyone re-keying budgets to a
+// coarser scope (user, device, machine) without a deliberate decision: ten
+// editor windows are ten budgets, on purpose.
+func TestOnRequest_BudgetsAreScopedPerSession(t *testing.T) {
+	p := newTestPlugin(1000, 10, 0)
+
+	// Session A has spent its entire call allowance.
+	p.mu.Lock()
+	p.cache["sess-A"] = &counters{tokens: 50, calls: 10, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	if action := p.OnRequest(context.Background(), makePctx("sess-A", 0)); action.Type != pipeline.Reject {
+		t.Fatalf("session A at its limit: expected Reject, got %v", action.Type)
+	}
+	if action := p.OnRequest(context.Background(), makePctx("sess-B", 0)); action.Type != pipeline.Continue {
+		t.Fatalf("session B has spent nothing: expected Continue, got %v — A's spend leaked into B", action.Type)
+	}
+}
+
+// TestOnRequest_EmptySessionViewStillEnforces covers the view the forward proxy
+// synthesizes on a session's first request, before any event has been recorded
+// under it: a non-nil view with the id set and no events. Enforcement must key on
+// that id like any other. If an empty view were treated as "no session", the
+// first call of every session would go unmetered — and since a client mints its
+// own session ids, rotating them would skip enforcement indefinitely.
+func TestOnRequest_EmptySessionViewStillEnforces(t *testing.T) {
+	p := newTestPlugin(1000, 10, 0)
+
+	p.mu.Lock()
+	p.cache["sess-fresh"] = &counters{tokens: 50, calls: 10, startedAt: time.Now()}
+	p.mu.Unlock()
+
+	// Exactly what sessionViewFor returns on a first turn: id known, no events.
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Headers:   http.Header{},
+		Session:   &pipeline.SessionView{ID: "sess-fresh"},
+		Extensions: pipeline.Extensions{
+			Inference: &pipeline.InferenceExtension{},
+		},
+	}
+	if got := p.sessionID(pctx); got != "sess-fresh" {
+		t.Fatalf("sessionID() = %q, want %q from an events-free view", got, "sess-fresh")
+	}
+	if action := p.OnRequest(context.Background(), pctx); action.Type != pipeline.Reject {
+		t.Fatalf("expected enforcement against the synthesized view, got %v", action.Type)
+	}
+}

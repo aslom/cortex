@@ -438,6 +438,20 @@ type EventError struct {
 
 // SessionView is a read-only snapshot of a session, safe to pass to plugins.
 // It contains a copy of events — plugins cannot mutate the store.
+//
+// ID is the session identity: stable for the life of one session, and what a
+// plugin should key per-session state on. The listener resolves it (see
+// Context.Session for the order, and for why it may be client-asserted), so a
+// plugin must not re-derive it from headers or bodies of its own accord — two
+// plugins deriving it differently is how per-session state drifts apart.
+//
+// Events is a snapshot and may be EMPTY for a session that genuinely exists: a
+// view is available as soon as the id is known, which is before that session's
+// first event is recorded. The accessors below therefore return nothing on a
+// fresh session, which is a truthful answer rather than a missing one. None of
+// them distinguishes "this session has no such events" from "this session is
+// new", so a plugin that needs to tell those apart must key on ID and track it,
+// not infer it from an empty result.
 type SessionView struct {
 	ID     string         `json:"id"`
 	Events []SessionEvent `json:"events"`

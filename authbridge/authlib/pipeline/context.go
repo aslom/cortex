@@ -131,8 +131,28 @@ type Context struct {
 	requestID string
 
 	Agent    *AgentIdentity
-	Identity Identity     // nil before an auth plugin runs
-	Session  *SessionView // nil unless session tracking is enabled
+	Identity Identity // nil before an auth plugin runs
+
+	// Session is the session this request belongs to, and the identity a plugin
+	// should key any per-session state on (Redis counters, engine state,
+	// correlation). Read-only; see SessionView.
+	//
+	// Three things a plugin must know about it:
+	//
+	//   - It may be nil, and nil means "no session identity is known" — not
+	//     "sessions are off". A plugin that needs one must decide what to do
+	//     without it rather than assume a fallback bucket; being handed a shared
+	//     bucket instead would silently pool unrelated traffic under one key.
+	//   - Events may be empty while ID is set. A session's first request is
+	//     hydrated before its first event is recorded, so an empty view means
+	//     "this session, nothing recorded yet". Key on ID regardless; treating an
+	//     empty view as absent skips the first request of every session.
+	//   - ID may be CLIENT-ASSERTED. Listeners resolve it from a client-supplied
+	//     header where one is configured (see session.IDFromHeaders), falling
+	//     back to the most recently active session and then, for recording only,
+	//     a shared default bucket. It is validated but not authenticated, so it
+	//     is an observability and correlation key, not an authorization subject.
+	Session *SessionView
 
 	// OutboundSessionID pins the session bucket resolved when the
 	// outbound REQUEST event was recorded, so the paired RESPONSE event
