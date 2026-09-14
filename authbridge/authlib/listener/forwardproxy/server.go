@@ -321,6 +321,17 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		slog.Debug("forward-proxy: buffered request body", "host", r.Host, "bodyLen", len(body))
 	}
 
+	// NOTE: this hydration is deliberately NOT resolveOutboundSessionID. The
+	// session identity handed to PLUGINS still comes from ActiveSession(), while
+	// event recording below resolves the client's session header — so within one
+	// request the two can disagree, and plugins keying on pctx.Session.ID
+	// (sessionbudget's Redis counters, contextguru's compaction state, sparc)
+	// still attribute two concurrent coding-agent sessions to whichever spoke
+	// last. Pre-existing, and not changed here: those keys drive enforcement
+	// rather than telemetry, and reading another session's View() by
+	// client-supplied id is a wider trust question than naming a write bucket —
+	// it feeds another session's state into plugin policy decisions. Tracked in
+	// #984, which has to settle that question before closing the gap.
 	if !skipped && s.Sessions != nil {
 		if aid := s.Sessions.ActiveSession(); aid != "" {
 			pctx.Session = s.Sessions.View(aid)
@@ -1167,6 +1178,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 			s.OutboundPipeline.RunFinish(r.Context(), pctx, pipeline.OutcomeFromContext(pctx))
 		}()
 
+		// Same plugin-versus-recording split as the request path, and reachable
+		// for CONNECT traffic the reject path below now DOES bucket by header:
+		// the denial event lands in the client's bucket while the plugins that
+		// produced it saw ActiveSession(). See the note at the request-path
+		// hydration and #984.
 		if s.Sessions != nil {
 			if aid := s.Sessions.ActiveSession(); aid != "" {
 				pctx.Session = s.Sessions.View(aid)

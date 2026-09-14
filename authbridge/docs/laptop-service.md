@@ -58,7 +58,7 @@ most recently active session, or the `default` bucket. In practice `default` col
 Claude Code's own connectivity probe (`HEAD /api/hello`) and anything else that egresses
 through the proxy without announcing a session.
 
-Two limitations worth knowing:
+Some limitations worth knowing:
 
 - **Tool calls are attributed by timing, not identity.** MCP requests carry no session
   header, so they are filed under whichever session was most recently active. That is
