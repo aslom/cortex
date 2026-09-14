@@ -108,7 +108,7 @@ func TestServiceInstall_RestrictedEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errOut strings.Builder
-	code := serviceInstall(p, true, &out, &errOut)
+	code := serviceInstall(p, true, false, &out, &errOut)
 
 	if code != exitNoSupervisor {
 		t.Errorf("exit = %d, want %d so install.sh can offer the fallback", code, exitNoSupervisor)

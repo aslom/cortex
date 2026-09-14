@@ -35,6 +35,25 @@ root. `authbridge-proxy` defaults to the `full` plugin profile; pass
 [Build-tag plugin selection](#build-tag-plugin-selection) for the underlying
 `go build` invocations.
 
+To run what you just built, `make dev-install` from the repo root builds both
+binaries, installs them to `~/.local/bin` (the same place `install.sh` puts the
+released ones), and restarts the local service so the new bytes are serving.
+It works on a machine that has never run Cortex — it writes the built-in config
+first — and it accepts the same `PROFILE=`. It restarts every time, which cuts
+whatever is currently talking to the proxy and clears the in-memory session
+store; agents themselves keep working without restarting, because the CA in
+`~/.cortex/ca` is reused rather than re-minted.
+
+`PROFILE` has to satisfy the config you are running. `~/.cortex/config.yaml` names the
+plugins it wants, and a profile that omits one is a fatal error at startup rather than a
+reduced feature set — `PROFILE=lite` against a config using `inference-parser` will not
+start at all. What you find afterwards differs by platform: macOS restarts it
+indefinitely (the plist supervises the proxy, which backs off between attempts), while
+Linux gives up after five failures inside five minutes and leaves the unit `failed`, so
+there you get a stopped service rather than a looping one. Either way the proxy logs the
+missing plugin and the set it does have, and `abctl service status` shows the last log
+lines; the default `full` avoids the question.
+
 ## Deployment Modes
 
 Two container images are published:
