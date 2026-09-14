@@ -11,17 +11,29 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
-// newSessionsTable builds an empty sessions table.
-// Widths are refined later by layout() based on terminal width.
+// sessionsColumns is the table's full-width column set, before any terminal-fitting.
+//
+// A function rather than a package var so layout() can re-fit from the originals on every
+// resize: fitting the LIVE columns would be cumulative, and a terminal that got narrower once
+// would keep its narrowed columns after being widened again.
+//
+// These widths sum to 90 rendered columns (80 declared plus bubbles' two per cell), which is
+// why they are fitted rather than used as-is — see fitTableColumns.
+func sessionsColumns() []table.Column {
+	return []table.Column{
+		{Title: "ID", Width: 40},
+		{Title: "UPDATED", Width: 14},
+		{Title: "EVENTS", Width: 8},
+		{Title: "TOKENS", Width: 10},
+		{Title: "ACTIVE", Width: 8},
+	}
+}
+
+// newSessionsTable builds an empty sessions table. Columns are fitted to the terminal by
+// layout(), which is called on every WindowSizeMsg.
 func newSessionsTable() table.Model {
 	t := table.New(
-		table.WithColumns([]table.Column{
-			{Title: "ID", Width: 40},
-			{Title: "UPDATED", Width: 14},
-			{Title: "EVENTS", Width: 8},
-			{Title: "TOKENS", Width: 10},
-			{Title: "ACTIVE", Width: 8},
-		}),
+		table.WithColumns(sessionsColumns()),
 		table.WithFocused(true),
 	)
 	t.SetStyles(tableStyles())
@@ -73,18 +85,18 @@ func (m *model) rebuildSessionsTable() {
 	}
 	m.sessionsTbl.SetRows(rows)
 
-	// Restore cursor position if possible.
+	// Restore cursor position if possible. Through setCursorVisible: a restored row
+	// past the first screenful would otherwise land one line below the rendered
+	// window, leaving the pane with no highlight — see setCursorVisible.
 	if prev != "" {
 		for i, r := range rows {
 			if r[0] == prev {
-				m.sessionsTbl.SetCursor(i)
+				setCursorVisible(&m.sessionsTbl, i)
 				return
 			}
 		}
 	}
-	if len(rows) > 0 {
-		m.sessionsTbl.SetCursor(0)
-	}
+	setCursorVisible(&m.sessionsTbl, 0)
 }
 
 // cachedOnlySessionIDs lists sessions abctl has events for that the server's

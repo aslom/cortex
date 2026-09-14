@@ -11,6 +11,7 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/pricing"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"gopkg.in/yaml.v3"
 )
 
@@ -223,6 +224,38 @@ type SessionConfig struct {
 
 	MaxEvents   int `yaml:"max_events" json:"max_events"`     // max events per session; default: 500
 	MaxSessions int `yaml:"max_sessions" json:"max_sessions"` // max concurrent sessions; default: 100 (0 = unlimited)
+
+	// IDHeaders names the request headers consulted, in order, for a
+	// client-supplied session id to bucket events under. Unset means the Claude
+	// Code session header; an explicit empty list turns header bucketing off and
+	// puts every session back in one shared bucket. Like Enabled above, the
+	// nil-versus-empty distinction is load-bearing — do not collapse it by
+	// assigning a default at load time.
+	//
+	// The ids these headers carry are client-asserted and unauthenticated: a
+	// client can name any bucket, including another session's. The store is
+	// in-process, so the reach of that is every client that can reach this proxy
+	// — one workload for a sidecar, but all of them for a shared or standalone
+	// forward proxy, which binds a wildcard address by default. Set this to an
+	// empty list in any deployment where telemetry attribution is a trust
+	// boundary rather than a convenience. See session.IDFromHeaders for the full
+	// reasoning.
+	IDHeaders []string `yaml:"id_headers" json:"id_headers"`
+}
+
+// SessionIDHeaders returns the headers to consult for a client-supplied session
+// id, defaulting to the Claude Code session header when unset: bucketing per
+// coding-agent session is the point of running this on a laptop, and an operator
+// should not have to learn a header name to get it. An explicit empty list
+// disables the lookup.
+//
+// Whatever this returns, a request that carries none of the named headers
+// buckets exactly as it did before this option existed.
+func (s SessionConfig) SessionIDHeaders() []string {
+	if s.IDHeaders == nil {
+		return []string{session.ClaudeCodeSessionHeader}
+	}
+	return s.IDHeaders
 }
 
 // SessionEnabled returns true when session tracking should run. Defaults to true

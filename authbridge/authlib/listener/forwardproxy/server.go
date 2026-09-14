@@ -93,6 +93,14 @@ type Server struct {
 
 	TLSBridge *tlsbridge.Engine // nil = disabled; set by caller after NewServer
 
+	// SessionIDHeaders are the request headers consulted, in order, for a
+	// client-supplied session id to bucket events under. The first one
+	// present and usable wins; when none is, bucketing falls back to
+	// ActiveSession() and then the default bucket, exactly as before.
+	// Empty disables header-based bucketing. See config.SessionConfig
+	// SessionIDHeaders for the default and how to turn it off.
+	SessionIDHeaders []string
+
 	// bufferedFallbackOnce keeps the SSE-buffered-path notice to one line per
 	// process; the condition is a supported chain shape, not an error.
 	bufferedFallbackOnce sync.Once
@@ -313,6 +321,17 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		slog.Debug("forward-proxy: buffered request body", "host", r.Host, "bodyLen", len(body))
 	}
 
+	// NOTE: this hydration is deliberately NOT resolveOutboundSessionID. The
+	// session identity handed to PLUGINS still comes from ActiveSession(), while
+	// event recording below resolves the client's session header — so within one
+	// request the two can disagree, and plugins keying on pctx.Session.ID
+	// (sessionbudget's Redis counters, contextguru's compaction state, sparc)
+	// still attribute two concurrent coding-agent sessions to whichever spoke
+	// last. Pre-existing, and not changed here: those keys drive enforcement
+	// rather than telemetry, and reading another session's View() by
+	// client-supplied id is a wider trust question than naming a write bucket —
+	// it feeds another session's state into plugin policy decisions. Tracked in
+	// #984, which has to settle that question before closing the gap.
 	if !skipped && s.Sessions != nil {
 		if aid := s.Sessions.ActiveSession(); aid != "" {
 			pctx.Session = s.Sessions.View(aid)
@@ -323,7 +342,7 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		action := s.OutboundPipeline.Run(r.Context(), pctx)
 
 		if action.Type == pipeline.Reject {
-			s.recordOutboundReject(pctx, action)
+			s.recordOutboundReject(pctx, action, r.Header)
 			// Render as a JSON-RPC error frame when the rejected
 			// request was MCP JSON-RPC, so the agent's MCP client
 			// surfaces this as one failed tool call rather than a
@@ -335,10 +354,7 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 	}
 
 	if !skipped && s.Sessions != nil {
-		sid := s.Sessions.ActiveSession()
-		if sid == "" {
-			sid = session.DefaultSessionID
-		}
+		sid := s.resolveOutboundSessionID(r.Header)
 		// Pin this session so the paired response event records into the
 		// same bucket. Without it, recordOutboundResponseEvent re-resolves
 		// ActiveSession() at response time, which interleaving traffic (a
@@ -713,6 +729,45 @@ func (s *Server) bridgeServe(client net.Conn, authority, host string, rec tunnel
 	return true
 }
 
+// resolveOutboundSessionID picks the bucket an outbound event is recorded
+// under, in descending order of trustworthiness:
+//
+//  1. A session id the client put on the request (SessionIDHeaders). This is
+//     the only source that can tell two concurrent agent sessions apart:
+//     ActiveSession() is a single global "most recently updated" id, so with
+//     two Claude Code windows open, whichever spoke last would swallow the
+//     other's events.
+//  2. ActiveSession(), which correlates an agent's outbound calls with the
+//     inbound A2A turn that caused them — the in-cluster case, where the
+//     agent is not the one holding the session id.
+//  3. The default bucket, for traffic belonging to neither.
+//
+// clientHeaders must be the headers as RECEIVED (r.Header), not pctx.Headers.
+// The two diverge: pctx.Headers starts as a clone of r.Header but the outbound
+// pipeline has already run by the time events are recorded, so it holds the
+// upstream-facing set including any plugin rewrite (staticinject writes a
+// configurable target header, so this is reachable by configuration, not just
+// in theory). A bucket key means "what the client claimed about its session", so
+// a plugin rewriting a header for the gateway's benefit must not silently re-file
+// telemetry — and it would fail invisibly, since "" means "fall back", never an
+// error. Pass nil where there is no request to read (opaque tunnels); resolution
+// then falls through to the two fallbacks below.
+//
+// Safe to call with s.Sessions == nil: ActiveSession() is skipped and the default
+// bucket is returned, so a future caller that forgets the nil check on Sessions
+// gets a usable answer rather than a panic.
+func (s *Server) resolveOutboundSessionID(clientHeaders http.Header) string {
+	if sid := session.IDFromHeaders(clientHeaders, s.SessionIDHeaders); sid != "" {
+		return sid
+	}
+	if s.Sessions != nil {
+		if sid := s.Sessions.ActiveSession(); sid != "" {
+			return sid
+		}
+	}
+	return session.DefaultSessionID
+}
+
 // recordOutboundResponseEvent emits the SessionResponse event for a
 // completed outbound response. Extracted from handleRequest so the
 // streaming path can call it once at end-of-stream and the buffered
@@ -1031,14 +1086,13 @@ func (s *Server) streamFallbackBuffered(w http.ResponseWriter, r *http.Request, 
 // Skips when no Invocations were appended — the deny came from a
 // plugin that didn't contribute diagnostic context, and a content-free
 // SessionDenied event would be noise without attribution.
-func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Action) {
+func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Action, clientHeaders http.Header) {
 	if s.Sessions == nil || pctx.Extensions.Invocations == nil {
 		return
 	}
-	sid := s.Sessions.ActiveSession()
-	if sid == "" {
-		sid = session.DefaultSessionID
-	}
+	// Same resolution as the accept path: a rejected request belongs to the
+	// session that made it, or the operator sees a block with no owner.
+	sid := s.resolveOutboundSessionID(clientHeaders)
 	var status int
 	var code, message string
 	if action.Violation != nil {
@@ -1124,6 +1178,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 			s.OutboundPipeline.RunFinish(r.Context(), pctx, pipeline.OutcomeFromContext(pctx))
 		}()
 
+		// Same plugin-versus-recording split as the request path, and reachable
+		// for CONNECT traffic the reject path below now DOES bucket by header:
+		// the denial event lands in the client's bucket while the plugins that
+		// produced it saw ActiveSession(). See the note at the request-path
+		// hydration and #984.
 		if s.Sessions != nil {
 			if aid := s.Sessions.ActiveSession(); aid != "" {
 				pctx.Session = s.Sessions.View(aid)
@@ -1135,7 +1194,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		// HTTP body (parsers) see no body, which they handle gracefully.
 		action := s.OutboundPipeline.Run(r.Context(), pctx)
 		if action.Type == pipeline.Reject {
-			s.recordOutboundReject(pctx, action)
+			s.recordOutboundReject(pctx, action, r.Header)
 			// Render as a JSON-RPC error frame when the rejected
 			// request was MCP JSON-RPC, so the agent's MCP client
 			// surfaces this as one failed tool call rather than a
