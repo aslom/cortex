@@ -950,3 +950,50 @@ func lastInvocation(t *testing.T, pctx *pipeline.Context) pipeline.Invocation {
 	out := pctx.Extensions.Invocations.Outbound
 	return out[len(out)-1]
 }
+
+// Empty-but-present Session under policy=allow. The forward proxy now hands
+// plugins a session view as soon as it knows the id, which on a session's first
+// request means a view with no events yet — so IBAC meets an empty view where it
+// previously met nil. The guardrail decision must not change: no recorded intent
+// still means Skip and Continue, not a denial.
+func TestOnRequest_EmptySessionView_PolicyAllow_Bypasses(t *testing.T) {
+	fj := &fakeJudge{}
+	p := newConfiguredIBAC(t, fj) // default policy=allow
+
+	pctx := makePCtx(t)
+	pctx.Session = &pipeline.SessionView{ID: "sess-fresh"} // id known, nothing recorded
+	action := invokeOnRequest(p, pctx)
+
+	if action.Type != pipeline.Continue {
+		t.Errorf("got %v, want Continue for an events-free session under policy=allow", action.Type)
+	}
+	if fj.calls != 0 {
+		t.Errorf("judge should not be called when there is no recorded intent")
+	}
+}
+
+// Empty-but-present Session under policy=deny. Still fails closed, which is the
+// property that matters. Documents the one visible difference the identity change
+// introduces: the denial arrives as "no_intent" rather than "no_session", because
+// IBAC now gets past its nil-session guard and finds an empty LastIntent instead.
+// Anything alerting on the reason string sees this rename; the allow/deny outcome
+// is unchanged.
+func TestOnRequest_EmptySessionView_PolicyDeny_FailsClosedAsNoIntent(t *testing.T) {
+	fj := &fakeJudge{}
+	p := newConfiguredIBACDeny(t, fj)
+
+	pctx := makePCtx(t)
+	pctx.Session = &pipeline.SessionView{ID: "sess-fresh"}
+	action := invokeOnRequest(p, pctx)
+
+	if action.Type != pipeline.Reject {
+		t.Errorf("got %v, want Reject for an events-free session under policy=deny", action.Type)
+	}
+	if fj.calls != 0 {
+		t.Errorf("judge should not be called when there is no recorded intent")
+	}
+	inv := lastInvocation(t, pctx)
+	if inv.Reason != "no_intent" {
+		t.Errorf("Invocation reason = %q, want 'no_intent' (an empty view is a session with no intent, not a missing session)", inv.Reason)
+	}
+}

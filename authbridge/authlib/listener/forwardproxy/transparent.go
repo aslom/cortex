@@ -102,19 +102,26 @@ func (s *Server) HandleTransparentConn(clientConn net.Conn, dst string) {
 		s.OutboundPipeline.RunFinish(ctx, pctx, pipeline.OutcomeFromContext(pctx))
 	}()
 
-	if s.Sessions != nil {
-		if aid := s.Sessions.ActiveSession(); aid != "" {
-			pctx.Session = s.Sessions.View(aid)
-		}
+	// One identity for this connection, resolved once, exactly as on the request
+	// and CONNECT paths. What an opaque redirected connection lacks is a
+	// CLIENT-ASSERTED id — not an identity: ActiveSession() at the moment the
+	// connection is gated is the answer, and resolving it again at recording time
+	// would reopen the same flip window the other paths were fixed for, reduced to
+	// ActiveSession@T0 versus ActiveSession@T1. resolvePluginSessionID with nil
+	// headers is that same resolver with nothing to read a header from.
+	var sessionID string
+	if sessionID = s.resolvePluginSessionID(nil); sessionID != "" {
+		pctx.Session = s.sessionViewFor(sessionID)
 	}
 
 	// Gate on host/identity before opening the tunnel — identical to the
 	// CONNECT path. Parsers see no body and degrade gracefully.
 	action := s.OutboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
-		// nil headers: an opaque redirected connection has no HTTP request to read
-		// a client session id from, so bucketing falls back as it always did.
-		s.recordOutboundReject(pctx, action, nil)
+		// Carry the identity this connection was gated under, so the denial lands
+		// in the session whose traffic it was. Empty only when nothing was active,
+		// where recording applies the default bucket as it always did.
+		s.recordOutboundReject(pctx, action, s.recordingSessionID(sessionID, nil))
 		slog.Warn("transparent-proxy: outbound rejected by policy", "host", host)
 		return
 	}
