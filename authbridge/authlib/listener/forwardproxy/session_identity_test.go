@@ -2,8 +2,11 @@ package forwardproxy
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -377,5 +380,140 @@ func TestSessionViewFor_NilStoreDoesNotPanic(t *testing.T) {
 	v := s.sessionViewFor("sess-1")
 	if v == nil || v.ID != "sess-1" {
 		t.Fatalf("sessionViewFor with a nil store = %+v, want a view identifying sess-1", v)
+	}
+}
+
+// TestTransparentPath_RecordsUnderTheIdentityThePluginSaw extends the
+// one-identity rule to the third path. An opaque redirected connection has no
+// client-asserted id — but it does have an identity: ActiveSession() at the
+// moment the connection was gated. Resolving it once to hydrate and then
+// re-resolving to record reintroduces the flip window the other two paths were
+// just fixed for, reduced to ActiveSession@T0 versus ActiveSession@T1.
+//
+// A non-HTTP/TLS dst port with no bridge configured keeps shouldSniff false, so
+// the handler never reads from the conn and the rejection returns immediately.
+func TestTransparentPath_RecordsUnderTheIdentityThePluginSaw(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	store.Append("conv-A", pipeline.SessionEvent{
+		At:        time.Now(),
+		Direction: pipeline.Inbound,
+		Phase:     pipeline.SessionRequest,
+		A2A:       &pipeline.A2AExtension{Method: "message/send", SessionID: "conv-A"},
+	})
+
+	p, err := pipeline.New([]pipeline.Plugin{&flipAndRejectPlugin{store: store, flipTo: session.DefaultSessionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		OutboundPipeline: pipeline.NewHolder(p),
+		Sessions:         store,
+		Client:           http.DefaultClient,
+	}
+
+	clientSide, serverSide := net.Pipe()
+	defer func() { _ = clientSide.Close() }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.HandleTransparentConn(serverSide, "10.0.0.1:9999")
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("HandleTransparentConn did not return; it should reject before dialing")
+	}
+
+	countDenied := func(id string) int {
+		v := store.View(id)
+		if v == nil {
+			return 0
+		}
+		n := 0
+		for _, e := range v.Events {
+			if e.Phase == pipeline.SessionDenied {
+				n++
+			}
+		}
+		return n
+	}
+	if got := countDenied("conv-A"); got != 1 {
+		t.Errorf("denial recorded in conv-A: got %d, want 1", got)
+	}
+	if got := countDenied(session.DefaultSessionID); got != 0 {
+		t.Errorf("denial leaked into the session that flipped ActiveSession mid-pipeline: got %d, want 0", got)
+	}
+}
+
+// TestTransparentPath_HydratesTheIdentityItGatesOn drives the transparent path
+// end to end and asserts the plugin gating the tunnel is told which session the
+// connection belongs to. Characterization for the hydration half — View(aid)
+// already produced this — but it is the only test that exercises
+// HandleTransparentConn's session wiring at all, and it pins the identity the
+// denial path now carries forward.
+func TestTransparentPath_HydratesTheIdentityItGatesOn(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	store.Append("conv-A", pipeline.SessionEvent{
+		At:        time.Now(),
+		Direction: pipeline.Inbound,
+		Phase:     pipeline.SessionRequest,
+		A2A:       &pipeline.A2AExtension{Method: "message/send", SessionID: "conv-A"},
+	})
+
+	probe := &identityProbePlugin{}
+	p, err := pipeline.New([]pipeline.Plugin{probe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		OutboundPipeline: pipeline.NewHolder(p),
+		Sessions:         store,
+		Client:           http.DefaultClient,
+	}
+
+	clientSide, serverSide := net.Pipe()
+	defer func() { _ = clientSide.Close() }()
+	go srv.HandleTransparentConn(serverSide, "10.0.0.1:9999")
+
+	deadline := time.After(5 * time.Second)
+	for len(probe.sawID) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("plugin never ran on the transparent path")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if probe.sawID[0] != "conv-A" {
+		t.Errorf("plugin saw %q, want conv-A", probe.sawID[0])
+	}
+}
+
+// TestSessionViewFor_IsTheOnlyHydrationPath guards the invariant behind the
+// previous test: every listener path must hydrate through sessionViewFor, which
+// is the single place that guarantees a usable view. A raw Sessions.View() call
+// can hand plugins nil when a bucket expires between ActiveSession() and View()
+// — the two take separate locks — which is the gap this consolidates away.
+func TestSessionViewFor_IsTheOnlyHydrationPath(t *testing.T) {
+	srcs, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range srcs {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			if strings.Contains(line, "pctx.Session = ") && !strings.Contains(line, "sessionViewFor") {
+				t.Errorf("%s:%d hydrates pctx.Session without sessionViewFor: %s",
+					f, i+1, strings.TrimSpace(line))
+			}
+		}
 	}
 }

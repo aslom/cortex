@@ -807,9 +807,14 @@ func (s *Server) recordingSessionID(resolved string, clientHeaders http.Header) 
 // acceptable where session attribution is a trust boundary — a shared or
 // standalone forward proxy, or any deployment running an authorization plugin on
 // session state. Those must set session.id_headers to an empty list, which
-// returns this to ActiveSession() only. Narrowing what plugins receive for a
-// client-asserted id (identity without the recorded events) is the open
-// alternative, tracked with the reasoning in the issue.
+// returns this to ActiveSession() only.
+//
+// The open alternative is to narrow what plugins receive for a client-asserted
+// id — the ID, which is all that sessionbudget, contextguru and sparc key on, but
+// not the recorded events, so no client can adopt another session's intent. Its
+// cost is sparc's InferenceRequests() correlation for header-identified sessions.
+// Stated in full under "Decision recorded: client-asserted ids as plugin input"
+// in #984, which is where to argue with it.
 func (s *Server) resolvePluginSessionID(clientHeaders http.Header) string {
 	if sid := session.IDFromHeaders(clientHeaders, s.SessionIDHeaders); sid != "" {
 		return sid
