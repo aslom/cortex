@@ -44,6 +44,13 @@ whatever is currently talking to the proxy and clears the in-memory session
 store; agents themselves keep working without restarting, because the CA in
 `~/.cortex/ca` is reused rather than re-minted.
 
+`PROFILE` has to satisfy the config you are running. `~/.cortex/config.yaml` names the
+plugins it wants, and a profile that omits one is a fatal startup error the supervisor
+then retries every 30s — `PROFILE=lite` against a config using `inference-parser` leaves
+the service crash-looping, not degraded. The proxy names the missing plugin and the set
+it does have in the log, so `abctl service status` says what happened; the default
+`full` avoids the question.
+
 ## Deployment Modes
 
 Two container images are published:

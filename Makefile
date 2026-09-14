@@ -84,11 +84,22 @@ dev-install: authbridge-proxy abctl ## Build from this tree, install to ~/.local
 	@# Replacing a RUNNING executable in place fails with ETXTBSY on macOS, and both
 	@# of these are usually running: the proxy under the supervisor, abctl in a TUI.
 	@# rename swaps the directory entry and leaves the live process on its own inode.
+	@# The .new file is removed on any failure: this directory is meant to be on PATH,
+	@# so a half-copied executable left behind is worse than the failure itself.
 	@for b in authbridge-proxy abctl; do \
 		cp $(BIN_DIR)/$$b $(DEV_BIN_DIR)/$$b.new && \
-		mv -f $(DEV_BIN_DIR)/$$b.new $(DEV_BIN_DIR)/$$b || exit 1; \
+		mv -f $(DEV_BIN_DIR)/$$b.new $(DEV_BIN_DIR)/$$b || \
+		{ rm -f $(DEV_BIN_DIR)/$$b.new; exit 1; }; \
 	done
 	@echo "installed -> $(DEV_BIN_DIR)"
+	@# Everything below runs by absolute path, so a missing PATH entry does not fail
+	@# this target — it fails the NEXT thing the developer types. install.sh checks the
+	@# same thing and offers to fix the shell profile; a build target should not edit
+	@# dotfiles, so it says so and stops there.
+	@case ":$$PATH:" in \
+		*":$(DEV_BIN_DIR):"*) ;; \
+		*) echo "note: $(DEV_BIN_DIR) is not on PATH; \`abctl\` will not resolve until you add it";; \
+	esac
 	@# A machine that has never run Cortex has no config, and `service install` refuses
 	@# without one. Minting it here is what makes this work on a clean checkout rather
 	@# than only as an upgrade.

@@ -590,6 +590,74 @@ func unitStamp(unitFile, plistKey, iniKey string) string {
 	return ""
 }
 
+// refreshUnitProxyStamp rewrites the unit's recorded proxy hash to match the binary
+// on disk, leaving the rest of the unit alone.
+//
+// Called after a start or restart, which is what makes the stamp mean "the bytes the
+// supervisor last launched" rather than "the bytes present at the last install". Those
+// diverge the moment anyone replaces the binary and restarts without reinstalling —
+// the manual flow `make dev-install` replaces, and one that scripts may still use. The
+// stamp would then name bytes that are neither on disk nor running, so the next
+// install would find itself not-current and restart a service that was already
+// serving the right code. That would make an installer re-run cost every attached
+// session, which is exactly the property serviceInstall's no-op check exists to
+// protect.
+//
+// Every failure is silent and leaves the old stamp in place. A stale stamp costs one
+// unnecessary restart; a half-written unit costs the service, so this must never be
+// the thing that breaks it. The supervisor has already read the unit by now, so
+// editing the file cannot disturb the running job — and on systemd the field is
+// X-prefixed, which the spec reserves for exactly this kind of third-party data.
+func refreshUnitProxyStamp(p servicePaths) {
+	want := binarySHA256(p.binary)
+	if want == "" {
+		return
+	}
+	b, err := os.ReadFile(p.unitFile) //nolint:gosec // path we wrote
+	if err != nil {
+		return
+	}
+	out, ok := replaceUnitStamp(string(b), "AbctlProxySHA256", "X-AbctlProxySHA256", want)
+	if !ok || out == string(b) {
+		return
+	}
+	// Written via a temp file and renamed: a truncated unit is unbootable, and this
+	// runs on a path whose whole job is that the service comes back.
+	mode := os.FileMode(0o644)
+	if fi, serr := os.Stat(p.unitFile); serr == nil {
+		mode = fi.Mode().Perm()
+	}
+	tmp := p.unitFile + ".stamp.tmp"
+	if err := os.WriteFile(tmp, []byte(out), mode); err != nil {
+		_ = os.Remove(tmp) //nolint:errcheck // best effort
+		return
+	}
+	if err := os.Rename(tmp, p.unitFile); err != nil {
+		_ = os.Remove(tmp) //nolint:errcheck // best effort
+	}
+}
+
+// replaceUnitStamp swaps one stamped field's value, accepting either spelling.
+//
+// Deliberately the mirror image of unitStamp's scan, so the two cannot disagree about
+// where a field ends: a reader that stops at "<" or "\n" and a writer that assumed
+// something else is how a stamp becomes unreadable while still looking present.
+func replaceUnitStamp(body, plistKey, iniKey, want string) (string, bool) {
+	for _, marker := range []string{"<key>" + plistKey + "</key><string>", iniKey + "="} {
+		i := strings.Index(body, marker)
+		if i < 0 {
+			continue
+		}
+		rest := body[i+len(marker):]
+		end := strings.IndexAny(rest, "<\n")
+		if end < 0 {
+			continue
+		}
+		return body[:i+len(marker)] + want + rest[end:], true
+	}
+	return body, false
+}
+
 // binarySHA256 hashes the file at path, or returns "" when it cannot be read.
 //
 // "" is a legitimate answer rather than an error: renderUnit calls this while

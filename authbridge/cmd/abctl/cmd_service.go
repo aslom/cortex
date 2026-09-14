@@ -600,6 +600,13 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
 		return 1
 	}
+	if action == "start" || action == "restart" {
+		// The supervisor has just launched whatever p.binary holds now, so this is the
+		// moment the unit's record of those bytes is either confirmed or out of date.
+		// See refreshUnitProxyStamp for why leaving it stale would make the next
+		// install cut every attached session for nothing.
+		refreshUnitProxyStamp(p)
+	}
 	switch action {
 	case "stop":
 		fmt.Fprintln(stdout, "Stopped, and it will stay stopped across logins.")
