@@ -204,8 +204,10 @@ func TestParity_InboundRequestBodyOverflow(t *testing.T) {
 		path:    "/parity/big",
 		reqBody: big,
 	}
-	// wantPhase is a placeholder — pipelineRefusedPreRun short-circuits
-	// the phase check.
+	// wantPhase is load-bearing: SessionRequest is where all three
+	// listeners record on the request path, so a regression that ran
+	// the pipeline anyway would surface here and trip the
+	// pipelineRefusedPreRun check.
 	assertParity(t, f, pipeline.SessionRequest, inboundListeners)
 }
 

@@ -563,7 +563,7 @@ func TestBridge_UnverifiableUpstream_FallsOpenToTunnel(t *testing.T) {
 	originHostPort := originURL.Host // "127.0.0.1:port"
 
 	// Build the bridge Engine. The Upstream client trusts ONLY the system roots
-	// (NewUpstreamClient(nil)) — it does NOT trust the httptest origin's
+	// (NewUpstreamClient(nil, false)) — it does NOT trust the httptest origin's
 	// self-signed CA, so bridgeServe's upstream-verify HEAD fails and the branch
 	// falls open to a plain tunnel.
 	src, err := tlsbridge.NewEphemeralSource()
@@ -699,7 +699,7 @@ func TestBridge_PinnedClient_AutoSkipsThenTunnels(t *testing.T) {
 	}
 	originHostPort := originURL.Host // "127.0.0.1:port"
 
-	// Upstream trusts the origin (NewUpstreamClient(originCAPEM)) so upstream-verify
+	// Upstream trusts the origin (NewUpstreamClient(originCAPEM, false)) so upstream-verify
 	// PASSES and bridgeServe reaches the Terminate step where the pinned agent
 	// rejects the minted leaf.
 	src, err := tlsbridge.NewEphemeralSource()

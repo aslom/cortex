@@ -52,8 +52,9 @@ type fixture struct {
 	pipelineRefusedPreRun bool
 
 	// expectedWireStatus, when non-zero, is asserted against every
-	// listener's wire status. Used with pipelineRefusedPreRun to pin
-	// (e.g.) 413 rather than only agreeing pairwise.
+	// listener's wire status. Only meaningful together with
+	// pipelineRefusedPreRun — on the success path extproc has no HTTP
+	// transport and reports 0.
 	expectedWireStatus int
 
 	// expectedPluginEvents anchors correctness — maps each expected
