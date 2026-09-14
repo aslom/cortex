@@ -220,3 +220,162 @@ func TestPluginIdentity_NoSessionAtAllStaysNil(t *testing.T) {
 		t.Errorf("plugin saw session %q, want nil (no header, nothing active)", probe.sawID[0])
 	}
 }
+
+// flipAndRejectPlugin reproduces the interleaving that makes re-resolution
+// unsafe: it appends an event under an unrelated session (flipping the global
+// ActiveSession, exactly as a health probe under "default" does) and then
+// rejects. Any recorder that re-resolves after the pipeline ran will file the
+// denial under the interloper.
+type flipAndRejectPlugin struct {
+	store  *session.Store
+	flipTo string
+}
+
+func (p *flipAndRejectPlugin) Name() string { return "flip-and-reject" }
+func (p *flipAndRejectPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
+func (p *flipAndRejectPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	p.store.Append(p.flipTo, pipeline.SessionEvent{
+		At:        time.Now(),
+		Direction: pipeline.Inbound,
+		Phase:     pipeline.SessionRequest,
+		Host:      "health-probe.example",
+	})
+	return pctx.DenyAndRecord("blocked for test", "test.blocked", "blocked for test")
+}
+func (p *flipAndRejectPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestRejectPath_RecordsUnderTheIdentityThePluginSaw closes the gap the accept
+// path already has. A denial must land in the session that made the request —
+// the same identity the plugin that produced the denial was given. Re-resolving
+// after the pipeline ran reads ActiveSession() at a later moment, and a guardrail
+// judge call is seconds long, so any interleaving traffic in that window flips it
+// and the operator sees a block filed against an unrelated session.
+//
+// Deliberately the NO-HEADER case: with a header the two resolutions agree by
+// luck, so only header-less traffic (the in-cluster A2A shape) can show the bug.
+func TestRejectPath_RecordsUnderTheIdentityThePluginSaw(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+
+	// The agent's inbound A2A turn: this is the session that owns the request.
+	store.Append("conv-A", pipeline.SessionEvent{
+		At:        time.Now(),
+		Direction: pipeline.Inbound,
+		Phase:     pipeline.SessionRequest,
+		A2A:       &pipeline.A2AExtension{Method: "message/send", SessionID: "conv-A"},
+	})
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("backend reached; request should have been rejected")
+	}))
+	defer backend.Close()
+
+	p, err := pipeline.New([]pipeline.Plugin{&flipAndRejectPlugin{store: store, flipTo: session.DefaultSessionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		OutboundPipeline: pipeline.NewHolder(p),
+		Sessions:         store,
+		Client:           http.DefaultClient,
+		SessionIDHeaders: []string{session.ClaudeCodeSessionHeader},
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxy.URL))}}
+
+	get(t, client, backend.URL, "") // no session header
+
+	countDenied := func(id string) int {
+		v := store.View(id)
+		if v == nil {
+			return 0
+		}
+		n := 0
+		for _, e := range v.Events {
+			if e.Phase == pipeline.SessionDenied {
+				n++
+			}
+		}
+		return n
+	}
+	if got := countDenied("conv-A"); got != 1 {
+		t.Errorf("denial recorded in conv-A: got %d, want 1", got)
+	}
+	if got := countDenied(session.DefaultSessionID); got != 0 {
+		t.Errorf("denial leaked into the session that flipped ActiveSession mid-pipeline: got %d, want 0", got)
+	}
+}
+
+// pinHijackPlugin writes pctx.OutboundSessionID, which is an exported field a
+// plugin can reach.
+type pinHijackPlugin struct{ hijackTo string }
+
+func (p *pinHijackPlugin) Name() string { return "pin-hijack" }
+func (p *pinHijackPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
+func (p *pinHijackPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	pctx.OutboundSessionID = p.hijackTo
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *pinHijackPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestPinIsNotPluginWritable guards the hazard created by resolving the identity
+// before the pipeline runs: OutboundSessionID is exported, so a plugin that
+// writes it could re-file both the request and its paired response event.
+// resolveOutboundSessionID's own contract forbids exactly that — a plugin must
+// not silently re-file telemetry, and it would fail invisibly because "" means
+// "fall back", never an error. The listener's resolution must win.
+func TestPinIsNotPluginWritable(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p, err := pipeline.New([]pipeline.Plugin{&pinHijackPlugin{hijackTo: "attacker-chosen"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		OutboundPipeline: pipeline.NewHolder(p),
+		Sessions:         store,
+		Client:           http.DefaultClient,
+		SessionIDHeaders: []string{session.ClaudeCodeSessionHeader},
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxy.URL))}}
+
+	const sid = "511754a6-63e2-47df-bb22-706dc165c344"
+	get(t, client, backend.URL, sid)
+
+	if v := store.View("attacker-chosen"); v != nil && len(v.Events) > 0 {
+		t.Errorf("a plugin re-filed %d events by writing OutboundSessionID", len(v.Events))
+	}
+	v := store.View(sid)
+	if v == nil || len(v.Events) != 2 {
+		t.Fatalf("expected request+response under %s, got %+v", sid, v)
+	}
+}
+
+// TestSessionViewFor_NilStoreDoesNotPanic holds sessionViewFor to the convention
+// resolveOutboundSessionID states thirty lines above it — safe to call with a nil
+// store, so a future caller that forgets the guard gets a usable answer rather
+// than a panic. Both current callers guard, so this is latent by design.
+func TestSessionViewFor_NilStoreDoesNotPanic(t *testing.T) {
+	s := &Server{} // Sessions nil: session tracking disabled
+	v := s.sessionViewFor("sess-1")
+	if v == nil || v.ID != "sess-1" {
+		t.Fatalf("sessionViewFor with a nil store = %+v, want a view identifying sess-1", v)
+	}
+}

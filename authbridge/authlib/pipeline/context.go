@@ -154,16 +154,24 @@ type Context struct {
 	//     is an observability and correlation key, not an authorization subject.
 	Session *SessionView
 
-	// OutboundSessionID pins the session bucket resolved when the
-	// outbound REQUEST event was recorded, so the paired RESPONSE event
-	// lands in the same session. recordOutboundResponseEvent reuses it
-	// instead of re-resolving Store.ActiveSession() at response time:
-	// ActiveSession() returns the global "most-recently-updated session",
-	// which interleaving traffic (e.g. a health probe bucketed under
-	// "default") can flip between a streaming request and its response,
-	// mis-filing the response into the wrong session. Empty when no
-	// request event was recorded (skip_hosts, sessions disabled), in
-	// which case the response recorder falls back to ActiveSession().
+	// OutboundSessionID pins the session bucket the outbound REQUEST event was
+	// recorded under, so the paired RESPONSE event lands in the same session.
+	// recordOutboundResponseEvent reuses it instead of re-resolving
+	// Store.ActiveSession() at response time: ActiveSession() returns the global
+	// "most-recently-updated session", which interleaving traffic (e.g. a health
+	// probe bucketed under "default") can flip between a streaming request and
+	// its response, mis-filing the response into the wrong session. Empty when
+	// no request event was recorded (skip_hosts, sessions disabled), in which
+	// case the response recorder falls back to ActiveSession().
+	//
+	// Listeners MUST assign this only after the request pipeline has run, and
+	// must not read it back as the source of truth for recording. It is
+	// exported, so a plugin can write it; the listener's own resolution is held
+	// in a local for exactly that reason, and assigning last means a plugin
+	// write is overwritten rather than able to silently re-file this request and
+	// its response into a session of the plugin's choosing. Plugins wanting to
+	// influence attribution should say so through their own invocation records,
+	// where it is visible.
 	OutboundSessionID string
 
 	// TLS is the connection state of the inbound TLS handshake when

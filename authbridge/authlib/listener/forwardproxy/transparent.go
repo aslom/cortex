@@ -112,9 +112,10 @@ func (s *Server) HandleTransparentConn(clientConn net.Conn, dst string) {
 	// CONNECT path. Parsers see no body and degrade gracefully.
 	action := s.OutboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
-		// nil headers: an opaque redirected connection has no HTTP request to read
-		// a client session id from, so bucketing falls back as it always did.
-		s.recordOutboundReject(pctx, action, nil)
+		// An opaque redirected connection has no HTTP request to read a client
+		// session id from, so there is nothing to carry forward: recording falls
+		// back to ActiveSession() and then the default bucket, as it always did.
+		s.recordOutboundReject(pctx, action, s.recordingSessionID("", nil))
 		slog.Warn("transparent-proxy: outbound rejected by policy", "host", host)
 		return
 	}
