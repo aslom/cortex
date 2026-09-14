@@ -12,7 +12,11 @@ import (
 // carries it on every screen (see #975): the moment a user is looking at their
 // session data is the moment they have an opinion, and the tool should not make
 // them hunt for the repository. Kept quiet (muted style) and to one line.
-const feedbackURL = "https://github.com/rossoctl/cortex/issues"
+//
+// The /issues/new/choose form drops the user on the template picker — the
+// Laptop feedback form — one click from filing, rather than on the issue list.
+// This is the same destination the docs point at (see rossoctl#977).
+const feedbackURL = "https://github.com/rossoctl/cortex/issues/new/choose"
 
 // footerView renders the bottom two lines: status (connection + rate + drops
 // + optional transient flash, then a muted feedback link) and a
@@ -82,10 +86,17 @@ func (m *model) footerView() string {
 		status.WriteString(styleTitle.Render("   " + m.flash))
 	}
 
-	// Feedback link, quiet and last on the status line so it never crowds the
-	// connection state or a flash. Always present — this is the one screen
-	// element #975 wants a user to be able to find without looking for it.
-	status.WriteString(styleMuted.Render("   feedback: " + feedbackURL))
+	// Feedback link, quiet and last on the status line. It has the weakest claim
+	// on the columns — the connection state, rate, drops and any flash are what a
+	// user is actively debugging with — so it is the first thing to drop when the
+	// line would otherwise overflow the terminal and wrap onto a third row. It is
+	// dropped whole rather than truncated: half a URL is not clickable and reads
+	// as corruption. On the common wide terminal it is always present, which is
+	// the case #975 is about; a width of 0 (no size yet) keeps it too.
+	feedback := styleMuted.Render("   feedback: " + feedbackURL)
+	if m.width <= 0 || lipgloss.Width(status.String())+lipgloss.Width(feedback) <= m.width {
+		status.WriteString(feedback)
+	}
 
 	hint := fitHintLine(m.helpView(), m.width)
 
