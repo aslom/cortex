@@ -1,6 +1,7 @@
 package costing
 
 import (
+	"math"
 	"net/http"
 	"testing"
 
@@ -134,6 +135,156 @@ func TestSettle_CarriesBothFigures(t *testing.T) {
 	}
 	if got.ModelledProv != pricing.ProvConfigured {
 		t.Errorf("ModelledProv = %v, want configured", got.ModelledProv)
+	}
+}
+
+// tieredTable has a distinct rate per tier AND a long-context threshold at 200k that
+// raises every tier, output included — the shape bundled.go gives the Sonnet 4.5 family
+// (there, 1.5e-05 output becomes 2.25e-05 above 200k).
+//
+// Both properties earn their place. The flat one-micro-per-token `rates` table cannot catch
+// an output half priced at the input rate; a table with no threshold cannot catch a figure
+// that resolved its rates from its own token counts rather than the request's, which is
+// exactly how the premium went missing from the halves and from savings. Rates are chosen
+// so every expectation lands on a whole number of micros, because Cost rounds to micros and
+// a fractional expectation would assert the rounding rather than the pricing.
+func tieredTable(t *testing.T) pricing.Resolver {
+	t.Helper()
+	var r pricing.Rates
+	for _, tr := range []struct {
+		tier pricing.Tier
+		per  float64
+	}{
+		{pricing.TierInput, 5e-6}, {pricing.TierCacheWrite, 6.25e-6},
+		{pricing.TierCacheRead, 0.5e-6}, {pricing.TierOutput, 25e-6},
+	} {
+		r.Base[tr.tier], r.Set[tr.tier] = tr.per, true
+	}
+	var above pricing.ContextThreshold
+	above.AbovePromptTokens = 200_000
+	for _, tr := range []struct {
+		tier pricing.Tier
+		per  float64
+	}{
+		{pricing.TierInput, 6e-6}, {pricing.TierCacheWrite, 8e-6},
+		{pricing.TierCacheRead, 0.6e-6}, {pricing.TierOutput, 30e-6},
+	} {
+		above.Rate[tr.tier], above.Set[tr.tier] = tr.per, true
+	}
+	r.Thresholds = []pricing.ContextThreshold{above}
+	tab, err := pricing.NewTable([]pricing.Entry{{Host: "*", Model: "*", Rates: r, Prov: pricing.ProvConfigured}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pricing.NewRegistry(tab)
+}
+
+// Each half is priced on its own tiers, so a per-row consumer can render a row-local
+// figure instead of a running total — and both resolve their rates at the REQUEST's prompt
+// size, so a long-context premium reaches the completion as well as the prompt.
+//
+// The usage is the turn that motivated the split: a long-running agent's cold cache write,
+// where the prompt is two orders of magnitude more expensive than the completion and a
+// cumulative cell hides that.
+func TestSettle_PricesPromptAndOutputHalvesSeparately(t *testing.T) {
+	reg := tieredTable(t)
+	pctx := &pipeline.Context{
+		Host:            "gw.internal",
+		ResponseHeaders: http.Header{},
+		Extensions: pipeline.Extensions{Inference: &pipeline.InferenceExtension{
+			Model: "claude-opus-5", InputTokens: 26,
+			CacheWriteTokens: 640_985, OutputTokens: 1_075,
+		}},
+	}
+	got := Settle(pctx, reg)
+
+	// 26x6 + 640,985x8 micros — the ABOVE-threshold input and cache-write rates, since
+	// 641,011 prompt tokens are past 200k. Nothing of the output: at the output rate those
+	// 1,075 tokens would add 32,250 micros, which is what a prompt half must not contain.
+	if wantPrompt := (26*6 + 640_985*8) / 1e6; !got.HasPrompt || got.PromptUSD != wantPrompt {
+		t.Errorf("PromptUSD = %v (has=%v), want %v", got.PromptUSD, got.HasPrompt, wantPrompt)
+	}
+	// 1,075x30 micros: the OUTPUT tier, at the ABOVE-threshold rate. Three ways to get
+	// this wrong, all of which this pins:
+	//   - the base output rate (25) = 26,875 micros, which is what resolving the
+	//     threshold from the output half's own token counts produces, because a half with
+	//     no prompt tokens lands at At(0)
+	//   - the input rate (6) = 6,450 micros
+	//   - the cache-write rate the prompt landed in (8) = 8,600 micros
+	if wantOutput := (1_075 * 30) / 1e6; !got.HasOutput || got.OutputUSD != wantOutput {
+		t.Errorf("OutputUSD = %v (has=%v), want %v", got.OutputUSD, got.HasOutput, wantOutput)
+	}
+	// The halves partition the modelled total: neither double-counts a tier, nothing falls
+	// between them, and — the reason this assertion has teeth now — both resolved their
+	// rates at the same prompt size, so the premium cannot land on one and miss the other.
+	// Tolerance is one micro: each figure rounds to micros independently, so a partition
+	// can legitimately differ from the whole in the last place.
+	if sum := got.PromptUSD + got.OutputUSD; !got.HasModelled || math.Abs(sum-got.ModelledUSD) > 1e-6 {
+		t.Errorf("halves sum to %v, want the modelled total %v (has=%v)", sum, got.ModelledUSD, got.HasModelled)
+	}
+
+	// With the gateway's own total winning, both halves stay the TABLE's. A consumer
+	// showing a row-local figure must never end up with a share of the header, and the
+	// difference proves why: the gateway charged 3.0652 against a modelled 5.160286, so
+	// total-minus-prompt would report the completion as a negative cost. (Subtracting
+	// ModelledUSD − PromptUSD would be sound — same table, same prompt size; it is mixing
+	// the gateway's total with the table's half that cannot work.)
+	pctx.ResponseHeaders.Set("Content-Type", "application/json")
+	pctx.ResponseHeaders.Set(ResponseCostHeader, "3.0652")
+	withHeader := Settle(pctx, reg)
+	if withHeader.Source != costevent.SourceGatewayHeader {
+		t.Fatalf("Source = %q, want the header to win", withHeader.Source)
+	}
+	if withHeader.PromptUSD != got.PromptUSD || withHeader.OutputUSD != got.OutputUSD {
+		t.Errorf("halves moved with the header: prompt %v output %v, want %v and %v",
+			withHeader.PromptUSD, withHeader.OutputUSD, got.PromptUSD, got.OutputUSD)
+	}
+	if diff := withHeader.CostUSD - withHeader.PromptUSD; diff >= 0 {
+		t.Errorf("total-minus-prompt is %v; this fixture exists because that is negative", diff)
+	}
+}
+
+// A saving is a slice of THIS request's prompt, so it prices at the rates the request
+// landed on — long-context premium included.
+//
+// Keying the threshold on the saving's own token count instead put a ~10k-token slice at
+// At(10000), below a 200k threshold that the 641k-token request it came out of is well past,
+// and under-reported every saving on exactly the long-context turns where the premium
+// applies. Asserted as a RATE (dollars per avoided token) rather than a dollar total, so the
+// byte-ratio token estimate can change without rewriting the expectation.
+func TestAvoided_PricesSavingsAtTheRequestsPromptSize(t *testing.T) {
+	pctx := &pipeline.Context{
+		Host: "gw.internal",
+		Extensions: pipeline.Extensions{
+			Inference: &pipeline.InferenceExtension{
+				Model: "claude-opus-5", InputTokens: 26,
+				CacheWriteTokens: 640_985, OutputTokens: 1_075,
+			},
+			Custom: map[string]any{
+				"tool-prune" + pipeline.PluginEventSuffix: map[string]any{
+					"bytesRemoved": 34_645, "bodyBytesAfter": 2_384_550,
+				},
+			},
+		},
+	}
+	got := Avoided(pctx, tieredTable(t))
+	if len(got) != 1 {
+		t.Fatalf("Avoided returned %d savings, want 1: %+v", len(got), got)
+	}
+	s := got[0]
+	if s.TokensAvoided <= 0 || s.USD <= 0 {
+		t.Fatalf("saving not priced: %+v", s)
+	}
+	// The prompt landed in the cache-write tier, which is 8e-06 above the threshold and
+	// 6.25e-06 below it.
+	if want := float64(s.TokensAvoided) * 8e-6; math.Abs(s.USD-want) > 1e-6 {
+		t.Errorf("saving priced at %v/token (%v for %d tokens), want the above-threshold "+
+			"8e-06 (%v); the below-threshold rate would give %v",
+			s.USD/float64(s.TokensAvoided), s.USD, s.TokensAvoided, want,
+			float64(s.TokensAvoided)*6.25e-6)
+	}
+	if s.Tier != pricing.TierCacheWrite.String() {
+		t.Errorf("Tier = %q, want %q", s.Tier, pricing.TierCacheWrite.String())
 	}
 }
 

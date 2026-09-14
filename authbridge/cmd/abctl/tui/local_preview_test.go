@@ -58,13 +58,15 @@ func seedAgentTurns(store *session.Store, sid string, n int) {
 			},
 			Plugins: map[string]json.RawMessage{
 				// The cost record, as the proxy publishes it on the RESPONSE: the
-				// prompt-only figure and the saving now travel here rather than
+				// prompt-only and output-only figures (1.9e-5 per output token,
+				// 5x the input rate) and the saving now travel here rather than
 				// being derived in the UI from rates on the request event.
 				costevent.Key: json.RawMessage(fmt.Sprintf(
 					`{"cost_usd":%.4f,"source":"gateway-header","daily_total_usd":%.4f,"daily_max_usd":5,`+
-						`"prompt_usd":%.5f,"avoided":[{"component":"tool-prune","tokensAvoided":9899,`+
+						`"prompt_usd":%.5f,"output_usd":%.5f,`+
+						`"avoided":[{"component":"tool-prune","tokensAvoided":9899,`+
 						`"usd":0.0038,"tier":"cache_read","estimated":true}]}`,
-					cost, cost*float64(i+1), 1_300*3.8e-6+float64(cacheRead)*3.8e-7)),
+					cost, cost*float64(i+1), 1_300*3.8e-6+float64(cacheRead)*3.8e-7, float64(output)*1.9e-5)),
 			},
 			Invocations: &pipeline.Invocations{Outbound: []pipeline.Invocation{
 				{Plugin: "inference-parser", Action: pipeline.ActionObserve, Reason: "parsed"},
@@ -76,7 +78,8 @@ func seedAgentTurns(store *session.Store, sid string, n int) {
 // TestSplitColumnsRender drives the real row builder over seeded traffic and
 // asserts the TOKENS and COST cells land on the rows they belong to. This is the
 // regression guard for the split: a request row must carry a prompt total with
-// its saving, a response row the generated count and the exchange cost.
+// its saving, a response row the generated count and what generating them cost.
+// Neither cell may be a running total of the other.
 func TestSplitColumnsRender(t *testing.T) {
 	store := session.New(5*time.Minute, 100, 0)
 	defer store.Close()
@@ -103,12 +106,14 @@ func TestSplitColumnsRender(t *testing.T) {
 	if !strings.HasPrefix(reqCost, "$0.2633(−$") {
 		t.Errorf("request COST = %q, want a prompt total with a saving", reqCost)
 	}
-	// Response: generated tokens only, and the authoritative exchange cost.
+	// Response: generated tokens only, and what those generated tokens cost —
+	// 1,850 × 1.9e-5 = 0.03515, not the 0.2824 exchange total on the same record.
+	// Both cells on this row therefore describe this row.
 	if respTokens != "1,850" {
 		t.Errorf("response TOKENS = %q, want %q", respTokens, "1,850")
 	}
-	if respCost != "$0.2824" {
-		t.Errorf("response COST = %q, want %q", respCost, "$0.2824")
+	if respCost != "$0.0352" {
+		t.Errorf("response COST = %q, want %q", respCost, "$0.0352")
 	}
 	// The halves must not both claim the prompt: that was the pre-split bug.
 	if reqTokens == respTokens {

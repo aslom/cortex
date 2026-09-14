@@ -57,6 +57,23 @@ func promptCost(resp *pipeline.SessionEvent) (usd float64, ok bool) {
 	return ev.PromptUSD, true
 }
 
+// outputCost is what the RESPONSE of one exchange cost: its generated tokens at the output
+// rate, nothing of the prompt. The other half of promptCost, read off the same record, so
+// each row's COST cell answers for that row alone.
+//
+// False for a producer that publishes no output figure — an older proxy, or a model whose
+// output tier has no rate — and a response row then renders blank, exactly as a request row
+// does without a prompt figure. Deliberately NOT backfilled with the exchange total: that
+// is what made this column read as cumulative, and a total in a per-row cell is wrong by
+// more than it is right.
+func outputCost(resp *pipeline.SessionEvent) (usd float64, ok bool) {
+	ev, ok := costevent.Record(resp)
+	if !ok || ev.OutputUSD <= 0 {
+		return 0, false
+	}
+	return ev.OutputUSD, true
+}
+
 // promptTokens is the request's own billed token count: what the provider
 // counted for everything we sent. It lives on the response because the provider
 // is the only party that tokenizes, but it is a request-side quantity — which is

@@ -84,7 +84,12 @@ func Avoided(pctx *pipeline.Context, rates pricing.Resolver) []costevent.Saving 
 			Projected:     facts.Projected,
 			Estimated:     true,
 		}
-		if micros, prov, ok := modelledCost(rates, pctx.Host, model, saved); ok {
+		// Priced at the REQUEST's prompt size (`prompt`), not the saving's own token
+		// count. A saving is a slice of this request's prompt, so it bills at the rates
+		// this request landed on — including a long-context premium, which keying the
+		// lookup on the slice would have dropped: 9.7k avoided tokens resolve at At(9700)
+		// and miss a 200k threshold the 641k request they came out of is well past.
+		if micros, prov, ok := modelledCost(rates, pctx.Host, model, saved, prompt); ok {
 			s.USD, s.Provenance = float64(micros)/1e6, prov.String()
 		}
 		// Published even with no dollar figure: the token saving is still known, and

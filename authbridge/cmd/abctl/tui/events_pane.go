@@ -910,38 +910,43 @@ func (m *model) tokensCell(rows []eventRow, partner map[int]int, i int, ev *pipe
 
 // costCell renders the COST column.
 //
-// The two rows are NOT two halves of one sum, unlike TOKENS:
+// EVERY CELL IS ROW-LOCAL: what that one row cost, never a running total. Read with
+// TOKENS, which is row-local too, each row divides into its own rate.
 //
-//   - a REQUEST row shows what its prompt cost, modelled per-tier from the rates
-//     tool-prune published, with the saving in parentheses. Blank without
-//     tool-prune, which is the only plugin that puts rates on the wire.
-//   - a RESPONSE row shows what the whole exchange cost, as reported by
-//     litellm-budget-track: the gateway's own post-discount figure when it
-//     stamped one, otherwise the plugin's own per-token pricing. A streamed
-//     response always reports 0 in the header, so for a streaming agent the
-//     modelled path is the common case rather than the exception.
+//   - a REQUEST row shows what its prompt cost, modelled per-tier, with the saving in
+//     parentheses.
+//   - a RESPONSE row shows what its generated tokens cost, at the output rate.
 //
-// Both figures in this column can therefore be models, and neither is marked as
-// one. That is deliberate: marking the response cost while leaving the request
-// cost — which is always modelled — unmarked would imply a distinction the column
-// does not actually draw. costEvent.Source carries the provenance for anyone who
-// needs it.
+// Both halves come off litellm-budget-track's record as separate figures (prompt_usd,
+// output_usd) rather than being derived here. The response cell used to show the
+// exchange TOTAL, which put a cumulative figure in a per-row column: against a 641k-token
+// cache-heavy turn it rendered $3.0652 beside 1,075 output tokens, implying an output rate
+// of $2,851/MTok to anyone reading the row on its own, and inviting the total to be summed
+// again with the request row above it.
 //
-// The response figure *includes* the request figure. It is not the generated-token
-// cost, because no plugin publishes an output rate: tool-prune deliberately omits
-// one (it only ever shrinks the prompt, so attributing output cost to it would be
-// false) and budget-track emits a finished total rather than its rates. Deriving
-// the completion cost by subtraction would concentrate all of the prompt model's
-// error into it and can go negative, so the reported total is shown instead of a
-// computed delta.
+// The two are still NOT two halves of one sum, unlike TOKENS. They are two breakdowns of
+// one call: the total may be the gateway's own post-discount figure while both halves are
+// always the rate table's, so their sum is the table's opinion of the call and not what
+// was charged. The total remains on the record for the detail view and for the drift
+// check in authlib/costing.
+//
+// Every figure in this column is therefore a model, and none is marked as one — the
+// distinction the column used to blur (one cell authoritative, one modelled) is gone now
+// that both halves come from the table. costEvent.Source and .Provenance carry it for
+// anyone who needs it.
+//
+// A cell is blank when no figure was published, which reads as "not reported". Blank is
+// specifically not backfilled with the total: an older proxy sends no output_usd, and
+// showing the exchange total there would reintroduce exactly the cumulative reading this
+// column no longer has.
 func (m *model) costCell(rows []eventRow, partner map[int]int, i int, ev *pipeline.SessionEvent) string {
 	switch ev.Phase {
 	case pipeline.SessionResponse:
-		ce, ok := decodeCostEvent(ev)
+		usd, ok := outputCost(ev)
 		if !ok {
 			return ""
 		}
-		return formatUSDCell(ce.CostUSD)
+		return formatUSDCell(usd)
 	case pipeline.SessionRequest:
 		resp := pairedResponse(rows, partner, i, ev)
 		if resp == nil {
