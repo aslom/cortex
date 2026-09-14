@@ -150,6 +150,8 @@ type frameState struct {
 var (
 	_ pipeline.Plugin             = (*spyPlugin)(nil)
 	_ pipeline.Configurable       = (*spyPlugin)(nil)
+	_ pipeline.Plugin             = (*spyStreamingPlugin)(nil)
+	_ pipeline.Configurable       = (*spyStreamingPlugin)(nil)
 	_ pipeline.StreamingResponder = (*spyStreamingPlugin)(nil)
 )
 

@@ -148,9 +148,12 @@ func TestParity_InboundRequestBodyOverflow(t *testing.T) {
 	f := fixture{
 		name:      "inbound-request-body-overflow",
 		direction: pipeline.Inbound,
+		// ReadsBody without any Record* knobs: the spy MUST NOT record
+		// anything because the pipeline must not run. Any observed
+		// plugin event on either listener would surface as a parity
+		// diff on PluginKeys / PluginEventJSON.
 		entries: []config.PluginEntry{spyEntry(spyPluginA, spyConfig{
-			ReadsBody:         true,
-			RecordRequestBody: true, // spy would record IF it got called; it must not
+			ReadsBody: true,
 		})},
 		method:  "POST",
 		path:    "/parity/big",
@@ -158,6 +161,9 @@ func TestParity_InboundRequestBodyOverflow(t *testing.T) {
 		// upstreamStatus deliberately 0: the listener must reject
 		// before ever reaching an upstream.
 	}
+	// wantPhase is unused for overflow — the pipeline never runs so no
+	// session event of any phase is recorded. Pass SessionRequest as a
+	// placeholder; assertParity short-circuits on PipelineRan == false.
 	assertParity(t, f, pipeline.SessionRequest, inboundListeners)
 }
 
