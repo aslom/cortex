@@ -450,8 +450,13 @@ func TestTransparentPath_RecordsUnderTheIdentityThePluginSaw(t *testing.T) {
 // end to end and asserts the plugin gating the tunnel is told which session the
 // connection belongs to. Characterization for the hydration half — View(aid)
 // already produced this — but it is the only test that exercises
-// HandleTransparentConn's session wiring at all, and it pins the identity the
-// denial path now carries forward.
+// HandleTransparentConn's session wiring, and it pins the identity the denial
+// path now carries forward.
+//
+// The probe is paired with a rejecting plugin so the handler returns at the
+// reject branch instead of dialing an unreachable address. That makes the test
+// deterministic AND race-free: closing done happens-after the pipeline ran, so
+// reading the probe's observations needs no polling and no lock.
 func TestTransparentPath_HydratesTheIdentityItGatesOn(t *testing.T) {
 	store := session.New(5*time.Minute, 100, 0)
 	defer store.Close()
@@ -463,7 +468,7 @@ func TestTransparentPath_HydratesTheIdentityItGatesOn(t *testing.T) {
 	})
 
 	probe := &identityProbePlugin{}
-	p, err := pipeline.New([]pipeline.Plugin{probe})
+	p, err := pipeline.New([]pipeline.Plugin{probe, &denyingPlugin{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,16 +480,19 @@ func TestTransparentPath_HydratesTheIdentityItGatesOn(t *testing.T) {
 
 	clientSide, serverSide := net.Pipe()
 	defer func() { _ = clientSide.Close() }()
-	go srv.HandleTransparentConn(serverSide, "10.0.0.1:9999")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.HandleTransparentConn(serverSide, "10.0.0.1:9999")
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("HandleTransparentConn did not return; it should reject before dialing")
+	}
 
-	deadline := time.After(5 * time.Second)
-	for len(probe.sawID) == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("plugin never ran on the transparent path")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
+	if len(probe.sawID) != 1 {
+		t.Fatalf("probe ran %d times on the transparent path, want 1", len(probe.sawID))
 	}
 	if probe.sawID[0] != "conv-A" {
 		t.Errorf("plugin saw %q, want conv-A", probe.sawID[0])
