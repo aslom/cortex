@@ -27,6 +27,24 @@ const ClaudeCodeSessionHeader = "X-Claude-Code-Session-Id"
 // duplicates the id in metadata.user_id) because a header costs nothing to
 // reach: bucketing must work for every request, including ones no parser
 // matched and ones whose body was never buffered.
+//
+// TRUST: the returned id is CLIENT-ASSERTED AND UNAUTHENTICATED. validity
+// checks below stop a value from corrupting a log line or a terminal; nothing
+// establishes that the client owns the session it names. A client may name
+// another session's id and write into that bucket, or name "default" and become
+// indistinguishable from unattributed traffic. Since these buckets now feed cost
+// attribution, a poisoned key mis-attributes spend, not just a TUI row.
+//
+// That is acceptable where this runs today. On a laptop the user owns every
+// session. In-cluster the forward proxy exists only in proxy-sidecar mode
+// (config.RoleForward) with an in-process store, so a workload can only
+// mis-file its OWN pod's telemetry — there is no path to a neighbour's bucket.
+// The residual, and the reason this is written down: within one pod, an agent
+// serving several users can redirect telemetry away from the inbound A2A turn
+// that caused it, and that A2A correlation is the trustworthy signal in-cluster.
+// Deployments where that matters should set session.id_headers to an empty list.
+// Compare DefaultSessionID, which carries the mirror-image caveat for the shared
+// bucket.
 func IDFromHeaders(h http.Header, names []string) string {
 	for _, name := range names {
 		id := h.Get(name)
@@ -40,6 +58,13 @@ func IDFromHeaders(h http.Header, names []string) string {
 			// report only its shape.
 			slog.Debug("session: ignoring unusable session id header",
 				"header", name, "len", len(id))
+			// continue, not return "": an unusable value is not a claim about
+			// which session this is, so it does not get to veto the next
+			// configured header. names is a precedence order over CLIENTS —
+			// "if both a Claude Code and a Bob id are present, prefer this one"
+			// — and a malformed winner means that client said nothing
+			// intelligible, not that attribution should be abandoned. Pinned by
+			// TestIDFromHeaders_InvalidWinnerFallsThroughToNextHeader.
 			continue
 		}
 		return id

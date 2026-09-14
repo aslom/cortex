@@ -1,6 +1,7 @@
 package forwardproxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,13 +38,9 @@ func TestResolveOutboundSessionID_HeaderWinsOverActiveSession(t *testing.T) {
 	s := &Server{Sessions: store, SessionIDHeaders: []string{session.ClaudeCodeSessionHeader}}
 
 	// A request from the OTHER concurrent session must not be filed under A.
-	pctx := &pipeline.Context{
-		Direction: pipeline.Outbound,
-		Host:      "ete-litellm.example",
-		Headers:   http.Header{session.ClaudeCodeSessionHeader: []string{sidB}},
-	}
+	clientHeaders := http.Header{session.ClaudeCodeSessionHeader: []string{sidB}}
 
-	if got := s.resolveOutboundSessionID(pctx); got != sidB {
+	if got := s.resolveOutboundSessionID(clientHeaders); got != sidB {
 		t.Fatalf("resolveOutboundSessionID() = %q, want %q (header must win over ActiveSession)", got, sidB)
 	}
 }
@@ -108,6 +105,145 @@ func TestForwardProxy_BucketsConcurrentSessionsByHeader(t *testing.T) {
 	}
 }
 
+// sessionHeaderScrubbingPlugin deletes the Claude Code session header from the
+// pipeline's header set, standing in for any plugin that rewrites request
+// headers on the way upstream. staticinject already does this with a
+// configurable target header, so this is reachable by configuration today, not
+// only by a hypothetical future plugin.
+type sessionHeaderScrubbingPlugin struct{}
+
+func (p *sessionHeaderScrubbingPlugin) Name() string { return "session-header-scrubber" }
+func (p *sessionHeaderScrubbingPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
+func (p *sessionHeaderScrubbingPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	pctx.Headers.Del(session.ClaudeCodeSessionHeader)
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *sessionHeaderScrubbingPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestForwardProxy_BucketsFromClientHeadersNotPipelineMutations pins the header
+// SOURCE. pctx.Headers is the upstream-facing set: it starts as a clone of
+// r.Header but the outbound pipeline has already run by the time events are
+// recorded, so a plugin's rewrite is visible there. The bucket key means "what
+// the client claimed about its session", so it must come from the request as
+// received. Reading the mutated set would collapse every session back into one
+// bucket, and the failure would be invisible by design — "" means "fall back",
+// never an error.
+func TestForwardProxy_BucketsFromClientHeadersNotPipelineMutations(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p, err := pipeline.New([]pipeline.Plugin{&sessionHeaderScrubbingPlugin{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		OutboundPipeline: pipeline.NewHolder(p),
+		Sessions:         store,
+		Client:           http.DefaultClient,
+		SessionIDHeaders: []string{session.ClaudeCodeSessionHeader},
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	const sid = "511754a6-63e2-47df-bb22-706dc165c344"
+	req, _ := http.NewRequest("POST", backend.URL+"/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set(session.ClaudeCodeSessionHeader, sid)
+	proxyClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxy.URL))}}
+	resp, err := proxyClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	if v := store.View(sid); v == nil || len(v.Events) == 0 {
+		t.Fatalf("events did not land in the client's bucket %s — a plugin's header rewrite changed attribution", sid)
+	}
+	if v := store.View(session.DefaultSessionID); v != nil && len(v.Events) > 0 {
+		t.Errorf("%d events collapsed into the default bucket", len(v.Events))
+	}
+}
+
+// denyingPlugin blocks the request and records why, standing in for a guardrail
+// plugin. DenyAndRecord appends an Invocation, which recordOutboundReject
+// requires — a denial with no diagnostic context is deliberately not recorded.
+type denyingPlugin struct{}
+
+func (p *denyingPlugin) Name() string { return "test-guardrail" }
+func (p *denyingPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
+func (p *denyingPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	return pctx.DenyAndRecord("blocked for test", "test.blocked", "blocked for test")
+}
+func (p *denyingPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestForwardProxy_BucketsRejectedRequestByHeader drives the OTHER call site the
+// change touches. A blocked request must be filed under the session that made it
+// — otherwise the operator sees a denial with no owner, which is what the reject
+// path's session recording exists to prevent. The accept path being wired is no
+// guarantee this one is.
+func TestForwardProxy_BucketsRejectedRequestByHeader(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("backend was reached — the request should have been rejected")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p, err := pipeline.New([]pipeline.Plugin{&denyingPlugin{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{
+		OutboundPipeline: pipeline.NewHolder(p),
+		Sessions:         store,
+		Client:           http.DefaultClient,
+		SessionIDHeaders: []string{session.ClaudeCodeSessionHeader},
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	const sid = "511754a6-63e2-47df-bb22-706dc165c344"
+	req, _ := http.NewRequest("POST", backend.URL+"/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set(session.ClaudeCodeSessionHeader, sid)
+	proxyClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(mustParseURL(proxy.URL))}}
+	resp, err := proxyClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	v := store.View(sid)
+	if v == nil {
+		t.Fatalf("no bucket for session %s — the denial has no owner", sid)
+	}
+	var denied int
+	for _, e := range v.Events {
+		if e.Phase == pipeline.SessionDenied {
+			denied++
+		}
+	}
+	if denied != 1 {
+		t.Fatalf("bucket %s has %d denied events, want 1 (total events: %d)", sid, denied, len(v.Events))
+	}
+	if dv := store.View(session.DefaultSessionID); dv != nil && len(dv.Events) > 0 {
+		t.Errorf("denial leaked into the default bucket: %d events", len(dv.Events))
+	}
+}
+
 // TestResolveOutboundSessionID_RejectsControlCharacters guards the one way a
 // client-supplied bucket key can do damage: the id is rendered in abctl's TUI,
 // written to structured logs, and echoed in /v1/sessions JSON, so a value
@@ -125,11 +261,8 @@ func TestResolveOutboundSessionID_RejectsControlCharacters(t *testing.T) {
 		"abc\rdef",      // carriage return
 		"abc\x00def",    // NUL
 	} {
-		pctx := &pipeline.Context{
-			Direction: pipeline.Outbound,
-			Headers:   http.Header{session.ClaudeCodeSessionHeader: []string{bad}},
-		}
-		if got := s.resolveOutboundSessionID(pctx); got != session.DefaultSessionID {
+		clientHeaders := http.Header{session.ClaudeCodeSessionHeader: []string{bad}}
+		if got := s.resolveOutboundSessionID(clientHeaders); got != session.DefaultSessionID {
 			t.Errorf("resolveOutboundSessionID(%q) = %q, want %q (must refuse control characters)",
 				bad, got, session.DefaultSessionID)
 		}
@@ -147,11 +280,8 @@ func TestResolveOutboundSessionID_RejectsOverlongID(t *testing.T) {
 	s := &Server{Sessions: store, SessionIDHeaders: []string{session.ClaudeCodeSessionHeader}}
 
 	overlong := strings.Repeat("a", session.MaxSessionIDLen+1)
-	pctx := &pipeline.Context{
-		Direction: pipeline.Outbound,
-		Headers:   http.Header{session.ClaudeCodeSessionHeader: []string{overlong}},
-	}
-	if got := s.resolveOutboundSessionID(pctx); got != session.DefaultSessionID {
+	clientHeaders := http.Header{session.ClaudeCodeSessionHeader: []string{overlong}}
+	if got := s.resolveOutboundSessionID(clientHeaders); got != session.DefaultSessionID {
 		t.Fatalf("resolveOutboundSessionID(len %d) = %q, want %q",
 			len(overlong), got, session.DefaultSessionID)
 	}
@@ -173,8 +303,8 @@ func TestResolveOutboundSessionID_FallsBackWhenHeaderAbsent(t *testing.T) {
 	})
 	s := &Server{Sessions: store, SessionIDHeaders: []string{session.ClaudeCodeSessionHeader}}
 
-	pctx := &pipeline.Context{Direction: pipeline.Outbound, Headers: http.Header{}}
-	if got := s.resolveOutboundSessionID(pctx); got != "conv-A" {
+	clientHeaders := http.Header{}
+	if got := s.resolveOutboundSessionID(clientHeaders); got != "conv-A" {
 		t.Fatalf("resolveOutboundSessionID() = %q, want %q (A2A correlation must survive)", got, "conv-A")
 	}
 
@@ -182,7 +312,7 @@ func TestResolveOutboundSessionID_FallsBackWhenHeaderAbsent(t *testing.T) {
 	empty := session.New(5*time.Minute, 100, 0)
 	defer empty.Close()
 	s2 := &Server{Sessions: empty, SessionIDHeaders: []string{session.ClaudeCodeSessionHeader}}
-	if got := s2.resolveOutboundSessionID(pctx); got != session.DefaultSessionID {
+	if got := s2.resolveOutboundSessionID(clientHeaders); got != session.DefaultSessionID {
 		t.Fatalf("resolveOutboundSessionID() = %q, want %q", got, session.DefaultSessionID)
 	}
 }
@@ -194,11 +324,8 @@ func TestResolveOutboundSessionID_DisabledByEmptyHeaderList(t *testing.T) {
 	defer store.Close()
 	s := &Server{Sessions: store, SessionIDHeaders: nil}
 
-	pctx := &pipeline.Context{
-		Direction: pipeline.Outbound,
-		Headers:   http.Header{session.ClaudeCodeSessionHeader: []string{"some-session"}},
-	}
-	if got := s.resolveOutboundSessionID(pctx); got != session.DefaultSessionID {
+	clientHeaders := http.Header{session.ClaudeCodeSessionHeader: []string{"some-session"}}
+	if got := s.resolveOutboundSessionID(clientHeaders); got != session.DefaultSessionID {
 		t.Fatalf("resolveOutboundSessionID() = %q, want %q (header bucketing disabled)", got, session.DefaultSessionID)
 	}
 }

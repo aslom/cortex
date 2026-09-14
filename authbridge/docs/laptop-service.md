@@ -68,6 +68,11 @@ Two limitations worth knowing:
   consult in precedence order if you run a client with its own session header. An
   explicit empty list (`session.id_headers: []`) turns grouping off and puts everything
   back in one bucket.
+- **Bucket names are taken on trust.** The id comes from the client's own header and is
+  not authenticated, so a client can name any bucket — including another session's. On a
+  laptop that is a non-issue: you own every session. It matters where telemetry
+  attribution is a trust boundary rather than a convenience, and `session.id_headers: []`
+  is the way to opt out there.
 
 ## Why traffic disappears from `abctl`
 
@@ -78,8 +83,15 @@ Two limits, and neither is a clock:
 | `session.max_events` | 500 per session | oldest events drop, the session stays |
 | `session.max_sessions` | 100 | whole sessions evicted, least-recently-used first |
 
-`max_events` is per bucket, so each Claude Code session gets its own 500 events rather
-than sharing one ring with every other session on the machine.
+Both limits changed meaning now that sessions are grouped per Claude Code session:
+
+- `max_events` is **per bucket**, so each session gets its own 500 events rather than
+  sharing one ring with every other session on the machine. Strictly more history.
+- `max_sessions` is now **reachable in normal use**, which it effectively was not before.
+  Every `claude` invocation mints a new bucket, so the 101st session on a busy machine
+  evicts the least-recently-updated one — whole session and all. If an older session has
+  vanished from `abctl` entirely rather than just losing its oldest rows, this is why.
+  Raise `session.max_sessions` if you work across many sessions and want them to stay.
 
 Sessions do **not** expire on time. They used to, after 30 minutes idle, which read as
 data loss — traffic vanished because you stepped away, not because anything overflowed.

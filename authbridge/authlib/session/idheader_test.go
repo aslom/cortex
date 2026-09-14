@@ -29,6 +29,46 @@ func TestIDFromHeaders_FirstConfiguredHeaderWins(t *testing.T) {
 	}
 }
 
+// TestIDFromHeaders_InvalidWinnerFallsThroughToNextHeader pins the interaction
+// between validation and precedence — the one branch where the two rules meet.
+// A present-but-unusable value in the higher-precedence header must not veto the
+// runner-up: it is not a claim about which session this is, so attribution falls
+// through rather than being abandoned. The alternative reading (a bad winner
+// hard-stops the lookup) is deliberately NOT the behavior; see IDFromHeaders.
+func TestIDFromHeaders_InvalidWinnerFallsThroughToNextHeader(t *testing.T) {
+	names := []string{ClaudeCodeSessionHeader, "X-Other-Agent-Session"}
+
+	t.Run("control characters in the winner", func(t *testing.T) {
+		h := http.Header{
+			ClaudeCodeSessionHeader: []string{"poisoned\nvalue"},
+			"X-Other-Agent-Session": []string{"good-session"},
+		}
+		if got := IDFromHeaders(h, names); got != "good-session" {
+			t.Errorf("IDFromHeaders() = %q, want %q", got, "good-session")
+		}
+	})
+
+	t.Run("over-length winner", func(t *testing.T) {
+		h := http.Header{
+			ClaudeCodeSessionHeader: []string{strings.Repeat("a", MaxSessionIDLen+1)},
+			"X-Other-Agent-Session": []string{"good-session"},
+		}
+		if got := IDFromHeaders(h, names); got != "good-session" {
+			t.Errorf("IDFromHeaders() = %q, want %q", got, "good-session")
+		}
+	})
+
+	t.Run("both unusable yields empty so the caller falls back", func(t *testing.T) {
+		h := http.Header{
+			ClaudeCodeSessionHeader: []string{"bad\nwinner"},
+			"X-Other-Agent-Session": []string{"bad\rrunner-up"},
+		}
+		if got := IDFromHeaders(h, names); got != "" {
+			t.Errorf("IDFromHeaders() = %q, want \"\"", got)
+		}
+	})
+}
+
 // TestIDFromHeaders_NoUsableIDReturnsEmpty covers every way the lookup comes up
 // empty. All of them must return "" so the caller falls back to its previous
 // bucketing rather than inventing a bucket.

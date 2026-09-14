@@ -331,7 +331,7 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		action := s.OutboundPipeline.Run(r.Context(), pctx)
 
 		if action.Type == pipeline.Reject {
-			s.recordOutboundReject(pctx, action)
+			s.recordOutboundReject(pctx, action, r.Header)
 			// Render as a JSON-RPC error frame when the rejected
 			// request was MCP JSON-RPC, so the agent's MCP client
 			// surfaces this as one failed tool call rather than a
@@ -343,7 +343,7 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 	}
 
 	if !skipped && s.Sessions != nil {
-		sid := s.resolveOutboundSessionID(pctx)
+		sid := s.resolveOutboundSessionID(r.Header)
 		// Pin this session so the paired response event records into the
 		// same bucket. Without it, recordOutboundResponseEvent re-resolves
 		// ActiveSession() at response time, which interleaving traffic (a
@@ -730,12 +730,29 @@ func (s *Server) bridgeServe(client net.Conn, authority, host string, rec tunnel
 //     inbound A2A turn that caused them — the in-cluster case, where the
 //     agent is not the one holding the session id.
 //  3. The default bucket, for traffic belonging to neither.
-func (s *Server) resolveOutboundSessionID(pctx *pipeline.Context) string {
-	if sid := session.IDFromHeaders(pctx.Headers, s.SessionIDHeaders); sid != "" {
+//
+// clientHeaders must be the headers as RECEIVED (r.Header), not pctx.Headers.
+// The two diverge: pctx.Headers starts as a clone of r.Header but the outbound
+// pipeline has already run by the time events are recorded, so it holds the
+// upstream-facing set including any plugin rewrite (staticinject writes a
+// configurable target header, so this is reachable by configuration, not just
+// in theory). A bucket key means "what the client claimed about its session", so
+// a plugin rewriting a header for the gateway's benefit must not silently re-file
+// telemetry — and it would fail invisibly, since "" means "fall back", never an
+// error. Pass nil where there is no request to read (opaque tunnels); resolution
+// then falls through to the two fallbacks below.
+//
+// Safe to call with s.Sessions == nil: ActiveSession() is skipped and the default
+// bucket is returned, so a future caller that forgets the nil check on Sessions
+// gets a usable answer rather than a panic.
+func (s *Server) resolveOutboundSessionID(clientHeaders http.Header) string {
+	if sid := session.IDFromHeaders(clientHeaders, s.SessionIDHeaders); sid != "" {
 		return sid
 	}
-	if sid := s.Sessions.ActiveSession(); sid != "" {
-		return sid
+	if s.Sessions != nil {
+		if sid := s.Sessions.ActiveSession(); sid != "" {
+			return sid
+		}
 	}
 	return session.DefaultSessionID
 }
@@ -1058,13 +1075,13 @@ func (s *Server) streamFallbackBuffered(w http.ResponseWriter, r *http.Request, 
 // Skips when no Invocations were appended — the deny came from a
 // plugin that didn't contribute diagnostic context, and a content-free
 // SessionDenied event would be noise without attribution.
-func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Action) {
+func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Action, clientHeaders http.Header) {
 	if s.Sessions == nil || pctx.Extensions.Invocations == nil {
 		return
 	}
 	// Same resolution as the accept path: a rejected request belongs to the
 	// session that made it, or the operator sees a block with no owner.
-	sid := s.resolveOutboundSessionID(pctx)
+	sid := s.resolveOutboundSessionID(clientHeaders)
 	var status int
 	var code, message string
 	if action.Violation != nil {
@@ -1161,7 +1178,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		// HTTP body (parsers) see no body, which they handle gracefully.
 		action := s.OutboundPipeline.Run(r.Context(), pctx)
 		if action.Type == pipeline.Reject {
-			s.recordOutboundReject(pctx, action)
+			s.recordOutboundReject(pctx, action, r.Header)
 			// Render as a JSON-RPC error frame when the rejected
 			// request was MCP JSON-RPC, so the agent's MCP client
 			// surfaces this as one failed tool call rather than a

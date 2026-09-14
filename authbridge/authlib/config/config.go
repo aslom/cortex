@@ -231,6 +231,12 @@ type SessionConfig struct {
 	// puts every session back in one shared bucket. Like Enabled above, the
 	// nil-versus-empty distinction is load-bearing — do not collapse it by
 	// assigning a default at load time.
+	//
+	// The ids these headers carry are client-asserted and unauthenticated: a
+	// client can name any bucket, including another session's. Set this to an
+	// empty list in any deployment where telemetry attribution is a trust
+	// boundary rather than a convenience. See session.IDFromHeaders for the full
+	// reasoning and why the blast radius is one sidecar's own telemetry.
 	IDHeaders []string `yaml:"id_headers" json:"id_headers"`
 }
 
