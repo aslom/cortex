@@ -35,6 +35,15 @@ root. `authbridge-proxy` defaults to the `full` plugin profile; pass
 [Build-tag plugin selection](#build-tag-plugin-selection) for the underlying
 `go build` invocations.
 
+To run what you just built, `make dev-install` from the repo root builds both
+binaries, installs them to `~/.local/bin` (the same place `install.sh` puts the
+released ones), and restarts the local service so the new bytes are serving.
+It works on a machine that has never run Cortex — it writes the built-in config
+first — and it accepts the same `PROFILE=`. It restarts every time, which cuts
+whatever is currently talking to the proxy and clears the in-memory session
+store; agents themselves keep working without restarting, because the CA in
+`~/.cortex/ca` is reused rather than re-minted.
+
 ## Deployment Modes
 
 Two container images are published:

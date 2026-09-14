@@ -43,6 +43,12 @@
 # `curl | sh` should not be the first thing to run a change nobody has released.
 # --ref=main opts back in; --ref=vX.Y.Z pins.
 #
+# Every path here installs a RELEASE. To install what is in a checkout instead,
+# use `make dev-install` from the repo root: it compiles both binaries, writes them
+# to the same ~/.local/bin this script uses, and restarts the service. --ref=main
+# is not that — it only chooses which copy of this script runs, and that copy still
+# downloads a build.
+#
 # Environment (maintainer testing only — not part of the documented interface):
 #   AUTHBRIDGE_SKIP_DOWNLOAD=1  use the already-installed binaries in ~/.local/bin
 #                               instead of downloading (re-run setup offline)
