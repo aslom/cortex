@@ -605,12 +605,14 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		prev := m.pipelineTbl.Cursor()
 		var cmd tea.Cmd
 		m.pipelineTbl, cmd = m.pipelineTbl.Update(msg)
-		// Skip over the divider row when navigating.
+		// Skip over the divider row when navigating. One more step in the direction
+		// of travel, as a relative move so the offset stays reconciled — see
+		// setCursorVisible for why SetCursor is not used for cursor placement.
 		if isDividerRow(m.pipelineTbl.Rows(), m.pipelineTbl.Cursor()) {
 			if m.pipelineTbl.Cursor() > prev {
-				m.pipelineTbl.SetCursor(m.pipelineTbl.Cursor() + 1)
+				m.pipelineTbl.MoveDown(1)
 			} else {
-				m.pipelineTbl.SetCursor(m.pipelineTbl.Cursor() - 1)
+				m.pipelineTbl.MoveUp(1)
 			}
 		}
 		return cmd
@@ -640,16 +642,21 @@ func (m *model) refreshActivePane() {
 	}
 }
 
+// goTop and goBottom place the cursor through setCursorVisible, not SetCursor: a
+// jump to the last row is exactly the case where SetCursor leaves the highlight one
+// line below the rendered window, so `G` on any list longer than the screen used to
+// scroll to the bottom with nothing highlighted. The empty-table guards live in
+// setCursorVisible now, and it clamps, so goBottom does not need the row count.
 func (m *model) goTop() {
 	switch m.pane {
 	case paneCatalog:
-		m.catalogTbl.SetCursor(0)
+		setCursorVisible(&m.catalogTbl, 0)
 	case paneSessions:
-		m.sessionsTbl.SetCursor(0)
+		setCursorVisible(&m.sessionsTbl, 0)
 	case paneEvents:
-		m.eventsTbl.SetCursor(0)
+		setCursorVisible(&m.eventsTbl, 0)
 	case panePipeline:
-		m.pipelineTbl.SetCursor(0)
+		setCursorVisible(&m.pipelineTbl, 0)
 	case paneDetail, panePluginDetail:
 		m.detailVp.GotoTop()
 	}
@@ -658,21 +665,13 @@ func (m *model) goTop() {
 func (m *model) goBottom() {
 	switch m.pane {
 	case paneSessions:
-		if n := len(m.sessionsTbl.Rows()); n > 0 {
-			m.sessionsTbl.SetCursor(n - 1)
-		}
+		setCursorVisible(&m.sessionsTbl, len(m.sessionsTbl.Rows())-1)
 	case paneEvents:
-		if n := len(m.eventsTbl.Rows()); n > 0 {
-			m.eventsTbl.SetCursor(n - 1)
-		}
+		setCursorVisible(&m.eventsTbl, len(m.eventsTbl.Rows())-1)
 	case panePipeline:
-		if n := len(m.pipelineTbl.Rows()); n > 0 {
-			m.pipelineTbl.SetCursor(n - 1)
-		}
+		setCursorVisible(&m.pipelineTbl, len(m.pipelineTbl.Rows())-1)
 	case paneCatalog:
-		if n := len(m.catalogTbl.Rows()); n > 0 {
-			m.catalogTbl.SetCursor(n - 1)
-		}
+		setCursorVisible(&m.catalogTbl, len(m.catalogTbl.Rows())-1)
 	case paneDetail, panePluginDetail:
 		m.detailVp.GotoBottom()
 	}
