@@ -43,7 +43,7 @@ const (
 	serviceUsage          = `abctl service — keep Cortex running across crashes and logins
 
 Usage:
-  abctl service install   [--yes] [--config PATH]
+  abctl service install   [--yes] [--restart] [--config PATH]
   abctl service uninstall [--yes]
   abctl service status
   abctl service stop | start | restart
@@ -56,6 +56,11 @@ and nothing else keeps it up.
 stop/start/restart exist so there is never a reason to reach for launchctl,
 systemctl, kill or pkill: under a supervisor a plain kill is undone within seconds,
 which looks like the process refusing to die.
+
+install is free to re-run: with nothing to change it reports "Already current" and
+leaves the proxy alone, so it never cuts attached sessions for no reason. --restart
+overrides that and restarts regardless, which is what a source rebuild wants — see
+"make dev-install".
 
 If a proxy you started by hand is already running, install stops it first and
 supervises a fresh one: two copies cannot share the ports, and the supervised one
@@ -109,6 +114,7 @@ func runService(args []string, stdout, stderr io.Writer) int {
 	unitOverride := fs.String("unit-file", "", "unit file path (testing)")
 	proxyPath := fs.String("proxy", "", "authbridge-proxy binary to supervise (default: the one installed beside abctl)")
 	printUnit := fs.Bool("print-unit", false, "print the unit file and exit, installing nothing")
+	forceRestart := fs.Bool("restart", false, "with install: restart even when nothing changed")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -128,7 +134,7 @@ func runService(args []string, stdout, stderr io.Writer) int {
 
 	switch action {
 	case "install":
-		return serviceInstall(p, *yes, stdout, stderr)
+		return serviceInstall(p, *yes, *forceRestart, stdout, stderr)
 	case "uninstall":
 		return serviceUninstall(p, *yes, stdout, stderr)
 	case "status":
@@ -244,7 +250,7 @@ func serviceInstalled(p servicePaths) bool {
 	return err == nil
 }
 
-func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
+func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Writer) int {
 	if _, err := os.Stat(p.configFile); err != nil {
 		// Not "run the installer first": the installer is what calls this, so that
 		// advice sent people in a circle. Name the command that creates the file.
@@ -355,7 +361,13 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 	// Deliberately AFTER the migration: a config that still needs pins is a change, so
 	// it must not be short-circuited. `changed` above is false only when the config was
 	// already up to date.
-	if !configChanged && serviceIsCurrent(p) {
+	//
+	// --restart opts out. `make dev-install` wants one command that ends with the built
+	// bytes serving, and it must not have to reason about whether they differ from the
+	// running ones — a rebuild that happens to be reproducible would otherwise silently
+	// skip the restart, making the target's effect depend on whether the compiler was
+	// deterministic that day.
+	if installCanSkip(configChanged, forceRestart, func() bool { return serviceIsCurrent(p) }) {
 		fmt.Fprintf(stdout, "Already current: %s is running under %s and healthy.\n"+
 			"  Nothing to change. Use `abctl service restart` to restart it anyway.\n",
 			filepath.Base(p.binary), supervisorName())
@@ -746,6 +758,9 @@ func serviceIsCurrent(p servicePaths) bool {
 	if !strings.Contains(body, p.binary) || !strings.Contains(body, p.configFile) {
 		return false
 	}
+	if !proxyBinaryUnchanged(p) {
+		return false
+	}
 	// On macOS the proxy must be supervised; a unit that lost --supervise would leave
 	// crashes unrecovered, which is the whole point of the feature.
 	if runtime.GOOS == "darwin" && !strings.Contains(body, "--supervise") {
@@ -758,6 +773,38 @@ func serviceIsCurrent(p servicePaths) bool {
 		return false // cannot confirm it is serving, so do not claim it is
 	}
 	return waitHealthy(p.healthURL, 2*time.Second)
+}
+
+// proxyBinaryUnchanged reports whether the binary on disk is still the one the unit
+// was written for.
+//
+// Separate from serviceIsCurrent because it is the one clause there that can be
+// checked without a live supervisor and a serving port, and because it is the clause
+// that was missing: the unit naming the right binary PATH is not the same as that
+// path holding the bytes we installed, and every OTHER clause is satisfied when it
+// does not. Replacing the binary in place — a source rebuild, or an installer
+// overwriting it — left install reporting "Already current: authbridge-proxy is
+// running under launchd and healthy" while the running process was the previous
+// build. True of the unit, false of the service, and silent either way.
+//
+// A unit with no stamp counts as changed, which costs exactly one restart on the
+// upgrade that introduces the stamp and then never again. The opposite default would
+// make the first dev install after upgrading silently skip its restart.
+func proxyBinaryUnchanged(p servicePaths) bool {
+	want := unitProxySHA256(p.unitFile)
+	return want != "" && want == binarySHA256(p.binary)
+}
+
+// installCanSkip decides whether install may return having touched nothing.
+//
+// current is a FUNC, not a bool, and that is the point: serviceIsCurrent probes the
+// health endpoint with a 2s budget, so evaluating it eagerly would spend that wait on
+// every run that had already decided to restart. Both early exits must stay lazy.
+func installCanSkip(configChanged, forceRestart bool, current func() bool) bool {
+	if configChanged || forceRestart {
+		return false
+	}
+	return current()
 }
 
 // bridgeCANotBefore returns the bridge CA's NotBefore in RFC3339 and the file it

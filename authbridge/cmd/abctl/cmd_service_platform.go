@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"flag"
@@ -111,6 +113,7 @@ func renderUnitFor(goos string, p servicePaths) string {
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>AbctlVersion</key><string>` + xmlStr(version) + `</string>
+  <key>AbctlProxySHA256</key><string>` + xmlStr(binarySHA256(p.binary)) + `</string>
   <key>StandardOutPath</key><string>` + xmlStr(p.logFile) + `</string>
   <key>StandardErrorPath</key><string>` + xmlStr(p.logFile) + `</string>
   <key>ProcessType</key><string>Background</string>
@@ -130,6 +133,7 @@ func renderUnitFor(goos string, p servicePaths) string {
 Description=Cortex local proxy (authbridge-proxy)
 Documentation=https://github.com/rossoctl/cortex
 X-AbctlVersion=` + version + `
+X-AbctlProxySHA256=` + binarySHA256(p.binary) + `
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -545,12 +549,33 @@ func rotateLog(path string, maxBytes int64) {
 // "unknown subcommand" — so the launchd artifact is live and unmanageable, with no
 // hint anywhere that the two disagree. Observed on a real machine.
 func unitWriterVersion(unitFile string) string {
+	return unitStamp(unitFile, "AbctlVersion", "X-AbctlVersion")
+}
+
+// unitProxySHA256 reports the hash of the proxy binary as it stood when the unit
+// was written, or "" for a unit that carries no such stamp.
+//
+// This is what lets serviceIsCurrent tell "the unit names the right path" from "that
+// path still holds the bytes we installed". Those are different questions, and a dev
+// loop makes the difference routine: rebuilding over the same path leaves every other
+// clause satisfied while the running process is the old code.
+func unitProxySHA256(unitFile string) string {
+	return unitStamp(unitFile, "AbctlProxySHA256", "X-AbctlProxySHA256")
+}
+
+// unitStamp reads one stamped field out of an installed unit, accepting either
+// spelling so one reader serves both platforms' renderings.
+//
+// Generic over the key because there are now two stamps and a third is plausible.
+// The alternative — a copy of this scan per field — is where the plist and systemd
+// spellings drift apart, since only one of them is exercised on any given machine.
+func unitStamp(unitFile, plistKey, iniKey string) string {
 	b, err := os.ReadFile(unitFile) //nolint:gosec // path we wrote
 	if err != nil {
 		return ""
 	}
 	body := string(b)
-	for _, marker := range []string{"<key>AbctlVersion</key><string>", "X-AbctlVersion="} {
+	for _, marker := range []string{"<key>" + plistKey + "</key><string>", iniKey + "="} {
 		i := strings.Index(body, marker)
 		if i < 0 {
 			continue
@@ -563,6 +588,25 @@ func unitWriterVersion(unitFile string) string {
 		return strings.TrimSpace(rest[:end])
 	}
 	return ""
+}
+
+// binarySHA256 hashes the file at path, or returns "" when it cannot be read.
+//
+// "" is a legitimate answer rather than an error: renderUnit calls this while
+// building a unit for a binary that install has already validated, and every
+// comparison against the result treats "" as "does not match", which is the safe
+// direction for a binary that has gone missing.
+func binarySHA256(path string) string {
+	f, err := os.Open(path) //nolint:gosec // operator-supplied binary path, validated by install
+	if err != nil {
+		return ""
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // waitBootedOut polls until the label is gone from its domain.

@@ -66,7 +66,7 @@ func TestServiceInstall_RefusesABrokenConfig(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	if code := serviceInstall(p, true, &out, &errOut); code == 0 {
+	if code := serviceInstall(p, true, false, &out, &errOut); code == 0 {
 		t.Error("install succeeded on a config that cannot load")
 	}
 	if !strings.Contains(errOut.String(), "will not load") {
