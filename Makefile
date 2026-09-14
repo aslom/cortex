@@ -1,9 +1,14 @@
 # Root Makefile for cortex monorepo
 # Orchestrates linting and formatting across all sub-projects
 
-.PHONY: lint fmt pre-commit build-proxy-init pricing-table abctl authbridge-proxy help
+.PHONY: lint fmt pre-commit build-proxy-init pricing-table abctl authbridge-proxy dev-install help
 
 BIN_DIR := $(CURDIR)/bin
+
+# Where dev-install puts the binaries. Hardcoded to match install.sh, which writes
+# the same two names to the same directory — a dev install that landed somewhere else
+# would leave two copies on PATH and no way to tell which one the service supervises.
+DEV_BIN_DIR := $(HOME)/.local/bin
 
 help: ## Display this help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
@@ -64,3 +69,54 @@ authbridge-proxy: ## Build authbridge-proxy to ./bin/authbridge-proxy (PROFILE=f
 	TAGS=$$(go -C authbridge/scripts/profile-tags run . $(or $(PROFILE),full)) && \
 		cd authbridge/cmd/authbridge-proxy && \
 		GOWORK=off go build -tags "$$TAGS" -o $(BIN_DIR)/authbridge-proxy .
+
+##@ Local Dev
+
+# install.sh installs Cortex from a RELEASE: it downloads prebuilt binaries, verifies
+# their checksums, and starts the service. There was no equivalent for the tree you are
+# sitting in — `make authbridge-proxy` built to ./bin and stopped, leaving four manual
+# steps between a build and a running proxy. This is that bridge, and nothing else here
+# is a substitute for it.
+
+dev-install: authbridge-proxy abctl ## Build from this tree, install to ~/.local/bin, restart the service (PROFILE=full|lite|local)
+	@mkdir -p $(DEV_BIN_DIR)
+	@# Copy to a sibling name and rename, rather than writing over the target.
+	@# Replacing a RUNNING executable in place fails with ETXTBSY on macOS, and both
+	@# of these are usually running: the proxy under the supervisor, abctl in a TUI.
+	@# rename swaps the directory entry and leaves the live process on its own inode.
+	@# The .new file is removed on any failure: this directory is meant to be on PATH,
+	@# so a half-copied executable left behind is worse than the failure itself.
+	@for b in authbridge-proxy abctl; do \
+		cp $(BIN_DIR)/$$b $(DEV_BIN_DIR)/$$b.new && \
+		mv -f $(DEV_BIN_DIR)/$$b.new $(DEV_BIN_DIR)/$$b || \
+		{ rm -f $(DEV_BIN_DIR)/$$b.new; exit 1; }; \
+	done
+	@echo "installed -> $(DEV_BIN_DIR)"
+	@# Everything below runs by absolute path, so a missing PATH entry does not fail
+	@# this target — it fails the NEXT thing the developer types. install.sh checks the
+	@# same thing and offers to fix the shell profile; a build target should not edit
+	@# dotfiles, so it says so and stops there.
+	@case ":$$PATH:" in \
+		*":$(DEV_BIN_DIR):"*) ;; \
+		*) echo "note: $(DEV_BIN_DIR) is not on PATH; \`abctl\` will not resolve until you add it";; \
+	esac
+	@# A machine that has never run Cortex has no config, and `service install` refuses
+	@# without one. Minting it here is what makes this work on a clean checkout rather
+	@# than only as an upgrade.
+	@if [ ! -f "$(HOME)/.cortex/config.yaml" ]; then \
+		echo "no config at ~/.cortex/config.yaml; writing the built-in one"; \
+		$(DEV_BIN_DIR)/authbridge-proxy --local --write-config || exit 1; \
+	fi
+	@# Absolute path, not bare `abctl`: PATH may resolve to a different copy, and the
+	@# unit records which abctl wrote it. --yes because a build command that stops to
+	@# ask is not a one-liner; --restart because install is otherwise free to re-run and
+	@# would skip the restart whenever the rebuild happened to be byte-identical.
+	$(DEV_BIN_DIR)/abctl service install --yes --restart
+	@echo
+	@# Only what abctl does not already say. It prints the attached-connection count
+	@# and what to do about it, so repeating that here would be a second voice on the
+	@# same subject — and an earlier draft of this line contradicted it outright.
+	@# The session store is the one consequence nothing else reports.
+	@echo "The restart also cleared captured session history: the store is in-memory,"
+	@echo "so any timeline you were reading in abctl starts over."
+	@$(DEV_BIN_DIR)/abctl service status

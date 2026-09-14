@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"flag"
@@ -563,6 +565,62 @@ func unitWriterVersion(unitFile string) string {
 		return strings.TrimSpace(rest[:end])
 	}
 	return ""
+}
+
+// writeProxyStamp records the hash of the binary about to be, or just, launched.
+//
+// Called after the unit is written and after every start or restart, which is what
+// makes the stamp mean "the bytes the supervisor last launched" rather than "the bytes
+// present at the last install". Those are the same on the install path and diverge on
+// every other one — replace the binary, restart, and only this file moves.
+//
+// Silent on failure, and deliberately so: a missing or stale stamp costs one
+// unnecessary restart on the next install, which is the safe direction. Nothing here
+// may be the reason a service fails to come up.
+func writeProxyStamp(p servicePaths) {
+	h := binarySHA256(p.binary)
+	if h == "" || p.stampFile == "" {
+		return
+	}
+	tmp := p.stampFile + ".tmp"
+	if err := os.WriteFile(tmp, []byte(h+"\n"), 0o600); err != nil {
+		_ = os.Remove(tmp) //nolint:errcheck // best effort
+		return
+	}
+	if err := os.Rename(tmp, p.stampFile); err != nil {
+		_ = os.Remove(tmp) //nolint:errcheck // best effort
+	}
+}
+
+// readProxyStamp returns the recorded hash, or "" when there is none to read.
+func readProxyStamp(p servicePaths) string {
+	if p.stampFile == "" {
+		return ""
+	}
+	b, err := os.ReadFile(p.stampFile) //nolint:gosec // path we wrote
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// binarySHA256 hashes the file at path, or returns "" when it cannot be read.
+//
+// "" is a legitimate answer rather than an error: renderUnit calls this while
+// building a unit for a binary that install has already validated, and every
+// comparison against the result treats "" as "does not match", which is the safe
+// direction for a binary that has gone missing.
+func binarySHA256(path string) string {
+	f, err := os.Open(path) //nolint:gosec // operator-supplied binary path, validated by install
+	if err != nil {
+		return ""
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // waitBootedOut polls until the label is gone from its domain.

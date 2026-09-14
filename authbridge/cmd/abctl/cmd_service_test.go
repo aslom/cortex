@@ -26,6 +26,7 @@ func servicePathsFixture(t *testing.T) servicePaths {
 		configFile: filepath.Join(dir, "config.yaml"),
 		logFile:    filepath.Join(dir, "proxy.log"),
 		pidFile:    filepath.Join(dir, "proxy.pid"),
+		stampFile:  filepath.Join(dir, "proxy.sha256"),
 		healthURL:  "http://127.0.0.1:1/healthz",
 		home:       dir,
 	}
