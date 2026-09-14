@@ -9,6 +9,9 @@ body:
         Thank you for trying Cortex on your laptop. This form is for feedback on the
         local tool — the install, `abctl observe`, and the numbers it shows.
 
+        For anything that is not about running Cortex on your own machine — an
+        operator, Helm or platform problem — open a blank issue instead.
+
         For a security issue, do not use this form. See
         [SECURITY.md](https://github.com/rossoctl/cortex/blob/main/SECURITY.md).
   - type: dropdown
