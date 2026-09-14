@@ -114,7 +114,7 @@ func TestTransparentBridge(t *testing.T) {
 		t.Fatalf("NewEphemeralSource: %v", err)
 	}
 	minter := tlsbridge.NewMinter(src, tlsbridge.MinterOpts{})
-	up, err := tlsbridge.NewUpstreamClient(originCAPEM)
+	up, err := tlsbridge.NewUpstreamClient(originCAPEM, false)
 	if err != nil {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestTransparentBridge_CustomPort(t *testing.T) {
 		t.Fatalf("NewEphemeralSource: %v", err)
 	}
 	minter := tlsbridge.NewMinter(src, tlsbridge.MinterOpts{})
-	up, err := tlsbridge.NewUpstreamClient(originCAPEM)
+	up, err := tlsbridge.NewUpstreamClient(originCAPEM, false)
 	if err != nil {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestConnectBridge(t *testing.T) {
 		t.Fatalf("NewEphemeralSource: %v", err)
 	}
 	minter := tlsbridge.NewMinter(src, tlsbridge.MinterOpts{})
-	up, err := tlsbridge.NewUpstreamClient(originCAPEM)
+	up, err := tlsbridge.NewUpstreamClient(originCAPEM, false)
 	if err != nil {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
@@ -563,7 +563,7 @@ func TestBridge_UnverifiableUpstream_FallsOpenToTunnel(t *testing.T) {
 	originHostPort := originURL.Host // "127.0.0.1:port"
 
 	// Build the bridge Engine. The Upstream client trusts ONLY the system roots
-	// (NewUpstreamClient(nil)) — it does NOT trust the httptest origin's
+	// (NewUpstreamClient(nil, false)) — it does NOT trust the httptest origin's
 	// self-signed CA, so bridgeServe's upstream-verify HEAD fails and the branch
 	// falls open to a plain tunnel.
 	src, err := tlsbridge.NewEphemeralSource()
@@ -571,7 +571,7 @@ func TestBridge_UnverifiableUpstream_FallsOpenToTunnel(t *testing.T) {
 		t.Fatalf("NewEphemeralSource: %v", err)
 	}
 	minter := tlsbridge.NewMinter(src, tlsbridge.MinterOpts{})
-	up, err := tlsbridge.NewUpstreamClient(nil)
+	up, err := tlsbridge.NewUpstreamClient(nil, false)
 	if err != nil {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
@@ -699,7 +699,7 @@ func TestBridge_PinnedClient_AutoSkipsThenTunnels(t *testing.T) {
 	}
 	originHostPort := originURL.Host // "127.0.0.1:port"
 
-	// Upstream trusts the origin (NewUpstreamClient(originCAPEM)) so upstream-verify
+	// Upstream trusts the origin (NewUpstreamClient(originCAPEM, false)) so upstream-verify
 	// PASSES and bridgeServe reaches the Terminate step where the pinned agent
 	// rejects the minted leaf.
 	src, err := tlsbridge.NewEphemeralSource()
@@ -707,7 +707,7 @@ func TestBridge_PinnedClient_AutoSkipsThenTunnels(t *testing.T) {
 		t.Fatalf("NewEphemeralSource: %v", err)
 	}
 	minter := tlsbridge.NewMinter(src, tlsbridge.MinterOpts{})
-	up, err := tlsbridge.NewUpstreamClient(originCAPEM)
+	up, err := tlsbridge.NewUpstreamClient(originCAPEM, false)
 	if err != nil {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
@@ -869,7 +869,7 @@ func TestBridge_NonTLS_Passthrough(t *testing.T) {
 		t.Fatalf("NewEphemeralSource: %v", err)
 	}
 	minter := tlsbridge.NewMinter(src, tlsbridge.MinterOpts{})
-	up, err := tlsbridge.NewUpstreamClient(nil)
+	up, err := tlsbridge.NewUpstreamClient(nil, false)
 	if err != nil {
 		t.Fatalf("NewUpstreamClient: %v", err)
 	}
