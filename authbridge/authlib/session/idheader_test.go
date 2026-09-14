@@ -93,6 +93,82 @@ func TestIDFromHeaders_NoUsableIDReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestIDFromHeaders_RejectsControlCharactersAboveASCII closes the gap between
+// the documented rule and the check. "No control characters, printable bytes
+// above ASCII left alone" cannot be enforced by inspecting bytes: a C1 control
+// encodes as two bytes, neither of which looks like a control byte, so it slips
+// through a byte loop. U+009B is the C1 CSI — a control character above ASCII,
+// not a printable one — so the carve-out for other clients' id schemes was wider
+// than intended.
+func TestIDFromHeaders_RejectsControlCharactersAboveASCII(t *testing.T) {
+	for _, bad := range []string{
+		"abc\u009bdef", // C1 CSI, encodes as C2 9B — neither byte looks like a control
+		"abc\u0085def", // C1 NEL
+		"abc\u0080def", // C1 PAD, low end of the block
+		"abc\u009fdef", // C1 APC, high end of the block
+	} {
+		h := http.Header{ClaudeCodeSessionHeader: []string{bad}}
+		if got := IDFromHeaders(h, []string{ClaudeCodeSessionHeader}); got != "" {
+			t.Errorf("IDFromHeaders(%q) = %q, want \"\" (control character above ASCII)", bad, got)
+		}
+	}
+}
+
+// TestIDFromHeaders_RejectsInvalidUTF8 keeps the bucket key round-trippable. The
+// id is echoed in /v1/sessions JSON, and encoding/json substitutes U+FFFD for
+// invalid UTF-8 on marshal — so an id the store keyed on raw bytes would come
+// back out as a DIFFERENT string, and an operator could not match what they read
+// to the bucket it names.
+func TestIDFromHeaders_RejectsInvalidUTF8(t *testing.T) {
+	for _, bad := range []string{
+		"abc\xffdef",      // never valid in UTF-8
+		"abc\xc2",         // truncated two-byte sequence
+		"abc\xed\xa0\x80", // surrogate half, rejected by Go's UTF-8
+	} {
+		h := http.Header{ClaudeCodeSessionHeader: []string{bad}}
+		if got := IDFromHeaders(h, []string{ClaudeCodeSessionHeader}); got != "" {
+			t.Errorf("IDFromHeaders(%q) = %q, want \"\" (invalid UTF-8)", bad, got)
+		}
+	}
+}
+
+// TestIDFromHeaders_AcceptsPrintableNonASCII pins the carve-out the control check
+// must NOT eat: a client with its own id scheme in a non-Latin script keeps
+// working. This is the test that fails if the fix for C1 controls over-corrects
+// into "ASCII only".
+func TestIDFromHeaders_AcceptsPrintableNonASCII(t *testing.T) {
+	for _, good := range []string{
+		"café-session",   // Latin-1 supplement, printable
+		"会话-42",          // CJK
+		"sesión-emoji-🙂", // outside the BMP
+	} {
+		h := http.Header{ClaudeCodeSessionHeader: []string{good}}
+		if got := IDFromHeaders(h, []string{ClaudeCodeSessionHeader}); got != good {
+			t.Errorf("IDFromHeaders(%q) = %q, want it accepted", good, got)
+		}
+	}
+}
+
+// TestIDFromHeaders_LengthLimitIsBytesNotRunes guards the trap in fixing the
+// control check: Store.Append truncates with sessionID[:MaxSessionIDLen], a BYTE
+// slice. If the limit were counted in runes, a multi-byte id under the rune
+// budget but over the byte budget would pass here and then be byte-truncated by
+// the store, reintroducing the silent prefix-merge this validator exists to
+// prevent.
+func TestIDFromHeaders_LengthLimitIsBytesNotRunes(t *testing.T) {
+	// 200 runes, 400 bytes: comfortably under MaxSessionIDLen in runes, over it
+	// in bytes. Must be refused.
+	id := strings.Repeat("é", 200)
+	if len(id) <= MaxSessionIDLen {
+		t.Fatalf("fixture is not over the byte limit: %d bytes", len(id))
+	}
+	h := http.Header{ClaudeCodeSessionHeader: []string{id}}
+	if got := IDFromHeaders(h, []string{ClaudeCodeSessionHeader}); got != "" {
+		t.Errorf("IDFromHeaders() accepted a %d-byte id (%d runes); the store would truncate it",
+			len(id), len([]rune(id)))
+	}
+}
+
 // TestIDFromHeaders_AcceptsIDAtMaxLength is the boundary companion to the
 // over-length rejection: exactly MaxSessionIDLen is stored intact by
 // Store.Append, so it must be accepted. An off-by-one here would silently push

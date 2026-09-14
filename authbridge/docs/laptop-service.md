@@ -69,10 +69,11 @@ Two limitations worth knowing:
   explicit empty list (`session.id_headers: []`) turns grouping off and puts everything
   back in one bucket.
 - **Bucket names are taken on trust.** The id comes from the client's own header and is
-  not authenticated, so a client can name any bucket — including another session's. On a
-  laptop that is a non-issue: you own every session. It matters where telemetry
-  attribution is a trust boundary rather than a convenience, and `session.id_headers: []`
-  is the way to opt out there.
+  not authenticated, so a client can name any bucket — including another session's, or a
+  stream of ids nobody owns, which evicts real buckets once there are more than
+  `session.max_sessions` of them (see below). On a laptop that is a non-issue: you own
+  every session. It matters where telemetry attribution is a trust boundary rather than a
+  convenience, and `session.id_headers: []` is the way to opt out there.
 
 ## Why traffic disappears from `abctl`
 
@@ -92,6 +93,12 @@ Both limits changed meaning now that sessions are grouped per Claude Code sessio
   evicts the least-recently-updated one — whole session and all. If an older session has
   vanished from `abctl` entirely rather than just losing its oldest rows, this is why.
   Raise `session.max_sessions` if you work across many sessions and want them to stay.
+
+  This cap is also the only thing bounding the churn described above: because bucket names
+  are unauthenticated, anything sending unfamiliar ids consumes the same 100 slots and
+  evicts real sessions. Raising the cap trades eviction for memory; it does not remove the
+  effect. On a laptop the only thing minting ids is your own tooling, so in practice this
+  reads as a capacity setting — it stops reading that way on a proxy several clients share.
 
 Sessions do **not** expire on time. They used to, after 30 minutes idle, which read as
 data loss — traffic vanished because you stepped away, not because anything overflowed.

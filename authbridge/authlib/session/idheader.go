@@ -3,6 +3,8 @@ package session
 import (
 	"log/slog"
 	"net/http"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ClaudeCodeSessionHeader is the request header the Claude Code CLI sets on
@@ -30,10 +32,21 @@ const ClaudeCodeSessionHeader = "X-Claude-Code-Session-Id"
 //
 // TRUST: the returned id is CLIENT-ASSERTED AND UNAUTHENTICATED. validity
 // checks below stop a value from corrupting a log line or a terminal; nothing
-// establishes that the client owns the session it names. A client may name
-// another session's id and write into that bucket, or name "default" and become
-// indistinguishable from unattributed traffic. Since these buckets now feed cost
-// attribution, a poisoned key mis-attributes spend, not just a TUI row.
+// establishes that the client owns the session it names. Two distinct effects
+// follow, and the second is the cheaper one:
+//
+//   - Targeting. A client may name another session's id and write into that
+//     bucket, or name "default" and become indistinguishable from unattributed
+//     traffic. Since these buckets now feed cost attribution, a poisoned key
+//     mis-attributes spend, not just a TUI row.
+//   - Cardinality. Store.Append evicts the oldest bucket once the store exceeds
+//     session.max_sessions (default 100), so a client that sends distinct random
+//     ids evicts every real bucket without needing to know a single one of them.
+//     Memory stays bounded; the telemetry does not survive. That destroys history
+//     rather than mis-filing it, and it reaches the buckets this comment calls
+//     trustworthy below — an agent can evict the A2A-correlated buckets, not only
+//     redirect its own. session.max_sessions is the only knob that bounds it, and
+//     raising it trades eviction for memory rather than removing the effect.
 //
 // The blast radius is set by one property only: the session store is
 // in-process, so the bucket namespace is shared by exactly those clients that
@@ -85,24 +98,46 @@ func IDFromHeaders(h http.Header, names []string) string {
 // validHeaderSessionID reports whether a client-supplied id is safe to use as
 // a bucket key.
 //
-// Two rules, each for a concrete reason:
+// Three rules, each for a concrete reason:
 //
-//   - No control characters. The id is rendered in abctl's TUI, interpolated
-//     into structured log lines, and returned in /v1/sessions JSON. A newline
-//     forges a log line and an ESC sequence rewrites the operator's terminal.
-//     Printable bytes above ASCII are left alone so a non-Anthropic client with
-//     its own id scheme still works.
-//   - No longer than MaxSessionIDLen. Store.Append truncates past that, and two
-//     overlong ids sharing a prefix would then silently merge into one bucket —
-//     precisely the confusion per-session bucketing exists to remove. Refusing
-//     falls back to the old shared bucket, which is wrong in a way the operator
-//     can see, rather than wrong in a way they cannot.
+//   - No longer than MaxSessionIDLen, counted in BYTES. Store.Append truncates
+//     with sessionID[:MaxSessionIDLen], a byte slice, and two overlong ids
+//     sharing a prefix would then silently merge into one bucket — precisely the
+//     confusion per-session bucketing exists to remove. Counting runes here
+//     instead would let a multi-byte id under the rune budget through and hand it
+//     to the store to byte-truncate, reintroducing that merge. Refusing falls
+//     back to the old shared bucket, which is wrong in a way the operator can
+//     see, rather than wrong in a way they cannot.
+//   - Valid UTF-8. The id is echoed in /v1/sessions JSON, and encoding/json
+//     substitutes U+FFFD for invalid bytes on marshal — so an id keyed on raw
+//     bytes would come back out as a DIFFERENT string, and an operator could not
+//     match what they read to the bucket it names.
+//   - No control characters, tested per RUNE. The id is rendered in abctl's TUI,
+//     interpolated into structured log lines, and returned in that JSON. A
+//     newline forges a log line and an ESC sequence rewrites the operator's
+//     terminal. Printable characters above ASCII are deliberately left alone so a
+//     non-Anthropic client with its own id scheme still works — but that carve-out
+//     has to be about PRINTABLE characters, and a byte loop cannot draw the line:
+//     a C1 control (U+0080–U+009F) encodes as two bytes, neither of which looks
+//     like a control byte, so it passed a check whose own stated rule excluded it.
+//     unicode.IsControl covers C0, DEL and C1 together and implements the rule as
+//     written.
+//
+// Deliberately NOT rejected: bidi overrides (U+202E) and zero-width characters,
+// which are category Cf rather than Cc. Both can make two distinct buckets look
+// alike in the TUI, so there is an argument for requiring unicode.IsPrint
+// instead. Left out because it widens the rule beyond "no control characters"
+// and risks refusing a legitimate client's ids; revisit if bucket names ever
+// become something a human types rather than something a client generates.
 func validHeaderSessionID(id string) bool {
 	if len(id) > MaxSessionIDLen {
 		return false
 	}
-	for i := 0; i < len(id); i++ {
-		if id[i] < 0x20 || id[i] == 0x7f {
+	if !utf8.ValidString(id) {
+		return false
+	}
+	for _, r := range id {
+		if unicode.IsControl(r) {
 			return false
 		}
 	}
