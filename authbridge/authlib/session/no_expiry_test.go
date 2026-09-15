@@ -61,8 +61,19 @@ func TestNoReaperWhenNothingCanExpire(t *testing.T) {
 	s.Close() // idempotent: must not panic on a double close
 }
 
-// TestSizeCapsStillBound: removing time expiry must not remove the memory bound.
-func TestSizeCapsStillBound(t *testing.T) {
+// TestSizeCapsBoundWhenSet: a cap that is set is honoured, in both dimensions.
+//
+// Named for what it asserts. It used to be TestSizeCapsStillBound, "removing time
+// expiry must not remove the memory bound" — the same premise this branch retired from
+// isExpired, the TTL field comment, Limits and CLAUDE.md, and the last copy of it. It
+// is no longer true as stated: with max_events unset by default, removing time expiry
+// does leave one long-lived session unbounded, which is why Limits argues for setting
+// max_events or a ttl on that shape.
+//
+// The body was always narrower than the name. It passes explicit caps, so what it
+// proves is that the store honours them when an operator asks — the case that still
+// matters, and the one the new default makes reachable only on purpose.
+func TestSizeCapsBoundWhenSet(t *testing.T) {
 	s := New(0, 10, 3)
 	defer s.Close()
 
