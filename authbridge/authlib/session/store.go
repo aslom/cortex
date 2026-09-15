@@ -129,7 +129,10 @@ func (s *Subscription) Drops() uint64 {
 }
 
 // New creates a Store with the given TTL, per-session event limit, and max
-// concurrent sessions. A background goroutine runs cleanup every TTL/2.
+// concurrent sessions. maxEvents <= 0 keeps every event a session produces, which
+// is what the binaries pass unless session.max_events is configured; maxSessions
+// <= 0 likewise keeps every session. A background goroutine runs cleanup every
+// TTL/2.
 // Call Close() during graceful shutdown to stop the background goroutine.
 func New(ttl time.Duration, maxEvents int, maxSessions int) *Store {
 	s := &Store{
@@ -182,8 +185,8 @@ func (s *Store) backgroundCleanup() {
 }
 
 // Append adds an event to the named session. Creates the session if it
-// doesn't exist. Updates activeID to this session. Evicts the oldest event
-// if the session exceeds maxEvents.
+// doesn't exist. Updates activeID to this session. Evicts the oldest event if the
+// session exceeds maxEvents — which by default it cannot, maxEvents being unset.
 func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 	if len(sessionID) > MaxSessionIDLen {
 		sessionID = sessionID[:MaxSessionIDLen]

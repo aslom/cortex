@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -76,5 +77,36 @@ func TestSizeCapsStillBound(t *testing.T) {
 	}
 	if got := len(s.ListSessions()); got > 3 {
 		t.Errorf("maxSessions ignored: %d sessions retained, cap is 3", got)
+	}
+}
+
+// TestUnsetMaxEventsKeepsEveryEvent pins what the binaries now rely on: they pass
+// cfg.Session.MaxEvents straight through, so an operator who has not set
+// session.max_events gets a store that never evicts an event from a live session.
+//
+// The first event is asserted as well as the count, because FIFO eviction takes the
+// BEGINNING of a session — on a long agent run, the inbound request that started it.
+// That is what made a defaulted cap the wrong trade: the trim was invisible from the
+// timeline, so the story just began later than it really had.
+func TestUnsetMaxEventsKeepsEveryEvent(t *testing.T) {
+	s := New(0, 0, 100) // maxEvents unset, as the binaries pass it by default
+	defer s.Close()
+
+	const n = 2000
+	for i := 0; i < n; i++ {
+		s.Append("s1", pipeline.SessionEvent{Host: fmt.Sprintf("h%04d", i)})
+	}
+
+	v := s.View("s1")
+	if v == nil {
+		t.Fatal("no session recorded")
+	}
+	if len(v.Events) != n {
+		t.Errorf("retained %d events with maxEvents unset, want all %d", len(v.Events), n)
+	}
+	if len(v.Events) > 0 {
+		if got, want := v.Events[0].Host, "h0000"; got != want {
+			t.Errorf("oldest retained event is %q, want the very first %q", got, want)
+		}
 	}
 }

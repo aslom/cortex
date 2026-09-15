@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -178,10 +179,18 @@ func main() {
 				slog.Warn("invalid session.ttl, using default", "value", cfg.Session.TTL, "error", err)
 			}
 		}
-		maxEvents := 100
-		if cfg.Session.MaxEvents > 0 {
-			maxEvents = cfg.Session.MaxEvents
-		}
+		// Unset means unlimited: a session keeps every event it produced for as long
+		// as the session itself lives. The old default trimmed to the most recent 100
+		// here (500 in the proxy and envoy binaries), which made the store quietly lossy
+		// on exactly the sessions worth reading — a long agent run would drop the
+		// beginning of its own story, and abctl showed a count that disagreed with itself
+		// depending on which side last wrote it. Set session.max_events for a FIFO bound.
+		//
+		// What bounds memory now is max_sessions below plus, if set, session.ttl. That
+		// is a real ceiling for the usual shape of traffic (many short sessions) and no
+		// ceiling at all for one long-lived chatty session, which is the case to reach
+		// for max_events on.
+		maxEvents := cfg.Session.MaxEvents
 		maxSessions := 100
 		if cfg.Session.MaxSessions > 0 {
 			maxSessions = cfg.Session.MaxSessions
@@ -192,8 +201,13 @@ func main() {
 		if ttl > 0 {
 			ttlDesc = ttl.String()
 		}
+		// Same for "maxEvents=0", which would read as "keeps nothing".
+		maxEventsDesc := "unlimited"
+		if maxEvents > 0 {
+			maxEventsDesc = strconv.Itoa(maxEvents)
+		}
 		slog.Info("session tracking enabled",
-			"expiry", ttlDesc, "maxEvents", maxEvents, "maxSessions", maxSessions)
+			"expiry", ttlDesc, "maxEvents", maxEventsDesc, "maxSessions", maxSessions)
 	} else {
 		slog.Info("session tracking disabled")
 	}

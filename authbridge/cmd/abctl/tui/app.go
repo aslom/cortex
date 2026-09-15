@@ -71,11 +71,6 @@ type connStateInfo struct {
 	err       error
 }
 
-// maxEventsPerSession caps per-session event retention in the TUI. Matches
-// the server's default maxEvents cap so we don't hold more than the server
-// itself does.
-const maxEventsPerSession = 1000
-
 // flashDuration is how long a one-shot status message (e.g. yank
 // confirmation) stays in the footer.
 const flashDuration = 3 * time.Second
@@ -758,8 +753,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case snapshotLoadedMsg:
+		// Every event the snapshot carried, untrimmed. This used to cut to the most
+		// recent 1000 on the claim that it "matches the server's default cap" — the
+		// server's was 500, so the two never matched, and neither trims now.
+		//
 		// Only update if we're still focused on this session.
-		m.events[msg.id] = trim(msg.events, maxEventsPerSession)
+		m.events[msg.id] = msg.events
 		if m.pane == paneEvents && m.selectedSess == msg.id {
 			m.rebuildEventsTable()
 		}
@@ -1109,18 +1108,23 @@ func (m *model) handleStreamEvent(ev apiclient.StreamEvent) {
 	}
 	e := *ev.Event
 	m.eventCt++
-	buf := m.events[e.SessionID]
-	buf = append(buf, e)
-	if len(buf) > maxEventsPerSession {
-		buf = buf[len(buf)-maxEventsPerSession:]
-	}
+	buf := append(m.events[e.SessionID], e)
 	m.events[e.SessionID] = buf
 
 	// Bump updatedAt on the session summary if we already have it.
+	//
+	// UpdatedAt only. This used to also write EventCount = len(buf), which made the
+	// EVENTS column mean two different things depending on which code path last
+	// touched the row: the local cache length here, the server's own count on the
+	// two-second poll. The two disagreed by construction — abctl's buffer holds what
+	// it snapshotted plus what it has streamed since attaching, the server's count is
+	// every event the session produced — so the cell visibly flipped between them, 500
+	// against 1000 back when both sides capped. The server's count is the one that is
+	// complete, so it is the only one that writes here now; the poll refreshes it
+	// within two seconds of anything changing.
 	for i := range m.sessions {
 		if m.sessions[i].ID == e.SessionID {
 			m.sessions[i].UpdatedAt = e.At
-			m.sessions[i].EventCount = len(buf)
 			goto sortAndRebuild
 		}
 	}
@@ -1451,17 +1455,6 @@ func yankEventToFile(e *pipeline.SessionEvent) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
-}
-
-// trim bounds a slice to the last n elements (drops oldest on overflow).
-// Used when a snapshot arrives with more events than the TUI caps.
-func trim[T any](s []T, n int) []T {
-	if len(s) <= n {
-		return s
-	}
-	out := make([]T, n)
-	copy(out, s[len(s)-n:])
-	return out
 }
 
 // RunOptions selects the entry mode for abctl's TUI.

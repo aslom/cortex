@@ -224,9 +224,17 @@ type SessionConfig struct {
 	// someone stepped away, not because anything overflowed — and it was never what
 	// bounded memory. MaxEvents and MaxSessions do that. Set it to a duration
 	// ("30m") where limiting how long raw prompts sit in memory is worth the surprise.
+	// Note MaxEvents is unlimited by default now, so on a single long-lived session
+	// MaxSessions bounds nothing and a TTL (or an explicit MaxEvents) is the only cap.
 	TTL string `yaml:"ttl" json:"ttl"` // duration string; default: never
 
-	MaxEvents   int `yaml:"max_events" json:"max_events"`     // max events per session; default: 500
+	// MaxEvents bounds how many events ONE session keeps, oldest evicted first.
+	// Unset (0) means unlimited, which is the default: a trimmed store is lossy on
+	// exactly the sessions worth reading, and the trim point is invisible from the
+	// timeline. Set it where one long-lived chatty session would otherwise grow
+	// without limit — MaxSessions bounds how MANY sessions are kept, not how big any
+	// one of them gets, so it is no help against a single session that never ends.
+	MaxEvents   int `yaml:"max_events" json:"max_events"`     // max events per session; default: unlimited
 	MaxSessions int `yaml:"max_sessions" json:"max_sessions"` // max concurrent sessions; default: 100 (0 = unlimited)
 
 	// IDHeaders names the request headers consulted, in order, for a
