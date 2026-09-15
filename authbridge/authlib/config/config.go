@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/pricing"
@@ -277,6 +279,78 @@ func (s SessionConfig) SessionEnabled() bool {
 		return true
 	}
 	return *s.Enabled
+}
+
+// SessionLimits is the resolved form of the three store parameters: what
+// session.New should be called with, after defaults.
+type SessionLimits struct {
+	TTL         time.Duration
+	MaxEvents   int
+	MaxSessions int
+}
+
+// Limits resolves the session store's parameters from config.
+//
+// One home for what used to be the same twenty lines in three main packages, kept in
+// step by review alone. It is also the only way to assert the part that matters most
+// and is easiest to get wrong in one copy: MaxEvents passes through UNMODIFIED, so an
+// operator who has not set session.max_events gets a store that never evicts an event
+// from a live session.
+//
+// The defaults, and why they are not symmetrical:
+//
+//   - TTL 0 (never expire on time). Time-based expiry read as data loss — traffic
+//     vanished because someone stepped away, not because anything overflowed. Note
+//     what this does NOT rest on any more: it used to be justified by "the size caps
+//     still bound memory", and with MaxEvents unset by default that is no longer true
+//     for a single long-lived session. TTL stays 0 because a clock is the wrong tool
+//     for bounding memory, not because something else is bounding it.
+//   - MaxEvents 0 (unlimited). A trimmed store is lossy on exactly the sessions worth
+//     reading, and FIFO eviction takes the BEGINNING of a session — on a long agent
+//     run, the inbound request that started it — with no mark left in the timeline.
+//   - MaxSessions 100. This one keeps a default because it bounds how MANY sessions
+//     are kept, which is the dimension that grows without an operator doing anything
+//     unusual, and evicting a whole idle session costs less than truncating a live one.
+//
+// So on a single session that never ends, nothing here is a ceiling: set max_events or
+// a ttl for that shape. A negative max_events means unlimited, the same as unset — it
+// used to fall back to 500, and the startup log reports the resolved value either way.
+//
+// A malformed session.ttl yields the zero TTL and is returned as an error for the
+// caller to log; resolution stays here, logging stays at the edge.
+func (s SessionConfig) Limits() (SessionLimits, error) {
+	lim := SessionLimits{MaxEvents: s.MaxEvents, MaxSessions: 100}
+	if s.MaxSessions > 0 {
+		lim.MaxSessions = s.MaxSessions
+	}
+	if s.TTL == "" {
+		return lim, nil
+	}
+	d, err := time.ParseDuration(s.TTL)
+	if err != nil {
+		return lim, err
+	}
+	lim.TTL = d
+	return lim, nil
+}
+
+// LogAttrs renders the resolved limits for a startup line, spelling out the two zeros
+// that would otherwise read as misconfiguration: "ttl=0s" as if sessions expired
+// instantly, "maxEvents=0" as if the store kept nothing.
+func (l SessionLimits) LogAttrs() []any {
+	ttl := "never"
+	if l.TTL > 0 {
+		ttl = l.TTL.String()
+	}
+	maxEvents := "unlimited"
+	if l.MaxEvents > 0 {
+		maxEvents = strconv.Itoa(l.MaxEvents)
+	}
+	maxSessions := "unlimited"
+	if l.MaxSessions > 0 {
+		maxSessions = strconv.Itoa(l.MaxSessions)
+	}
+	return []any{"expiry", ttl, "maxEvents", maxEvents, "maxSessions", maxSessions}
 }
 
 // PipelineConfig holds the plugin pipeline composition. Required:

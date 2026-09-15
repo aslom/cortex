@@ -757,6 +757,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// recent 1000 on the claim that it "matches the server's default cap" — the
 		// server's was 500, so the two never matched, and neither trims now.
 		//
+		// Which leaves m.events unbounded in BOTH dimensions, and worth stating because
+		// it is a laptop's memory: nothing caps depth now that the per-session 1000 is
+		// gone, and entries are only ever released wholesale — on a pod or endpoint
+		// switch (releaseSessionCaches) or an explicit operator prune — while
+		// cachedOnlySessionIDs deliberately keeps sessions the server has stopped
+		// listing. abctl holds the same full prompt and completion strings the proxy
+		// does, so resident size tracks the traffic it has watched.
+		//
 		// Only update if we're still focused on this session.
 		m.events[msg.id] = msg.events
 		if m.pane == paneEvents && m.selectedSess == msg.id {
@@ -1138,6 +1146,13 @@ sortAndRebuild:
 	})
 	m.rebuildSessionsTable()
 	if m.pane == paneEvents && m.selectedSess == e.SessionID {
+		// TODO: coalesce these rebuilds. Every streamed event rebuilds the whole table
+		// for the session being watched: ~1.5ms flat plus ~0.23ms per 1000 events held
+		// (measured: 3.5ms at 10k, 12ms at 50k, 25ms at 100k). The flat part is this
+		// rebuild-per-event design and predates unbounded retention, which it dominates
+		// below ~5k events; past that the growth term takes over, so a session long
+		// enough will outrun the arrival rate. Rebuilding at most once per tick would
+		// bound it. Left alone because no session anyone has today is near it.
 		m.rebuildEventsTable()
 	}
 }

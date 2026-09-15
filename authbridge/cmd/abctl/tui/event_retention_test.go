@@ -304,17 +304,25 @@ func TestSnapshot_IsKeptWhole(t *testing.T) {
 	const id = "snapshot"
 	m := newRetentionModel(t, id, 0)
 
+	first := time.Now()
 	evs := make([]pipeline.SessionEvent, 3000)
 	for i := range evs {
+		// Distinct timestamps, so the identity of the oldest survivor can be asserted
+		// as well as the count — the doc comment above promises the timeline still
+		// begins where it did, and identical events cannot show that.
 		evs[i] = pipeline.SessionEvent{
-			At: time.Now(), SessionID: id,
+			At: first.Add(time.Duration(i) * time.Millisecond), SessionID: id,
 			Direction: pipeline.Outbound, Phase: pipeline.SessionRequest, Host: "h",
 		}
 	}
 	m.Update(snapshotLoadedMsg{id: id, events: evs})
 
-	if got := len(m.events[id]); got != len(evs) {
-		t.Errorf("snapshot of %d events stored as %d", len(evs), got)
+	got := m.events[id]
+	if len(got) != len(evs) {
+		t.Errorf("snapshot of %d events stored as %d", len(evs), len(got))
+	}
+	if len(got) > 0 && !got[0].At.Equal(first) {
+		t.Errorf("oldest stored event is at %v, want the very first at %v", got[0].At, first)
 	}
 }
 
@@ -354,12 +362,30 @@ func TestSessionsPane_EventCountDoesNotFlipOnAStreamedEvent(t *testing.T) {
 }
 
 // sessionsEventsCell reads the EVENTS column from the sessions row for id.
+//
+// The column is located by TITLE, not by the index it happens to have. Rows are built
+// positionally, so a hardcoded index agrees with the table only until someone inserts a
+// column — after which this would read TOKENS and go on passing against the wrong cell.
 func sessionsEventsCell(t *testing.T, m *model, id string) string {
 	t.Helper()
-	for _, r := range m.sessionsTbl.Rows() {
-		if r[0] == id {
-			return strings.TrimSpace(r[2])
+	col := -1
+	for i, c := range m.sessionsTbl.Columns() {
+		if c.Title == "EVENTS" {
+			col = i
+			break
 		}
+	}
+	if col < 0 {
+		t.Fatalf("no EVENTS column in %v", m.sessionsTbl.Columns())
+	}
+	for _, r := range m.sessionsTbl.Rows() {
+		if r[0] != id {
+			continue
+		}
+		if col >= len(r) {
+			t.Fatalf("row for %q has %d cells, EVENTS is column %d: %v", id, len(r), col, r)
+		}
+		return strings.TrimSpace(r[col])
 	}
 	t.Fatalf("no sessions row for %q", id)
 	return ""

@@ -28,7 +28,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -362,35 +361,14 @@ func main() {
 	var sessions *session.Store
 	var usageAgg *usage.Aggregator
 	if cfg.Session.SessionEnabled() {
-		// 0 = never expire on time. This was 30m, and it meant sessions disappeared
-		// while someone was reading them — they had only stepped away. Size caps below
-		// still bound memory, so nothing here was protecting the process. Set
-		// session.ttl to restore a time limit where that is wanted for hygiene.
-		var ttl time.Duration
-		if cfg.Session.TTL != "" {
-			if d, err := time.ParseDuration(cfg.Session.TTL); err == nil {
-				ttl = d
-			} else {
-				slog.Warn("invalid session.ttl, using default", "value", cfg.Session.TTL, "error", err)
-			}
+		// Store parameters come from config.SessionConfig.Limits, which is where the
+		// defaults and the reasoning behind them live — one home for what used to be
+		// this same block in three main packages.
+		lim, err := cfg.Session.Limits()
+		if err != nil {
+			slog.Warn("invalid session.ttl, using default", "value", cfg.Session.TTL, "error", err)
 		}
-		// Unset means unlimited: a session keeps every event it produced for as long
-		// as the session itself lives. The old default trimmed to the most recent 500
-		// (100 here before that), which made the store quietly lossy on exactly the
-		// sessions worth reading — a long agent run would drop the beginning of its own
-		// story, and abctl showed a count that disagreed with itself depending on which
-		// side last wrote it. Set session.max_events to put a FIFO bound back.
-		//
-		// What bounds memory now is max_sessions below plus, if set, session.ttl. That
-		// is a real ceiling for the usual shape of traffic (many short sessions) and no
-		// ceiling at all for one long-lived chatty session, which is the case to reach
-		// for max_events on.
-		maxEvents := cfg.Session.MaxEvents
-		maxSessions := 100
-		if cfg.Session.MaxSessions > 0 {
-			maxSessions = cfg.Session.MaxSessions
-		}
-		sessions = session.New(ttl, maxEvents, maxSessions)
+		sessions = session.New(lim.TTL, lim.MaxEvents, lim.MaxSessions)
 
 		// Usage aggregation feeds GET /v1/usage. Registered as a store Recorder
 		// so it sees every appended event, and deliberately independent of the
@@ -411,21 +389,10 @@ func main() {
 		// so a pipeline running just inference-parser reported every request
 		// unpriced however many tokens it burned. The registry is the same
 		// long-lived one the plugins hold, so a config reload moves both together.
-		usageAgg = usage.New(usage.WithMaxSessions(maxSessions), usage.WithPricing(pricingRegistry))
+		usageAgg = usage.New(usage.WithMaxSessions(lim.MaxSessions), usage.WithPricing(pricingRegistry))
 		sessions.AddRecorder(usageAgg)
 
-		// "ttl=0s" would read like a misconfiguration rather than the default.
-		ttlDesc := "never"
-		if ttl > 0 {
-			ttlDesc = ttl.String()
-		}
-		// Same for "maxEvents=0", which would read as "keeps nothing".
-		maxEventsDesc := "unlimited"
-		if maxEvents > 0 {
-			maxEventsDesc = strconv.Itoa(maxEvents)
-		}
-		slog.Info("session tracking enabled",
-			"expiry", ttlDesc, "maxEvents", maxEventsDesc, "maxSessions", maxSessions)
+		slog.Info("session tracking enabled", lim.LogAttrs()...)
 	} else {
 		slog.Info("session tracking disabled")
 	}
