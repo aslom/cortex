@@ -334,26 +334,39 @@ func TestPluginDetail_ResizeKeepsItsOwnContent(t *testing.T) {
 		t.Fatal("fixture has no selectable event row")
 	}
 
-	// Read an event, then leave that pane. detailEvent stays set, as esc does not clear it.
+	// Read an event, then leave that pane through the real key rather than by assigning
+	// the pane twice. Pressing esc is the load-bearing half of the premise: it is what
+	// does NOT clear m.detailEvent, so the check below says something about the code
+	// instead of about state the test just set.
 	m.showDetail(er, true)
 	m.pane = paneDetail
-	m.pane = panePipeline
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.pane != paneEvents {
+		t.Fatalf("esc from the detail pane left pane = %v, want paneEvents", m.pane)
+	}
 	if m.detailEvent == nil {
-		t.Fatal("fixture assumes detailEvent outlives the events detail pane")
+		t.Fatal("esc cleared detailEvent; this test's premise no longer holds")
 	}
 
 	// Open a plugin, then resize.
+	m.pane = panePipeline
 	m.showPluginDetail(prunePlugin(), true)
 	m.pane = panePluginDetail
 	m.width, m.height = 90, 28
 	m.layout()
 
-	view := m.detailVp.View()
-	if !strings.Contains(view, "tool-prune") {
+	// One assertion, on the plugin's own first content line.
+	//
+	// Not two: a companion `!strings.Contains(view, "inference")` looked like it added
+	// coverage but was checking the visible WINDOW, since View() renders Height lines
+	// from YOffset — so whether the event's JSON happened to be on screen depended on
+	// the pane's geometry rather than on which content was loaded. This one does not:
+	// showDetail and showPluginDetail each SetContent wholesale, so the loaded content
+	// is one or the other and never both, "Plugin: tool-prune" is the first line
+	// showPluginDetail writes, and the event's JSON contains no such string (checked).
+	// Visible whenever anything is.
+	if view := m.detailVp.View(); !strings.Contains(view, "tool-prune") {
 		t.Errorf("resize replaced the plugin pane's content:\n%s", view)
-	}
-	if strings.Contains(view, "inference") {
-		t.Errorf("resize rendered the stale event's JSON into the plugin pane:\n%s", view)
 	}
 }
 
