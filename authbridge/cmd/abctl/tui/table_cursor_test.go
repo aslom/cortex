@@ -551,3 +551,175 @@ func TestEventsTable_TailWithArrivingEventsKeepsSelectionVisible(t *testing.T) {
 	m.rebuildEventsTable()
 	assertSelectionVisible(t, m.eventsTbl, "idle tick at the tail")
 }
+
+// renderedWindow reports the span of fixture rows the table currently shows, as
+// "first..last". That span IS the scroll position in the only terms an operator can
+// see, and it is what the tests below pin: the cursor INDEX was never wrong
+// here, the window under it moved.
+func renderedWindow(tbl table.Model) string {
+	view := tbl.View()
+	first, last := -1, -1
+	for i := 0; i < len(tbl.Rows()); i++ {
+		if strings.Contains(view, hostToken(i)) {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first < 0 {
+		return "nothing"
+	}
+	return fmt.Sprintf("%d..%d", first, last)
+}
+
+// TestEventsTable_PollRebuildKeepsScrollPosition is the reported bug: scroll to the
+// last message, arrow back up a few rows, and a few seconds later the row under the
+// cursor is the bottom row on screen.
+//
+// The few seconds are the two-second sessions poll: refreshTickMsg → loadSessionsCmd →
+// sessionsLoadedMsg calls rebuildEventsTable while the events pane is open, whether or
+// not any event arrived. That rebuild restored the cursor index correctly but re-anchored
+// the window under it, so every poll slid the rows the operator had scrolled back to off
+// the bottom edge.
+//
+// A rebuild that changes no data must change no pixel: same cursor, same window.
+func TestEventsTable_PollRebuildKeepsScrollPosition(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		park int
+	}{
+		// Reading back from the tail — the reported path.
+		{"scrolled back from the tail", 39},
+		// And well away from either end, where nothing clamps the answer for us.
+		{"scrolled back mid-list", 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := cursorModel(t, 40)
+			setCursorVisible(&m.eventsTbl, tc.park)
+			for i := 0; i < 3; i++ {
+				m.eventsTbl, _ = m.eventsTbl.Update(tea.KeyMsg{Type: tea.KeyUp})
+			}
+			wantCursor, wantWindow := m.eventsTbl.Cursor(), renderedWindow(m.eventsTbl)
+			if wantCursor != tc.park-3 {
+				t.Fatalf("three arrows up from %d left cursor %d", tc.park, wantCursor)
+			}
+
+			// Two polls, because one that merely delays the jerk is not a fix.
+			for poll := 1; poll <= 2; poll++ {
+				m.rebuildEventsTable()
+				if got := m.eventsTbl.Cursor(); got != wantCursor {
+					t.Errorf("poll %d moved the cursor: %d, want %d", poll, got, wantCursor)
+				}
+				if got := renderedWindow(m.eventsTbl); got != wantWindow {
+					t.Errorf("poll %d scrolled the pane: showing rows %s, want %s", poll, got, wantWindow)
+				}
+			}
+		})
+	}
+}
+
+// The same guarantee when the poll actually brings something: an event appended while
+// the operator reads mid-list must not scroll the rows out from under them either.
+func TestEventsTable_NewEventWhileScrolledBackKeepsScrollPosition(t *testing.T) {
+	m := cursorModel(t, 40)
+	setCursorVisible(&m.eventsTbl, 39)
+	for i := 0; i < 3; i++ {
+		m.eventsTbl, _ = m.eventsTbl.Update(tea.KeyMsg{Type: tea.KeyUp})
+	}
+	wantCursor, wantWindow := m.eventsTbl.Cursor(), renderedWindow(m.eventsTbl)
+
+	m.events["s"] = cursorRowsFixture(41)
+	m.rebuildEventsTable()
+	if got := m.eventsTbl.Cursor(); got != wantCursor {
+		t.Errorf("a new event moved the cursor: %d, want %d", got, wantCursor)
+	}
+	if got := renderedWindow(m.eventsTbl); got != wantWindow {
+		t.Errorf("a new event scrolled the pane: showing rows %s, want %s", got, wantWindow)
+	}
+}
+
+// The other half of the contract, and the reason this cannot be fixed by simply never
+// scrolling: an operator sitting ON the last row is following the tail, and the tail
+// must keep advancing under them.
+func TestEventsTable_TailStillFollowsOnNewEvent(t *testing.T) {
+	m := cursorModel(t, 40)
+	if got, want := m.eventsTbl.Cursor(), 39; got != want {
+		t.Fatalf("fixture should open following the tail: cursor %d, want %d", got, want)
+	}
+	before := renderedWindow(m.eventsTbl)
+
+	m.events["s"] = cursorRowsFixture(41)
+	m.rebuildEventsTable()
+	if got, want := m.eventsTbl.Cursor(), 40; got != want {
+		t.Errorf("tail-follow left the cursor at %d, want the new last row %d", got, want)
+	}
+	if got := renderedWindow(m.eventsTbl); got == before {
+		t.Errorf("tail-follow did not scroll: still showing rows %s", got)
+	}
+	assertSelectionVisible(t, m.eventsTbl, "tail-follow onto a new event")
+}
+
+// The sessions picker restores its cursor BY ID on the same two-second poll, so it had
+// the same jerk — and unlike the events pane it is the first thing an operator lands on.
+func TestSessionsTable_PollRebuildKeepsScrollPosition(t *testing.T) {
+	m := sessionsModel(t, 40)
+	setCursorVisible(&m.sessionsTbl, 30)
+	for i := 0; i < 3; i++ {
+		m.sessionsTbl, _ = m.sessionsTbl.Update(tea.KeyMsg{Type: tea.KeyUp})
+	}
+	wantID := m.selectedSessionID()
+	wantCursor, wantWindow := m.sessionsTbl.Cursor(), renderedWindow(m.sessionsTbl)
+
+	for poll := 1; poll <= 2; poll++ {
+		m.rebuildSessionsTable()
+		if got := m.selectedSessionID(); got != wantID {
+			t.Errorf("poll %d moved the selection to %q, want %q", poll, got, wantID)
+		}
+		if got := m.sessionsTbl.Cursor(); got != wantCursor {
+			t.Errorf("poll %d moved the cursor: %d, want %d", poll, got, wantCursor)
+		}
+		if got := renderedWindow(m.sessionsTbl); got != wantWindow {
+			t.Errorf("poll %d scrolled the picker: showing rows %s, want %s", poll, got, wantWindow)
+		}
+	}
+}
+
+// TestTables_ResizeKeepsSelectionVisible guards the sharp edge of that fix.
+//
+// Restoring the cursor to the row it is already on no longer touches the scroll
+// offset — that is the fix — so the blanket re-anchor that used to happen on every
+// poll is gone, and with it the accidental repair of an offset invalidated by a
+// resize. SetHeight re-windows the rendered rows (start = cursor − height) while the
+// viewport keeps the offset it computed for the old height, and the pane can end up
+// rendering a window entirely below the row it highlights.
+//
+// Arrow keys are what make this reachable: each MoveUp raises the offset, so the
+// deeper the operator has scrolled up, the further the stale offset is from anything
+// true. Driven through layout() rather than SetHeight, because layout() is where the
+// tables it does not rebuild get their height — and therefore the only place that can
+// reconcile them.
+func TestTables_ResizeKeepsSelectionVisible(t *testing.T) {
+	for _, ups := range []int{0, 3, 8, 15, 25} {
+		for _, termH := range []int{7, 9, 11, 15, 33, 60} {
+			m := sessionsModel(t, 40)
+			m.width, m.height = 200, 15
+			setCursorVisible(&m.sessionsTbl, 39)
+			for i := 0; i < ups; i++ {
+				m.sessionsTbl, _ = m.sessionsTbl.Update(tea.KeyMsg{Type: tea.KeyUp})
+			}
+			want := m.selectedSessionID()
+
+			m.height = termH
+			m.layout()
+			label := fmt.Sprintf("%d ups, terminal height %d", ups, termH)
+			assertSelectionVisible(t, m.sessionsTbl, label)
+			if got := m.selectedSessionID(); got != want {
+				t.Errorf("%s: resize moved the selection to %q, want %q", label, got, want)
+			}
+			// And the poll that follows must not undo the repair.
+			m.rebuildSessionsTable()
+			assertSelectionVisible(t, m.sessionsTbl, label+", after the next poll")
+		}
+	}
+}

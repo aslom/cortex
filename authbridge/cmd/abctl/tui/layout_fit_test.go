@@ -52,6 +52,18 @@ func fitModel(t *testing.T, p paneID, w, h int, events []pipeline.SessionEvent) 
 			UpdatedAt: time.Now(), EventCount: 12, TotalTokens: 641011,
 		})
 	}
+	// A populated catalog, not just a nil one. Without this the catalog pane rendered
+	// its "loading catalog…" line at every size, so the fit invariant never measured
+	// the catalog TABLE — which is how it stayed at bubbles' default height of 20 rows
+	// with nothing in layout() sizing it, overflowing any terminal shorter than that.
+	m.catalog = &apiclient.PluginCatalog{}
+	for i := 0; i < 30; i++ {
+		m.catalog.Plugins = append(m.catalog.Plugins, apiclient.PluginCatalogEntry{
+			Name:        fmt.Sprintf("catalog-plugin-%02d", i),
+			Requires:    []string{"some-upstream-plugin"},
+			Description: "a one-line operator-facing description of the plugin",
+		})
+	}
 	m.pipeline = &apiclient.PipelineView{}
 	for i := 0; i < 8; i++ {
 		m.pipeline.Inbound = append(m.pipeline.Inbound, apiclient.PipelinePlugin{
@@ -62,6 +74,7 @@ func fitModel(t *testing.T, p paneID, w, h int, events []pipeline.SessionEvent) 
 	m.layout()
 	m.rebuildSessionsTable()
 	m.rebuildPipelineTable()
+	m.rebuildCatalogTable()
 	return m
 }
 

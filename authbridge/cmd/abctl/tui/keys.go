@@ -890,18 +890,28 @@ func (m *model) layout() {
 	m.pipelineTbl.SetColumns(fitTableColumns(pipelineColumns(), m.width))
 	m.catalogTbl.SetColumns(fitTableColumns(catalogColumns(), m.width))
 
-	m.sessionsTbl.SetHeight(bodyH)
+	// Through setTableHeight, not SetHeight: a height change re-windows the rows
+	// while the viewport keeps the offset it had for the old height, and these
+	// tables are not rebuilt from here, so nothing else would reconcile it.
+	setTableHeight(&m.sessionsTbl, bodyH)
 	m.bodyHeight = bodyH
 	// Picker tables share the same body area as the session tables so the
 	// terminal real estate stays constant as the user navigates panes.
-	m.namespacesTbl.SetHeight(bodyH)
-	m.podsTbl.SetHeight(bodyH)
+	setTableHeight(&m.namespacesTbl, bodyH)
+	setTableHeight(&m.podsTbl, bodyH)
 	// The events table's height depends on whether the IDENTITY banner
 	// is rendered for the selected session. rebuildEventsTable() applies
 	// the banner-aware adjustment; call it so the size is correct after
 	// a window resize too.
 	m.rebuildEventsTable()
-	m.pipelineTbl.SetHeight(bodyH)
+	setTableHeight(&m.pipelineTbl, bodyH)
+	// The catalog table had no height set anywhere: it kept bubbles' table.New
+	// default of 20 rows for the life of the process, so on a terminal shorter than
+	// that the pane rendered past the bottom (scrolling the title away) and on a
+	// taller one it left the remaining rows unused. TestLayout_EveryPaneFitsTheTerminal
+	// covered this pane but never populated m.catalog, so it only ever measured the
+	// "loading catalog…" line.
+	setTableHeight(&m.catalogTbl, bodyH)
 	m.detailVp.Width = m.width
 	m.detailVp.Height = bodyH
 
