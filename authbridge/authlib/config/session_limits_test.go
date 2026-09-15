@@ -35,9 +35,24 @@ func TestSessionLimits(t *testing.T) {
 			want: SessionLimits{MaxEvents: -1, MaxSessions: 100},
 		},
 		{
-			name: "max_sessions keeps its default",
+			name: "max_sessions set is honoured verbatim",
 			in:   SessionConfig{MaxSessions: 7},
 			want: SessionLimits{MaxSessions: 7},
+		},
+		{
+			// The case that matters, and the one the field comment used to get wrong:
+			// max_sessions: 0 is indistinguishable from unset on a plain int, so it
+			// resolves to the default rather than to the "unlimited" the store would
+			// apply if it were ever handed a zero. Honouring it would delete the default
+			// for everyone who left the field alone.
+			name: "max_sessions zero resolves to the default, not unlimited",
+			in:   SessionConfig{MaxSessions: 0},
+			want: SessionLimits{MaxSessions: 100},
+		},
+		{
+			name: "negative max_sessions resolves to the default too",
+			in:   SessionConfig{MaxSessions: -5},
+			want: SessionLimits{MaxSessions: 100},
 		},
 		{
 			name: "ttl parses",
@@ -93,9 +108,12 @@ func TestSessionLimits_LogAttrs(t *testing.T) {
 			want: []any{"expiry", "30m0s", "maxEvents", "500", "maxSessions", "7"},
 		},
 		{
-			name: "unlimited sessions too",
-			lim:  SessionLimits{},
-			want: []any{"expiry", "never", "maxEvents", "unlimited", "maxSessions", "unlimited"},
+			// Only MaxEvents gets an "unlimited": Limits resolves every max_sessions
+			// <= 0 to 100, so a zero there cannot reach LogAttrs and is not rendered
+			// as anything.
+			name: "defaults, as Limits produces them",
+			lim:  SessionLimits{MaxEvents: 0, MaxSessions: 100},
+			want: []any{"expiry", "never", "maxEvents", "unlimited", "maxSessions", "100"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

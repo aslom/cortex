@@ -760,7 +760,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Which leaves m.events unbounded in BOTH dimensions, and worth stating because
 		// it is a laptop's memory: nothing caps depth now that the per-session 1000 is
 		// gone, and entries are only ever released wholesale — on a pod or endpoint
-		// switch (releaseSessionCaches) or an explicit operator prune — while
+		// switch (backToPodsPane resets the whole map) or an explicit operator prune — while
 		// cachedOnlySessionIDs deliberately keeps sessions the server has stopped
 		// listing. abctl holds the same full prompt and completion strings the proxy
 		// does, so resident size tracks the traffic it has watched.

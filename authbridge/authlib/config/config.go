@@ -223,11 +223,11 @@ type SessionConfig struct {
 	Enabled *bool `yaml:"enabled" json:"enabled"`
 	// TTL bounds how long an IDLE session is kept. Empty or "0" means never, which is
 	// the default: time-based expiry read as data loss — traffic vanished because
-	// someone stepped away, not because anything overflowed — and it was never what
-	// bounded memory. MaxEvents and MaxSessions do that. Set it to a duration
-	// ("30m") where limiting how long raw prompts sit in memory is worth the surprise.
-	// Note MaxEvents is unlimited by default now, so on a single long-lived session
-	// MaxSessions bounds nothing and a TTL (or an explicit MaxEvents) is the only cap.
+	// someone stepped away, not because anything overflowed. Set it to a duration
+	// ("30m") where limiting how long raw prompts sit in memory is worth the surprise,
+	// or where one long-lived session would otherwise grow without limit — with
+	// MaxEvents unset, a ttl is the only thing that bounds that shape. See Limits for
+	// how the three resolve together and why the default is what it is.
 	TTL string `yaml:"ttl" json:"ttl"` // duration string; default: never
 
 	// MaxEvents bounds how many events ONE session keeps, oldest evicted first.
@@ -236,8 +236,20 @@ type SessionConfig struct {
 	// timeline. Set it where one long-lived chatty session would otherwise grow
 	// without limit — MaxSessions bounds how MANY sessions are kept, not how big any
 	// one of them gets, so it is no help against a single session that never ends.
-	MaxEvents   int `yaml:"max_events" json:"max_events"`     // max events per session; default: unlimited
-	MaxSessions int `yaml:"max_sessions" json:"max_sessions"` // max concurrent sessions; default: 100 (0 = unlimited)
+	MaxEvents int `yaml:"max_events" json:"max_events"` // max events per session; default: unlimited
+	// MaxSessions bounds how many sessions are kept at once, least-recently-updated
+	// evicted first. Unset means 100.
+	//
+	// NOT "0 = unlimited", which is what this said and what the store would do with a
+	// zero it was handed: Limits substitutes 100 for any value <= 0, so the documented
+	// unlimited was unreachable through every binary. It cannot be honoured either,
+	// because MaxSessions is a plain int — an operator who never mentions max_sessions
+	// yields the same 0 as one who writes it, so honouring 0 would delete the default
+	// for everyone who left it alone, and with MaxEvents now unset that is the last
+	// default bound standing. Distinguishing the two would take a *int, the way Enabled
+	// above uses a *bool for exactly this reason. Not worth it for a value nobody has
+	// asked for: to lift the cap, set it high.
+	MaxSessions int `yaml:"max_sessions" json:"max_sessions"` // max concurrent sessions; default: 100 (<= 0 means default)
 
 	// IDHeaders names the request headers consulted, in order, for a
 	// client-supplied session id to bucket events under. Unset means the Claude
@@ -308,9 +320,12 @@ type SessionLimits struct {
 //   - MaxEvents 0 (unlimited). A trimmed store is lossy on exactly the sessions worth
 //     reading, and FIFO eviction takes the BEGINNING of a session — on a long agent
 //     run, the inbound request that started it — with no mark left in the timeline.
-//   - MaxSessions 100. This one keeps a default because it bounds how MANY sessions
-//     are kept, which is the dimension that grows without an operator doing anything
-//     unusual, and evicting a whole idle session costs less than truncating a live one.
+//   - MaxSessions 100, for any configured value <= 0 including unset. This one keeps a
+//     default because it bounds how MANY sessions are kept, which is the dimension that
+//     grows without an operator doing anything unusual, and evicting a whole idle
+//     session costs less than truncating a live one. So the resolved MaxSessions is
+//     always positive, which is why LogAttrs does not render an "unlimited" for it the
+//     way it does for MaxEvents.
 //
 // So on a single session that never ends, nothing here is a ceiling: set max_events or
 // a ttl for that shape. A negative max_events means unlimited, the same as unset — it
@@ -336,7 +351,8 @@ func (s SessionConfig) Limits() (SessionLimits, error) {
 
 // LogAttrs renders the resolved limits for a startup line, spelling out the two zeros
 // that would otherwise read as misconfiguration: "ttl=0s" as if sessions expired
-// instantly, "maxEvents=0" as if the store kept nothing.
+// instantly, "maxEvents=0" as if the store kept nothing. Takes limits as Limits
+// produces them, where MaxSessions is always positive.
 func (l SessionLimits) LogAttrs() []any {
 	ttl := "never"
 	if l.TTL > 0 {
@@ -346,11 +362,10 @@ func (l SessionLimits) LogAttrs() []any {
 	if l.MaxEvents > 0 {
 		maxEvents = strconv.Itoa(l.MaxEvents)
 	}
-	maxSessions := "unlimited"
-	if l.MaxSessions > 0 {
-		maxSessions = strconv.Itoa(l.MaxSessions)
-	}
-	return []any{"expiry", ttl, "maxEvents", maxEvents, "maxSessions", maxSessions}
+	// No "unlimited" case for MaxSessions: Limits resolves every value <= 0 to 100, so
+	// a zero cannot reach here, and a branch for it would document a semantic no config
+	// can produce.
+	return []any{"expiry", ttl, "maxEvents", maxEvents, "maxSessions", strconv.Itoa(l.MaxSessions)}
 }
 
 // PipelineConfig holds the plugin pipeline composition. Required:
