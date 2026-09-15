@@ -157,6 +157,24 @@ func TestSetCursorVisible_ClampsAndSurvivesEmpty(t *testing.T) {
 		if got := empty.Cursor(); got != before {
 			t.Errorf("%s empty table: cursor moved %d -> %d, want it left alone", tc.name, before, got)
 		}
+
+		// setTableHeight shares the promise, because it reaches the cursor through
+		// GotoTop. table's clamp is min(max(v, low), high) and does NOT swap inverted
+		// bounds (viewport's does — different package, and not the one MoveUp uses), so
+		// GotoTop on a table with no rows resolves clamp(0, 0, -1) to −1 and would walk
+		// a fresh table's cursor off row 0. The height must still be applied.
+		resized := tc.build()
+		before = resized.Cursor()
+		wasHeight := resized.Height()
+		setTableHeight(&resized, wasHeight+7)
+		if got := resized.Cursor(); got != before {
+			t.Errorf("%s empty table: setTableHeight moved the cursor %d -> %d, want it left alone",
+				tc.name, before, got)
+		}
+		if got := resized.Height(); got == wasHeight {
+			t.Errorf("%s empty table: setTableHeight did not apply the new height (still %d)",
+				tc.name, got)
+		}
 	}
 }
 
@@ -556,7 +574,8 @@ func TestEventsTable_TailWithArrivingEventsKeepsSelectionVisible(t *testing.T) {
 // "first..last". That span IS the scroll position in the only terms an operator can
 // see, and it is what the tests below pin: the cursor INDEX was never wrong
 // here, the window under it moved.
-func renderedWindow(tbl table.Model) string {
+func renderedWindow(t *testing.T, tbl table.Model) string {
+	t.Helper()
 	view := tbl.View()
 	first, last := -1, -1
 	for i := 0; i < len(tbl.Rows()); i++ {
@@ -567,8 +586,11 @@ func renderedWindow(tbl table.Model) string {
 			last = i
 		}
 	}
+	// Fails rather than returning a sentinel. Every caller compares one window against
+	// another, so a "nothing" would have matched a "nothing" and passed vacuously — the
+	// exact shape of failure these tests exist to catch.
 	if first < 0 {
-		return "nothing"
+		t.Fatalf("no fixture row is rendered at all; the window assertions would be vacuous")
 	}
 	return fmt.Sprintf("%d..%d", first, last)
 }
@@ -600,7 +622,7 @@ func TestEventsTable_PollRebuildKeepsScrollPosition(t *testing.T) {
 			for i := 0; i < 3; i++ {
 				m.eventsTbl, _ = m.eventsTbl.Update(tea.KeyMsg{Type: tea.KeyUp})
 			}
-			wantCursor, wantWindow := m.eventsTbl.Cursor(), renderedWindow(m.eventsTbl)
+			wantCursor, wantWindow := m.eventsTbl.Cursor(), renderedWindow(t, m.eventsTbl)
 			if wantCursor != tc.park-3 {
 				t.Fatalf("three arrows up from %d left cursor %d", tc.park, wantCursor)
 			}
@@ -611,7 +633,7 @@ func TestEventsTable_PollRebuildKeepsScrollPosition(t *testing.T) {
 				if got := m.eventsTbl.Cursor(); got != wantCursor {
 					t.Errorf("poll %d moved the cursor: %d, want %d", poll, got, wantCursor)
 				}
-				if got := renderedWindow(m.eventsTbl); got != wantWindow {
+				if got := renderedWindow(t, m.eventsTbl); got != wantWindow {
 					t.Errorf("poll %d scrolled the pane: showing rows %s, want %s", poll, got, wantWindow)
 				}
 			}
@@ -627,14 +649,14 @@ func TestEventsTable_NewEventWhileScrolledBackKeepsScrollPosition(t *testing.T) 
 	for i := 0; i < 3; i++ {
 		m.eventsTbl, _ = m.eventsTbl.Update(tea.KeyMsg{Type: tea.KeyUp})
 	}
-	wantCursor, wantWindow := m.eventsTbl.Cursor(), renderedWindow(m.eventsTbl)
+	wantCursor, wantWindow := m.eventsTbl.Cursor(), renderedWindow(t, m.eventsTbl)
 
 	m.events["s"] = cursorRowsFixture(41)
 	m.rebuildEventsTable()
 	if got := m.eventsTbl.Cursor(); got != wantCursor {
 		t.Errorf("a new event moved the cursor: %d, want %d", got, wantCursor)
 	}
-	if got := renderedWindow(m.eventsTbl); got != wantWindow {
+	if got := renderedWindow(t, m.eventsTbl); got != wantWindow {
 		t.Errorf("a new event scrolled the pane: showing rows %s, want %s", got, wantWindow)
 	}
 }
@@ -647,14 +669,14 @@ func TestEventsTable_TailStillFollowsOnNewEvent(t *testing.T) {
 	if got, want := m.eventsTbl.Cursor(), 39; got != want {
 		t.Fatalf("fixture should open following the tail: cursor %d, want %d", got, want)
 	}
-	before := renderedWindow(m.eventsTbl)
+	before := renderedWindow(t, m.eventsTbl)
 
 	m.events["s"] = cursorRowsFixture(41)
 	m.rebuildEventsTable()
 	if got, want := m.eventsTbl.Cursor(), 40; got != want {
 		t.Errorf("tail-follow left the cursor at %d, want the new last row %d", got, want)
 	}
-	if got := renderedWindow(m.eventsTbl); got == before {
+	if got := renderedWindow(t, m.eventsTbl); got == before {
 		t.Errorf("tail-follow did not scroll: still showing rows %s", got)
 	}
 	assertSelectionVisible(t, m.eventsTbl, "tail-follow onto a new event")
@@ -669,7 +691,7 @@ func TestSessionsTable_PollRebuildKeepsScrollPosition(t *testing.T) {
 		m.sessionsTbl, _ = m.sessionsTbl.Update(tea.KeyMsg{Type: tea.KeyUp})
 	}
 	wantID := m.selectedSessionID()
-	wantCursor, wantWindow := m.sessionsTbl.Cursor(), renderedWindow(m.sessionsTbl)
+	wantCursor, wantWindow := m.sessionsTbl.Cursor(), renderedWindow(t, m.sessionsTbl)
 
 	for poll := 1; poll <= 2; poll++ {
 		m.rebuildSessionsTable()
@@ -679,7 +701,7 @@ func TestSessionsTable_PollRebuildKeepsScrollPosition(t *testing.T) {
 		if got := m.sessionsTbl.Cursor(); got != wantCursor {
 			t.Errorf("poll %d moved the cursor: %d, want %d", poll, got, wantCursor)
 		}
-		if got := renderedWindow(m.sessionsTbl); got != wantWindow {
+		if got := renderedWindow(t, m.sessionsTbl); got != wantWindow {
 			t.Errorf("poll %d scrolled the picker: showing rows %s, want %s", poll, got, wantWindow)
 		}
 	}
@@ -700,6 +722,12 @@ func TestSessionsTable_PollRebuildKeepsScrollPosition(t *testing.T) {
 // tables it does not rebuild get their height — and therefore the only place that can
 // reconcile them.
 func TestTables_ResizeKeepsSelectionVisible(t *testing.T) {
+	// Not every combination exercises both halves, and it is worth knowing which:
+	// termH 15 lands on the height sessionsModel already set, so setTableHeight takes
+	// its early return and nothing resizes — that row checks only that the selection
+	// survives a poll. termH 60 gives the 40-row fixture more rows than it has, so
+	// every row renders and the visibility half holds at any offset. 7, 9, 11 and 33
+	// all resize AND leave rows off screen, which is where the assertion has teeth.
 	for _, ups := range []int{0, 3, 8, 15, 25} {
 		for _, termH := range []int{7, 9, 11, 15, 33, 60} {
 			m := sessionsModel(t, 40)
@@ -758,6 +786,12 @@ func TestViewports_GrowingTheTerminalDoesNotStrandTheOffset(t *testing.T) {
 			t.Errorf("detail viewport left past the bottom: YOffset %d, height %d",
 				m.detailVp.YOffset, m.detailVp.Height)
 		}
+		// PastBottom is the library's own name for the state, but the symptom is what
+		// the pane draws, so assert that too: a stranded offset renders the body high
+		// with dead space under it, and at the far end nothing at all.
+		if strings.TrimSpace(m.detailVp.View()) == "" {
+			t.Error("detail viewport renders nothing after the resize")
+		}
 	})
 
 	// The plugin detail pane shares detailVp but is NOT re-rendered by layout(), so
@@ -774,6 +808,13 @@ func TestViewports_GrowingTheTerminalDoesNotStrandTheOffset(t *testing.T) {
 			t.Errorf("plugin detail viewport left past the bottom: YOffset %d, height %d",
 				m.detailVp.YOffset, m.detailVp.Height)
 		}
+		// Grown past its own content, so the offset must be back at the top and the
+		// pane must be showing the plugin from its first line — the rendered form of
+		// "not stranded". This is also the case that would catch layout() re-rendering
+		// somebody else's content into this pane (see keys.go's showDetail guard).
+		if view := m.detailVp.View(); !strings.Contains(view, "tool-prune") {
+			t.Errorf("plugin detail pane does not show its plugin after the resize:\n%s", view)
+		}
 	})
 
 	t.Run("help overlay", func(t *testing.T) {
@@ -783,6 +824,13 @@ func TestViewports_GrowingTheTerminalDoesNotStrandTheOffset(t *testing.T) {
 			t.Fatal("\"?\" did not open the help overlay")
 		}
 		m.helpVp.GotoBottom()
+		// The same guard as the two cases above, and this one is the closest to the
+		// line: the help body for paneEvents runs only a handful of lines past the
+		// overlay's height, so deleting a few entries from globalKeys/paneKeys would
+		// turn this into an unconditional pass.
+		if m.helpVp.YOffset == 0 {
+			t.Fatal("help body is not scrollable at 80x24; the case would be vacuous")
+		}
 
 		next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 60})
 		mm, ok := next.(*model)
@@ -792,6 +840,9 @@ func TestViewports_GrowingTheTerminalDoesNotStrandTheOffset(t *testing.T) {
 		if mm.helpVp.PastBottom() {
 			t.Errorf("help viewport left past the bottom: YOffset %d, height %d",
 				mm.helpVp.YOffset, mm.helpVp.Height)
+		}
+		if strings.TrimSpace(mm.helpVp.View()) == "" {
+			t.Error("help overlay renders nothing after the resize")
 		}
 	})
 }

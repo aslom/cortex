@@ -230,12 +230,21 @@ func TestPluginDetail_RefreshKeepsScrollPosition(t *testing.T) {
 	if want == 0 {
 		t.Fatal("fixture is not scrollable: YOffset still 0 after scrolling down")
 	}
+	// The refresh re-renders the same plugin from an equal PipelineView, and the render
+	// is deterministic (encoding/json sorts the config's map keys), so what the pane
+	// draws must come back byte-identical. An integer comparison alone would pass while
+	// the content shifted under a preserved offset.
+	wantView := m.detailVp.View()
 
 	// Two refreshes: the Enter-time fetch, then a tick.
 	for refresh := 1; refresh <= 2; refresh++ {
 		refreshPipeline(t, m, nil)
 		if got := m.detailVp.YOffset; got != want {
 			t.Errorf("refresh %d scrolled the pane to YOffset %d, want %d", refresh, got, want)
+		}
+		if got := m.detailVp.View(); got != wantView {
+			t.Errorf("refresh %d changed what the pane draws:\n--- got ---\n%s\n--- want ---\n%s",
+				refresh, got, wantView)
 		}
 	}
 }
@@ -300,6 +309,52 @@ func TestPluginDetail_ShrinkingRefreshDoesNotStrandTheOffset(t *testing.T) {
 		t.Errorf("a shrinking refresh left the viewport past the bottom: YOffset %d, height %d",
 			m.detailVp.YOffset, m.detailVp.Height)
 	}
+	// And the rendered consequence: parked at the bottom of a config listing, the pane
+	// should still be drawing that listing rather than the blank space past its end.
+	if view := m.detailVp.View(); !strings.Contains(view, "allow_tool_") {
+		t.Errorf("pane shows no config after the shrinking refresh:\n%s", view)
+	}
+}
+
+// TestPluginDetail_ResizeKeepsItsOwnContent covers the pane confusion behind layout()'s
+// showDetail guard.
+//
+// detailVp is shared by the events detail pane and the plugin detail pane, and
+// m.detailEvent outlives the pane that set it — nothing clears it on the way out, only
+// the pod/session reset does. layout() re-renders the EVENTS detail into that shared
+// viewport to re-wrap its JSON for the new width, so without a pane check the sequence
+// below replaced the plugin's content with a stale event's JSON, under a
+// "pipeline · <plugin>" title, and the offset clamp then reconciled against content the
+// operator never asked for.
+func TestPluginDetail_ResizeKeepsItsOwnContent(t *testing.T) {
+	m := fitModel(t, paneEvents, 100, 30, []pipeline.SessionEvent{fatInferenceEvent()})
+	m.rebuildEventsTable()
+	er, ok := m.selectedEventRow()
+	if !ok {
+		t.Fatal("fixture has no selectable event row")
+	}
+
+	// Read an event, then leave that pane. detailEvent stays set, as esc does not clear it.
+	m.showDetail(er, true)
+	m.pane = paneDetail
+	m.pane = panePipeline
+	if m.detailEvent == nil {
+		t.Fatal("fixture assumes detailEvent outlives the events detail pane")
+	}
+
+	// Open a plugin, then resize.
+	m.showPluginDetail(prunePlugin(), true)
+	m.pane = panePluginDetail
+	m.width, m.height = 90, 28
+	m.layout()
+
+	view := m.detailVp.View()
+	if !strings.Contains(view, "tool-prune") {
+		t.Errorf("resize replaced the plugin pane's content:\n%s", view)
+	}
+	if strings.Contains(view, "inference") {
+		t.Errorf("resize rendered the stale event's JSON into the plugin pane:\n%s", view)
+	}
 }
 
 // The events detail pane takes the same flag, and its false case is reached by a
@@ -323,17 +378,26 @@ func TestEventDetail_ReRenderKeepsScrollPosition(t *testing.T) {
 		t.Fatal("fixture is not scrollable: YOffset still 0 after scrolling down")
 	}
 
-	// Opening the filter re-lays-out the body, which re-renders this pane.
+	// Opening the filter re-lays-out the body, which re-renders this pane. The width
+	// does not change, so the content re-wraps identically and the top visible line is
+	// available as an assertion — the offset alone would not notice content shifting
+	// underneath a preserved YOffset.
+	topLine := func() string { return strings.SplitN(m.detailVp.View(), "\n", 2)[0] }
+	wantTop := topLine()
 	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	if got := m.detailVp.YOffset; got != want {
 		t.Errorf("opening the filter scrolled the pane to %d, want %d", got, want)
 	}
+	if got := topLine(); got != wantTop {
+		t.Errorf("opening the filter changed the top visible line to %q, want %q", got, wantTop)
+	}
 
-	// A resize re-wraps the content; the reader stays put (clamped if the re-wrap
-	// made the content shorter, never reset to the top).
+	// A resize re-wraps the content. Narrowing 100→70 wraps LONGER, so maxYOffset only
+	// grows and no clamp is possible: the offset must come through exactly. (The top
+	// line legitimately changes here, because the wrap points move.)
 	m.width, m.height = 70, 24
 	m.layout()
-	if got := m.detailVp.YOffset; got == 0 && want != 0 {
-		t.Errorf("a resize reset the pane to the top, want it near %d", want)
+	if got := m.detailVp.YOffset; got != want {
+		t.Errorf("the resize moved the pane to YOffset %d, want %d", got, want)
 	}
 }

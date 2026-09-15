@@ -98,6 +98,18 @@ func setTableHeight(t *table.Model, h int) {
 	if t.Height() == was {
 		return
 	}
+	// An empty table keeps the new height and nothing else. setCursorVisible promises
+	// to leave one alone rather than park it on a row that does not exist, and the
+	// GotoTop below would break that promise on this path: table's clamp is
+	// min(max(v, low), high) with no swap for inverted bounds, so on a table with no
+	// rows GotoTop resolves clamp(0, 0, -1) to −1 and moves a fresh table's cursor off
+	// row 0. (viewport's clamp DOES swap, which is the confusing part — different
+	// package, and not the one MoveUp uses.) Harmless in itself, since neither index
+	// addresses a row and rebuildEventsTable's wasAtEnd reads both the same way, but
+	// the invariant is worth keeping true package-wide.
+	if len(t.Rows()) == 0 {
+		return
+	}
 	n := t.Cursor()
 	t.GotoTop()
 	setCursorVisible(t, n)

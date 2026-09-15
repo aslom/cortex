@@ -71,10 +71,14 @@ func fitModel(t *testing.T, p paneID, w, h int, events []pipeline.SessionEvent) 
 		m.pipeline.Outbound = append(m.pipeline.Outbound, apiclient.PipelinePlugin{
 			Name: fmt.Sprintf("outbound-plugin-%02d", i), Direction: "outbound", Position: i + 1})
 	}
-	m.layout()
+	// Rows before layout(), so the geometry layout() computes is the geometry the
+	// returned model is actually in. Rebuilding after it left the fixture in a state
+	// layout() had never seen — harmless while table heights do not depend on row
+	// count, but the fit assertions measure precisely what layout() produced.
 	m.rebuildSessionsTable()
 	m.rebuildPipelineTable()
 	m.rebuildCatalogTable()
+	m.layout()
 	return m
 }
 
