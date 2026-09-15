@@ -723,3 +723,75 @@ func TestTables_ResizeKeepsSelectionVisible(t *testing.T) {
 		}
 	}
 }
+
+// TestViewports_GrowingTheTerminalDoesNotStrandTheOffset covers the two scrollable
+// viewports — the shared detail pane and the help overlay.
+//
+// viewport.Height is a plain field, so assigning it on resize moves maxYOffset while
+// YOffset stays put, and viewport.SetContent only clamps against the line COUNT. Grow
+// the terminal under a viewport scrolled near its end and the offset is left past the
+// bottom: the body renders high with dead space beneath it and no key but a scroll
+// brings it back. PastBottom is the viewport's own name for that state.
+//
+// Both are asserted after a GotoBottom, which is where the gap between YOffset and
+// maxYOffset is widest.
+func TestViewports_GrowingTheTerminalDoesNotStrandTheOffset(t *testing.T) {
+	t.Run("detail pane", func(t *testing.T) {
+		m := fitModel(t, paneEvents, 80, 24, []pipeline.SessionEvent{fatInferenceEvent()})
+		m.rebuildEventsTable()
+		er, ok := m.selectedEventRow()
+		if !ok {
+			t.Fatal("fixture has no selectable event row")
+		}
+		m.showDetail(er, true)
+		m.pane = paneDetail
+		m.detailVp.GotoBottom()
+		// Without this the case is vacuous: GotoBottom on content that fits leaves the
+		// offset at 0, and "not past the bottom" then holds however the resize behaves.
+		if m.detailVp.YOffset == 0 {
+			t.Fatal("fixture is not scrollable at 80x24")
+		}
+
+		m.width, m.height = 120, 60
+		m.layout()
+		if m.detailVp.PastBottom() {
+			t.Errorf("detail viewport left past the bottom: YOffset %d, height %d",
+				m.detailVp.YOffset, m.detailVp.Height)
+		}
+	})
+
+	// The plugin detail pane shares detailVp but is NOT re-rendered by layout(), so
+	// its offset can only be reconciled where the height is assigned.
+	t.Run("plugin detail pane", func(t *testing.T) {
+		m := pluginDetailModel(t)
+		m.detailVp.GotoBottom()
+		if m.detailVp.YOffset == 0 {
+			t.Fatal("fixture is not scrollable")
+		}
+		m.width, m.height = 100, 60
+		m.layout()
+		if m.detailVp.PastBottom() {
+			t.Errorf("plugin detail viewport left past the bottom: YOffset %d, height %d",
+				m.detailVp.YOffset, m.detailVp.Height)
+		}
+	})
+
+	t.Run("help overlay", func(t *testing.T) {
+		m := fitModel(t, paneEvents, 80, 24, cursorRowsFixture(60))
+		m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+		if !m.helpVisible {
+			t.Fatal("\"?\" did not open the help overlay")
+		}
+		m.helpVp.GotoBottom()
+
+		next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 60})
+		mm, ok := next.(*model)
+		if !ok {
+			t.Fatalf("Update returned %T, want *model", next)
+		}
+		if mm.helpVp.PastBottom() {
+			t.Errorf("help viewport left past the bottom: YOffset %d, height %d",
+				mm.helpVp.YOffset, mm.helpVp.Height)
+		}
+	})
+}

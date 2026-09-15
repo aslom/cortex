@@ -492,7 +492,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			if !ok {
 				return nil
 			}
-			m.showDetail(er)
+			m.showDetail(er, true)
 			m.pane = paneDetail
 			return nil
 		case panePipeline:
@@ -501,7 +501,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 			m.previousPane = panePipeline
-			m.showPluginDetail(p)
+			m.showPluginDetail(p, true)
 			m.pane = panePluginDetail
 			// Fetch immediately rather than waiting for the next refresh tick:
 			// opening the pane is exactly when someone wants current counters.
@@ -512,7 +512,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				return nil
 			}
 			m.previousPane = paneCatalog
-			m.showPluginDetail(p)
+			m.showPluginDetail(p, true)
 			m.pane = panePluginDetail
 			return nil
 		}
@@ -914,13 +914,20 @@ func (m *model) layout() {
 	setTableHeight(&m.catalogTbl, bodyH)
 	m.detailVp.Width = m.width
 	m.detailVp.Height = bodyH
+	// Re-clamp the scroll offset to the new height, for the PLUGIN detail pane:
+	// nothing re-renders that one on a resize, so this is the only place its offset
+	// can be reconciled. The events detail pane is re-rendered just below and clamps
+	// itself (see showDetail), which is why this line cannot simply move down there —
+	// the re-render would land after it either way.
+	m.detailVp.SetYOffset(m.detailVp.YOffset)
 
 	m.filterInput.Width = m.width - 4
 
 	// Re-wrap the detail viewport to the new width so long JSON values
-	// continue to fit after a terminal resize.
+	// continue to fit after a terminal resize. Not a scroll reset: the reader
+	// stays where they were, as in the help overlay.
 	if m.detailEvent != nil {
-		m.showDetail(m.detailRow)
+		m.showDetail(m.detailRow, false)
 	}
 }
 
