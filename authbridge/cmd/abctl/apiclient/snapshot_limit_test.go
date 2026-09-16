@@ -50,11 +50,16 @@ func TestGetSessionTail_SendsTheGivenLimit(t *testing.T) {
 }
 
 // A session id with characters that need escaping must still escape, now that the path
-// is built with a query string appended.
+// is built by formatting a query string onto it.
+//
+// Asserted on EscapedPath, not Path: the decoded path is "/v1/sessions/a/b c" whether or
+// not the id was escaped, because the slash stays a slash and the space is escaped by the
+// transport regardless — so the obvious assertion holds with url.PathEscape removed and
+// proves nothing.
 func TestGetSessionTail_EscapesTheID(t *testing.T) {
-	var gotPath string
+	var escaped string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
+		escaped = r.URL.EscapedPath()
 		_ = json.NewEncoder(w).Encode(pipeline.SessionView{ID: "x"})
 	}))
 	defer ts.Close()
@@ -62,8 +67,8 @@ func TestGetSessionTail_EscapesTheID(t *testing.T) {
 	if _, err := New(ts.URL).GetSessionTail(context.Background(), "a/b c", 5); err != nil {
 		t.Fatal(err)
 	}
-	if gotPath != "/v1/sessions/a/b c" {
-		t.Errorf("path = %q — the id must be escaped on the wire and decode back", gotPath)
+	if want := "/v1/sessions/a%2Fb%20c"; escaped != want {
+		t.Errorf("escaped path = %q, want %q", escaped, want)
 	}
 }
 

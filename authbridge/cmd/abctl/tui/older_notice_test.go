@@ -69,3 +69,28 @@ func TestSnapshotCmd_DerivesTheOlderCountFromTotalEvents(t *testing.T) {
 		})
 	}
 }
+
+// Snapshots land asynchronously, for whichever session was selected when the fetch
+// started. A late one for a session the operator has left must not describe the session
+// they are looking at — which is what a single shared counter did.
+func TestFooter_OlderCountIsPerSession(t *testing.T) {
+	m := fitModel(t, paneEvents, 200, 40, cursorRowsFixture(3))
+	m.selectedSess = "current"
+	m.events["current"] = cursorRowsFixture(3)
+	m.rebuildEventsTable()
+
+	// The snapshot for the session being viewed: nothing omitted.
+	m.Update(snapshotLoadedMsg{id: "current", events: cursorRowsFixture(3)})
+	// Then a straggler for a session that was abandoned, reporting thousands omitted.
+	m.Update(snapshotLoadedMsg{id: "abandoned", events: cursorRowsFixture(1), olderNotFetched: 9999})
+
+	if got := m.helpView(); strings.Contains(got, "9999") {
+		t.Errorf("a late snapshot for another session leaked into the footer: %q", got)
+	}
+
+	// And selecting that session shows its own count, not the current one's.
+	m.selectedSess = "abandoned"
+	if got := m.helpView(); !strings.Contains(got, "9999 older not fetched") {
+		t.Errorf("the session's own count is not shown after selecting it: %q", got)
+	}
+}

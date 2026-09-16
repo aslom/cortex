@@ -818,8 +818,8 @@ func (m *model) helpView() string {
 		// bound is not something the operator chose, so it says "not fetched" rather
 		// than naming a key to undo it. There is no key: the window is what the client
 		// is willing to hold.
-		if m.olderNotFetched > 0 {
-			base = fmt.Sprintf("%s  ·  %d older not fetched", base, m.olderNotFetched)
+		if n := m.olderNotFetched[m.selectedSess]; n > 0 {
+			base = fmt.Sprintf("%s  ·  %d older not fetched", base, n)
 		}
 		// Columns that did not fit — the whole reason issue #866 was filed: HOST was
 		// declared but never visible, and nothing said the table had been clipped.

@@ -1,6 +1,10 @@
 package session
 
-import "github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+import (
+	"slices"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+)
 
 // Repeated message content is stored once per session, not once per event.
 //
@@ -32,11 +36,16 @@ const (
 // interner maps a string to the one copy the session keeps of it.
 //
 // It holds only the strings of the LAST event interned, which is enough to collapse the
-// whole history and is the reason it needs no eviction policy of its own. Turn N's array
-// is turn N-1's array plus a message or two, so interning N against N-1 makes them share;
-// N-1 already shares with N-2, and so on back to the first turn that carried the string.
-// One rolling event's worth of keys, rather than a table that grows with the session and
-// would then have to be pruned in step with event eviction and body shedding.
+// whole history: turn N's array is turn N-1's array plus a message or two, so interning N
+// against N-1 makes them share; N-1 already shares with N-2, and so on back to the first
+// turn that carried the string.
+//
+// That is one event's worth of keys, which on this workload is NOT small — an LLM request
+// carries the whole conversation, so the last event's strings are roughly the whole
+// distinct set. What the rolling table buys is not a small table but a table that costs
+// nothing extra: every key is a string some event already references, so it pins no
+// content of its own and needs no pruning in step with event eviction. A table
+// accumulating across events would hold strings whose events had been evicted.
 //
 // The tradeoff is deliberate: content that disappears from the conversation and comes
 // back later (a compaction that rewrites history, say) misses the table and gets a second
@@ -47,37 +56,74 @@ type interner struct {
 }
 
 // intern returns the session's copy of s, recording s as canonical if it is new.
+//
+// The table is keyed on the CANONICAL string, never on the duplicate that was looked
+// up. Keying on the duplicate would work identically for lookups — equal strings hash
+// equally — while pinning the copy the event just stopped referencing, so the table
+// would hold a copy of every message the last interned event carried.
+//
+// Bounded to one event's worth, because the table is rolled forward on every Append — so
+// on BenchmarkRetainedHeap it is 2.358MB keyed on the duplicate against 2.205MB keyed on
+// the canonical, a 0.15MB difference and not the multiplier it first looks like. Worth
+// fixing because it is free, and worth measuring before claiming more than that.
 func (in *interner) intern(s string, next map[string]string) string {
 	if len(s) < internMinLen {
 		return s
 	}
-	if canon, ok := in.prev[s]; ok {
-		next[s] = canon
-		return canon
+	canon, ok := in.prev[s]
+	if !ok {
+		canon = s
 	}
-	next[s] = s
-	return s
+	next[canon] = canon
+	return canon
 }
 
-// internEvent rewrites the event's large string fields to reference the session's
-// existing copies, then rolls the table forward to this event's strings.
+// internEvent gives the event its own extension and message slice, with content
+// pointing at the session's existing copies, then rolls the table forward.
 //
-// It mutates through the event's extension POINTERS, which the caller may still hold —
-// safe because every replacement is a string equal to the one it replaces. There is no
-// observable change to make; that is the whole point.
+// It CLONES rather than rewriting in place, and that is not defensive habit — writing in
+// place is unsound here for three separate reasons:
+//
+//   - pipeline.SnapshotInference and SnapshotA2A are shallow copies, and their contract
+//     says so: "Slice fields are reused intentionally — they are only assigned, never
+//     mutated in place, after the parser completes." Interning in place breaks the
+//     invariant the rest of the pipeline is written against.
+//   - the request-phase and response-phase events of one request alias the same backing
+//     array, because both snapshot the same live pctx.Extensions.Inference
+//     (forwardproxy/server.go:377 and :880). So the second Append would rewrite an
+//     array the first event already published.
+//   - publishLocked hands the event — extension pointers included — to subscriber
+//     channels, and the SSE goroutine encodes it outside the store's mutex. Mutating
+//     those arrays is a straight data race against an in-flight encode.
+//
+// "Every replacement is a string equal to the one it replaced" does not rescue it
+// either. With two requests interleaved in one session bucket, the second Append rolls
+// prev forward before the first request's response-phase event is interned, so that
+// pass writes a genuinely different pointer over memory the store has already handed
+// out.
+//
+// Cloning costs one slice copy per event and nothing in steady state: the original array
+// becomes garbage when the request completes, and the store then owns everything it
+// mutates.
 func (in *interner) internEvent(e *pipeline.SessionEvent) {
 	next := make(map[string]string, len(in.prev))
 
 	if e.Inference != nil {
-		for i := range e.Inference.Messages {
-			e.Inference.Messages[i].Content = in.intern(e.Inference.Messages[i].Content, next)
+		cp := *e.Inference
+		cp.Messages = slices.Clone(e.Inference.Messages)
+		for i := range cp.Messages {
+			cp.Messages[i].Content = in.intern(cp.Messages[i].Content, next)
 		}
-		e.Inference.Completion = in.intern(e.Inference.Completion, next)
+		cp.Completion = in.intern(cp.Completion, next)
+		e.Inference = &cp
 	}
 	if e.A2A != nil {
-		for i := range e.A2A.Parts {
-			e.A2A.Parts[i].Content = in.intern(e.A2A.Parts[i].Content, next)
+		cp := *e.A2A
+		cp.Parts = slices.Clone(e.A2A.Parts)
+		for i := range cp.Parts {
+			cp.Parts[i].Content = in.intern(cp.Parts[i].Content, next)
 		}
+		e.A2A = &cp
 	}
 
 	in.prev = next

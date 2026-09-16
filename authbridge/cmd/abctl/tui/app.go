@@ -272,11 +272,17 @@ type model struct {
 	hideInactive   bool
 	hiddenInactive int
 
-	// olderNotFetched is how many events the selected session holds that the snapshot
-	// did not carry, reported by the server. Kept beside hiddenInactive because it
-	// answers the same question — "is this the whole timeline?" — for a different
-	// reason: that one is a filter the operator chose, this one is a bound they did not.
-	olderNotFetched int
+	// olderNotFetched is how many events a session holds that its snapshot did not
+	// carry, reported by the server, keyed by session id.
+	//
+	// Keyed rather than a single number, because snapshots land asynchronously and for
+	// whichever session was selected when the fetch started. A single field let a late
+	// snapshot for an abandoned session describe the one on screen, and showed the
+	// previous session's count in the window between selecting a session and its
+	// snapshot arriving. Beside hiddenInactive in spirit — both answer "is this the
+	// whole timeline?" — but that one is a filter the operator chose and this is a
+	// bound they did not.
+	olderNotFetched map[string]int
 	flash           string
 	flashUntil      time.Time
 	// flashSticky keeps the current flash up until the next keypress instead of
@@ -796,7 +802,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		//
 		// Only update if we're still focused on this session.
 		m.events[msg.id] = msg.events
-		m.olderNotFetched = msg.olderNotFetched
+		if m.olderNotFetched == nil {
+			m.olderNotFetched = map[string]int{}
+		}
+		m.olderNotFetched[msg.id] = msg.olderNotFetched
 		if m.pane == paneEvents && m.selectedSess == msg.id {
 			m.rebuildEventsTable()
 		}

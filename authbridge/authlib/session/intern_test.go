@@ -104,7 +104,6 @@ func TestAppend_DoesNotShareAcrossSessions(t *testing.T) {
 	s := New(0, 0, 100)
 	defer s.Close()
 
-	msgs := convo(2)
 	s.Append("s1", pipeline.SessionEvent{Inference: &pipeline.InferenceExtension{Messages: convo(2)}})
 	s.Append("s2", pipeline.SessionEvent{Inference: &pipeline.InferenceExtension{Messages: convo(2)}})
 
@@ -113,7 +112,6 @@ func TestAppend_DoesNotShareAcrossSessions(t *testing.T) {
 	if a == b {
 		t.Error("two sessions share one copy of the same message")
 	}
-	_ = msgs
 }
 
 // Short strings skip the table: a role or a finish reason costs less to duplicate than
@@ -162,10 +160,16 @@ func TestAppend_SharesA2APartContent(t *testing.T) {
 	}
 }
 
-// The table holds one event's strings, not the session's. Otherwise it grows with the
-// conversation and has to be pruned in step with event eviction, which is the coupling
-// this design avoids.
-func TestIntern_TableDoesNotGrowWithTheSession(t *testing.T) {
+// The table holds the LAST event's strings — one event's worth, not an accumulation
+// across events.
+//
+// Named for that rather than for "does not grow with the session", which the first
+// version of this claimed and the assertion contradicts: on this workload one event
+// carries the whole conversation, so 30 turns means 30 entries and the table does grow
+// with it. What the rolling table buys is that every key is a string some event still
+// references, so it pins nothing of its own and never needs pruning when events are
+// evicted.
+func TestIntern_TableHoldsTheLastEventsStrings(t *testing.T) {
 	s := New(0, 0, 100)
 	defer s.Close()
 
@@ -187,4 +191,97 @@ func trunc(s string) string {
 		return s
 	}
 	return s[:48] + "…"
+}
+
+// The store must not mutate what it was handed.
+//
+// SnapshotInference is a shallow copy whose contract says slice fields "are only
+// assigned, never mutated in place, after the parser completes" — and the request- and
+// response-phase events of one request snapshot the SAME live extension, so they alias
+// one backing array. Interning in place rewrote an array the first event had already
+// been published with, and publishLocked hands those pointers to an SSE goroutine that
+// encodes them outside the store's lock.
+func TestAppend_DoesNotMutateTheCallersSlice(t *testing.T) {
+	s := New(0, 0, 100)
+	defer s.Close()
+
+	live := &pipeline.InferenceExtension{Model: "m", Messages: convo(4)}
+	before := make([]uintptr, len(live.Messages))
+	for i := range live.Messages {
+		before[i] = backing(live.Messages[i].Content)
+	}
+
+	// Both phases of one request, as the forward proxy builds them: two shallow copies
+	// sharing live.Messages.
+	reqEv := pipeline.SessionEvent{Phase: pipeline.SessionRequest, Inference: pipeline.SnapshotInference(live)}
+	respEv := pipeline.SessionEvent{Phase: pipeline.SessionResponse, Inference: pipeline.SnapshotInference(live)}
+	s.Append("s1", reqEv)
+	s.Append("s1", respEv)
+
+	for i := range live.Messages {
+		if backing(live.Messages[i].Content) != before[i] {
+			t.Errorf("message %d of the caller's live extension was rewritten by the store", i)
+		}
+	}
+	// And the snapshots the caller still holds are untouched too.
+	if reqEv.Inference == nil || len(reqEv.Inference.Messages) != 4 {
+		t.Fatal("caller's request snapshot was altered")
+	}
+	for i := range reqEv.Inference.Messages {
+		if backing(reqEv.Inference.Messages[i].Content) != before[i] {
+			t.Errorf("message %d of the caller's snapshot was rewritten", i)
+		}
+	}
+}
+
+// The event the store keeps must be its own, so that a second Append cannot reach the
+// first event's memory through a shared array.
+func TestAppend_StoresItsOwnExtension(t *testing.T) {
+	s := New(0, 0, 100)
+	defer s.Close()
+
+	live := &pipeline.InferenceExtension{Messages: convo(3)}
+	ev := pipeline.SessionEvent{Inference: pipeline.SnapshotInference(live)}
+	s.Append("s1", ev)
+
+	stored := s.View("s1").Events[0].Inference
+	if stored == ev.Inference {
+		t.Error("the store kept the caller's extension pointer")
+	}
+	if len(stored.Messages) > 0 && len(ev.Inference.Messages) > 0 &&
+		&stored.Messages[0] == &ev.Inference.Messages[0] {
+		t.Error("the store kept the caller's message array")
+	}
+}
+
+// The table is keyed on the canonical string, not on the duplicate that was looked up.
+//
+// Keying on the duplicate reads identically — equal strings hash equally — while pinning
+// the copy the event just stopped referencing, so the table would hold a second full
+// copy of the conversation and undo most of the saving. Asserting on POINTERS is what
+// catches that; a heap measurement would absorb it as noise.
+func TestIntern_TableKeysAreTheStringsTheEventsReference(t *testing.T) {
+	s := New(0, 0, 100)
+	defer s.Close()
+
+	for turn := 1; turn <= 6; turn++ {
+		s.Append("s1", pipeline.SessionEvent{
+			Inference: &pipeline.InferenceExtension{Messages: convo(turn)},
+		})
+	}
+
+	stored := map[uintptr]bool{}
+	for _, e := range s.View("s1").Events {
+		for i := range e.Inference.Messages {
+			stored[backing(e.Inference.Messages[i].Content)] = true
+		}
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for key := range s.sessions["s1"].intern.prev {
+		if !stored[backing(key)] {
+			t.Errorf("table key %q is a copy no event references — it pins a duplicate", trunc(key))
+		}
+	}
 }

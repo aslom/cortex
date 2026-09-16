@@ -61,8 +61,6 @@ func (c *Client) ListSessions(ctx context.Context) ([]session.SessionSummary, er
 	return body.Sessions, nil
 }
 
-// GetSession fetches /v1/sessions/{id}. Returns an error whose Unwrap chain
-// includes ErrNotFound if the server returned 404.
 // SnapshotEventLimit is how many events a snapshot asks for.
 //
 // Sent explicitly rather than relying on the server's default, so what this client is
@@ -77,7 +75,8 @@ func (c *Client) ListSessions(ctx context.Context) ([]session.SessionSummary, er
 // and the timeline came up empty.
 const SnapshotEventLimit = 500
 
-// GetSession fetches the most recent SnapshotEventLimit events of a session.
+// GetSession fetches the most recent SnapshotEventLimit events of a session. Returns an
+// error whose Unwrap chain includes ErrNotFound if the server returned 404.
 //
 // The returned view's TotalEvents is non-zero when older events exist that this
 // response does not carry.
