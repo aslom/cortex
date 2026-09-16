@@ -389,11 +389,16 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	// to happen. Announcing "connections will be cut" and then changing nothing would be
 	// its own small lie, and it printed on every re-run.
 	//
-	// Replacing a running Cortex cuts whatever is talking to it and nothing on this side
-	// can soften that: HTTPS_PROXY is fixed in each Claude Code process's environment at
-	// startup, so a session cannot fall back to a direct connection and simply starts
-	// failing. That looked like a Cortex bug twice during development, to me, on my own
-	// machine.
+	// Replacing a running Cortex cuts whatever is talking to it. What that costs is one
+	// in-flight request per connection, not the session: HTTPS_PROXY is fixed in each
+	// client's environment so it cannot fall back to a direct connection, but it does
+	// reconnect through the proxy on its next request. Measured on three restarts of a
+	// laptop proxy — time from bind to the first request served: 0.92s, 0.81s, 0.59s,
+	// with the Claude Code sessions that had been attached carrying on across all three.
+	//
+	// This used to read "cannot reconnect on its own — restart any session that starts
+	// failing", which is what it looked like to me when a mid-stream request died and I
+	// restarted the session that reported it. The session had not needed restarting.
 	reportSessionInterruption(p, stdout)
 
 	if adopt > 0 {
@@ -635,9 +640,10 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 		if n > 0 {
 			fmt.Fprintf(stdout, "\n  %d connection(s) were attached to %s and have just been cut.\n",
 				n, p.forwardAddr)
-			fmt.Fprintln(stdout, "  A running Claude Code cannot fall back to a direct connection —")
-			fmt.Fprintln(stdout, "  HTTPS_PROXY is fixed in its environment at startup — so restart any")
-			fmt.Fprintln(stdout, "  session that now fails to connect.")
+			fmt.Fprintln(stdout, "  Clients cannot fall back to a direct connection — HTTPS_PROXY is fixed")
+			fmt.Fprintln(stdout, "  in their environment at startup — so they will keep failing until you run")
+			fmt.Fprintln(stdout, "  abctl service start. They reconnect on their own once it is back;")
+			fmt.Fprintln(stdout, "  restarting the sessions themselves is not necessary.")
 		}
 		return 0
 	default:
@@ -758,8 +764,8 @@ func loginHome() string {
 // or when we cannot tell — a confident "0" would be worse than no number.
 func reportSessionInterruption(p servicePaths, stdout io.Writer) {
 	if n := establishedConns(p.forwardAddr); n > 0 {
-		fmt.Fprintf(stdout, "  %d connection(s) are attached and will be cut. A running Claude Code\n"+
-			"  cannot reconnect on its own — restart any session that starts failing.\n", n)
+		fmt.Fprintf(stdout, "  %d connection(s) will be cut. Clients reconnect on their next\n"+
+			"  request — a request in flight right now fails.\n", n)
 	}
 }
 

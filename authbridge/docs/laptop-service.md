@@ -37,10 +37,17 @@ changed it changes nothing: it does not re-download binaries already at that ver
 `service install` reports `Already current` and leaves the running proxy alone rather
 than restarting it.
 
-That last part matters — a restart cuts every attached Claude Code session, because
-`HTTPS_PROXY` is fixed in each session's environment at startup and cannot fall back to a
-direct connection. When a restart genuinely is needed, install says how many connections
-it is about to cut.
+That last part matters, though less than it used to read here. A restart cuts every
+connection attached to the proxy, and `HTTPS_PROXY` is fixed in each client's environment
+at startup so it cannot fall back to a direct connection — but it does reconnect through
+the proxy on its next request. Measured across three restarts, time from bind to first
+request served: **0.92s, 0.81s, 0.59s**, with the attached Claude Code sessions carrying
+on through all three.
+
+So what a restart costs is the requests in flight at that moment, not the sessions. A
+session that reports an error has lost one request and will recover; it does not need
+restarting. When a restart genuinely is needed, install says how many connections it is
+about to cut.
 
 To restart deliberately: `abctl service restart`.
 
