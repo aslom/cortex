@@ -693,9 +693,22 @@ func (a *Aggregator) costOf(e *pipeline.SessionEvent) eventCost {
 	}
 	micros, ok := pricing.Cost(rates, u)
 	if !ok {
-		// A rate was found but it does not cover every tier this request used. Still
-		// a gap an operator can close, and naming the pair points at the entry to
-		// extend rather than to create.
+		// TWO CAUSES REACH HERE, AND ONLY ONE OF THEM IS A MISSING RATE. Either a rate was
+		// found that does not cover every tier this request used — a gap an operator closes
+		// by extending the entry — or the figure the rates produced was REFUSED: an
+		// implausible token count, or a modelled total past
+		// pricing.MaxPlausibleRequestCostMicros. See pricing.Cost for the full list.
+		//
+		// The distinction matters to whoever reads UnpricedBy, because the second cause is
+		// not fixed by touching the rate table: an entry is already there, and either the
+		// counts on the wire or the rate's magnitude is wrong. Naming the pair is still
+		// right — that pair genuinely produced no figure — but "add or extend a pricing
+		// entry" is only half the advice, and Snapshot.UnpricedBy says so.
+		//
+		// The header path keeps its causes apart (costevent.RejectedImplausible) because the
+		// refusal is published per request; this path has no equivalent field, and adding one
+		// is a wire change rather than a comment. Recorded here so the asymmetry is known
+		// rather than inferred from a total that will not reconcile.
 		return eventCost{priceable: 1, unpricedKey: key}
 	}
 	ec := eventCost{micros: micros, priced: 1, priceable: 1, provenance: prov.String()}

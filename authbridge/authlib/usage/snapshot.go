@@ -170,9 +170,17 @@ type Snapshot struct {
 	// Totals.PricedRequests with Totals.PriceableRequests for that.
 	//
 	// A gap has to be nameable, not just countable. "Cost is incomplete" gives an
-	// operator nothing to act on; "api.openai.com gpt-5: 412" names the pricing
-	// entry to add. Traffic carrying no model is excluded — naming every non-LLM
+	// operator nothing to act on; "api.openai.com gpt-5: 412" names the pair to
+	// investigate. Traffic carrying no model is excluded — naming every non-LLM
 	// call the proxy handled would bury the real gaps.
+	//
+	// "ADD A PRICING ENTRY" IS NOT ALWAYS THE REMEDY, and this field cannot say which it
+	// is. A pair lands here when no rate covers it, when the rate covers only some of the
+	// tiers the request used, AND when the figure the rates produced was refused as
+	// implausible — an absurd rate, or a token count that cannot be one. In that last case
+	// the entry already exists and the fix is upstream of it. See usage.Aggregator.costOf,
+	// which is where the causes converge, and costevent.RejectedImplausible, which keeps
+	// them apart on the path that CAN report per request.
 	//
 	// Summed across the window from the raw buckets, so it is unaffected by the
 	// requested resolution, exactly like Totals.
