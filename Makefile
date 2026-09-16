@@ -103,7 +103,7 @@ dev-install: authbridge-proxy abctl ## Build from this tree, install to ~/.local
 	@# dotfiles, so it says so and stops there.
 	@case ":$$PATH:" in \
 		*":$(DEV_BIN_DIR):"*) ;; \
-		*) echo; echo "!  $(DEV_BIN_DIR) is not on PATH — \`abctl\` will not resolve until you add it"; echo;; \
+		*) echo >&2; echo "!  $(DEV_BIN_DIR) is not on PATH — \`abctl\` will not resolve until you add it" >&2; echo >&2;; \
 	esac
 	@# A machine that has never run Cortex has no config, and `service install` refuses
 	@# without one. Minting it here is what makes this work on a clean checkout rather

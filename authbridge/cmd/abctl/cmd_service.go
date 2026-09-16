@@ -392,15 +392,18 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	// Replacing a running Cortex cuts whatever is talking to it. What that costs is one
 	// in-flight request per connection, not the session: HTTPS_PROXY is fixed in each
 	// client's environment so it cannot fall back to a direct connection, but it does
-	// reconnect through the proxy on its next request. Measured on three restarts of a
-	// laptop proxy — time from bind to the first request served: 0.92s, 0.81s, 0.59s,
-	// with the Claude Code sessions that had been attached carrying on across all three.
+	// reconnect through the proxy on its next request. The measurements are in
+	// docs/laptop-service.md, "Re-running the installer is safe" — kept in one place so a
+	// re-measurement does not leave stale copies in three others.
 	//
 	// This used to read "cannot reconnect on its own — restart any session that starts
 	// failing", which is what it looked like to me when a mid-stream request died and I
 	// restarted the session that reported it. The session had not needed restarting.
 	reportSessionInterruption(p, stdout)
-	reportHistoryCleared(serviceInstalled(p) || adopt > 0, stdout)
+	// Whether anything is SERVING, captured before the replacement and reported after it
+	// succeeds — see reportHistoryCleared for why neither half of that is optional.
+	wasServing := adopt > 0 ||
+		(p.healthURL != "" && waitHealthy(p.healthURL, historyProbeBudget))
 
 	if adopt > 0 {
 		fmt.Fprintf(stdout, "Stopping pid %d...\n", adopt)
@@ -469,6 +472,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	if p.healthURL != "" {
 		if waitHealthy(p.healthURL, serviceReadyTimeout) {
 			reportInstallSuccess(true, stdout)
+			reportHistoryCleared(wasServing, stdout)
 			return 0
 		}
 		fmt.Fprintf(stderr, "\nabctl: installed, but nothing answered %s within %s.\n"+
@@ -477,6 +481,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 		return 1
 	}
 	reportInstallSuccess(false, stdout)
+	reportHistoryCleared(wasServing, stdout)
 	return 0
 }
 
@@ -760,9 +765,9 @@ func loginHome() string {
 //
 // HTTPS_PROXY is baked into each client's environment when it starts, so none of them can
 // fall back to a direct connection — but they do reconnect through the proxy on their next
-// request, measured at 0.92s, 0.81s and 0.59s across three restarts. So the cost is the
-// requests in flight, one per connection, and naming the count turns that into a
-// five-second diagnosis instead of a bug report.
+// request, in well under a second (docs/laptop-service.md has the measurements). So the
+// cost is the requests in flight, one per connection, and naming the count turns that into
+// a five-second diagnosis instead of a bug report.
 //
 // Silent when there is nothing attached, or when we cannot tell — a confident "0" would be
 // worse than no number.
@@ -773,18 +778,35 @@ func reportSessionInterruption(p servicePaths, stdout io.Writer) {
 	}
 }
 
+// historyProbeBudget is how long the pre-replacement liveness check may take.
+//
+// Short deliberately: on loopback a live proxy answers on the first attempt and a dead
+// port refuses immediately, so this costs nothing in either direction. It is not
+// supervisorRunning, which polls to serviceReadyTimeout and would therefore make every
+// FIRST install — the case with nothing to find — wait out the whole budget.
+const historyProbeBudget = 250 * time.Millisecond
+
 // reportHistoryCleared names the one consequence of a restart that nothing else reports.
 //
-// Only when something was already serving, which is what wasRunning carries: a first
-// install has nothing to clear, and a false line there is what teaches operators to skim
-// the rest. It used to live in the Makefile's dev-install as an unconditional echo,
-// printed on a clean machine too — a Makefile cannot tell a first install from a
-// replacement, and abctl can.
+// wasServing must mean SERVING, and must have been sampled before the replacement:
 //
-// Extracted rather than inlined so the gate is assertable: serviceInstall reaches this
-// point only after writing a unit file and calling launchctl, which a unit test cannot.
-func reportHistoryCleared(wasRunning bool, stdout io.Writer) {
-	if !wasRunning {
+//   - not "installed". That was the first version of this, and serviceInstalled is
+//     os.Stat on the unit file. A service that is installed and stopped — which `service
+//     stop` makes persist across logouts, deliberately — has a unit on disk and no store,
+//     so it got told a timeline it was not reading had been cleared. Precisely the false
+//     line this commit removed from the Makefile, one path over.
+//   - not sampled after. The probe cannot run once the replacement has started, because
+//     by then the answer is about the new process.
+//
+// And it is emitted only on a success path, because it asserts an accomplished fact where
+// its neighbour reportSessionInterruption makes a prediction ("will be cut"). A prediction
+// is safe to print early; this is not — printed before the replacement, an install that
+// then failed had already claimed the history was gone.
+//
+// Extracted rather than inlined so the gate is assertable: serviceInstall reaches these
+// lines only after writing a unit file and calling launchctl, which a unit test cannot.
+func reportHistoryCleared(wasServing bool, stdout io.Writer) {
+	if !wasServing {
 		return
 	}
 	fmt.Fprintln(stdout, "  Captured session history is cleared: the store is in memory, so any")

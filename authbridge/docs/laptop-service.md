@@ -44,6 +44,9 @@ the proxy on its next request. Measured across three restarts, time from bind to
 request served: **0.92s, 0.81s, 0.59s**, with the attached Claude Code sessions carrying
 on through all three.
 
+These three numbers are the only copy: `cmd_service.go` and its tests point here rather
+than repeating them, so a re-measurement changes one place and not four.
+
 So what a restart costs is the requests in flight at that moment, not the sessions. A
 session that reports an error has lost one request and will recover; it does not need
 restarting. When a restart genuinely is needed, install says how many connections it is

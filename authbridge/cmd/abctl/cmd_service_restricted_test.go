@@ -184,13 +184,15 @@ func TestReportSessionInterruption(t *testing.T) {
 	// of this function no test touched.
 	//
 	// What it must NOT say is that a session cannot reconnect, or that one should be
-	// restarted. Measured across three restarts, clients came back in 0.92s, 0.81s and
-	// 0.59s; a restart costs the requests in flight, not the sessions. That advice sent
-	// people to restart working sessions for two years.
+	// restarted: clients come back in well under a second, so a restart costs the requests
+	// in flight and not the sessions. The measurements live in docs/laptop-service.md.
 	t.Run("names the cost when connections are attached", func(t *testing.T) {
+		// Fatalf, not Skipf: a loopback listen that fails is infrastructure breakage,
+		// and a skip here would report success for the one test that pins the wording
+		// this whole change exists to correct.
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			t.Skipf("cannot listen: %v", err)
+			t.Fatalf("cannot listen on loopback: %v", err)
 		}
 		defer ln.Close() //nolint:errcheck
 
@@ -203,14 +205,14 @@ func TestReportSessionInterruption(t *testing.T) {
 		}()
 		client, err := net.Dial("tcp", ln.Addr().String())
 		if err != nil {
-			t.Skipf("cannot dial: %v", err)
+			t.Fatalf("cannot dial the listener we just opened: %v", err)
 		}
 		defer client.Close() //nolint:errcheck
 		select {
 		case c := <-accepted:
 			defer c.Close() //nolint:errcheck
 		case <-time.After(2 * time.Second):
-			t.Skip("connection was not accepted in time")
+			t.Fatal("our own listener did not accept in 2s")
 		}
 
 		var out strings.Builder
@@ -219,11 +221,16 @@ func TestReportSessionInterruption(t *testing.T) {
 		if got == "" {
 			t.Fatalf("said nothing with a connection attached to %s", ln.Addr())
 		}
+		// "in flight" is the phrase unique to the new wording, and the only positive
+		// assertion here that a revert fails. "will be cut" matched the old text too
+		// ("are attached and will be cut"), and so did "reconnect" ("cannot reconnect on
+		// its own") — so those two passed on both texts and the retracted-phrase loop
+		// below was doing all the work.
+		if !strings.Contains(got, "in flight") {
+			t.Errorf("does not name the cost as the in-flight request: %q", got)
+		}
 		if !strings.Contains(got, "will be cut") {
 			t.Errorf("does not say the connections are cut: %q", got)
-		}
-		if !strings.Contains(got, "reconnect") {
-			t.Errorf("does not say clients reconnect: %q", got)
 		}
 		for _, retracted := range []string{"cannot reconnect", "restart any session"} {
 			if strings.Contains(strings.ToLower(got), retracted) {
