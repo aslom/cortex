@@ -14,11 +14,14 @@
 package usage
 
 import (
+	"math"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
@@ -52,6 +55,96 @@ type Counts struct {
 	Requests int64 `json:"requests"`
 	Errors   int64 `json:"errors,omitempty"`
 	Tokens   int64 `json:"tokens,omitempty"`
+	// The four billed token kinds, plus reasoning. Names match
+	// pipeline.InferenceExtension exactly: one vocabulary from parser to aggregate
+	// to ledger to collector, because aggregate-side synonyms are how two halves
+	// of a system come to disagree about what a field means.
+	//
+	// Tokens above stays as the legacy aggregate for clients written against it.
+	// These are additive to the wire, not a replacement.
+	//
+	// Tokens is NOT always the sum of the fields below. parsercommon.Fill prefers
+	// the provider's own total_tokens when one was reported and falls back to
+	// summing the split otherwise, so a gateway reporting only a total — prompt and
+	// completion absent — yields a non-zero Tokens with every split field at 0. A
+	// client normalising a stacked bar against Tokens would be wrong in that case;
+	// PresentKinds below is what keeps it legible, since no bits set means nothing
+	// reported a breakdown at all, which is a different answer from a breakdown that
+	// was genuinely zero.
+	//
+	// They matter because the kinds price very differently — a cache read is
+	// roughly 0.1x uncached input and a cache write roughly 1.25x — so for a
+	// long-running agent, whose traffic is overwhelmingly cache reads, the split
+	// IS the shape of the bill. One scalar cannot express that.
+	InputTokens      int64 `json:"inputTokens,omitempty"`
+	CacheReadTokens  int64 `json:"cacheReadTokens,omitempty"`
+	CacheWriteTokens int64 `json:"cacheWriteTokens,omitempty"`
+	OutputTokens     int64 `json:"outputTokens,omitempty"`
+	// ReasoningTokens is a SUBSET of OutputTokens, not a sibling of it: the
+	// provider reports how much of what it generated was reasoning. Adding the two
+	// double-counts every reasoning token at the output rate, which is the most
+	// expensive tier there is.
+	ReasoningTokens int64 `json:"reasoningTokens,omitempty"`
+	// RefusedTokenRequests counts the requests whose token report was REJECTED as
+	// implausible and contributed nothing to any figure above. See plausibleTokenReport for
+	// the rule and for why the whole report goes rather than the offending field.
+	//
+	// It exists because capping cost while leaving tokens unbounded is not a position that
+	// survives being stated. Cost is bounded per request twice over
+	// (pricing.MaxPlausibleRequestCostMicros for a gateway's own figure, pricing.MaxCostMicros
+	// for the unit) while the token fields are read straight from a provider-controlled `int`
+	// on the wire — so unbounded, the same forged response that cannot move the dollar total
+	// by more than $10,000 moves the token total by 9.2e18, or moves it DOWN with a negative,
+	// and both feed the same aggregate a client renders side by side.
+	//
+	// REFUSED, NOT CLAMPED, matching how an out-of-range cost is handled: a clamp invents a
+	// number nobody reported, and 10,000,000 tokens presented as fact is a worse answer than
+	// no figure plus a count of what was dropped. The request itself still counts in
+	// Requests, and its cost — settled by a different producer, bounded separately — is
+	// untouched, because this says nothing about whether the response was billed.
+	//
+	// A COUNTER, on the same reasoning as PricedRequests: buckets are summed when a client
+	// asks for a coarser resolution, and a count survives that where a flag degrades to
+	// "somewhere in here". Non-zero here means Tokens and the split are SHORT by whatever
+	// those requests really used, which is unknowable by construction.
+	RefusedTokenRequests int64 `json:"refusedTokenRequests,omitempty"`
+	// PresentKinds is the OR of every folded event's InferenceExtension.PresentKinds:
+	// a set bit means at least one response in this bucket actually REPORTED that
+	// kind. Bit layout matches parsercommon.Kind (Input=1, CacheRead=2,
+	// CacheWrite=4, Output=8, Reasoning=16).
+	//
+	// Summing would be meaningless, hence the union. It exists because a zero in
+	// one of the fields above has two readings — "this traffic wrote no cache" and
+	// "nothing here reports cache writes" — and a by-model table showing a blank
+	// column cannot be interpreted without knowing which. The per-event flag
+	// already carries that distinction; dropping it at the aggregate would throw
+	// away the only thing that makes an empty cell readable.
+	PresentKinds uint8 `json:"presentKinds,omitempty"`
+	// Saturated says that at least one addition into this Counts hit the int64 ceiling and
+	// was CLAMPED rather than allowed to wrap. Every number here is then a FLOOR: the real
+	// figure is larger, and by an amount nothing in this struct can state.
+	//
+	// It exists because the alternative was a wrapped total, and a wrapped total is a lie
+	// that reads as a fact. No per-request bound can prevent the wrap — for any bound C the
+	// sum overflows after ceil(math.MaxInt64/C) requests and nothing bounds the request
+	// count (see pricing.MaxCostMicros, which spells out the arithmetic) — so the only place
+	// to close it is where the sum is kept, which is Add below. A clamp on its own would
+	// merely trade a large negative lie for a large positive one; this field is what makes
+	// the clamp honest, and it is the whole reason the clamp is acceptable.
+	//
+	// A BOOL, NOT A COUNTER, unlike every other disclosure in this struct. A count of
+	// saturating additions would depend on how many folds happened, which depends on the
+	// bucket resolution the client asked for — the one property this package insists a total
+	// must not have (see Totals and UngroupedCostMicros, both summed from the raw buckets for
+	// exactly that reason). "This number is a ceiling" survives any regrouping; "it was
+	// clamped four times" does not.
+	//
+	// OR-ED THROUGH Add, like PresentKinds: folding a saturated bucket into a clean one
+	// yields a saturated total, because the total inherits the floor.
+	//
+	// NOT LOGGED, deliberately: this package has no logger, and the disclosure travels on the
+	// same response as the number it qualifies.
+	Saturated bool `json:"saturated,omitempty"`
 	// CostMicros is millionths of a US dollar. An integer unit keeps bucket
 	// addition exact and JSON round-tripping lossless, which float dollars do
 	// not; a client divides by 1e6 to display. Zero when nothing here could be
@@ -63,9 +156,47 @@ type Counts struct {
 	// asks for a coarser resolution, and because a deployment can price some of
 	// its traffic and not the rest: several endpoints, rates known for some.
 	//
-	// Requests-minus-PricedRequests is the gap, correct at every resolution, and
-	// it is what stops a partial total being presented as a complete one.
+	// PriceableRequests-minus-PricedRequests is the gap, correct at every
+	// resolution, and it is what stops a partial total being presented as a
+	// complete one.
+	//
+	// NOT Requests-minus-PricedRequests. Requests counts every proxied response — MCP
+	// tool calls, health checks, tunnels — none of which can ever carry a price, so
+	// that difference never reaches zero and a client obeying it marks every total
+	// partial forever. Requests is not the denominator for coverage;
+	// PriceableRequests is.
+	//
+	// It counts an INEXACT figure too — see IncompleteRequests. This counter answers
+	// "did anything price this", which a request priced from partial counters
+	// truthfully did; withholding it here would answer a question this counter is not
+	// asking and would state the same caveat twice in two vocabularies.
 	PricedRequests int64 `json:"pricedRequests,omitempty"`
+	// IncompleteRequests counts the priced requests whose figure is not EXACT: known-low
+	// because a stream died before its output count arrived, or approximate because the
+	// gateway reported only a total. costevent.Event.IncompleteReason carries which, per
+	// request; this counter is the aggregate's answer to "is this dollar total exact".
+	//
+	// HOW MANY, not in which way. The two readings are different claims about money — a
+	// floor means the real figure is higher, an approximation means it is off in no known
+	// direction — and this counter cannot tell them apart because it is one number.
+	// Snapshot.IncompleteBy carries the split, keyed on the reason, and its counts sum to
+	// this one.
+	//
+	// A SUBSET of PricedRequests, never a sibling of it. Their dollars are in CostMicros and
+	// the requests are in PricedRequests, because both of those are true; the disclosure
+	// rides alongside instead of subtracting from either — honest by saying more, not by
+	// counting less. Subtracting would be an adjustment, and an adjustment invites a client
+	// to render the remainder as an exact total, which is the error this counter exists to
+	// prevent.
+	//
+	// A counter rather than a flag, for the reason PricedRequests is one: buckets are summed
+	// when a client asks for a coarser resolution, and a count survives that where a flag
+	// degrades to "somewhere in here".
+	//
+	// NOT a pricing gap, and deliberately absent from byUnpriced: nothing an operator
+	// adds to a rate table would make one of these disappear, so naming it there would
+	// point at an entry that already exists.
+	IncompleteRequests int64 `json:"incompleteRequests,omitempty"`
 	// PriceableRequests counts the requests that COULD be priced — those carrying a
 	// model and a non-zero token count.
 	//
@@ -79,10 +210,25 @@ type Counts struct {
 	//
 	// Priced-versus-priceable is the ratio that answers "is my cost total complete",
 	// and it reaches parity when it should.
+	//
+	// WHAT COUNTS AS PRICEABLE WIDENED, and a client comparing figures across versions should
+	// know. Requiring extractable token counts made a 2xx inference response whose usage the
+	// parser could not read invisible: not priced, not priceable, and absent from UnpricedBy —
+	// nine good requests plus one of those read "9/9 priced", parity, while real spend was
+	// missing. It is now counted as priceable-but-unpriced and named as a gap, which is a
+	// HIGHER priceable figure for identical traffic: a dashboard tracking the ratio across an
+	// upgrade sees coverage appear to drop, and nothing got worse.
+	//
+	// There is deliberately NO version marker on the wire for it. A field whose meaning is
+	// versioned needs every consumer to branch on the version, and the honest reading is the
+	// same in both: this is the count of requests that could have carried a price.
 	PriceableRequests int64 `json:"priceableRequests,omitempty"`
 }
 
-// Add accumulates o into c, field by field.
+// Add accumulates o into c, field by field — except PresentKinds, which is
+// OR-ed. It is a set of which token kinds a response reported, so adding two
+// buckets' flags would produce a number that is not a bit set at all. Do not
+// pattern-match on the `+=` below when adding a field of that shape.
 //
 // Exported because consumers fold these too — abctl collapses low-volume series
 // into an "(other)" band — and an unexported version left them hand-summing the
@@ -92,13 +238,201 @@ type Counts struct {
 //
 // Pointer receiver and mutating, matching how the aggregator accumulates on the
 // hot path. For a map value, read-modify-write: `v := m[k]; v.Add(o); m[k] = v`.
+//
+// EVERY FIELD IS A CHECKED ACCUMULATE. A bare `+=` wraps, and a wrapped total is the worst
+// failure this package has: 1,024 requests at pricing.MaxCostMicros sum to
+// -9214364837600034816, which then sits in the durable ledger for its full retention with no
+// repair path. pricing.MaxCostMicros' own doc proves no per-request bound can close that and
+// names this function as the place that must. Add is the single summation point, so the guard
+// lands once and cannot be forgotten at a call site.
+//
+// WHICH FIELDS ARE ACTUALLY AT RISK, in order:
+//   - The TOKEN fields. They are read from a provider-reported `int` on the wire, and
+//     foldInto refuses an implausible one — but the refusal is a ceiling per request, not on
+//     the sum, and Add is exported so a consumer can hand it anything.
+//   - CostMicros. Bounded per request at pricing.MaxPlausibleRequestCostMicros for the
+//     modelled path and pricing.MaxCostMicros for a gateway's own cost header, which puts the
+//     wrap at ~9.2e8 and 1,024 requests respectively. The second is reachable.
+//   - Requests, Errors and the three coverage counters are one per event at the source, so
+//     traffic cannot reach 2^63 of them. They are checked anyway: Add is exported, abctl folds
+//     arbitrary Counts through it to build its "(other)" band, and a uniform call site is the
+//     only kind that cannot be forgotten when a field is added.
 func (c *Counts) Add(o Counts) {
-	c.Requests += o.Requests
-	c.Errors += o.Errors
-	c.Tokens += o.Tokens
-	c.CostMicros += o.CostMicros
-	c.PricedRequests += o.PricedRequests
-	c.PriceableRequests += o.PriceableRequests
+	c.addInto(&c.Requests, o.Requests)
+	c.addInto(&c.Errors, o.Errors)
+	c.addInto(&c.Tokens, o.Tokens)
+	c.addInto(&c.CostMicros, o.CostMicros)
+	c.addInto(&c.PricedRequests, o.PricedRequests)
+	// Summed alongside PricedRequests, never out of it: it is a subset disclosure, not a
+	// deduction. See the field's own comment for why the aggregate discloses rather than
+	// adjusts.
+	c.addInto(&c.IncompleteRequests, o.IncompleteRequests)
+	c.addInto(&c.PriceableRequests, o.PriceableRequests)
+	c.addInto(&c.InputTokens, o.InputTokens)
+	c.addInto(&c.CacheReadTokens, o.CacheReadTokens)
+	c.addInto(&c.CacheWriteTokens, o.CacheWriteTokens)
+	c.addInto(&c.OutputTokens, o.OutputTokens)
+	c.addInto(&c.RefusedTokenRequests, o.RefusedTokenRequests)
+	// Summed alongside OutputTokens, never into it: it is a subset of the output
+	// the provider already reported, so folding it in would bill it twice.
+	c.addInto(&c.ReasoningTokens, o.ReasoningTokens)
+	// Union, not sum: PresentKinds is a set of which kinds were reported, so
+	// adding two buckets' flags would produce a number that is not a bit set.
+	c.PresentKinds |= o.PresentKinds
+	// Inherited, not merely OR-ed for symmetry: if o's own total was a floor then any total
+	// containing it is a floor too. See the field.
+	if o.Saturated {
+		c.Saturated = true
+	}
+}
+
+// addInto accumulates v into *dst, saturating at the int64 bounds, and records on c that
+// the figure it produced is no longer a sum.
+//
+// A METHOD RATHER THAN A CLOSURE over a local flag: this runs once per field per folded
+// event on the aggregator's hot path, and a closure capturing a bool escapes to the heap.
+//
+// The receiver is the same Counts that owns dst in every call above. It is passed
+// separately because the point is to write two places — the field and the disclosure — from
+// one call, so a saturating add cannot record the clamp and lose the fact that it clamped.
+func (c *Counts) addInto(dst *int64, v int64) {
+	sum, saturated := addSat(*dst, v)
+	*dst = sum
+	if saturated {
+		c.Saturated = true
+	}
+}
+
+// maxPlausibleRequestTokens is the largest token count one request could report, per field.
+//
+// THE SAME NUMBER AND THE SAME REASONING AS pricing's unexported maxPlausibleTokens: the
+// largest context window on any path we run is 1,000,000 tokens (the Claude [1m] beta), a
+// request bills prompt plus completion, so 2,000,000 covers the worst real call and ten
+// million is 5x that. A future window growth cannot turn a legitimate response into a
+// refusal.
+//
+// DERIVED, NOT RESTATED. pricing.MaxPlausibleTokens is exported for exactly this: two
+// literals that must agree is the shape that let config's retention floor drift from the
+// window span it protects, shipping a floor of 7 against a window that opens 8 files.
+//
+// PER FIELD, NOT PER REPORT. Six fields at the bound is 6e7, which is nowhere near an int64
+// and needs no separate sum check; a per-report bound would have to pick between refusing a
+// legitimate large prompt and admitting a forged split, and a per-field one refuses neither.
+const maxPlausibleRequestTokens = pricing.MaxPlausibleTokens
+
+// plausibleTokenReport reports whether an event's token counters could have come from a real
+// inference response.
+//
+// ALL OR NOTHING, and that is the point. If one figure in the report is impossible then the
+// report is not trustworthy, and mixing a believed number with a refused one in the same row
+// produces a breakdown that cannot be reconciled against its own total — the client is then
+// worse off than with no figures at all. So one bad field refuses the whole set, and
+// Counts.RefusedTokenRequests says how many times that happened.
+//
+// NEGATIVE IS REFUSED TOO, not merely the ceiling. These arrive as `int` decoded from a
+// provider's JSON, so a negative is one minus sign away, and a negative token count
+// SUBTRACTS from the aggregate — a forged response that makes a real bill look smaller,
+// which is the direction an attacker actually wants.
+//
+// The nil check is the caller's; every call site here has already tested it.
+func plausibleTokenReport(inf *pipeline.InferenceExtension) bool {
+	for _, n := range [...]int{
+		inf.TotalTokens, inf.InputTokens, inf.CacheReadTokens,
+		inf.CacheWriteTokens, inf.OutputTokens, inf.ReasoningTokens,
+	} {
+		if n < 0 || n > maxPlausibleRequestTokens {
+			return false
+		}
+	}
+	return true
+}
+
+// addSat is a + b, clamped to the int64 range instead of wrapping, and whether it clamped.
+//
+// The test is written as `a > math.MaxInt64-b` rather than by inspecting the sign of the
+// result, because computing the wrapped sum first and then reasoning about it is signed
+// overflow — undefined in most languages and merely unhelpful in Go, where it silently
+// produces the very number this function exists to avoid returning.
+//
+// BOTH DIRECTIONS. No producer in this package can settle a negative cost — costevent refuses
+// one and MicrosFromUSD rejects it — so the lower clamp is unreachable through the aggregator
+// today. It is here because Add is exported, because "unreachable today" is how the wrap
+// arrived in the first place, and because a half-guarded accumulator invites a reader to
+// conclude the other half was considered and ruled out.
+func addSat(a, b int64) (int64, bool) {
+	if b > 0 && a > math.MaxInt64-b {
+		return math.MaxInt64, true
+	}
+	if b < 0 && a < math.MinInt64-b {
+		return math.MinInt64, true
+	}
+	return a + b, false
+}
+
+// CostSum is a running total of money in micros that clamps instead of wrapping, and
+// remembers that it clamped.
+//
+// IT EXISTS BECAUSE Counts.Add IS NOT THE ONLY PLACE MONEY IS SUMMED. Counts.addInto routes
+// every field of an aggregate through addSat — the reasoning is on Counts.Saturated and
+// pricing.MaxCostMicros — but three money accumulates sit outside it, all of them totals
+// DERIVED from Counts rather than fields of one:
+//
+//	seriesCost              sums CostMicros across a label breakdown
+//	Snapshot's ungrouped    the residual, per raw bucket
+//	costledger.Fold's       the same residual, per ledger row
+//
+// Each was a bare `+=` on an int64 that a saturating add had already been chosen for one call
+// frame away. Two saturated buckets or two saturated rows wrap them — reachable at the ~1,024
+// requests pricing.MaxCostMicros documents, and immediately from a hand-edited day file.
+//
+// AND THE RESIDUAL IS THE WORST PLACE FOR IT TO HAPPEN, which is why this is a type rather
+// than an exported function. A wrapped residual goes NEGATIVE, and Snapshot.SetUngroupedCost
+// reads a negative residual as the series having overshot its own total — a condition whose
+// field doc tells the reader this process is wrong about its own arithmetic and to file a bug.
+// So the wrap does not merely produce a wrong number: it fabricates a defect report about
+// correct data and suppresses the real residual while doing it. Clamping alone would still be
+// a lie; the flag is what makes it honest, exactly as Counts.Saturated is for the fields.
+//
+// A TYPE, NOT `func AddCostMicros(a, b int64) (int64, bool)`, for the reason given on
+// Counts.addInto: the point is that one call writes both the figure and the disclosure, so
+// there is no shape in which a caller takes the clamped sum and drops the fact that it
+// clamped. An exported saturating add would have been one `_` away from restoring this bug.
+type CostSum struct {
+	// Micros is the total so far, clamped to the int64 range.
+	Micros int64
+	// Saturated says Micros is a bound rather than a sum. Callers surface it by setting
+	// Counts.Saturated on the totals the residual belongs to: that field already means
+	// "read every money figure here as a bound", and a second flag for the same fact
+	// would let a client trust one while the other contradicted it.
+	Saturated bool
+}
+
+// Add accumulates micros into s.
+func (s *CostSum) Add(micros int64) {
+	sum, saturated := addSat(s.Micros, micros)
+	s.Micros = sum
+	if saturated {
+		s.Saturated = true
+	}
+}
+
+// Sub subtracts micros from s, which is how a residual is computed: a bucket's total
+// minus what its breakdown accounted for.
+//
+// Separate from Add(-micros) for one input only, and it is the input that made
+// SetUngroupedCost need its own guard: math.MinInt64 has no positive counterpart, so
+// negating it yields math.MinInt64 again and SUBTRACTING it would add. Reachable only
+// from an already-clamped figure, and clamped to the ceiling with the flag set rather
+// than being special-cased into exactness — the true answer is out of range in that
+// direction whatever s holds, and pretending otherwise for the sub-case where it
+// happens to fit would put a branch nothing can test in the middle of the one
+// arithmetic in this file that must be obviously right.
+func (s *CostSum) Sub(micros int64) {
+	if micros == math.MinInt64 {
+		s.Micros, s.Saturated = math.MaxInt64, true
+		return
+	}
+	s.Add(-micros)
 }
 
 // Bucket is one BucketWidth slice of time, as served to clients.
@@ -136,8 +470,55 @@ type bucket struct {
 	// latN counts only the requests that actually carried a duration. Dividing
 	// latSum by Requests instead reports a mean diluted by every unmeasured
 	// response: one 2s response plus one unmeasured one reported 1s, not 2s.
-	latN     int64
+	latN int64
+	// byMethod tallies by the model named on the request — despite the name, which
+	// is the one GroupModel shipped under. See GroupModel's godoc: nothing has ever
+	// put an A2A or MCP method name in here.
 	byMethod map[string]Counts
+	// byEndpoint tallies by target host. Bounded by maxLabelsPerBucket like every
+	// other label map: Host comes off the request, so its cardinality is set
+	// off-host rather than by anything this process controls.
+	byEndpoint map[string]Counts
+	// bySession tallies by the session the event was recorded under, so ONE
+	// snapshot of the all-sessions ring answers for every row of a sessions list
+	// instead of costing a request per row.
+	//
+	// Bounded by maxLabelsPerBucket like every other label map, and here the bound
+	// is the load-bearing one: the id is request-derived rather than process-chosen —
+	// the reverse proxy takes it from the A2A contextId and falls back to "default"
+	// (reverseproxy.inboundSessionID) — so its cardinality is set off-host. A client
+	// varying the contextId every turn would otherwise add a retained map entry and a
+	// retained string per request, in a ring that frees a slot only a full lap later.
+	//
+	// Recorded on the per-session rings too, where it is a single-key map and
+	// redundant. That is deliberate: a uniform call site in foldInto cannot fall out
+	// of step with itself, and one key costs nothing.
+	bySession map[string]Counts
+	// byAgent tallies by the coding agent that made the request, as
+	// pipeline.EventClient.Label reports it ("claude-code/2.1.14").
+	//
+	// NO INFERENCE GUARD, unlike byMethod. It is folded for every event, so MCP, A2A
+	// and tool traffic are attributed here too — which means this axis has a
+	// DIFFERENT DENOMINATOR from group=model's, exactly as byEndpoint does. A client
+	// putting a per-agent table beside a per-model one will not see the request counts
+	// reconcile, and that is correct rather than a bug. Deliberate: "what did this
+	// agent cost me" has to include the tool calls it made, not only its LLM turns.
+	//
+	// Bounded by maxLabelsPerBucket and maxLabelLen like every other label map, and here
+	// the bound is load-bearing for the same reason bySession's is: the key is derived from
+	// a REQUEST HEADER, so both its length and its cardinality are set off-host. Capped
+	// twice on the way in — pipeline.maxClientLen when the header is first retained, then
+	// truncateLabel at the addLabel call in foldInto.
+	//
+	// The value is CLIENT-ASSERTED AND TRIVIALLY SPOOFABLE, so this is a display axis and
+	// never a basis for a policy decision; see pipeline.EventClient.
+	//
+	// An event with no client folds under the reserved "unknown" bucket rather than "" —
+	// Label() is nil-safe and answers that — because a blank key renders as a blank row,
+	// which reads as a rendering bug rather than as unattributed traffic. "unknown" is NOT
+	// an agent name. An agent that WAS reported but matched no known name keeps its raw
+	// User-Agent instead, so a new coding agent never pools in with untagged traffic.
+	byAgent  map[string]Counts
 	byStatus map[string]Counts
 	byPlugin map[string]Counts
 	byHost   map[string]Counts
@@ -152,28 +533,60 @@ type bucket struct {
 	// same counts but a coverage gap, and a client needs it whichever grouping it
 	// asked for.
 	byUnpriced map[string]Counts
+	// byIncomplete tallies inexact figures by WHICH WAY they are inexact, keyed on
+	// costevent.Event.IncompleteReason. Outside the Group machinery for the same
+	// reason as the two above: it qualifies the dollar total, so a client needs it
+	// whichever grouping it asked for.
+	//
+	// Counts.IncompleteRequests answers how many; this answers in which way, and the
+	// two are different claims about money. A floor (a stream that died before its
+	// output count) means the real figure is HIGHER — "at least $X" — while an
+	// approximation (a gateway reporting only a total) means it is off in NO KNOWN
+	// DIRECTION — "roughly $X". A client that can only see the count has to render
+	// both the same way, which is how a permanent property of a gateway comes to read
+	// as an incident.
+	byIncomplete map[string]Counts
 }
 
 // eventCost is one event's settled cost, decoded once per Record and passed to
 // each ring's foldInto.
 //
-// Cost is read from the figure litellm-budget-track settles per response and
-// publishes on the session event (see authlib/costevent): it prefers the
-// gateway's own post-discount cost header and falls back to pricing the usage
-// block. So the number here is a plugin's measurement, not a rate table's guess,
-// and this package holds no rates of its own — deployment-specific pricing is
-// not something authlib should assert.
+// Cost is read from the figure inference-parser settles per response and publishes
+// on the session event (see authlib/costevent): it prefers the gateway's own
+// post-discount cost header and falls back to pricing the parsed token counters.
+// litellm-budget-track consumes that figure to enforce a budget; it settles nothing
+// of its own.
 //
-// Traffic the plugin did not price contributes no cost and is visible as the gap
-// between Counts.PricedRequests and Counts.Requests. Modelled rates for that
-// traffic arrive with the pricing resolver; see
-// docs/superpowers/specs/2026-09-09-pricing-consolidation-design.md.
+// THIS PACKAGE IS NOT RATE-FREE. WithPricing stores a pricing.Resolver, and costOf below
+// resolves a rate for any request that carries a model and tokens but arrives with no cost
+// record. So there are two sources: a published figure is preferred, a modelled one is the
+// fallback, and the two can answer differently about the same request. Collapsing them onto
+// the parser's figure alone is later work — until it lands, do not describe cost here as
+// coming from a single place.
+//
+// Traffic neither path could price contributes no cost and is visible as the gap between
+// Counts.PricedRequests and Counts.PriceableRequests — NOT against Counts.Requests, which
+// counts traffic that could never have carried a price and so never reaches parity;
+// Snapshot.UnpricedBy names the endpoint/model pairs involved. See
+// authbridge/docs/superpowers/specs/2026-09-09-pricing-consolidation-design.md.
 type eventCost struct {
 	micros int64
 	// priced is 1 when a cost was found and 0 otherwise, so it sums into
 	// Counts.PricedRequests as a coverage count rather than needing a separate
 	// branch at every accumulation site.
 	priced int64
+	// incomplete is 1 when micros is not an exact total. It rides ALONGSIDE priced,
+	// which stays 1: the figure exists and belongs in every total it was already in, and
+	// only the claim of exactness is withdrawn. See Counts.IncompleteRequests and
+	// costevent.Event.Incomplete.
+	incomplete int64
+	// incompleteReason names WHICH WAY micros is inexact — pricing.ReasonOutputUncounted
+	// for a floor, pricing.ReasonSplitUnreported for an approximation — so the aggregate
+	// can report the two separately instead of collapsing them into the counter's one
+	// bit. Empty for an exact figure, and never empty when incomplete is 1: see
+	// unlabelledReason for the case where the producer disclosed the caveat and not the
+	// reason.
+	incompleteReason string
 	// priceable is 1 when the request carried a model and tokens, so it belongs in
 	// the coverage denominator whether or not a rate was found.
 	priceable int64
@@ -191,15 +604,14 @@ type eventCost struct {
 // costOf settles one event's cost, preferring a published figure and falling back
 // to the rate table.
 //
-// The order is deliberate. A cost event is a figure litellm-budget-track already
+// The order is deliberate. A cost event is a figure inference-parser already
 // settled — often the gateway's own post-discount number — so it is never
-// second-guessed by a model. The resolver covers what that plugin did not: a
-// pipeline without it, or a request whose response carried no header.
+// second-guessed by a model. The resolver covers what the parser did not: a
+// pipeline without it, or a request whose response carried no usable figure.
 //
-// Before this fallback, cost required that plugin to be present. A deployment
-// running only inference-parser reported every request unpriced however many
-// tokens it burned, which reads as "this traffic was free" rather than "nothing
-// here priced it".
+// Without the fallback, cost requires some plugin to have published a figure, and a
+// deployment running only inference-parser reports every request unpriced however many tokens
+// it burned — which reads as "this traffic was free" rather than "nothing here priced it".
 //
 // Runs outside the aggregator's lock: resolution is a read of an immutable table
 // and must not hold up the hot path.
@@ -210,24 +622,66 @@ func (a *Aggregator) costOf(e *pipeline.SessionEvent) eventCost {
 			// An event from a producer predating the field. It is a settled figure,
 			// so the honest label is authoritative-or-modelled-unknown rather than
 			// silently claiming either.
-			prov = "unlabelled"
+			prov = unlabelledLabel
 		}
-		return eventCost{micros: ce.Micros(), priced: 1, priceable: 1, provenance: prov}
+		ec := eventCost{micros: ce.Micros(), priced: 1, priceable: 1, provenance: prov}
+		if ce.Incomplete {
+			// Disclosed, not deducted. micros, priced and provenance all stand: the
+			// figure exists, something priced it, and it came from where provenance
+			// says. Only exactness is withdrawn. See costevent.Event.Incomplete for why
+			// adjusting any of the three would be the worse answer, and
+			// Counts.IncompleteRequests for what a client does with this.
+			ec.incomplete = 1
+			// The REASON travels with the count, because a floor and an approximation are
+			// different claims about money — see bucket.byIncomplete. The producer sends
+			// both fields together (costing.Settle sets neither alone), so an empty reason
+			// here means an event from a producer predating IncompleteReason; labelled
+			// rather than dropped, for the reason unlabelledLabel gives.
+			ec.incompleteReason = ce.IncompleteReason
+			if ec.incompleteReason == "" {
+				ec.incompleteReason = unlabelledLabel
+			}
+		}
+		return ec
 	}
 	// Only inference traffic can be priced or named. A plain proxied request has no
 	// model and no tokens, and is neither.
 	if e.Inference == nil || e.Inference.Model == "" {
 		return eventCost{}
 	}
-	u := pricing.UsageFromInference(e.Inference)
-	// A response carrying no tokens cannot be priced and is not a pricing GAP
-	// either: a 5xx, or a denial after the parser ran, reports a model with zero
-	// usage. Naming it would advertise a missing rate for a model that may well
-	// have one, and adding that entry would never make the row disappear.
-	if u == (pricing.Usage{}) {
-		return eventCost{}
-	}
 	key := e.Host + " " + e.Inference.Model
+	u := pricing.UsageFromInference(e.Inference)
+	if u == (pricing.Usage{}) {
+		// A FAILED response carrying no tokens is not a pricing gap: a 5xx, or a
+		// denial after the parser ran, reports a model with zero usage. Naming it
+		// would advertise a missing rate for a model that may well have one, and
+		// adding that entry would never make the row disappear.
+		if e.StatusCode >= 400 || e.Phase == pipeline.SessionDenied {
+			return eventCost{}
+		}
+		// A SUCCEEDED one is a coverage gap and must be counted as one. Returning a
+		// bare eventCost{} here left the request in Requests and out of
+		// PricedRequests, PriceableRequests and UnpricedBy alike — so nine priced
+		// requests plus one of these read "9/9 priced", parity, while real spend was
+		// missing. That falsifies Counts.PriceableRequests' own promise that the
+		// ratio "reaches parity when it should".
+		//
+		// The dominant instance is a TRUNCATED OPENAI-DIALECT STREAM. OpenAI puts
+		// every counter on the final chunk, so a stream that dies mid-body yields no
+		// usage at all — not even a floor, because pricing.outputUncounted needs a
+		// prompt-side count to be a lower bound OF. Anthropic escapes this only
+		// because message_start carries the prompt counts, which is why the
+		// incomplete-reason path catches it there and never sees it here. Also
+		// reachable on a request/response stream-shape mismatch, since the parser
+		// picks its arm from the REQUEST's stream flag.
+		//
+		// Unpriced, never priced-zero: no figure was settled, so claiming one would
+		// report unmeasured traffic as free. Named, because the parser recognised
+		// this traffic well enough to report a Model — the information to name the
+		// gap was in hand, and this is not the off-allowlist blindness the design
+		// declares out of scope, where nothing is recognised at all.
+		return eventCost{priceable: 1, unpricedKey: key}
+	}
 	if a.rates == nil {
 		return eventCost{priceable: 1, unpricedKey: key}
 	}
@@ -244,8 +698,35 @@ func (a *Aggregator) costOf(e *pipeline.SessionEvent) eventCost {
 		// extend rather than to create.
 		return eventCost{priceable: 1, unpricedKey: key}
 	}
-	return eventCost{micros: micros, priced: 1, priceable: 1, provenance: prov.String()}
+	ec := eventCost{micros: micros, priced: 1, priceable: 1, provenance: prov.String()}
+	// The same exactness test the producer applies, on this package's OWN figure. There
+	// are two sources of cost here (see the type doc above) and a truncated stream
+	// reaching this fallback is priced prompt-only exactly as it would have been by the
+	// producer — so leaving the test on one side of the fork would disclose the caveat
+	// for one of the two ways a figure can arrive and not the other.
+	//
+	// The reason is kept, not just the bit: this arm has the actual answer in hand —
+	// pricing.IncompleteReason returns which of the two it is — and throwing it away here
+	// would make a fallback-priced window unable to say what a producer-priced one can.
+	if reason := pricing.IncompleteReason(e.Inference); reason != "" {
+		ec.incomplete, ec.incompleteReason = 1, reason
+	}
+	return ec
 }
+
+// unlabelledLabel is the reserved key for a caveat a producer disclosed WITHOUT saying
+// which kind it was: an event from a version predating the field that names it.
+//
+// One spelling for both maps that need one — PricedBy's provenance and IncompleteBy's
+// reason — because it is the same situation in both: the producer stated the fact and not
+// the label. It cannot collide with a real value; pricing's reasons are hyphenated
+// lowercase ("output-uncounted", "split-unreported") and its provenance levels are
+// ("authoritative", "configured", "discovered", "bundled").
+//
+// LABELLED, never dropped, so IncompleteBy's counts sum to Counts.IncompleteRequests. A
+// client subtracting the map from the counter to find "the rest" must get zero; silently
+// omitting a row would make that difference read as requests whose figures are exact.
+const unlabelledLabel = "unlabelled"
 
 // Aggregator is a fixed ring of per-minute buckets. Safe for concurrent use.
 //
@@ -427,11 +908,11 @@ func (a *Aggregator) Record(sessionID string, e *pipeline.SessionEvent) {
 	}
 
 	t := at.Truncate(BucketWidth)
-	a.foldInto(a.all, t, e, requestPlugins, ec)
+	a.foldInto(a.all, t, sessionID, e, requestPlugins, ec)
 
 	if ring, ok := a.sessions[sessionID]; ok {
 		ring.lastSeen = at
-		a.foldInto(ring.buckets, t, e, requestPlugins, ec)
+		a.foldInto(ring.buckets, t, sessionID, e, requestPlugins, ec)
 		return
 	}
 	// maxSess == 0 means no per-session rings at all — see WithMaxSessions. The
@@ -449,7 +930,7 @@ func (a *Aggregator) Record(sessionID string, e *pipeline.SessionEvent) {
 	}
 	ring := &sessionRing{buckets: make([]bucket, NumBuckets), lastSeen: at}
 	a.sessions[sessionID] = ring
-	a.foldInto(ring.buckets, t, e, requestPlugins, ec)
+	a.foldInto(ring.buckets, t, sessionID, e, requestPlugins, ec)
 }
 
 // holdRequestPluginsLocked stashes a request event's plugin names until its
@@ -537,7 +1018,13 @@ func (a *Aggregator) evictColdestLocked() {
 	}
 }
 
-func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEvent, requestPlugins []string, ec eventCost) {
+// foldInto accumulates one event into one ring.
+//
+// sessionID is passed rather than derived because the ring itself does not know
+// which session it belongs to: a.all is shared and a sessionRing holds only
+// buckets. Both call sites pass the same id, which is what lets the bySession
+// label be recorded uniformly instead of only on the all-sessions ring.
+func (a *Aggregator) foldInto(ring []bucket, t time.Time, sessionID string, e *pipeline.SessionEvent, requestPlugins []string, ec eventCost) {
 	b := &ring[slot(t)]
 	if !b.start.Equal(t) {
 		*b = bucket{start: t} // stale lap: reset rather than accumulate onto old data
@@ -545,23 +1032,66 @@ func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEve
 
 	var tokens int64
 	var model string
+	// split is read from the wire event's own split counters rather than derived
+	// from tokens: the parser is the only component that knows the breakdown, and
+	// there is no way to recover it from the total afterwards.
+	var split Counts
+	// refusedTokens is 1 when the report was rejected as implausible, so the drop is
+	// counted rather than silent. See Counts.RefusedTokenRequests.
+	var refusedTokens int64
 	if e.Inference != nil {
-		tokens = int64(e.Inference.TotalTokens)
 		model = e.Inference.Model
+		if plausibleTokenReport(e.Inference) {
+			tokens = int64(e.Inference.TotalTokens)
+			split = Counts{
+				InputTokens:      int64(e.Inference.InputTokens),
+				CacheReadTokens:  int64(e.Inference.CacheReadTokens),
+				CacheWriteTokens: int64(e.Inference.CacheWriteTokens),
+				OutputTokens:     int64(e.Inference.OutputTokens),
+				ReasoningTokens:  int64(e.Inference.ReasoningTokens),
+				PresentKinds:     e.Inference.PresentKinds,
+			}
+		} else {
+			// REFUSED WHOLE, including PresentKinds. Those bits assert "the provider reported
+			// these kinds", and this branch is the one where that report is not believed; a
+			// breakdown flagged as present with every figure dropped would be the worst of both
+			// answers. The model is still carried: the request happened, and which model it
+			// named is a label rather than a number.
+			refusedTokens = 1
+		}
 	}
 
 	one := Counts{
-		Requests:          1,
-		Tokens:            tokens,
-		CostMicros:        ec.micros,
-		PricedRequests:    ec.priced,
-		PriceableRequests: ec.priceable,
+		Requests:             1,
+		Tokens:               tokens,
+		CostMicros:           ec.micros,
+		PricedRequests:       ec.priced,
+		IncompleteRequests:   ec.incomplete,
+		PriceableRequests:    ec.priceable,
+		RefusedTokenRequests: refusedTokens,
 	}
+	// The split is CARRIED rather than re-enumerated. Add is the one summation over Counts'
+	// fields, for the reason its own doc gives, and re-listing six of them here would be the
+	// same exposure at the same distance: a field added to Counts and wired into Add would
+	// still be dropped on the floor by this literal, and nothing would fail.
+	//
+	// Behaviour-identical, not merely equivalent-looking: split is only ever built from the
+	// token counters above, so every other field is zero on one side of Add's `+=`, and
+	// PresentKinds is `0 | x`. Errors is set below and so is unaffected by the order.
+	one.Add(split)
 	if ec.unpricedKey != "" {
-		addLabel(&b.byUnpriced, truncateLabel(ec.unpricedKey), Counts{Requests: 1})
+		addLabel(&b.byUnpriced, ringLabel(ec.unpricedKey), Counts{Requests: 1})
 	}
 	if ec.provenance != "" {
-		addLabel(&b.byProvenance, truncateLabel(ec.provenance), Counts{Requests: 1})
+		addLabel(&b.byProvenance, ringLabel(ec.provenance), Counts{Requests: 1})
+	}
+	// Keyed on the reason, counted per request: Counts.IncompleteRequests above says how
+	// many figures are inexact, and this says in which way — "at least $X" versus "roughly
+	// $X", which are different claims about money. Non-empty exactly when incomplete is 1
+	// (costOf labels an unlabelled caveat rather than dropping it), so these counts sum to
+	// IncompleteRequests.
+	if ec.incompleteReason != "" {
+		addLabel(&b.byIncomplete, ringLabel(ec.incompleteReason), Counts{Requests: 1})
 	}
 	if e.StatusCode >= 400 || e.Phase == pipeline.SessionDenied {
 		one.Errors = 1
@@ -577,7 +1107,7 @@ func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEve
 	}
 
 	if model != "" {
-		addLabel(&b.byMethod, truncateLabel(model), one)
+		addLabel(&b.byMethod, ringLabel(model), one)
 	}
 	// Host is the :authority as the listener saw it, so it is request-controlled
 	// and goes through truncateLabel like the model name. Guarded on empty for the
@@ -595,6 +1125,33 @@ func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEve
 	if h := hostLabel(e.Host); h != "" {
 		addLabel(&b.byHost, truncateLabel(h), one)
 	}
+	// Recorded on whichever ring is being folded, including the per-session one
+	// where it is redundant — a uniform call site beats a conditional, and the
+	// per-session map has exactly one key so it costs nothing.
+	//
+	// Empty is skipped for the same reason Host is below: an unattributed event
+	// would render as a blank row, which reads as a bug rather than as missing
+	// attribution.
+	//
+	// What a key MEANS is the listener's business, not this package's. While
+	// several concurrent agents are recorded under one session id (#949), their
+	// spend lands in one entry and a per-session figure is a per-id figure — a
+	// caveat about the current session-bucketing behaviour, not about this axis.
+	if sessionID != "" {
+		addLabel(&b.bySession, ringLabel(sessionID), one)
+	}
+	// Guarded on non-empty: Host is unset when the listener did not populate it,
+	// and an "" key renders as a blank row in a breakdown table, which reads as a
+	// bug rather than as missing data.
+	if e.Host != "" {
+		addLabel(&b.byEndpoint, ringLabel(e.Host), one)
+	}
+	// UNCONDITIONAL, where byMethod and byEndpoint are guarded on a non-empty value.
+	// Label() is nil-safe and answers "unknown" for an event that carried no client,
+	// so there is no empty key to guard against — and folding unconditionally is what
+	// makes this axis's series sum to the bucket total. That is also what gives it a
+	// different denominator from group=model's; see byAgent.
+	addLabel(&b.byAgent, ringLabel(e.Client.Label()), one)
 	if e.StatusCode > 0 {
 		addLabel(&b.byStatus, strconv.Itoa(e.StatusCode), one)
 	} else if e.Phase == pipeline.SessionDenied {
@@ -612,22 +1169,22 @@ func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEve
 	// turn — a worse error than over-reporting tokens, because it reads as spend.
 	// Use Totals for any dollar figure; the per-plugin values answer "what did
 	// traffic this plugin saw cost", not "what did this plugin cost".
-	// Invocations is a POINTER and is nil whenever no plugin appended a record —
-	// which is the common case for a plain proxied response. Dereferencing it
-	// unguarded panics inside Store.Append, i.e. on the request hot path.
-	// Response-phase plugins from this event, plus the request-phase plugins held
-	// from its paired request event. Deduped across the two halves: a plugin that
-	// ran in both phases is still one plugin that touched one turn.
+	//
+	// Response-phase plugins from this event, plus the request-phase plugins held from its
+	// paired request event. Deduped across the two halves: a plugin that ran in both phases
+	// is still one plugin that touched one turn. invocationPlugins is nil-safe, which it has
+	// to be — Invocations is a POINTER and is nil for any plain proxied response, and
+	// dereferencing it unguarded would panic inside Store.Append, on the request hot path.
 	seen := make(map[string]bool, 4)
 	for _, name := range invocationPlugins(e.Invocations) {
 		seen[name] = true
-		addLabel(&b.byPlugin, name, one)
+		addLabel(&b.byPlugin, ringLabel(name), one)
 	}
 	for _, name := range requestPlugins {
 		if seen[name] {
 			continue
 		}
-		addLabel(&b.byPlugin, name, one)
+		addLabel(&b.byPlugin, ringLabel(name), one)
 	}
 }
 
@@ -651,6 +1208,28 @@ const maxLabelsPerBucket = 64
 // operator can see that cardinality was capped instead of wondering why a model
 // is missing.
 const overflowLabel = "(other)"
+
+// MaxSeriesInResponse bounds how many label series ONE RESPONSE carries, per bucket.
+//
+// A SEPARATE BOUND FROM maxLabelsPerBucket, and the reason both exist is that they bound
+// different things. That one is a MEMORY bound at record time: 64 per axis, so a caller
+// varying a label per request cannot grow this process. This one is a RESPONSE bound, and
+// nothing was enforcing it — the two multiply. Measured on the endpoint as shipped:
+// window=6h&resolution=1m&group=session is 360 buckets times up to 64 series, which produced
+// a 4.7 MB response from a single unauthenticated GET.
+//
+// SIXTEEN, because the response is something a person reads. A by-model or by-agent breakdown
+// past a dozen rows is not a breakdown anyone consumes; the rest belongs in the (other) band,
+// which every client already renders because the record-time cap has always produced it. That
+// is the property that makes this cheap: no new wire vocabulary, and a client written against
+// the old shape shows a correct total with one extra row.
+//
+// RANKED ACROSS THE WHOLE WINDOW, not per bucket, which is the part that has to be got right.
+// Capping each bucket independently would let the SAME label be a series in one minute and
+// part of (other) in the next, so a chart would show a line appearing and vanishing while the
+// traffic behind it was steady. The ranking is by cost, because this is a cost API and the
+// question "where did the money go" is the one the top of the list has to answer.
+const MaxSeriesInResponse = 16
 
 // maxLabelLen bounds one retained label. The model name is request-controlled, so
 // without this a caller could park a megabyte of string in a bucket that lives
@@ -688,11 +1267,226 @@ func hostLabel(authority string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(authority, "["), "]")
 }
 
+// truncateLabel caps a label at maxLabelLen BYTES, cutting on a rune boundary.
+//
+// BYTES, because that is what bounds the memory a label occupies and the line it becomes in
+// the ledger; RUNE BOUNDARY, because a byte cut breaks the very byte cap it enforces. A plain
+// s[:maxLabelLen] can split a multi-byte sequence and leave an invalid trailing fragment, and
+// encoding/json then expands each invalid byte into a 3-byte U+FFFD — so a 121-byte label cut
+// at 96 SERIALISES AT 100 BYTES (measured in costledger, where the same defect was fixed
+// first). The invalid fragment is the smaller problem; the cap silently not holding is the
+// reason this is a fix rather than tidying.
+//
+// Walking back off continuation bytes shortens the label by at most three bytes, which no
+// real model id notices.
 func truncateLabel(s string) string {
 	if len(s) <= maxLabelLen {
 		return s
 	}
-	return s[:maxLabelLen]
+	cut := maxLabelLen
+	// At most three steps: no UTF-8 sequence is longer than four bytes.
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// ringLabel prepares one string for a bucket's label map: sanitised, then capped.
+//
+// THE ORDER MATTERS, for the reason costledger.rowLabel gives: sanitising can triple a
+// string's length — every replaced byte becomes a 3-byte U+FFFD — so capping first would let
+// 96 control bytes become 288 and break the bound. Capping last is exact now that
+// truncateLabel cuts on a rune boundary.
+func ringLabel(s string) string {
+	return truncateLabel(sanitizeLabel(s))
+}
+
+// sanitizeLabel replaces C0 controls, DEL, C1 controls and invalid UTF-8 with U+FFFD.
+//
+// THE RING IS A SERVING SURFACE OF ITS OWN. The model comes off the parsed request body and
+// the endpoint is the host the workload asked for, so without this GET /v1/usage serves a
+// model name containing an ANSI escape straight out of memory — while the ledger's copy of the
+// very same label is clean, because costledger sanitises on write. Two surfaces, one request,
+// different bytes: group=model shows the label as two series, and the unsanitised one can
+// reposition an operator's cursor. CWE-150.
+//
+// REPLACED, NOT DROPPED, so tampering stays visible rather than collapsing into a
+// plausible-looking label: "m\x1b[31mx" reads as "m�[31mx" rather than as "m[31mx",
+// which nobody would question.
+//
+// C1 IS INCLUDED — U+0080–U+009F — and so are the bidi and zero-width runes; isControlRune
+// names the set and pipeline.sanitizeUA carries the argument for it. The short version: U+009B
+// is a single-character CSI, so a byte scan for anything below 0x20 steps straight past a
+// working escape sequence, which is why the scan below decodes runes.
+//
+// FOURTH COPY OF A FIVE-LINE RULE, AND THE LAYERING IS WHY:
+//
+//   - pipeline.sanitizeUA is PRIMARY for the Agent label, at the point a User-Agent header
+//     becomes a value, so it already covers this package's byAgent.
+//   - costledger.sanitizeLabel is PRIMARY for the durable row — the copy in front of a file
+//     retained for retentionDays that cannot be edited afterwards.
+//   - THIS one is primary for the RING's byMethod and byEndpoint, which reach /v1/usage
+//     without passing through either of the other two.
+//   - abctl's tui.sanitizeLabel is a render-time copy in a main module this library must not
+//     import, and still filters C0 and DEL only.
+//
+// Neither of the first two is reachable from here: pipeline's is unexported and costledger
+// IMPORTS this package, so referencing it would invert the layering into a cycle. A shared
+// leaf package is the real fix and cannot be done from this side alone — migrating one caller
+// to it while the other two stay put makes five copies rather than one. So: copied, with the
+// rule stated identically, and a change to any of them belongs in all of them.
+func sanitizeLabel(s string) string {
+	if !hasControlRunes(s) {
+		// The overwhelmingly common case, and no allocation for it: this runs on the fold path,
+		// once per label per event, under the aggregator's write lock.
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+			b.WriteRune('�')
+			i += size
+			continue
+		}
+		b.WriteString(s[i : i+size])
+		i += size
+	}
+	return b.String()
+}
+
+// hasControlRunes reports whether s carries anything sanitizeLabel would replace.
+//
+// A RUNE scan for the reason in sanitizeLabel: a byte scan is exact for C0 and DEL and blind
+// to C1. An INVALID byte reports true (RuneError at size 1 is the decoder saying "this is not
+// UTF-8"); a legitimately encoded U+FFFD does not, because it decodes at size 3, so an
+// already-sanitised label does not read as still hostile.
+func hasControlRunes(s string) bool {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+			return true
+		}
+		i += size
+	}
+	return false
+}
+
+// isControlRune is the shared rule: C0, DEL, C1, and the bidi and zero-width runes that
+// rewrite or hide the text around them. Identical to costledger.isControlRune and pipeline's,
+// deliberately — see sanitizeLabel.
+//
+// THE THREE COPIES MOVE TOGETHER. This one is the /v1/usage serving path, so a rune that gets
+// past it reaches every client of that endpoint whatever the other two do — which is the
+// reason the identical-rule rule exists rather than being tidiness. See
+// pipeline.isControlRune for why bidi and zero-width belong in the same set as C1.
+func isControlRune(r rune) bool {
+	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+		return true
+	}
+	switch r {
+	case // Bidi overrides and isolates: reorder the glyphs around them.
+		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+		'\u2066', '\u2067', '\u2068', '\u2069',
+		// Zero-width: make two distinct labels render identically.
+		'\u200b', '\u200c', '\u200d', '\u2060', '\ufeff':
+		return true
+	}
+	return false
+}
+
+// CapSeries folds everything past the n costliest entries into the (other) band.
+//
+// EXPORTED FOR costledger, which serves the symbolic windows from disk and had no bound of its
+// own at all: its rows come from day files, so the number of distinct (endpoint, model, agent)
+// keys in a response is however many a month of traffic produced. One map rather than a whole
+// snapshot, because that source answers with a single bucket.
+//
+// Ranked by cost, ties broken by requests and then by label, so the answer is deterministic —
+// a breakdown whose membership changed between two identical requests would be worse than an
+// unbounded one, because a client could not tell a traffic change from a tie-break.
+//
+// The (other) entry is Counts.Add-ed, so every field it carries is summed by the one
+// summation point and a field added to Counts is carried here with no edit.
+func CapSeries(series map[string]Counts, n int) map[string]Counts {
+	if len(series) <= n {
+		return series
+	}
+	keys := make([]string, 0, len(series))
+	for k := range series {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := series[keys[i]], series[keys[j]]
+		if a.CostMicros != b.CostMicros {
+			return a.CostMicros > b.CostMicros
+		}
+		if a.Requests != b.Requests {
+			return a.Requests > b.Requests
+		}
+		return keys[i] < keys[j]
+	})
+	out := make(map[string]Counts, n+1)
+	var other Counts
+	for i, k := range keys {
+		if i < n {
+			out[k] = series[k]
+			continue
+		}
+		other.Add(series[k])
+	}
+	// Merged rather than assigned: a label spelled "(other)" by a caller is already in the
+	// map, and overwriting it would drop that traffic. The band is not a reserved key — see
+	// costledger's overflowLabel, which makes the same point about spoofability.
+	cur := out[overflowLabel]
+	cur.Add(other)
+	out[overflowLabel] = cur
+	return out
+}
+
+// capSeriesAcrossWindow applies MaxSeriesInResponse to every bucket using ONE ranking taken
+// over the whole window, so a label is either a series everywhere or (other) everywhere.
+//
+// See MaxSeriesInResponse for why per-bucket capping is the wrong shape. The ranking is built
+// from the same Counts.Add the totals use, so "costliest" means the same thing here as in the
+// figure the client renders above the chart.
+func capSeriesAcrossWindow(buckets []Bucket, n int) {
+	window := map[string]Counts{}
+	for _, b := range buckets {
+		for k, v := range b.Series {
+			cur := window[k]
+			cur.Add(v)
+			window[k] = cur
+		}
+	}
+	if len(window) <= n {
+		return
+	}
+	keep := make(map[string]bool, n)
+	for k := range CapSeries(window, n) {
+		keep[k] = true
+	}
+	for i := range buckets {
+		if len(buckets[i].Series) == 0 {
+			continue
+		}
+		out := make(map[string]Counts, n+1)
+		var other Counts
+		for k, v := range buckets[i].Series {
+			if keep[k] {
+				out[k] = v
+				continue
+			}
+			other.Add(v)
+		}
+		if other != (Counts{}) {
+			cur := out[overflowLabel]
+			cur.Add(other)
+			out[overflowLabel] = cur
+		}
+		buckets[i].Series = out
+	}
 }
 
 func addLabel(m *map[string]Counts, key string, c Counts) {
