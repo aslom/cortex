@@ -34,6 +34,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/auth"
 	"github.com/rossoctl/cortex/authbridge/authlib/clientstate"
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/costledger"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 	"github.com/rossoctl/cortex/authbridge/authlib/pricing"
@@ -127,6 +128,83 @@ func pluginUsesSPIFFEIdentity(p config.PluginEntry) bool {
 		return false
 	}
 	return probe.Identity.Type == spiffeIdentityType
+}
+
+// warnCostLedgerNeedsSessions says out loud that the cost ledger will not run
+// because session tracking is off. Safe to call unconditionally — it checks both
+// settings itself, and stays silent when there is nothing to report.
+//
+// The ledger records by being registered as a Recorder on the session store, and the
+// whole block that constructs it is nested inside `if cfg.Session.SessionEnabled()`.
+// With sessions off it is therefore unreachable rather than merely idle — and it used
+// to be unreachable in complete silence: no error, no warning, not one log line
+// naming the ledger, so an operator whose cost history was empty had to read main.go
+// to find out why.
+//
+// The explicit contradiction (`cost_ledger.enabled: true` with `session.enabled:
+// false`) is refused at load by config.Validate, so it never reaches here. What
+// reaches here is the DEFAULT-ON case: a local install has the ledger on without
+// anyone writing it down, and turning sessions off there is a legitimate choice that
+// still silently costs the cost history. Only this binary knows which default
+// applies, which is why the line is emitted here rather than in the config package.
+//
+// Names both settings, because the fix is a decision between them and a message that
+// named only one would send the reader to the wrong file.
+// ledgerDefaultOn decides whether an unset cost_ledger.enabled means ON, and says why.
+//
+// ON WHEREVER THE LEDGER CAN ACTUALLY DELIVER, which is the rule that replaces localMode. The
+// old default was true under --local and false otherwise, so it described which FLAG started
+// the process rather than whether durable cost history was achievable — and since every
+// service install runs --config, the documented default was false on every installed laptop.
+//
+// Two ways to be durable, either sufficient:
+//
+//	an explicit cost_ledger.dir   an operator named a path, which in Kubernetes means a
+//	                              volume is mounted there. Nothing else in this process can
+//	                              see a volume, so this is the signal.
+//	a resolvable home directory   the laptop case: ~/.cortex/cost persists across restarts,
+//	                              which is the entire point of the feature.
+//
+// And one way to be neither: no dir, no $HOME. That is a container with no volume, where the
+// only writable place is the image layer — wiped on every restart, so the ledger would pay
+// its whole cost and keep nothing, and counted against ephemeral-storage, where exceeding the
+// limit EVICTS the pod. Measured growth is 36 MB to 1.2 GB per 30 days depending on label
+// cardinality, so that is not a hypothetical limit. Off, with the reason said out loud.
+//
+// The reason is returned rather than logged here so the caller can log it once, next to the
+// other ledger lines, instead of this being a function with a side effect.
+func ledgerDefaultOn(cfg *config.Config) (bool, string) {
+	if cfg.CostLedger.DirSet() {
+		return true, "cost_ledger.dir names a durable location"
+	}
+	if _, err := defaultCortexDir(); err == nil {
+		return true, "a home directory resolves, so ~/.cortex/cost persists across restarts"
+	}
+	return false, "no cost_ledger.dir and no resolvable home directory, so the only writable " +
+		"location is a container layer that is discarded on restart"
+}
+
+// ledgerDefaultOnValue is ledgerDefaultOn without the reason, for call sites that only need
+// the decision. Kept separate rather than making the reason optional, so no caller can pass a
+// default that disagrees with the one the ledger was built from.
+func ledgerDefaultOnValue(cfg *config.Config) bool {
+	on, _ := ledgerDefaultOn(cfg)
+	return on
+}
+
+func warnCostLedgerNeedsSessions(cfg *config.Config, defaultOn bool, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if cfg.Session.SessionEnabled() || !cfg.CostLedger.LedgerEnabled(defaultOn) {
+		return
+	}
+	logger.Warn("cost ledger will NOT run — session tracking is disabled",
+		"cost_ledger.enabled", true,
+		"session.enabled", false,
+		"reason", "the ledger records through the session store (registered as a Recorder on it), so with the store off nothing reaches it",
+		"effect", "no durable cost history; window=today and window=7d have nothing to read",
+		"fix", "set session.enabled: true, or cost_ledger.enabled: false to say the ledger is not wanted")
 }
 
 func main() {
@@ -371,6 +449,7 @@ func main() {
 
 	var sessions *session.Store
 	var usageAgg *usage.Aggregator
+	var costLedger *costledger.Writer
 	if cfg.Session.SessionEnabled() {
 		// Store parameters come from config.SessionConfig.Limits, which is where the
 		// defaults and the reasoning behind them live — one home for what used to be
@@ -403,10 +482,80 @@ func main() {
 		usageAgg = usage.New(usage.WithMaxSessions(lim.MaxSessions), usage.WithPricing(pricingRegistry))
 		sessions.AddRecorder(usageAgg)
 
+		// The durable cost ledger is a SECOND Recorder alongside the aggregator, not a
+		// reader of it: the aggregator keeps independent marginals (by-model,
+		// by-endpoint, by-provenance) rather than the joint distribution a ledger row
+		// needs, so summing them would double-count. See authlib/costledger.
+		//
+		// ON WHEREVER IT CAN DELIVER, which is not the same as "on for --local". The
+		// default used to be localMode, so it described which flag started the binary
+		// rather than whether durable history was achievable — and every service install
+		// runs --config, which made the documented default false on every installed
+		// laptop. ledgerDefaultOn asks the question that actually decides it: is there a
+		// location that survives a restart? An explicit cost_ledger.dir (a mounted volume
+		// in Kubernetes) or a resolvable home directory both qualify; a container with
+		// neither does not, because its only writable place is discarded on restart and
+		// counted against ephemeral-storage, where the limit evicts the pod rather than
+		// dropping a figure. cost_ledger.enabled still overrides in either direction.
+		defaultOn, whyDefault := ledgerDefaultOn(cfg)
+		if cfg.CostLedger.LedgerEnabled(defaultOn) {
+			dir, derr := costLedgerDir(cfg)
+			if derr != nil {
+				// Not fatal. The ledger is observability, and refusing to start the proxy
+				// because cost history has nowhere to live would trade a nicety for an outage.
+				slog.Warn("cost ledger disabled — cannot determine where to write it",
+					"error", derr, "effect", "cost history will not survive a restart")
+			} else {
+				retention := 0
+				if cfg.CostLedger != nil {
+					retention = cfg.CostLedger.RetentionDays
+				}
+				led, lerr := costledger.New(dir, costledger.WithRetentionDays(retention))
+				if lerr != nil {
+					slog.Warn("cost ledger disabled — could not open it",
+						"dir", dir, "error", lerr, "effect", "cost history will not survive a restart")
+				} else {
+					costLedger = led
+					sessions.AddRecorder(costLedger)
+					slog.Info("cost ledger enabled — durable cost history for window=today and window=7d",
+						"dir", dir, "retentionDays", retention,
+						// WHY it is on, because the default is now derived rather than
+						// keyed on a flag: an operator reading this line can tell an
+						// explicit choice from a resolved one without reading main.go.
+						"default", whyDefault,
+						"note", "closed minutes only, written off the request path; an unclean stop loses up to 60s of cost")
+				}
+			}
+		} else {
+			// Said out loud, at the same level as "session tracking disabled", because the
+			// absence is what makes window=today degrade to the ring's 6 hours — and a
+			// degraded answer with no log line behind it reads as a bug in abctl.
+			slog.Info("cost ledger disabled — window=today and window=7d will be served from the 6h in-memory ring",
+				// The DERIVED reason, not a guess about the deployment. It used to say
+				// "not a local install", which was the old localMode default describing
+				// itself — and it was wrong on the machine where it mattered most, since an
+				// installed laptop service is not a local install by that definition either.
+				"reason", whyDefault,
+				"fix", "set cost_ledger.dir to a path on a mounted volume, or cost_ledger.enabled: true if this filesystem does persist")
+		}
+
+		// Through lim.LogAttrs, not a hand-rolled attribute list. #999 gave the session
+		// store's limits one home, and the local "ttl=0s would read like a
+		// misconfiguration" formatting this branch had here moved with them — so the
+		// zero-value wording now lives beside the limits it describes instead of at this
+		// call site.
 		slog.Info("session tracking enabled", lim.LogAttrs()...)
 	} else {
 		slog.Info("session tracking disabled")
 	}
+	// Outside the branch on purpose: the ledger block above is nested inside
+	// `if cfg.Session.SessionEnabled()`, so with sessions off it is not merely
+	// disabled but unreachable, and this is the only place that knows which
+	// deployment default applied. The helper decides for itself whether there is
+	// anything to say, so this call is unconditional rather than branch-local —
+	// a warning that only exists down one arm of an if is the shape that produced
+	// the silence in the first place.
+	warnCostLedgerNeedsSessions(cfg, ledgerDefaultOnValue(cfg), slog.Default())
 
 	var httpServers []*http.Server
 
@@ -678,6 +827,9 @@ func main() {
 			sessionapi.WithPipelines(inboundH, outboundH),
 			sessionapi.WithCatalog(sessionapi.PluginsCatalog),
 			sessionapi.WithUsage(usageAgg),
+			// nil when the ledger is off, which handleUsage reads as "serve the ring's
+			// maximum window and say which window that was".
+			sessionapi.WithCostLedger(costLedger),
 		)
 		go func() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",
@@ -714,9 +866,25 @@ func main() {
 	if sessionAPISrv != nil {
 		sessionAPISrv.Shutdown(shutdownCtx)
 	}
-
 	outboundPipeline.Stop(shutdownCtx)
 	inboundPipeline.Stop(shutdownCtx)
+
+	// Flushed AFTER both pipelines have stopped and before the store closes, so the
+	// final minute includes every event a draining request still produced. Any earlier
+	// and a request finishing during the pipeline drain would land in a minute already
+	// written; any later and the store is gone.
+	//
+	// This is what turns "a restart loses up to 60 seconds of cost" into "an orderly
+	// stop loses nothing" — the ledger holds only closed minutes on disk precisely so
+	// that the minute still accumulating has exactly one owner, and Close is what hands
+	// it over. Close also stops the ledger's writer goroutine, so it must come after
+	// anything that can still record. A SIGKILL still loses the open minute, and
+	// nothing can change that.
+	if costLedger != nil {
+		if err := costLedger.Close(); err != nil {
+			slog.Warn("cost ledger: final flush failed; the last minute of cost is lost", "error", err)
+		}
+	}
 
 	if sessions != nil {
 		sessions.Close()
