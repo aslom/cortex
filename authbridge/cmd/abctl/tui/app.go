@@ -115,8 +115,13 @@ type refreshTickMsg time.Time
 type sessionsLoadedMsg []session.SessionSummary
 type pipelineLoadedMsg *apiclient.PipelineView
 type snapshotLoadedMsg struct {
-	id     string
-	events []pipeline.SessionEvent
+	// olderNotFetched is how many events precede the ones in this response, from the
+	// server's own count of the session. Non-zero means the timeline starts where the
+	// window starts, not where the session does — a distinction the operator cannot
+	// otherwise make, and the one that made a 5000-event session look like a 3-row one.
+	olderNotFetched int
+	id              string
+	events          []pipeline.SessionEvent
 }
 type streamMsg apiclient.StreamEvent
 type streamClosedMsg struct{}
@@ -266,8 +271,14 @@ type model struct {
 	// doesn't read as data loss.
 	hideInactive   bool
 	hiddenInactive int
-	flash          string
-	flashUntil     time.Time
+
+	// olderNotFetched is how many events the selected session holds that the snapshot
+	// did not carry, reported by the server. Kept beside hiddenInactive because it
+	// answers the same question — "is this the whole timeline?" — for a different
+	// reason: that one is a filter the operator chose, this one is a bound they did not.
+	olderNotFetched int
+	flash           string
+	flashUntil      time.Time
 	// flashSticky keeps the current flash up until the next keypress instead of
 	// expiring on flashUntil. Set only by setStickyFlash (yank), so every other
 	// flash producer keeps its timed behaviour.
@@ -629,7 +640,11 @@ func (m *model) snapshotCmd(id string) tea.Cmd {
 		if err != nil {
 			return errMsg{where: "snapshot " + id, err: err}
 		}
-		return snapshotLoadedMsg{id: id, events: view.Events}
+		older := 0
+		if view.TotalEvents > len(view.Events) {
+			older = view.TotalEvents - len(view.Events)
+		}
+		return snapshotLoadedMsg{id: id, events: view.Events, olderNotFetched: older}
 	}
 }
 
@@ -781,6 +796,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		//
 		// Only update if we're still focused on this session.
 		m.events[msg.id] = msg.events
+		m.olderNotFetched = msg.olderNotFetched
 		if m.pane == paneEvents && m.selectedSess == msg.id {
 			m.rebuildEventsTable()
 		}

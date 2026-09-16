@@ -813,6 +813,14 @@ func (m *model) helpView() string {
 		if m.hideInactive && m.hiddenInactive > 0 {
 			base = fmt.Sprintf("%s  ·  %d hidden", base, m.hiddenInactive)
 		}
+		// Older events the snapshot did not ask for. Same reasoning as the hidden count
+		// one line up — a partial timeline should not read as the whole one — but this
+		// bound is not something the operator chose, so it says "not fetched" rather
+		// than naming a key to undo it. There is no key: the window is what the client
+		// is willing to hold.
+		if m.olderNotFetched > 0 {
+			base = fmt.Sprintf("%s  ·  %d older not fetched", base, m.olderNotFetched)
+		}
 		// Columns that did not fit — the whole reason issue #866 was filed: HOST was
 		// declared but never visible, and nothing said the table had been clipped.
 		if m.eventColsDropped > 0 {
