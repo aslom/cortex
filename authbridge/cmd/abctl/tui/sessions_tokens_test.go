@@ -7,40 +7,67 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
 
-// tokensCellWidth is what sessionsColumns declares for TOKENS.
-func tokensCellWidth(t *testing.T) int {
-	t.Helper()
-	for _, c := range sessionsColumns() {
-		if c.Title == "TOKENS" {
-			return c.Width
-		}
-	}
-	t.Fatal("no TOKENS column")
-	return 0
+// sessionTotals are the values this column has to render, including the two from the
+// report and the boundaries where formatCompact changes tier.
+var sessionTotals = []int{
+	0, 1, 999, 1000, 9_999, 100_000, 999_949, 999_950,
+	1_000_000, 9_999_999, 30_661_090,
+	137_156_234, // the one that truncated
+	547_853_512, // the largest real one seen
+	999_949_999, 999_950_000, 1_000_000_000, 9_999_999_999,
 }
 
-// Every plausible session total has to fit the cell it is rendered into. Grouped digits
-// did not: 137,156,234 is eleven characters in a ten-wide column, so the pane showed
-// "137,156,2…" — longer than the rounded form, less readable, and truncated at the end
-// where the digits that distinguish 137M from 137M live.
-func TestSessionTokens_FitsTheColumn(t *testing.T) {
-	width := tokensCellWidth(t)
-	for _, total := range []int{
-		0, 1, 999, 1000, 9_999, 100_000, 999_999,
-		1_000_000, 9_999_999,
-		30_661_090,  // from a real picker row
-		137_156_234, // the one that truncated
-		547_853_512, // the largest real one seen
-		9_999_999_999,
-	} {
-		got := sessionTokens(total, nil)
-		if n := len([]rune(got)); n > width {
-			t.Errorf("total %d renders as %q (%d runes), wider than the %d-column cell",
-				total, got, n, width)
+// Every plausible session total has to fit the cell it is rendered into, at every width
+// the pane is actually laid out at — not only the declared one.
+//
+// The declared width is 10, but fitTableColumns squeezes columns toward minColumnWidth
+// on a narrow terminal, and TOKENS is one it squeezes: 10 at 60 columns, 8 at 50, 7 at
+// 46, 6 at 40, 5 at 36. So building the table from newSessionsTable() and asserting
+// against 10 — which the first version of this test did — pins the reported case and
+// nothing narrower, while the argument for compacting rather than widening the column is
+// precisely that the fit budget matters.
+//
+// 40 columns is the floor this can promise: formatCompact's widest output is six runes
+// ("999.9M"), so a cell of six or more always holds it. Below that the cell is five and
+// the value cannot fit however it is formatted — recorded by the last case rather than
+// left as a surprise.
+func TestSessionTokens_FitsEveryFittedWidth(t *testing.T) {
+	for _, term := range []int{200, 90, 60, 50, 46, 42, 40} {
+		width := 0
+		for _, c := range fitTableColumns(sessionsColumns(), term) {
+			if c.Title == "TOKENS" {
+				width = c.Width
+			}
 		}
-		if strings.Contains(got, "…") {
-			t.Errorf("total %d renders pre-truncated: %q", total, got)
+		if width == 0 {
+			t.Fatalf("term %d: no TOKENS column after fitting", term)
 		}
+		for _, total := range sessionTotals {
+			got := sessionTokens(total, nil)
+			if n := len([]rune(got)); n > width {
+				t.Errorf("term %d (TOKENS=%d): total %d renders as %q (%d runes) — truncates",
+					term, width, total, got, n)
+			}
+		}
+	}
+}
+
+// The floor, stated rather than discovered: at 36 columns the cell is five wide and
+// formatCompact's widest output is six, so it truncates. That is the fit budget running
+// out, not the formatter — worth a test so a future change to either is measured against
+// it instead of assumed.
+func TestSessionTokens_BelowFortyColumnsTheCellIsTooNarrow(t *testing.T) {
+	width := 0
+	for _, c := range fitTableColumns(sessionsColumns(), 36) {
+		if c.Title == "TOKENS" {
+			width = c.Width
+		}
+	}
+	if width != 5 {
+		t.Fatalf("TOKENS fitted to %d at 36 columns, want 5 — the floor moved", width)
+	}
+	if n := len([]rune(sessionTokens(547_853_512, nil))); n <= width {
+		t.Errorf("547.9M now fits a %d-wide cell in %d runes; the comment above is stale", width, n)
 	}
 }
 
@@ -77,7 +104,18 @@ func TestSessionsPane_TokensCellIsNotTruncatedInTheRow(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("built %d rows, want 1", len(rows))
 	}
-	cell := strings.TrimSpace(rows[0][3])
+	// By title, not by index: rows are built positionally, so a hardcoded 3 keeps
+	// asserting after a column is inserted ahead of TOKENS — on the wrong cell, quietly.
+	col := -1
+	for i, c := range m.sessionsTbl.Columns() {
+		if c.Title == "TOKENS" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("no TOKENS column in %v", m.sessionsTbl.Columns())
+	}
+	cell := strings.TrimSpace(rows[0][col])
 	if cell != "547.9M" {
 		t.Errorf("TOKENS cell = %q, want %q", cell, "547.9M")
 	}
