@@ -473,6 +473,9 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				for cached := range m.events {
 					if cached != id && live[cached] {
 						delete(m.events, cached)
+						// Same reason as the wholesale reset in backToPodsPane: the
+						// count belongs to the events it describes.
+						delete(m.olderNotFetched, cached)
 					}
 				}
 				// Clear only on an actual session change, so

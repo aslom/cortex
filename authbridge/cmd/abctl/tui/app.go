@@ -473,6 +473,10 @@ func (m *model) backToPodsPane() {
 	m.streamCh = nil
 	m.sessions = nil
 	m.events = make(map[string][]pipeline.SessionEvent)
+	// In lockstep with m.events. A count describing a session whose events are gone is
+	// the bug that made this map per-session in the first place, just with a narrower
+	// window: re-entering the events pane on a matching id before its snapshot lands.
+	m.olderNotFetched = nil
 	// A different pod is a different aggregator: keep the view options the
 	// operator chose, drop the data they described.
 	m.usage.snap = nil

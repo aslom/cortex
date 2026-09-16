@@ -193,29 +193,54 @@ func trunc(s string) string {
 	return s[:48] + "…"
 }
 
-// The store must not mutate what it was handed.
+// The store must not mutate what it was handed, and this is the sequence that catches it.
 //
-// SnapshotInference is a shallow copy whose contract says slice fields "are only
-// assigned, never mutated in place, after the parser completes" — and the request- and
-// response-phase events of one request snapshot the SAME live extension, so they alias
-// one backing array. Interning in place rewrote an array the first event had already
-// been published with, and publishLocked hands those pointers to an SSE goroutine that
-// encodes them outside the store's lock.
+// The obvious version of this test cannot fail. Append the request- and response-phase
+// events of one request — which alias one backing array — and the canonical string IS the
+// pointer already in that array: the first Append misses the table and mints the array's
+// own string as canonical, the second hits and gets the identical pointer back. In-place
+// interning writes nothing but what was already there.
+//
+// The failure needs the canonical pointer to have MOVED between the two passes over the
+// same array. Four appends do that:
+//
+//  1. the request-phase event, which mints canon from array A's own strings;
+//  2. an unrelated event, which rolls the table past them;
+//  3. an event whose content EQUALS A's but is a separate allocation, which mints a fresh
+//     canonical pointer into array B;
+//  4. the response-phase event, which aliases array A again and now resolves to B's
+//     pointer — a genuinely different one, written over memory the store published in
+//     step 1.
+//
+// That is the race the clone exists to prevent, in a form a test can see.
 func TestAppend_DoesNotMutateTheCallersSlice(t *testing.T) {
 	s := New(0, 0, 100)
 	defer s.Close()
 
-	live := &pipeline.InferenceExtension{Model: "m", Messages: convo(4)}
+	live := &pipeline.InferenceExtension{Model: "m", Messages: convo(3)} // array A
 	before := make([]uintptr, len(live.Messages))
 	for i := range live.Messages {
 		before[i] = backing(live.Messages[i].Content)
 	}
 
-	// Both phases of one request, as the forward proxy builds them: two shallow copies
-	// sharing live.Messages.
 	reqEv := pipeline.SessionEvent{Phase: pipeline.SessionRequest, Inference: pipeline.SnapshotInference(live)}
-	respEv := pipeline.SessionEvent{Phase: pipeline.SessionResponse, Inference: pipeline.SnapshotInference(live)}
 	s.Append("s1", reqEv)
+
+	// Roll the table past A's strings.
+	s.Append("s1", pipeline.SessionEvent{
+		Inference: &pipeline.InferenceExtension{Messages: []pipeline.InferenceMessage{
+			{Role: "user", Content: strings.Repeat("unrelated filler ", 8)},
+		}},
+	})
+
+	// Equal content, separate allocation: convo rebuilds its strings every call, so this
+	// mints canonical pointers that are NOT the ones in array A.
+	s.Append("s1", pipeline.SessionEvent{
+		Inference: &pipeline.InferenceExtension{Messages: convo(3)}, // array B
+	})
+
+	// The response-phase event of the first request: aliases array A again.
+	respEv := pipeline.SessionEvent{Phase: pipeline.SessionResponse, Inference: pipeline.SnapshotInference(live)}
 	s.Append("s1", respEv)
 
 	for i := range live.Messages {
@@ -223,13 +248,9 @@ func TestAppend_DoesNotMutateTheCallersSlice(t *testing.T) {
 			t.Errorf("message %d of the caller's live extension was rewritten by the store", i)
 		}
 	}
-	// And the snapshots the caller still holds are untouched too.
-	if reqEv.Inference == nil || len(reqEv.Inference.Messages) != 4 {
-		t.Fatal("caller's request snapshot was altered")
-	}
 	for i := range reqEv.Inference.Messages {
 		if backing(reqEv.Inference.Messages[i].Content) != before[i] {
-			t.Errorf("message %d of the caller's snapshot was rewritten", i)
+			t.Errorf("message %d of the caller's already-published snapshot was rewritten", i)
 		}
 	}
 }

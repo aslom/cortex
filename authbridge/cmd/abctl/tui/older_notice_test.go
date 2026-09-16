@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
 )
 
@@ -93,4 +96,63 @@ func TestFooter_OlderCountIsPerSession(t *testing.T) {
 	if got := m.helpView(); !strings.Contains(got, "9999 older not fetched") {
 		t.Errorf("the session's own count is not shown after selecting it: %q", got)
 	}
+}
+
+// The count and the events it describes are cleared together.
+//
+// Two sites drop cached events — backToPodsPane resets the map wholesale on an endpoint
+// switch, and the picker prunes single entries the server still lists. A count left behind
+// by either describes events that no longer exist, which is the bug that made this map
+// per-session, only narrower: it needs the operator back in the events pane on a matching
+// session id before that session's snapshot lands.
+func TestOlderCount_IsClearedWithTheEventsItDescribes(t *testing.T) {
+	t.Run("wholesale reset", func(t *testing.T) {
+		m := fitModel(t, paneEvents, 200, 40, cursorRowsFixture(3))
+		// backToPodsPane derives a fresh context from parentCtx, which fitModel leaves nil.
+		m.parentCtx, m.ctx = context.Background(), context.Background()
+		m.cancel = func() {}
+		m.Update(snapshotLoadedMsg{id: "s1", events: cursorRowsFixture(1), olderNotFetched: 700})
+		if m.olderNotFetched["s1"] == 0 {
+			t.Fatal("fixture did not record a count")
+		}
+
+		m.backToPodsPane()
+
+		if len(m.events) != 0 {
+			t.Fatalf("events survived the reset: %d", len(m.events))
+		}
+		if n := m.olderNotFetched["s1"]; n != 0 {
+			t.Errorf("count %d survived a reset that dropped its events", n)
+		}
+	})
+
+	t.Run("single-entry prune", func(t *testing.T) {
+		m := fitModel(t, paneEvents, 200, 40, cursorRowsFixture(3))
+		m.selectedSess = "keep"
+		m.events["keep"] = cursorRowsFixture(2)
+		m.Update(snapshotLoadedMsg{id: "prune-me", events: cursorRowsFixture(1), olderNotFetched: 900})
+		m.Update(snapshotLoadedMsg{id: "keep", events: cursorRowsFixture(2), olderNotFetched: 5})
+
+		// The picker prunes cached entries the server still lists, on selecting another
+		// session. Drive it the way handleKey does.
+		m.sessions = []session.SessionSummary{{ID: "prune-me"}, {ID: "keep"}}
+		m.rebuildSessionsTable()
+		setCursorVisible(&m.sessionsTbl, 0)
+		m.pane = paneSessions
+		m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+
+		// The invariant, rather than which id the picker happens to prune: a count may
+		// not outlive the events it describes. Selecting a session prunes the OTHER
+		// cached-but-live entries, so hardcoding a survivor here would pin the picker's
+		// policy instead of the lockstep — the first version of this did, and failed for
+		// naming the wrong side.
+		if len(m.olderNotFetched) == 0 {
+			t.Fatal("fixture recorded no counts, so nothing is under test")
+		}
+		for id, n := range m.olderNotFetched {
+			if _, haveEvents := m.events[id]; !haveEvents && n > 0 {
+				t.Errorf("count %d survives for %q, whose events were pruned", n, id)
+			}
+		}
+	})
 }

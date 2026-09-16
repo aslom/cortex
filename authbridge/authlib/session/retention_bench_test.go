@@ -57,7 +57,11 @@ func BenchmarkRetainedHeap(b *testing.B) {
 		runtime.GC()
 		var after runtime.MemStats
 		runtime.ReadMemStats(&after)
-		b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc)/1048576, "MB/session")
+		// Signed: HeapAlloc is uint64, and if a GC nets the heap below the baseline the
+		// unsigned difference wraps to ~1.8e19 and reports ~1.7e13 MB/session. A small
+		// negative is the honest answer and reads as one.
+		delta := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+		b.ReportMetric(float64(delta)/1048576, "MB/session")
 		b.ReportMetric(float64(benchTurns), "turns")
 
 		s.Close()
