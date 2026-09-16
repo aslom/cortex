@@ -25,7 +25,10 @@ func TestParseUserAgent(t *testing.T) {
 		// splits, and Version comes back as "2.1.14�(external, cli)" — the same agent in a
 		// byAgent series key of its own, with its spend divided between the two.
 		{"tab-separated comment (RFC 9110 RWS)", "claude-cli/2.1.14\t(external, cli)", "claude-code", "2.1.14", false},
-		{"tab-separated, bare", "claude-cli/2.1.14\t", "claude-code", "2.1.14", false},
+		// INTERNAL, past TrimSpace's reach. A TRAILING tab is stripped before the
+		// normalisation runs, so a row ending in one passes whether or not the
+		// normalisation exists — it looks like coverage and is not.
+		{"tab inside the value", "claude-cli/2.1.14\tx", "claude-code", "2.1.14", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ParseUserAgent(tc.ua)
@@ -68,7 +71,7 @@ func TestParseUserAgent_ATabIsNormalisedNotSubstituted(t *testing.T) {
 		t.Errorf("Raw = %q, want %q — a tab is legal whitespace here, so it is normalised "+
 			"rather than marked as tampering", c.Raw, want)
 	}
-	if strings.ContainsRune(c.Raw, '�') {
+	if strings.ContainsRune(c.Raw, '\uFFFD') {
 		t.Errorf("Raw = %q carries U+FFFD; the tab was substituted instead of normalised, so "+
 			"this caller keeps a byAgent key of its own", c.Raw)
 	}

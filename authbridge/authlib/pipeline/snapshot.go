@@ -41,6 +41,12 @@ func SnapshotMCP(ext *MCPExtension) *MCPExtension {
 
 // snapshotClient returns a copy of the parsed client label.
 //
+// UNEXPORTED, unlike its five siblings, and not an oversight: a listener never calls this one.
+// Its only caller is Context.ClientInfo, which snapshots on the caller's behalf, so every
+// recording site already receives a copy. Exported, it would invite
+// SnapshotClient(pctx.ClientInfo()) at some future site — a second copy of a copy, which reads
+// as belt-and-braces and is really a hint that the ownership is unclear.
+//
 // Every field on a SessionEvent is snapshotted by one of these helpers precisely so an
 // already-appended event cannot be rewritten later. Without one here, Client would be the live
 // pointer Context.ClientInfo memoizes, shared by every recording site of the request: one
