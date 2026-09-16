@@ -19,6 +19,13 @@ func TestParseUserAgent(t *testing.T) {
 		{"unrecognised keeps raw only", "SomeNewAgent/9.9", "", "", false},
 		{"curl is not a coding agent", "curl/8.4.0", "", "", false},
 		{"whitespace only is nil", "   ", "", "", true},
+		// RFC 9110 spells the separator RWS = 1*( SP / HTAB ), so a tab is legal here and has
+		// to yield the same agent and version a space does. Without ParseUserAgent's
+		// normalisation the tab is a C0 control, sanitizeUA replaces it with U+FFFD, nothing
+		// splits, and Version comes back as "2.1.14�(external, cli)" — the same agent in a
+		// byAgent series key of its own, with its spend divided between the two.
+		{"tab-separated comment (RFC 9110 RWS)", "claude-cli/2.1.14\t(external, cli)", "claude-code", "2.1.14", false},
+		{"tab-separated, bare", "claude-cli/2.1.14\t", "claude-code", "2.1.14", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ParseUserAgent(tc.ua)
@@ -42,6 +49,32 @@ func TestParseUserAgent(t *testing.T) {
 				t.Error("Raw is empty; the verbatim UA must be kept")
 			}
 		})
+	}
+}
+
+// A tab is NORMALISED to a space, not replaced with U+FFFD.
+//
+// The distinction is the whole point of doing it before sanitizeUA rather than inside it: a
+// tab is legal whitespace in this header (RFC 9110's RWS), so the honest answer is the
+// canonical whitespace rather than a substitution mark. Asserted on Raw, which is the field
+// that reaches a durable row and a chart — a U+FFFD here would mean the two spellings of one
+// agent stay distinct everywhere downstream.
+func TestParseUserAgent_ATabIsNormalisedNotSubstituted(t *testing.T) {
+	c := ParseUserAgent("claude-cli/2.1.14\t(external, cli)")
+	if c == nil {
+		t.Fatal("ParseUserAgent returned nil for a UA that was sent")
+	}
+	if want := "claude-cli/2.1.14 (external, cli)"; c.Raw != want {
+		t.Errorf("Raw = %q, want %q — a tab is legal whitespace here, so it is normalised "+
+			"rather than marked as tampering", c.Raw, want)
+	}
+	if strings.ContainsRune(c.Raw, '�') {
+		t.Errorf("Raw = %q carries U+FFFD; the tab was substituted instead of normalised, so "+
+			"this caller keeps a byAgent key of its own", c.Raw)
+	}
+	// And the label a consumer keys on is identical to the space-separated spelling's.
+	if space := ParseUserAgent("claude-cli/2.1.14 (external, cli)"); space == nil || c.Label() != space.Label() {
+		t.Errorf("Label() = %q, want it identical to the space-separated spelling's", c.Label())
 	}
 }
 
@@ -304,7 +337,7 @@ func TestContextClientInfo_MemoizesIncludingTheNilAnswer(t *testing.T) {
 	// SessionEvent must not be able to reach any other event's label through it.
 	if first == second {
 		t.Error("ClientInfo() returned the memo itself: the label an event is attributed to " +
-			"is then mutable by anyone holding another event's copy — see SnapshotClient")
+			"is then mutable by anyone holding another event's copy — see snapshotClient")
 	}
 	first.Name = "impostor"
 	if third := c.ClientInfo(); third.Name != "claude-code" {

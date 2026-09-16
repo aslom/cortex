@@ -79,8 +79,16 @@ type EventClient struct {
 // cut has to be on a rune boundary, because the sanitiser below can put multi-byte
 // U+FFFD runes in this string and half of one is invalid UTF-8 in a file other tools
 // parse. The ledger's truncateLabel will apply the same rule to the same class of
-// string for the same reason. usage.truncateLabel does NOT — it still cuts at a byte
-// boundary — and that divergence is named here rather than left to be discovered.
+// string for the same reason.
+//
+// usage.truncateLabel is a plain byte cut TODAY, and 128 here against its 96 is what would
+// make that reachable: a User-Agent between 97 and 128 bytes survives capUA whole and is
+// then byte-cut when it becomes a byAgent key, which can split one of this file's own
+// 3-byte U+FFFD runes and leave an invalid fragment as the in-memory key while
+// encoding/json substitutes on the way out — a label that is broken in the ring and clean
+// on the wire. Neither half is reachable before the aggregate work later in this series,
+// which is what wires byAgent AND makes usage.truncateLabel cut on a rune boundary. Should
+// that order ever change, cap here at 96 rather than leaving the window open.
 const maxClientLen = 128
 
 // sanitizeUA replaces every control character in a User-Agent with U+FFFD.
@@ -166,7 +174,8 @@ func hasControlRunes(s string) bool {
 // rewrites or hides the text around it without being a control character at all.
 //
 // The one predicate both the scan and the rewrite read, so they cannot disagree about
-// what a control character is. costledger has the same clauses in the same order.
+// what a control character is. The ledger's copy will carry the same clauses in the same
+// order.
 //
 // THE FOURTH CLAUSE IS THE SAME ARGUMENT AS THE THIRD, applied to runes that need no escape
 // sequence at all. C1 is here because U+009B opens one in a terminal, so a User-Agent could
@@ -181,8 +190,9 @@ func hasControlRunes(s string) bool {
 //
 // ONE MEMBER IS REACHABLE BY A COMPLIANT CLIENT, and it is worth naming rather than implying
 // otherwise: RFC 9110's User-Agent separator is RWS = 1*( SP / HTAB ), so a tab is legal
-// there and is replaced here like any other C0 control. See ParseUserAgent's token split for
-// what that costs and why the fix belongs elsewhere.
+// there. It is still replaced here like any other C0 control — ParseUserAgent normalises tabs
+// to spaces before this runs, so the legal-whitespace reading is honoured without weakening
+// the rule this predicate has to keep identical to the ledger's copy.
 func isControlRune(r rune) bool {
 	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 		return true
@@ -270,23 +280,26 @@ func ParseUserAgent(ua string) *EventClient {
 	// sanitising before capping is a builder up to 3x the header — bounded by whatever
 	// the listener already accepted as a header value, and paid only by a request that
 	// sent control bytes in the first place.
-	ua = capUA(sanitizeUA(ua))
+	// TAB NORMALISED TO SPACE FIRST, ahead of the sanitiser, and it is not cosmetic. RFC
+	// 9110 spells the separator RWS = 1*( SP / HTAB ), so a compliant client may separate
+	// the product token from its comment with a tab — and a tab is a C0 control, so
+	// sanitizeUA turns it into U+FFFD and the split below then finds no whitespace at all.
+	// Measured without this: "claude-cli/2.1\t(external)" yielded Version
+	// "2.1�(external)", a byAgent series key of its own, so one agent's spend divided
+	// in two.
+	//
+	// NORMALISATION, NOT SANITISATION, which is why it sits on this side of sanitizeUA
+	// instead of inside it. Mapping legal whitespace onto the canonical whitespace is not
+	// the same job as neutralising what a terminal would act on, and the rule inside
+	// sanitizeUA has to stay identical to the ledger's copy of it. Byte-length-neutral, so
+	// the cap arithmetic is untouched.
+	ua = capUA(sanitizeUA(strings.ReplaceAll(ua, "\t", " ")))
 	c := &EventClient{Raw: ua}
 	// The product token is the first SPACE-delimited word, so the trailing comment Claude
 	// Code appends — "(external, cli)" — is ignored rather than having to be matched.
 	// Parsed positionally rather than with a regexp: this runs twice per turn on the
-	// request path, and the grammar being read is one slash in one word.
-	//
-	// SPACE ONLY, because the string this reads has already been through sanitizeUA. HTAB
-	// is a C0 control, so it has become U+FFFD by now and a `\t` in this split would be
-	// unreachable. THE RESIDUAL IS REAL AND IS NOT FIXED HERE: RFC 9110 spells the
-	// separator RWS = 1*( SP / HTAB ), so a compliant client MAY separate the product
-	// token from its comment with a tab — and such a header does not split at all, leaving
-	// Version as "2.1�(external)" and putting that caller in its own byAgent series
-	// rather than beside the same agent's space-separated requests. Fixing it means taking
-	// the token boundary from the RAW header and sanitising the extracted fields instead,
-	// which reorders the load-bearing sanitise-then-cap sequence above; that is its own
-	// change, not a line here.
+	// request path, and the grammar being read is one slash in one word. Space alone is
+	// enough because of the normalisation above; no tab reaches here.
 	token := ua
 	if i := strings.IndexByte(token, ' '); i >= 0 {
 		token = token[:i]

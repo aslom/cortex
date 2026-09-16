@@ -39,7 +39,7 @@ func SnapshotMCP(ext *MCPExtension) *MCPExtension {
 	return &c
 }
 
-// SnapshotClient returns a copy of the parsed client label.
+// snapshotClient returns a copy of the parsed client label.
 //
 // Every field on a SessionEvent is snapshotted by one of these helpers precisely so an
 // already-appended event cannot be rewritten later. Without one here, Client would be the live
@@ -55,7 +55,7 @@ func SnapshotMCP(ext *MCPExtension) *MCPExtension {
 // now fixed at the moment it is recorded, which is what the claim requires.
 //
 // All three fields are strings, so a shallow copy is a deep one.
-func SnapshotClient(c *EventClient) *EventClient {
+func snapshotClient(c *EventClient) *EventClient {
 	if c == nil {
 		return nil
 	}
