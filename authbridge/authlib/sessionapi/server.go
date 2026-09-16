@@ -352,7 +352,9 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(view); err != nil {
+	// Streamed per event rather than Encoded whole: see writeSessionView for the heap
+	// this one response used to cost.
+	if err := writeSessionView(w, view); err != nil {
 		slog.Debug("sessionapi: get encode failed", "error", err, "sessionID", id)
 	}
 }
