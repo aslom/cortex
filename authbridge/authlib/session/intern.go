@@ -21,9 +21,19 @@ import (
 // immutable, so two events sharing one backing array cannot tell, and a consumer sees
 // the same bytes it always did.
 //
-// SCOPE: string fields only — inference messages and completions, A2A part content.
-// MCP Params/Result are map[string]any, which needs a recursive walk of arbitrary JSON;
-// deferred until measurement says it matters, rather than guessed at now.
+// SCOPE: string fields only — inference messages and completions, A2A part content, and
+// tool descriptions. The tool manifest earns its place: a client re-sends it on every
+// request, so it duplicates harder than the conversation does. Measured on a live
+// 272-event session, 10.3MB of tool JSON held against 0.1MB distinct — 154x, where the
+// conversation itself was 6.5x. Interning the descriptions takes that session's tool
+// retention from 7.12MB to 0.37MB.
+//
+// What is still duplicated, both because they are map[string]any and need a recursive walk
+// of arbitrary JSON, and in ascending order of how much they cost: InferenceTool.Parameters
+// (the JSON schema — 34.7% of that 10.3MB, so ~3.6MB per session of the same tool
+// signatures over and over) and MCP Params/Result (unmeasured on this workload). Deferred
+// rather than guessed at: a walk that rewrites map values cannot lean on string
+// immutability the way this does, so it needs its own reasoning about aliasing.
 const (
 	// internMinLen is the shortest string worth a map lookup.
 	//
@@ -115,6 +125,13 @@ func (in *interner) internEvent(e *pipeline.SessionEvent) {
 			cp.Messages[i].Content = in.intern(cp.Messages[i].Content, next)
 		}
 		cp.Completion = in.intern(cp.Completion, next)
+		// Tools, like Messages, must be cloned before any field is rewritten: the same
+		// array is aliased by this request's response-phase event. Parameters is left
+		// alone — see SCOPE above.
+		cp.Tools = slices.Clone(e.Inference.Tools)
+		for i := range cp.Tools {
+			cp.Tools[i].Description = in.intern(cp.Tools[i].Description, next)
+		}
 		e.Inference = &cp
 	}
 	if e.A2A != nil {

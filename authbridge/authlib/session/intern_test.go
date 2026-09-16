@@ -217,10 +217,14 @@ func TestAppend_DoesNotMutateTheCallersSlice(t *testing.T) {
 	s := New(0, 0, 100)
 	defer s.Close()
 
-	live := &pipeline.InferenceExtension{Model: "m", Messages: convo(3)} // array A
+	live := &pipeline.InferenceExtension{Model: "m", Messages: convo(3), Tools: manifest()} // array A
 	before := make([]uintptr, len(live.Messages))
 	for i := range live.Messages {
 		before[i] = backing(live.Messages[i].Content)
+	}
+	beforeTools := make([]uintptr, len(live.Tools))
+	for i := range live.Tools {
+		beforeTools[i] = backing(live.Tools[i].Description)
 	}
 
 	reqEv := pipeline.SessionEvent{Phase: pipeline.SessionRequest, Inference: pipeline.SnapshotInference(live)}
@@ -233,10 +237,10 @@ func TestAppend_DoesNotMutateTheCallersSlice(t *testing.T) {
 		}},
 	})
 
-	// Equal content, separate allocation: convo rebuilds its strings every call, so this
-	// mints canonical pointers that are NOT the ones in array A.
+	// Equal content, separate allocation: convo and manifest rebuild their strings every
+	// call, so this mints canonical pointers that are NOT the ones in array A.
 	s.Append("s1", pipeline.SessionEvent{
-		Inference: &pipeline.InferenceExtension{Messages: convo(3)}, // array B
+		Inference: &pipeline.InferenceExtension{Messages: convo(3), Tools: manifest()}, // array B
 	})
 
 	// The response-phase event of the first request: aliases array A again.
@@ -253,6 +257,70 @@ func TestAppend_DoesNotMutateTheCallersSlice(t *testing.T) {
 			t.Errorf("message %d of the caller's already-published snapshot was rewritten", i)
 		}
 	}
+	// The tool manifest gets the same treatment, and needs it for the same reason: both
+	// phases of one request alias the array it lives in.
+	for i := range live.Tools {
+		if backing(live.Tools[i].Description) != beforeTools[i] {
+			t.Errorf("tool %d of the caller's live extension was rewritten by the store", i)
+		}
+	}
+	for i := range reqEv.Inference.Tools {
+		if backing(reqEv.Inference.Tools[i].Description) != beforeTools[i] {
+			t.Errorf("tool %d of the caller's already-published snapshot was rewritten", i)
+		}
+	}
+}
+
+// manifest is the tool list a client re-sends on every request, rebuilt on every call for
+// the reason TestAppend_SharesA2APartContent gives: one string handed to four events is
+// shared by all of them whether or not the store interns anything.
+func manifest() []pipeline.InferenceTool {
+	return []pipeline.InferenceTool{
+		{
+			Name:        "get_weather",
+			Description: "Look up the forecast for a place. " + strings.Repeat("schema detail ", 8),
+			Parameters:  map[string]any{"type": "object"},
+		},
+		{
+			Name:        "send_email",
+			Description: "Send a message to a recipient. " + strings.Repeat("schema detail ", 8),
+		},
+	}
+}
+
+// The tool manifest interns too, and it is the field that duplicates hardest: a client
+// re-sends the whole manifest on every request, so a live 272-event session held 10.3MB of
+// tool JSON against 0.1MB distinct — 154x, against 6.5x for the conversation itself.
+func TestAppend_SharesRepeatedToolDescriptions(t *testing.T) {
+	s := New(0, 0, 100)
+	defer s.Close()
+
+	const turns = 4
+	for i := 0; i < turns; i++ {
+		s.Append("s1", pipeline.SessionEvent{
+			Inference: &pipeline.InferenceExtension{Model: "m", Tools: manifest()},
+		})
+	}
+
+	v := s.View("s1")
+	for tool := range manifest() {
+		first := backing(v.Events[0].Inference.Tools[tool].Description)
+		for i := range v.Events {
+			if backing(v.Events[i].Inference.Tools[tool].Description) != first {
+				t.Errorf("event %d holds its own copy of tool %d's description", i, tool)
+			}
+		}
+	}
+
+	// Two tools must not be collapsed into one string.
+	if backing(v.Events[0].Inference.Tools[0].Description) ==
+		backing(v.Events[0].Inference.Tools[1].Description) {
+		t.Error("two tools' descriptions were collapsed into one string")
+	}
+	// And the text still reads correctly.
+	if got, want := v.Events[turns-1].Inference.Tools[0].Description, manifest()[0].Description; got != want {
+		t.Errorf("tool description changed: %q", trunc(got))
+	}
 }
 
 // The event the store keeps must be its own, so that a second Append cannot reach the
@@ -261,7 +329,7 @@ func TestAppend_StoresItsOwnExtension(t *testing.T) {
 	s := New(0, 0, 100)
 	defer s.Close()
 
-	live := &pipeline.InferenceExtension{Messages: convo(3)}
+	live := &pipeline.InferenceExtension{Messages: convo(3), Tools: manifest()}
 	ev := pipeline.SessionEvent{Inference: pipeline.SnapshotInference(live)}
 	s.Append("s1", ev)
 
@@ -272,6 +340,10 @@ func TestAppend_StoresItsOwnExtension(t *testing.T) {
 	if len(stored.Messages) > 0 && len(ev.Inference.Messages) > 0 &&
 		&stored.Messages[0] == &ev.Inference.Messages[0] {
 		t.Error("the store kept the caller's message array")
+	}
+	if len(stored.Tools) > 0 && len(ev.Inference.Tools) > 0 &&
+		&stored.Tools[0] == &ev.Inference.Tools[0] {
+		t.Error("the store kept the caller's tool array")
 	}
 }
 
