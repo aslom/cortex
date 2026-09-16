@@ -110,6 +110,12 @@ One limit by default, and it is not a clock:
   so in the events footer (`· N older not fetched`). A session's whole history can be a
   gigabyte of JSON; asking for it took 17s and timed out at 10, which showed up as an
   events pane holding only what arrived after you opened it.
+- Opening a session no longer costs the proxy memory. The snapshot response is written one
+  event at a time, so serving it takes heap proportional to a single event; it used to be
+  encoded whole before the first byte went out, which meant a couple hundred megabytes of
+  resident memory per session you opened, kept for the life of the process. If you are
+  looking at an older build and wondering why RSS climbs in steps as you browse rather
+  than as traffic arrives, that is why — one step per <kbd>Enter</kbd>.
 - `max_sessions` is **reachable in normal use**, which it effectively was not before.
   Every `claude` invocation mints a new bucket, so the 101st session on a busy machine
   evicts the least-recently-updated one — whole session and all. If an older session has
