@@ -326,12 +326,15 @@ type Context struct {
 // Method on adjacent lines. A guard here would convert a programming error into a
 // silently unattributed event instead of a stack trace.
 // A COPY IS RETURNED, NOT THE MEMO. Every caller is an event-construction site that stores
-// the result on a SessionEvent, so handing out the memoized pointer made ten events share one
-// mutable struct: a single write through it relabelled events already appended to the store
-// and already being served by the session API. See SnapshotClient — this is the same rule the
-// other extensions on that event have followed all along, applied to the one field that was
-// missing it. The memo is still what stops the header being parsed ten times; what it no
-// longer does is escape.
+// the result on a SessionEvent, so handing out the memoized pointer would make ten events
+// share one mutable struct, and a single write through it would relabel events already
+// appended to the store and already being served by the session API. See SnapshotClient: the
+// same rule every other extension on that event follows. The memo is what stops the header
+// being parsed ten times; it does not escape.
+//
+// THE COPY IS AN ALLOCATION PER CALL, roughly ten per request, and that is the price of the
+// line above. sanitizeUA's fast path is written not to allocate, which bounds what a hostile
+// header costs; this one is unconditional and buys the integrity claim instead.
 func (c *Context) ClientInfo() *EventClient {
 	if c.clientParsed {
 		return SnapshotClient(c.client)
@@ -365,6 +368,17 @@ func (c *Context) ClientInfo() *EventClient {
 // Call it AFTER Headers is populated. Called before, it pins nil and the request's own
 // User-Agent is lost — which is why this is a listener's call to make at construction and
 // not something a constructor could do earlier.
+//
+// NOT EVERY LISTENER CALLS IT YET, and the gap is worth stating because of how it reads
+// downstream. The forward proxy does, at both its HTTP and its transparent-connection
+// construction sites; ext_proc does, at its four, arriving with the cost work later in this
+// series. The REVERSE proxy does not, and it has four Sessions.Append sites of its own — so
+// every inbound event records no client, and Label() answers "unknown" for it. That string
+// is documented as "this request carried no User-Agent", which for those events is not what
+// happened: nil there means "this listener was never wired", and an operator reading a
+// per-agent breakdown cannot tell the two apart. Wiring it is a small change in the reverse
+// proxy's own construction path and is tracked separately; until then, read "unknown" on
+// inbound traffic as unattributed rather than as absent.
 //
 // Idempotent: the second call is the memo's own no-op.
 func (c *Context) ResolveClient() { _ = c.ClientInfo() }

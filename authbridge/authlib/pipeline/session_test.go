@@ -427,8 +427,11 @@ func TestSessionEvent_OldWireFormatDecodesWithNoClient(t *testing.T) {
 		t.Fatalf("unmarshal of a pre-Client event: %v", err)
 	}
 	if out.Client != nil {
-		t.Errorf("Client = %+v, want nil for an event that predates the field", out.Client)
+		t.Fatalf("Client = %+v, want nil for an event that predates the field", out.Client)
 	}
+	// DELIBERATELY CALLED ON THE NIL POINTER the line above just established, because that
+	// is the property under test: consumers call Label() without a nil check, so absence has
+	// to answer rather than panic. Fatal above, so this is never an accidental deref.
 	if out.Client.Label() != "unknown" {
 		t.Errorf("Label() = %q, want unknown — consumers call it without a nil check", out.Client.Label())
 	}

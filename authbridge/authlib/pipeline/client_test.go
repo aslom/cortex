@@ -290,12 +290,10 @@ func TestContextClientInfo_MemoizesIncludingTheNilAnswer(t *testing.T) {
 	c.Headers.Set("User-Agent", "something-else/9.9")
 	second := c.ClientInfo()
 
-	// VALUE EQUALITY, NOT POINTER IDENTITY, and the change is the point rather than an
-	// accommodation. This asserted `first != second` on the pointers, which is the wrong
-	// instrument for the property the test is named for: "memoized" is a claim about WHICH
-	// ANSWER, and the pointer was standing in for it. It also pinned the aliasing bug —
-	// ClientInfo handed out the memo itself, so ten recording sites shared one mutable
-	// struct and a single write through it relabelled events already appended.
+	// VALUE EQUALITY, NOT POINTER IDENTITY. "Memoized" is a claim about WHICH ANSWER, so a
+	// pointer comparison is the wrong instrument for it — and asserting pointer identity
+	// here would pin the aliasing that ClientInfo deliberately avoids: every caller sharing
+	// one mutable struct, where a single write relabels events already appended.
 	if *first != *second {
 		t.Errorf("ClientInfo() gave different answers across calls: %+v then %+v", *first, *second)
 	}

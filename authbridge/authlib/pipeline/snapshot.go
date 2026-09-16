@@ -41,12 +41,11 @@ func SnapshotMCP(ext *MCPExtension) *MCPExtension {
 
 // SnapshotClient returns a copy of the parsed client label.
 //
-// THE ONE EXTENSION THAT WAS NOT COPIED. Every other field on a SessionEvent is snapshotted
-// by one of these helpers precisely so an already-appended event cannot be rewritten later —
-// and Client, alone, was assigned as the live pointer Context.ClientInfo memoizes. Ten
-// recording sites shared it, so one mutation through that pointer relabelled every event of
-// the request, including ones already handed to the session store and being read by the
-// session API.
+// Every field on a SessionEvent is snapshotted by one of these helpers precisely so an
+// already-appended event cannot be rewritten later. Without one here, Client would be the live
+// pointer Context.ClientInfo memoizes, shared by every recording site of the request: one
+// mutation through it would relabel every event, including those already handed to the session
+// store and being read by the session API.
 //
 // THAT IS AN INTEGRITY CLAIM, not a tidiness one. This label is what attributes spend to a
 // program, and context.go states that a caller lying about itself mis-attributes "that

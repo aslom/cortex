@@ -64,6 +64,12 @@ type EventClient struct {
 // so no field on EventClient — Raw, Version, or the string Label() builds — can
 // exceed it by more than the recognised name it is joined to.
 //
+// FORWARD REFERENCES BELOW. This lands ahead of the two packages that consume
+// Label(): the usage aggregator's byAgent series and the durable cost ledger
+// (`costledger`, which does not exist yet). Both arrive later in this series, so
+// `costledger.*` names in this file are the shape the rule takes there rather than
+// symbols that resolve today. `usage.*` names do resolve.
+//
 // 128 is well beyond any real agent's product token and version. Cardinality is
 // bounded separately, by usage.maxLabelsPerBucket, which applies to byAgent
 // exactly as it does to every other label map.
@@ -72,19 +78,19 @@ type EventClient struct {
 // because what it bounds is retained memory and the length of a persisted line; the
 // cut has to be on a rune boundary, because the sanitiser below can put multi-byte
 // U+FFFD runes in this string and half of one is invalid UTF-8 in a file other tools
-// parse. costledger.truncateLabel applies the same rule to the same class of string
-// for the same reason. usage.truncateLabel does NOT yet — it still cuts at a byte
+// parse. The ledger's truncateLabel will apply the same rule to the same class of
+// string for the same reason. usage.truncateLabel does NOT — it still cuts at a byte
 // boundary — and that divergence is named here rather than left to be discovered.
 const maxClientLen = 128
 
 // sanitizeUA replaces every control character in a User-Agent with U+FFFD.
 //
 // THE PRIMARY CHOKE POINT FOR THIS STRING. ParseUserAgent is the one place a header
-// becomes an EventClient, and Label() feeds BOTH consumers of the result — the live
-// usage aggregator and the durable cost ledger. Sanitising per consumer is strictly
-// worse: costledger.sanitizeLabel already did it on the way to disk while the
-// aggregator did not, so the same bytes were neutralised in the file and served intact
-// from /v1/usage, and the next consumer added would have started out unguarded too.
+// becomes an EventClient, and Label() is what both consumers of the result read — the
+// live usage aggregator and, later in this series, the durable cost ledger. Sanitising
+// per consumer is strictly worse: whichever one does it neutralises the bytes on its own
+// surface while the other serves them intact, and the next consumer added starts out
+// unguarded too.
 //
 // THE HEADER IS NOT ALREADY CLEAN, and the reason it looked clean is worth stating
 // because it is not a property of this package. On the forward proxy net/http rejects
@@ -110,8 +116,8 @@ const maxClientLen = 128
 // REPLACED, NOT DROPPED, so tampering stays visible: "claude-cli/1\x1b[31m" reads as
 // "claude-cli/1�[31m" rather than as "claude-cli/1[31m", which nobody would question.
 //
-// THE RULE IS SHARED WITH costledger.sanitizeLabel AND MUST STAY IDENTICAL. That copy
-// is not redundant and does not go away: it is the primary guard for Endpoint, Model
+// THE RULE WILL BE SHARED WITH THE LEDGER'S sanitizeLabel, AND THE TWO MUST STAY
+// IDENTICAL. That copy is not redundant: it is the primary guard for Endpoint, Model
 // and Provenance, which never pass through here, and it is defence in depth for this
 // one on a file that cannot be edited after the fact. Two copies of a five-line rule
 // is the right trade for a durable file; two DIFFERENT rules is not, so a change to
@@ -171,9 +177,12 @@ func hasControlRunes(s string) bool {
 // reaching a 30-day file and a chart through a self-reported header are the same class.
 //
 // NOT A GENERAL UNICODE POLICY, and deliberately narrow: the members named are the ones with
-// no legitimate use in a product token. A User-Agent is ASCII by RFC 9110's grammar, so
-// nothing here is refusing text a compliant client would send; the substitution exists
-// because non-compliant clients are the interesting ones.
+// no legitimate use in a product token, and non-compliant clients are the interesting ones.
+//
+// ONE MEMBER IS REACHABLE BY A COMPLIANT CLIENT, and it is worth naming rather than implying
+// otherwise: RFC 9110's User-Agent separator is RWS = 1*( SP / HTAB ), so a tab is legal
+// there and is replaced here like any other C0 control. See ParseUserAgent's token split for
+// what that costs and why the fix belongs elsewhere.
 func isControlRune(r rune) bool {
 	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 		return true
@@ -263,13 +272,23 @@ func ParseUserAgent(ua string) *EventClient {
 	// sent control bytes in the first place.
 	ua = capUA(sanitizeUA(ua))
 	c := &EventClient{Raw: ua}
-	// The product token is the first whitespace-delimited word, so the trailing
-	// comment Claude Code appends — "(external, cli)" — is ignored rather than
-	// having to be matched. Parsed positionally rather than with a regexp: this
-	// runs twice per turn on the request path, and the grammar being read is one
-	// slash in one word.
+	// The product token is the first SPACE-delimited word, so the trailing comment Claude
+	// Code appends — "(external, cli)" — is ignored rather than having to be matched.
+	// Parsed positionally rather than with a regexp: this runs twice per turn on the
+	// request path, and the grammar being read is one slash in one word.
+	//
+	// SPACE ONLY, because the string this reads has already been through sanitizeUA. HTAB
+	// is a C0 control, so it has become U+FFFD by now and a `\t` in this split would be
+	// unreachable. THE RESIDUAL IS REAL AND IS NOT FIXED HERE: RFC 9110 spells the
+	// separator RWS = 1*( SP / HTAB ), so a compliant client MAY separate the product
+	// token from its comment with a tab — and such a header does not split at all, leaving
+	// Version as "2.1�(external)" and putting that caller in its own byAgent series
+	// rather than beside the same agent's space-separated requests. Fixing it means taking
+	// the token boundary from the RAW header and sanitising the extracted fields instead,
+	// which reorders the load-bearing sanitise-then-cap sequence above; that is its own
+	// change, not a line here.
 	token := ua
-	if i := strings.IndexAny(token, " \t"); i >= 0 {
+	if i := strings.IndexByte(token, ' '); i >= 0 {
 		token = token[:i]
 	}
 	product, version, _ := strings.Cut(token, "/")
