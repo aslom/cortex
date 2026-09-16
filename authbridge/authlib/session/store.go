@@ -25,6 +25,11 @@ type entry struct {
 	Events    []pipeline.SessionEvent
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// intern collapses the message content this session repeats on every turn. Per
+	// session, so it is freed with the session and never shares content between two
+	// conversations. See intern.go for why the table only holds one event's strings.
+	intern interner
 }
 
 // MaxSessionIDLen is the longest session ID the store keeps intact; longer ids
@@ -210,6 +215,11 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 	// without needing to know which session it was appended to — critical for
 	// outbound events that have no protocol-native session field.
 	event.SessionID = sessionID
+
+	// Before the copy is taken: an LLM request re-sends the whole conversation, so most
+	// of this event's message text is already in the session. Point at what is there
+	// rather than keeping a second copy of it.
+	sess.intern.internEvent(&event)
 
 	sess.Events = append(sess.Events, event)
 	sess.UpdatedAt = now
