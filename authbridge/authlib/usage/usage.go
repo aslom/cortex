@@ -1389,6 +1389,10 @@ func isControlRune(r rune) bool {
 	case // Bidi overrides and isolates: reorder the glyphs around them.
 		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
 		'\u2066', '\u2067', '\u2068', '\u2069',
+		// Bidi MARKS, which are the same class and strictly easier to use: a mark needs no
+		// matching pop, so one LRM reorders the neutral characters around it on its own.
+		// U+200E LRM, U+200F RLM, U+061C ALM.
+		'\u200e', '\u200f', '\u061c',
 		// Zero-width: make two distinct labels render identically.
 		'\u200b', '\u200c', '\u200d', '\u2060', '\ufeff':
 		return true
