@@ -185,10 +185,11 @@ A stop persists: Cortex stays down across logouts and reboots until you start it
 again. That is deliberate — a stop that quietly undoes itself at your next login is
 worse than none.
 
-`stop` also reports how many connections it cut, because a Claude Code session that is
-already running cannot recover on its own: `HTTPS_PROXY` is fixed in its environment
-when it starts, so it has no way to fall back to a direct connection. Restart any
-session that begins failing to connect.
+`stop` also reports how many connections it cut, because until Cortex is back those
+clients have nowhere to go: `HTTPS_PROXY` is fixed in each one's environment when it
+starts, so none of them can fall back to a direct connection. Run `abctl service start`
+and they reconnect on their next request — the sessions themselves do not need
+restarting.
 
 ## Three ways to turn it off
 
@@ -203,11 +204,12 @@ abctl service stop
 Claude Code fails while Cortex is stopped, because its settings still point at the
 proxy. Either start Cortex again or unwire Claude Code (below).
 
-**A Claude Code session that is already running cannot recover on its own.**
-`HTTPS_PROXY` is fixed in its environment when it starts, so it has no way to fall
-back to a direct connection, and `claude-code disable` cannot reach it. Restart any
-session that starts failing to connect. `service stop` tells you how many
-connections it cut, for exactly this reason.
+**A running session cannot route around a stopped Cortex.** `HTTPS_PROXY` is fixed in
+its environment when it starts, so it has no way to fall back to a direct connection,
+and `claude-code disable` cannot reach it — that only affects sessions started
+afterwards. What it needs is Cortex back: `abctl service start`, after which it
+reconnects on its next request without being restarted. `service stop` tells you how
+many connections it cut, for exactly this reason.
 
 Use `abctl service stop`, not `kill` or `pkill` — the supervisor restarts the
 process within seconds, which looks like it refusing to die.

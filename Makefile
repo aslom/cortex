@@ -67,8 +67,11 @@ authbridge-proxy: ## Build authbridge-proxy to ./bin/authbridge-proxy (PROFILE=f
 	fi
 	@# GOWORK=off matches CI and the Dockerfile — workspace mode can select a
 	@# higher third-party version than this binary's own go.mod requires.
-	@echo "→ building authbridge-proxy (profile $(or $(PROFILE),full))"
+	@# The resolved tags, not just the profile name: "why is plugin X missing from my
+	@# binary" is answered by the tag list, and quieting the command removed the only
+	@# place it appeared.
 	@TAGS=$$(go -C authbridge/scripts/profile-tags run . $(or $(PROFILE),full)) && \
+		echo "→ building authbridge-proxy (profile $(or $(PROFILE),full)): $$TAGS" && \
 		cd authbridge/cmd/authbridge-proxy && \
 		GOWORK=off go build -tags "$$TAGS" -o $(BIN_DIR)/authbridge-proxy .
 
@@ -115,13 +118,13 @@ dev-install: authbridge-proxy abctl ## Build from this tree, install to ~/.local
 	@# would skip the restart whenever the rebuild happened to be byte-identical.
 	@# Quiet: make would otherwise echo an absolute path and a flag list immediately
 	@# after the previous line's output, which read as one run-together sentence.
-	@echo "→ restarting the service"
+	@#
+	@# "installing and starting" rather than "restarting": serviceInstall is also the
+	@# first-install path, where there is nothing to restart and no captured history to
+	@# clear. Both consequences are abctl's to report — it can tell whether anything was
+	@# running, and a Makefile echo cannot — so the session-store line moved there and
+	@# this says only what is true on both paths.
+	@echo "→ installing and starting the service"
 	@$(DEV_BIN_DIR)/abctl service install --yes --restart
-	@# Only what abctl does not already say. It prints the attached-connection count
-	@# and what to do about it, so repeating that here would be a second voice on the
-	@# same subject — and an earlier draft of this line contradicted it outright.
-	@# The session store is the one consequence nothing else reports.
-	@echo "  Captured session history is cleared: the store is in memory, so any"
-	@echo "  timeline you were reading in abctl starts over."
 	@echo
 	@$(DEV_BIN_DIR)/abctl service status

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeLaunchctl puts a launchctl on PATH that behaves like a restricted sandbox: it
@@ -176,11 +178,65 @@ func TestReportSessionInterruption(t *testing.T) {
 			t.Errorf("reported a zero count instead of staying quiet: %q", out.String())
 		}
 	})
+
+	// The branch that actually says something, which had no coverage at all — the three
+	// cases above are the quiet paths, so the wording an operator reads was the one part
+	// of this function no test touched.
+	//
+	// What it must NOT say is that a session cannot reconnect, or that one should be
+	// restarted. Measured across three restarts, clients came back in 0.92s, 0.81s and
+	// 0.59s; a restart costs the requests in flight, not the sessions. That advice sent
+	// people to restart working sessions for two years.
+	t.Run("names the cost when connections are attached", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Skipf("cannot listen: %v", err)
+		}
+		defer ln.Close() //nolint:errcheck
+
+		accepted := make(chan net.Conn, 1)
+		go func() {
+			c, aerr := ln.Accept()
+			if aerr == nil {
+				accepted <- c
+			}
+		}()
+		client, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Skipf("cannot dial: %v", err)
+		}
+		defer client.Close() //nolint:errcheck
+		select {
+		case c := <-accepted:
+			defer c.Close() //nolint:errcheck
+		case <-time.After(2 * time.Second):
+			t.Skip("connection was not accepted in time")
+		}
+
+		var out strings.Builder
+		reportSessionInterruption(servicePaths{forwardAddr: ln.Addr().String()}, &out)
+		got := out.String()
+		if got == "" {
+			t.Fatalf("said nothing with a connection attached to %s", ln.Addr())
+		}
+		if !strings.Contains(got, "will be cut") {
+			t.Errorf("does not say the connections are cut: %q", got)
+		}
+		if !strings.Contains(got, "reconnect") {
+			t.Errorf("does not say clients reconnect: %q", got)
+		}
+		for _, retracted := range []string{"cannot reconnect", "restart any session"} {
+			if strings.Contains(strings.ToLower(got), retracted) {
+				t.Errorf("repeats retracted advice %q: %q", retracted, got)
+			}
+		}
+	})
 }
 
 // TestServiceIsCurrent covers the no-op decision. Each clause is a way for
 // "installed" to be a lie, and getting any of them wrong means either a pointless
-// restart — which cuts every attached Claude Code session — or skipping a real upgrade.
+// restart — which cuts every attached connection, costing each client its in-flight
+// request — or skipping a real upgrade.
 func TestServiceIsCurrent(t *testing.T) {
 	base := func(t *testing.T) servicePaths {
 		t.Helper()
@@ -262,6 +318,25 @@ func TestServiceIsCurrent(t *testing.T) {
 		}
 		if serviceIsCurrent(p) {
 			t.Error("claimed current for a unit that lost --supervise")
+		}
+	})
+}
+
+// The session-history line must not appear on a first install, where there is no store to
+// clear. It printed unconditionally from the Makefile before, on a clean machine too.
+func TestReportHistoryCleared(t *testing.T) {
+	t.Run("silent when nothing was running", func(t *testing.T) {
+		var out strings.Builder
+		reportHistoryCleared(false, &out)
+		if out.Len() != 0 {
+			t.Errorf("claimed history was cleared on a first install: %q", out.String())
+		}
+	})
+	t.Run("names it when something was running", func(t *testing.T) {
+		var out strings.Builder
+		reportHistoryCleared(true, &out)
+		if !strings.Contains(out.String(), "session history is cleared") {
+			t.Errorf("did not name the cleared store: %q", out.String())
 		}
 	})
 }

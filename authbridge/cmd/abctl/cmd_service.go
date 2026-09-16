@@ -365,9 +365,9 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 
 	// Nothing to do is a valid outcome, and the common one: this command is what the
 	// one-liner runs every time, including when everything is already current. Without
-	// this it went ahead with bootout + bootstrap, which restarts the proxy and cuts
-	// every attached Claude Code session — for no change at all. Re-running an installer
-	// should be free.
+	// this it went ahead with bootout + bootstrap, which restarts the proxy and cuts every
+	// attached connection — costing each client the request it had in flight — for no
+	// change at all. Re-running an installer should be free.
 	//
 	// Deliberately AFTER the migration: a config that still needs pins is a change, so
 	// it must not be short-circuited. `changed` above is false only when the config was
@@ -400,6 +400,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	// failing", which is what it looked like to me when a mid-stream request died and I
 	// restarted the session that reported it. The session had not needed restarting.
 	reportSessionInterruption(p, stdout)
+	reportHistoryCleared(serviceInstalled(p) || adopt > 0, stdout)
 
 	if adopt > 0 {
 		fmt.Fprintf(stdout, "Stopping pid %d...\n", adopt)
@@ -757,16 +758,37 @@ func loginHome() string {
 
 // reportSessionInterruption names how many clients a restart will disconnect.
 //
-// Nothing on this side can make it graceful: HTTPS_PROXY is baked into each client's
-// environment when it starts, so a running Claude Code has no way back to a direct
-// connection and just begins failing to connect. Saying "3 connections" turns that into
-// a five-second diagnosis instead of a bug report. Silent when there is nothing attached,
-// or when we cannot tell — a confident "0" would be worse than no number.
+// HTTPS_PROXY is baked into each client's environment when it starts, so none of them can
+// fall back to a direct connection — but they do reconnect through the proxy on their next
+// request, measured at 0.92s, 0.81s and 0.59s across three restarts. So the cost is the
+// requests in flight, one per connection, and naming the count turns that into a
+// five-second diagnosis instead of a bug report.
+//
+// Silent when there is nothing attached, or when we cannot tell — a confident "0" would be
+// worse than no number.
 func reportSessionInterruption(p servicePaths, stdout io.Writer) {
 	if n := establishedConns(p.forwardAddr); n > 0 {
 		fmt.Fprintf(stdout, "  %d connection(s) will be cut. Clients reconnect on their next\n"+
 			"  request — a request in flight right now fails.\n", n)
 	}
+}
+
+// reportHistoryCleared names the one consequence of a restart that nothing else reports.
+//
+// Only when something was already serving, which is what wasRunning carries: a first
+// install has nothing to clear, and a false line there is what teaches operators to skim
+// the rest. It used to live in the Makefile's dev-install as an unconditional echo,
+// printed on a clean machine too — a Makefile cannot tell a first install from a
+// replacement, and abctl can.
+//
+// Extracted rather than inlined so the gate is assertable: serviceInstall reaches this
+// point only after writing a unit file and calling launchctl, which a unit test cannot.
+func reportHistoryCleared(wasRunning bool, stdout io.Writer) {
+	if !wasRunning {
+		return
+	}
+	fmt.Fprintln(stdout, "  Captured session history is cleared: the store is in memory, so any")
+	fmt.Fprintln(stdout, "  timeline you were reading in abctl starts over.")
 }
 
 // serviceIsCurrent reports whether the installed service already matches what
