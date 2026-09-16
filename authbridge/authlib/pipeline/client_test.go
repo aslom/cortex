@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -106,8 +107,13 @@ func TestParseUserAgent_CapsBeforeMatching(t *testing.T) {
 	if len(got.Version) > maxClientLen {
 		t.Errorf("Version retained %d bytes, want <= %d", len(got.Version), maxClientLen)
 	}
-	if len(got.Label()) > maxClientLen+len(got.Name)+1 {
-		t.Errorf("Label() is %d bytes; the cap must bound every derived string", len(got.Label()))
+	// The bound deliberately does NOT carry len(got.Name) on its right-hand side: with it,
+	// this reduces to `len(Version) > maxClientLen`, which is the assertion directly above.
+	// maxClientLen*2 is the honest ceiling for a joined "name/version" — every component is
+	// separately capped — and it is what would catch a future field escaping the cap.
+	if len(got.Label()) > 2*maxClientLen {
+		t.Errorf("Label() is %d bytes, want <= %d: the cap has to bound every DERIVED string, "+
+			"not only the fields it is applied to", len(got.Label()), 2*maxClientLen)
 	}
 }
 
@@ -223,24 +229,95 @@ func TestParseUserAgent_SanitisesBeforeCappingAndStillHonoursTheByteCap(t *testi
 //
 // Stated separately from the hostile case because this one is ordinary: a UA is usually
 // ASCII, but nothing makes it so, and the cut lands wherever the client's bytes put it.
+//
+// THE INPUT HAS TO PUT A RUNE ACROSS BYTE 128, which an even-width rune at an even cap never
+// does: 2-byte runes all start at even offsets, so byte 128 is always a rune start, the
+// walk-back never executes, and `return s[:maxClientLen]` passes every assertion. Both rows
+// below straddle it, and each names the byte the cut must land on — an exact figure rather
+// than `<= maxClientLen`, because the loose form is also what a cap loosened to a rune count
+// would satisfy.
 func TestParseUserAgent_CapCutsOnARuneBoundary(t *testing.T) {
-	// 2-byte runes, so 64 of them is exactly maxClientLen: a few more puts a rune across
-	// the boundary at byte 128, where a byte cut leaves half of it behind.
-	c := ParseUserAgent(strings.Repeat("é", maxClientLen/2+8))
-	if c == nil {
+	for _, tc := range []struct {
+		name string
+		ua   string
+		// wantLen is where the walk-back has to stop: the largest rune boundary at or below
+		// maxClientLen for this input.
+		wantLen int
+	}{
+		// One ASCII byte shifts the 2-byte runes onto odd offsets, so byte 128 is a
+		// continuation byte and the cut walks back one to 127.
+		{"2-byte runes behind one ASCII byte", "x" + strings.Repeat("é", 70), maxClientLen - 1},
+		// 3-byte runes: 42 of them end at 126, the 43rd spans 126..128, so the cut walks
+		// back two to 126.
+		{"3-byte runes", strings.Repeat("✓", 60), maxClientLen - 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ParseUserAgent(tc.ua)
+			if c == nil {
+				t.Fatal("ParseUserAgent returned nil")
+			}
+			if !utf8.ValidString(c.Raw) {
+				t.Errorf("Raw = %q is not valid UTF-8; the cut split a rune in half", c.Raw)
+			}
+			if len(c.Raw) != tc.wantLen {
+				t.Errorf("Raw is %d bytes, want exactly %d — the cut must land on the last rune "+
+					"boundary at or below the %d-byte cap, neither splitting a rune nor "+
+					"loosening the cap to a rune count", len(c.Raw), tc.wantLen, maxClientLen)
+			}
+		})
+	}
+	// And the ordinary case still cuts exactly at the cap when the boundary allows it, so
+	// the walk-back is not silently shortening every label.
+	if c := ParseUserAgent(strings.Repeat("é", maxClientLen/2+8)); c == nil {
 		t.Fatal("ParseUserAgent returned nil")
+	} else if len(c.Raw) != maxClientLen {
+		t.Errorf("Raw is %d bytes for an even-width input, want exactly %d", len(c.Raw), maxClientLen)
 	}
-	if len(c.Raw) > maxClientLen {
-		t.Errorf("Raw is %d bytes, want <= %d", len(c.Raw), maxClientLen)
-	}
-	if !utf8.ValidString(c.Raw) {
-		t.Errorf("Raw = %q is not valid UTF-8; the cut split a rune in half", c.Raw)
-	}
-	// And the cap is not quietly loosened to a rune count: 64 two-byte runes is the most
-	// that fits, so the cut must land ON the byte cap rather than one rune past it.
-	if len(c.Raw) != maxClientLen {
-		t.Errorf("Raw is %d bytes; a rune-boundary cut must still honour the byte cap "+
-			"exactly when the boundary allows it", len(c.Raw))
+}
+
+// EVERY MEMBER OF isControlRune's SWITCH, with a literal expectation for each.
+//
+// The predicate cannot be its own oracle: hasControlRunes calls isControlRune, so a loop
+// asserting !hasControlRunes(got) stays green when a rune is deleted from the switch —
+// verified by deleting U+200C, which no test in this package noticed. A member missing from
+// the switch is a rune that reaches a durable row and a chart intact, so each one is pinned
+// against the exact string it must become.
+//
+// A NEW MEMBER NEEDS A ROW HERE. That is the point of the literal want: this list is the only
+// thing standing between the switch and a silent regression.
+func TestParseUserAgent_EveryControlRuneIsReplaced(t *testing.T) {
+	for _, r := range []rune{
+		// Bidi overrides and isolates.
+		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+		'\u2066', '\u2067', '\u2068', '\u2069',
+		// Bidi marks.
+		'\u200e', '\u200f', '\u061c',
+		// Zero-width.
+		'\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
+		// C0, DEL and C1, which the range test above the switch covers.
+		'\x00', '\t', '\n', '\r', '\x1b', '\x7f', '\u0085', '\u009b',
+	} {
+		t.Run(fmt.Sprintf("U+%04X", r), func(t *testing.T) {
+			// MID-STRING, PAST TrimSpace's REACH. ParseUserAgent trims leading and trailing
+			// whitespace first, and \n, \r and U+0085 are all Unicode space — so a row that
+			// appended the rune would assert nothing whatever for those three, however the
+			// switch reads. Round 3 of this review had exactly that defect with a trailing tab.
+			c := ParseUserAgent("newagent/1" + string(r) + "x")
+			if c == nil {
+				t.Fatal("ParseUserAgent returned nil for a UA that was sent")
+			}
+			// A tab is NORMALISED to a space rather than replaced — see
+			// TestParseUserAgent_ATabIsNormalisedNotSubstituted — so it is the one member
+			// whose literal answer is not the replacement character.
+			want := "newagent/1\uFFFDx"
+			if r == '\t' {
+				want = "newagent/1 x"
+			}
+			if c.Raw != want {
+				t.Errorf("Raw = %q, want %q: U+%04X reaches a durable row and a chart intact, "+
+					"so it is either in the switch or it is not filtered at all", c.Raw, want, r)
+			}
+		})
 	}
 }
 
@@ -330,6 +407,14 @@ func TestContextClientInfo_MemoizesIncludingTheNilAnswer(t *testing.T) {
 	// pointer comparison is the wrong instrument for it — and asserting pointer identity
 	// here would pin the aliasing that ClientInfo deliberately avoids: every caller sharing
 	// one mutable struct, where a single write relabels events already appended.
+	// Guarded before dereferencing: nil is a legitimate answer from this method (see
+	// TestContextClientInfo_NilWhenNoUserAgent), so the regression where the memo starts
+	// answering nil for a UA that WAS sent would panic the test binary — taking the rest of
+	// the package's output with it — instead of failing this assertion.
+	if first == nil || second == nil {
+		t.Fatalf("ClientInfo() returned nil for a User-Agent that was sent: first=%v second=%v",
+			first, second)
+	}
 	if *first != *second {
 		t.Errorf("ClientInfo() gave different answers across calls: %+v then %+v", *first, *second)
 	}
@@ -343,7 +428,11 @@ func TestContextClientInfo_MemoizesIncludingTheNilAnswer(t *testing.T) {
 			"is then mutable by anyone holding another event's copy — see snapshotClient")
 	}
 	first.Name = "impostor"
-	if third := c.ClientInfo(); third.Name != "claude-code" {
+	third := c.ClientInfo()
+	if third == nil {
+		t.Fatal("ClientInfo() returned nil after a caller wrote through its own copy")
+	}
+	if third.Name != "claude-code" {
 		t.Errorf("writing through one caller's copy changed the memo: %+v", third)
 	}
 }

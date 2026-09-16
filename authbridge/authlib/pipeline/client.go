@@ -40,11 +40,14 @@ type EventClient struct {
 	// Version is the version string that followed the product token, or empty when
 	// the agent was not recognised or sent no version.
 	Version string `json:"version,omitempty"`
-	// Raw is the User-Agent as it was sent, sanitised (see sanitizeUA) and capped at
-	// maxClientLen.
+	// Raw is the User-Agent as it was sent, with tabs normalised to spaces, sanitised (see
+	// sanitizeUA) and capped at maxClientLen.
 	//
-	// "Verbatim" up to those two rules, which is as verbatim as a string that reaches a
-	// terminal and a durable file can be.
+	// "Verbatim" up to those three rules, which is as verbatim as a string that reaches a
+	// terminal and a durable file can be. Worth knowing before comparing this against a
+	// header captured somewhere else: a tab in the original is a space here, because RFC
+	// 9110 allows HTAB as the separator and ParseUserAgent normalises it rather than letting
+	// the sanitiser turn it into U+FFFD.
 	//
 	// Kept ALONGSIDE Name rather than only when parsing fails, so a new coding
 	// agent appears in the breakdown the day someone runs it instead of after a
@@ -201,6 +204,10 @@ func isControlRune(r rune) bool {
 	case // Bidi overrides and isolates: reorder the glyphs around them.
 		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
 		'\u2066', '\u2067', '\u2068', '\u2069',
+		// Bidi MARKS, which are the same class and strictly easier to use: a mark needs no
+		// matching pop, so one LRM reorders the neutral characters around it on its own.
+		// U+200E LRM, U+200F RLM, U+061C ALM.
+		'\u200e', '\u200f', '\u061c',
 		// Zero-width: make two distinct labels render identically.
 		'\u200b', '\u200c', '\u200d', '\u2060', '\ufeff':
 		return true

@@ -319,6 +319,13 @@ type Context struct {
 // the pipeline runs its phases sequentially. Said explicitly because the
 // surrounding type does have fields other goroutines read.
 //
+// THE PIN IS WHAT MAKES THAT SAFE FOR RECORDING SITES, WHICH ARE NOT PIPELINE PHASES. The
+// first call writes clientParsed and client, unsynchronised, and the callers are recorders —
+// a response-path recorder, and on ext_proc a streaming-response append — so two of them
+// reaching a FIRST ClientInfo() on one Context is a data race, not merely a wrong label.
+// ResolveClient having already filled the memo is what rules that out: after it, every call
+// here is a pure read.
+//
 // A nil Headers map is fine and answers nil. A nil RECEIVER panics, unlike
 // PeerCertificate above, and that difference is deliberate rather than an
 // oversight: this mutates the memo, so it cannot be a no-op on nil, and every
@@ -362,9 +369,12 @@ func (c *Context) ClientInfo() *EventClient {
 // It does NOT replace the memo, and the memo is deliberately still lazy. An accessor over
 // Headers answers correctly at a construction site that forgets this call — one answer,
 // for the life of the context, from the headers as they stood when something first asked —
-// where a listener-assigned field would have serialized a clean empty value instead. What
-// a forgotten call costs is only the ordering half: on such a Context the answer is
-// pre-plugin by coincidence rather than by construction.
+// where a listener-assigned field would have serialized a clean empty value instead.
+//
+// What a forgotten call costs is TWO things, not one. The ordering half: on such a Context the
+// answer is pre-plugin by coincidence rather than by construction. And the concurrency half:
+// this call is a pure read only AFTER the memo is filled, so without the pin whichever
+// recording site asks first performs the write instead — see ClientInfo.
 //
 // Call it AFTER Headers is populated. Called before, it pins nil and the request's own
 // User-Agent is lost — which is why this is a listener's call to make at construction and
