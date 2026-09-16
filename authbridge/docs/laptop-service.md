@@ -37,10 +37,20 @@ changed it changes nothing: it does not re-download binaries already at that ver
 `service install` reports `Already current` and leaves the running proxy alone rather
 than restarting it.
 
-That last part matters — a restart cuts every attached Claude Code session, because
-`HTTPS_PROXY` is fixed in each session's environment at startup and cannot fall back to a
-direct connection. When a restart genuinely is needed, install says how many connections
-it is about to cut.
+That last part matters, though less than it used to read here. A restart cuts every
+connection attached to the proxy, and `HTTPS_PROXY` is fixed in each client's environment
+at startup so it cannot fall back to a direct connection — but it does reconnect through
+the proxy on its next request. Measured across three restarts, time from bind to first
+request served: **0.92s, 0.81s, 0.59s**, with the attached Claude Code sessions carrying
+on through all three.
+
+These three numbers are the only copy: `cmd_service.go` and its tests point here rather
+than repeating them, so a re-measurement changes one place and not four.
+
+So what a restart costs is the requests in flight at that moment, not the sessions. A
+session that reports an error has lost one request and will recover; it does not need
+restarting. When a restart genuinely is needed, install says how many connections it is
+about to cut.
 
 To restart deliberately: `abctl service restart`.
 
@@ -178,10 +188,11 @@ A stop persists: Cortex stays down across logouts and reboots until you start it
 again. That is deliberate — a stop that quietly undoes itself at your next login is
 worse than none.
 
-`stop` also reports how many connections it cut, because a Claude Code session that is
-already running cannot recover on its own: `HTTPS_PROXY` is fixed in its environment
-when it starts, so it has no way to fall back to a direct connection. Restart any
-session that begins failing to connect.
+`stop` also reports how many connections it cut, because until Cortex is back those
+clients have nowhere to go: `HTTPS_PROXY` is fixed in each one's environment when it
+starts, so none of them can fall back to a direct connection. Run `abctl service start`
+and they reconnect on their next request — the sessions themselves do not need
+restarting.
 
 ## Three ways to turn it off
 
@@ -196,11 +207,12 @@ abctl service stop
 Claude Code fails while Cortex is stopped, because its settings still point at the
 proxy. Either start Cortex again or unwire Claude Code (below).
 
-**A Claude Code session that is already running cannot recover on its own.**
-`HTTPS_PROXY` is fixed in its environment when it starts, so it has no way to fall
-back to a direct connection, and `claude-code disable` cannot reach it. Restart any
-session that starts failing to connect. `service stop` tells you how many
-connections it cut, for exactly this reason.
+**A running session cannot route around a stopped Cortex.** `HTTPS_PROXY` is fixed in
+its environment when it starts, so it has no way to fall back to a direct connection,
+and `claude-code disable` cannot reach it — that only affects sessions started
+afterwards. What it needs is Cortex back: `abctl service start`, after which it
+reconnects on its next request without being restarted. `service stop` tells you how
+many connections it cut, for exactly this reason.
 
 Use `abctl service stop`, not `kill` or `pkill` — the supervisor restarts the
 process within seconds, which looks like it refusing to die.
