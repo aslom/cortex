@@ -50,10 +50,16 @@ func TestWriteSessionView_MatchesTheBufferedEncoding(t *testing.T) {
 				Completion: "   \x00 ünïcødé 世界",
 			},
 		}}}},
-		{"every extension populated", &pipeline.SessionView{ID: "s1", TotalEvents: 3, Events: []pipeline.SessionEvent{{
+		// Every field of sessionEventWire, so the name is not promising more than the
+		// case covers. Both paths hand the event to the same SessionEvent.MarshalJSON, so
+		// they cannot diverge per field — what this actually pins is that the ENVELOPE
+		// stays right around an event large enough to span a buffer boundary.
+		{"every wire field populated", &pipeline.SessionView{ID: "s1", TotalEvents: 3, Events: []pipeline.SessionEvent{{
+			SessionID:  "s1",
 			At:         at,
 			Direction:  pipeline.Outbound,
 			Phase:      pipeline.SessionResponse,
+			RequestID:  "req-7",
 			Host:       "api.example",
 			HTTPMethod: "POST",
 			HTTPPath:   "/v1/messages",
@@ -61,7 +67,15 @@ func TestWriteSessionView_MatchesTheBufferedEncoding(t *testing.T) {
 			Duration:   12 * time.Millisecond,
 			Identity:   &pipeline.EventIdentity{Subject: "alice", ClientID: "agent", Scopes: []string{"openid"}},
 			Error:      &pipeline.EventError{Kind: "upstream", Code: "503", Message: "unavailable"},
-			A2A:        &pipeline.A2AExtension{Method: "message/send", Parts: []pipeline.A2APart{{Content: "hi"}}},
+			A2A:        &pipeline.A2AExtension{Method: "message/send", Parts: []pipeline.A2APart{{Content: "hi"}}, IsAction: true},
+			MCP: &pipeline.MCPExtension{
+				Method:   "tools/call",
+				RPCID:    7,
+				Params:   map[string]any{"name": "get_weather", "arguments": map[string]any{"city": "Zürich"}},
+				Result:   map[string]any{"content": []any{"18°C"}},
+				Err:      &pipeline.MCPError{Code: -32602, Message: "invalid params", Data: "city"},
+				IsAction: true,
+			},
 			Inference: &pipeline.InferenceExtension{
 				Model:     "claude",
 				Messages:  []pipeline.InferenceMessage{{Role: "user", Content: "q"}},
@@ -72,7 +86,10 @@ func TestWriteSessionView_MatchesTheBufferedEncoding(t *testing.T) {
 				Plugin: "token-exchange", Action: pipeline.ActionModify, Reason: "exchanged",
 				Details: map[string]string{"target_audience": "aud"},
 			}}},
-			Plugins: map[string]json.RawMessage{"cost": json.RawMessage(`{"usd":0.0123}`)},
+			Plugins:      map[string]json.RawMessage{"cost": json.RawMessage(`{"usd":0.0123}`)},
+			TLS:          &pipeline.EventTLS{Version: "TLS 1.3", CipherSuite: "TLS_AES_128_GCM_SHA256", PeerSPIFFEID: "spiffe://example/agent"},
+			Tunnel:       true,
+			TunnelReason: pipeline.TunnelClientRejectedCA,
 		}}}},
 	}
 
@@ -115,9 +132,13 @@ func TestWriteSessionView_MatchesTheBufferedEncoding(t *testing.T) {
 func TestWriteSessionView_NeverBuffersTheWholeDocument(t *testing.T) {
 	const events = 40
 	view := &pipeline.SessionView{ID: "s1"}
+	// Fixed, not time.Now(): RFC3339Nano trims trailing zeros, so a wall-clock timestamp
+	// makes the byte counts in this test's own failure message vary run to run — which is
+	// no help to whoever is reading it to find out how far off the bound they are.
+	at := time.Date(2026, 9, 16, 10, 30, 0, 0, time.UTC)
 	for i := 0; i < events; i++ {
 		view.Events = append(view.Events, pipeline.SessionEvent{
-			At: time.Now(),
+			At: at,
 			Inference: &pipeline.InferenceExtension{
 				Model: "m",
 				Messages: []pipeline.InferenceMessage{{
@@ -173,6 +194,48 @@ func (m *maxWriter) Write(p []byte) (int, error) {
 	}
 	m.total += len(p)
 	return len(p), nil
+}
+
+// A marshal failure part-way through is where streaming differs from Encode in behavior
+// and not just in cost, so the difference is pinned rather than left to be discovered.
+//
+// The response is not atomic any more: bytes are already out under a 200, so the client
+// gets a truncated document. What this asserts is the part that was a choice — the cut
+// falls where the failure was, not at whatever buffer boundary preceded it, and the error
+// names the event so the handler's log line locates it.
+func TestWriteSessionView_OnMarshalFailureCutsAtTheFailureAndNamesIt(t *testing.T) {
+	view := &pipeline.SessionView{ID: "s1", Events: []pipeline.SessionEvent{
+		{Host: "first.example"},
+		{Host: "second.example"},
+		// json.RawMessage is emitted verbatim and then validated, so invalid content here
+		// is the one marshal error a SessionEvent can produce.
+		{Host: "third.example", Plugins: map[string]json.RawMessage{"broken": json.RawMessage(`{not json`)}},
+	}}
+
+	var got bytes.Buffer
+	err := writeSessionView(&got, view)
+	if err == nil {
+		t.Fatal("an unmarshalable event produced no error")
+	}
+	if want := "marshal event 2 of 3"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error does not name the failing event, want %q in: %v", want, err)
+	}
+
+	// The events already committed to the document reached the writer instead of dying in
+	// the buffer, and the failing one did not.
+	for _, host := range []string{"first.example", "second.example"} {
+		if !strings.Contains(got.String(), host) {
+			t.Errorf("event %q was committed to the document but discarded on the error path", host)
+		}
+	}
+	if strings.Contains(got.String(), "third.example") {
+		t.Error("the failing event was partly written")
+	}
+	// Truncated, and truncated in the way the doc comment says: the client sees invalid
+	// JSON rather than a short-but-parseable document that looks complete.
+	if json.Valid(got.Bytes()) {
+		t.Error("a truncated response parsed as valid JSON, which would hide the failure")
+	}
 }
 
 // A write error must surface, not be swallowed by the buffer.

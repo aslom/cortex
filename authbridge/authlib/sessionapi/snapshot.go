@@ -3,6 +3,7 @@ package sessionapi
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strconv"
 
@@ -39,6 +40,18 @@ const snapshotWriteBuffer = 32 << 10
 // envelope around a generated encoding is exactly the thing that drifts silently, so
 // TestWriteSessionView_MatchesTheBufferedEncoding compares the two outputs directly on
 // every shape this can produce.
+//
+// WHAT IS GIVEN UP: the response is no longer atomic. Encode either produced the whole
+// document or none of it, because it failed before the first byte left the buffer; this
+// writes as it goes, so a marshal failure on event i leaves the client holding a truncated
+// document under a 200 and a Content-Type that promises JSON. That is unavoidable for
+// anything streaming — the status line is long gone by then — and the client's own decoder
+// reports it as a parse error rather than as silently short data.
+//
+// Reachable only in theory today: the sole marshal-error source in the tree is an invalid
+// json.RawMessage in SessionEvent.Plugins, and those are produced by marshaling in the
+// first place. It is written down because it is a real difference in failure behavior and
+// the rest of this file accounts for its tradeoffs.
 func writeSessionView(w io.Writer, view *pipeline.SessionView) error {
 	id, err := json.Marshal(view.ID)
 	if err != nil {
@@ -68,7 +81,14 @@ func writeSessionView(w io.Writer, view *pipeline.SessionView) error {
 			// buffer is this one event.
 			b, err := json.Marshal(&view.Events[i])
 			if err != nil {
-				return err
+				// Flush before returning, deliberately. The document is already
+				// truncated either way, so the choice is only whether the client's cut
+				// falls where this failed or wherever the buffer boundary happened to
+				// be — up to snapshotWriteBuffer of committed events earlier, and not
+				// reproducibly. Cutting at the failure makes the truncation point mean
+				// something, and pairs with the event index in the error the caller logs.
+				_ = bw.Flush()
+				return fmt.Errorf("marshal event %d of %d: %w", i, len(view.Events), err)
 			}
 			_, _ = bw.Write(b)
 		}
