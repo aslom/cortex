@@ -473,6 +473,9 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				for cached := range m.events {
 					if cached != id && live[cached] {
 						delete(m.events, cached)
+						// Same reason as the wholesale reset in backToPodsPane: the
+						// count belongs to the events it describes.
+						delete(m.olderNotFetched, cached)
 					}
 				}
 				// Clear only on an actual session change, so
@@ -812,6 +815,14 @@ func (m *model) helpView() string {
 		// data loss. Only when hiding is on AND at least one message was hidden.
 		if m.hideInactive && m.hiddenInactive > 0 {
 			base = fmt.Sprintf("%s  ·  %d hidden", base, m.hiddenInactive)
+		}
+		// Older events the snapshot did not ask for. Same reasoning as the hidden count
+		// one line up — a partial timeline should not read as the whole one — but this
+		// bound is not something the operator chose, so it says "not fetched" rather
+		// than naming a key to undo it. There is no key: the window is what the client
+		// is willing to hold.
+		if n := m.olderNotFetched[m.selectedSess]; n > 0 {
+			base = fmt.Sprintf("%s  ·  %d older not fetched", base, n)
 		}
 		// Columns that did not fit — the whole reason issue #866 was filed: HOST was
 		// declared but never visible, and nothing said the table had been clipped.

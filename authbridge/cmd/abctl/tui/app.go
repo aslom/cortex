@@ -115,8 +115,13 @@ type refreshTickMsg time.Time
 type sessionsLoadedMsg []session.SessionSummary
 type pipelineLoadedMsg *apiclient.PipelineView
 type snapshotLoadedMsg struct {
-	id     string
-	events []pipeline.SessionEvent
+	// olderNotFetched is how many events precede the ones in this response, from the
+	// server's own count of the session. Non-zero means the timeline starts where the
+	// window starts, not where the session does — a distinction the operator cannot
+	// otherwise make, and the one that made a 5000-event session look like a 3-row one.
+	olderNotFetched int
+	id              string
+	events          []pipeline.SessionEvent
 }
 type streamMsg apiclient.StreamEvent
 type streamClosedMsg struct{}
@@ -266,8 +271,20 @@ type model struct {
 	// doesn't read as data loss.
 	hideInactive   bool
 	hiddenInactive int
-	flash          string
-	flashUntil     time.Time
+
+	// olderNotFetched is how many events a session holds that its snapshot did not
+	// carry, reported by the server, keyed by session id.
+	//
+	// Keyed rather than a single number, because snapshots land asynchronously and for
+	// whichever session was selected when the fetch started. A single field let a late
+	// snapshot for an abandoned session describe the one on screen, and showed the
+	// previous session's count in the window between selecting a session and its
+	// snapshot arriving. Beside hiddenInactive in spirit — both answer "is this the
+	// whole timeline?" — but that one is a filter the operator chose and this is a
+	// bound they did not.
+	olderNotFetched map[string]int
+	flash           string
+	flashUntil      time.Time
 	// flashSticky keeps the current flash up until the next keypress instead of
 	// expiring on flashUntil. Set only by setStickyFlash (yank), so every other
 	// flash producer keeps its timed behaviour.
@@ -456,6 +473,10 @@ func (m *model) backToPodsPane() {
 	m.streamCh = nil
 	m.sessions = nil
 	m.events = make(map[string][]pipeline.SessionEvent)
+	// In lockstep with m.events. A count describing a session whose events are gone is
+	// the bug that made this map per-session in the first place, just with a narrower
+	// window: re-entering the events pane on a matching id before its snapshot lands.
+	m.olderNotFetched = nil
 	// A different pod is a different aggregator: keep the view options the
 	// operator chose, drop the data they described.
 	m.usage.snap = nil
@@ -629,7 +650,11 @@ func (m *model) snapshotCmd(id string) tea.Cmd {
 		if err != nil {
 			return errMsg{where: "snapshot " + id, err: err}
 		}
-		return snapshotLoadedMsg{id: id, events: view.Events}
+		older := 0
+		if view.TotalEvents > len(view.Events) {
+			older = view.TotalEvents - len(view.Events)
+		}
+		return snapshotLoadedMsg{id: id, events: view.Events, olderNotFetched: older}
 	}
 }
 
@@ -781,6 +806,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		//
 		// Only update if we're still focused on this session.
 		m.events[msg.id] = msg.events
+		if m.olderNotFetched == nil {
+			m.olderNotFetched = map[string]int{}
+		}
+		m.olderNotFetched[msg.id] = msg.olderNotFetched
 		if m.pane == paneEvents && m.selectedSess == msg.id {
 			m.rebuildEventsTable()
 		}

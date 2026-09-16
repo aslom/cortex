@@ -92,7 +92,14 @@ One limit by default, and it is not a clock:
   the machine.
 - With `max_events` unset, `max_sessions` bounds how many sessions are kept and nothing
   about how large one gets. A single session that never ends grows until the process does;
-  that is the case to set `max_events` (or a `session.ttl`) for.
+  that is the case to set `max_events` (or a `session.ttl`) for. Repeated message text is
+  stored once per session rather than once per turn, which cut heap by 10.4x on a
+  300-turn measurement — so "5000 events" costs far less than multiplying by a request
+  size suggests, but it is not free.
+- `abctl` fetches the **most recent** 500 events of a session, not all of them, and says
+  so in the events footer (`· N older not fetched`). A session's whole history can be a
+  gigabyte of JSON; asking for it took 17s and timed out at 10, which showed up as an
+  events pane holding only what arrived after you opened it.
 - `max_sessions` is **reachable in normal use**, which it effectively was not before.
   Every `claude` invocation mints a new bucket, so the 101st session on a busy machine
   evicts the least-recently-updated one — whole session and all. If an older session has
