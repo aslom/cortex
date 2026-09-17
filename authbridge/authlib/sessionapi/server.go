@@ -173,7 +173,7 @@ func (s *Server) Shutdown(ctx context.Context) error { return s.server.Shutdown(
 const indexBody = `Cortex / AuthBridge Session API
 
   GET /v1/sessions        list active sessions
-  GET /v1/sessions/{id}   recent events (?limit=N, max 2000)
+  GET /v1/sessions/{id}   recent events (?limit=N max 2000, ?before=<seq>)
   GET /v1/events          SSE stream of new events (?session=<id> to filter)
   GET /v1/pipeline        active plugin pipeline
   GET /v1/plugins         catalog of registered plugins
@@ -344,9 +344,27 @@ func eventLimit(r *http.Request) int {
 	return n
 }
 
+// eventBefore reads ?before, the Seq to page backward from. Zero (absent, unparseable,
+// or negative) means "from the newest", which makes a client's first request and its
+// later pages the same call. Unparseable falls back rather than erroring for the same
+// reason eventLimit does.
+func eventBefore(r *http.Request) uint64 {
+	raw := strings.TrimSpace(r.URL.Query().Get("before"))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	view := s.store.ViewTail(id, eventLimit(r))
+	// ViewPage with before == 0 is ViewTail, so one call covers both the plain tail
+	// request and a paging one — see Store.ViewPage.
+	view := s.store.ViewPage(id, eventBefore(r), eventLimit(r))
 	if view == nil {
 		http.NotFound(w, r)
 		return

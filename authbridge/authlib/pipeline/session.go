@@ -80,6 +80,26 @@ type SessionEvent struct {
 	// without needing a side-channel lookup.
 	SessionID string
 
+	// Seq orders the events within one session, counting from 1. Assigned by
+	// Store.Append; zero on an event that never went through a store.
+	//
+	// It exists because nothing else here can order a session reliably. At ties —
+	// two events recorded in the same instant are common on a fast local proxy —
+	// and RequestID pairs a request with its response without saying which pair
+	// came first. That made a stable pagination cursor impossible: an offset into
+	// the slice shifts under eviction, and a timestamp cannot break its own ties.
+	//
+	// Seq is per session, not global, so it says nothing about ordering across
+	// sessions. Gaps are expected and are not lost events in the paging sense:
+	// FIFO eviction drops a prefix, and trimEventsPinIntent can leave one much
+	// older event pinned ahead of the retained tail. What is guaranteed is that
+	// the events a session holds are ascending in Seq, which is what lets both
+	// the store and a client binary-search them.
+	//
+	// Serialized via sessionEventWire like every other field here, not by a tag on
+	// this struct — SessionEvent has a custom MarshalJSON.
+	Seq uint64
+
 	At        time.Time
 	Direction Direction
 	Phase     SessionPhase
@@ -350,7 +370,12 @@ func tlsVersionString(v uint16) string {
 // writes to it directly; UnmarshalJSON reads into it and converts back.
 // Keeping the layout in one place guarantees round-trip symmetry.
 type sessionEventWire struct {
-	SessionID   string                     `json:"sessionId,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+	// omitempty for the same skew reason as the fields at the bottom of this struct:
+	// a new abctl against a proxy that predates paging decodes 0 and can tell that
+	// this event carries no cursor, rather than mistaking it for the first event of
+	// the session.
+	Seq         uint64                     `json:"seq,omitempty"`
 	At          time.Time                  `json:"at"`
 	Direction   Direction                  `json:"direction"`
 	Phase       SessionPhase               `json:"phase"`
@@ -387,6 +412,7 @@ type sessionEventWire struct {
 func (e SessionEvent) MarshalJSON() ([]byte, error) {
 	return json.Marshal(sessionEventWire{
 		SessionID:    e.SessionID,
+		Seq:          e.Seq,
 		At:           e.At,
 		Direction:    e.Direction,
 		Phase:        e.Phase,
@@ -420,6 +446,7 @@ func (e *SessionEvent) UnmarshalJSON(data []byte) error {
 	}
 	*e = SessionEvent{
 		SessionID:    w.SessionID,
+		Seq:          w.Seq,
 		At:           w.At,
 		Direction:    w.Direction,
 		Phase:        w.Phase,
@@ -489,6 +516,20 @@ type SessionView struct {
 	// indistinguishable — and was, for a 5000-event session whose snapshot request
 	// simply timed out with nothing to show for it.
 	TotalEvents int `json:"totalEvents,omitempty"`
+
+	// OldestSeq is the Seq of the oldest event the session still HOLDS — not the
+	// oldest in this response. It is what lets a paging client know when to stop:
+	// having received an event with this Seq, there is nothing older to ask for.
+	//
+	// A count cannot answer that question. TotalEvents says how many events exist,
+	// but eviction and the pinned intent make "how many" a poor guide to "how far
+	// back can I go", and a client comparing counts would keep asking for pages the
+	// store cannot produce. Comparing two Seq values is exact and survives events
+	// being evicted between one page and the next.
+	//
+	// Absent when the view already starts at the oldest held event, so the common
+	// whole-session response is unchanged — same reasoning as TotalEvents above.
+	OldestSeq uint64 `json:"oldestSeq,omitempty"`
 }
 
 // Intents returns only inbound A2A request events (user messages).
