@@ -220,12 +220,61 @@ type InferenceMessage struct {
 	ContentBytes int `json:"contentBytes,omitempty"`
 }
 
+// RawJSON is a JSON value held exactly as it arrived, rather than decoded into Go
+// values. It marshals back byte-for-byte, so a round trip through this type preserves
+// key order and spacing instead of normalizing them.
+//
+// WHY A NAMED STRING, and not the two obvious alternatives — this type exists to be
+// deduplicated by authlib/session's interner, and both of them defeat that:
+//
+//   - map[string]any (what InferenceTool.Parameters used to be) cannot be interned at
+//     all without a recursive walk that rewrites map values, and a walk cannot lean on
+//     immutability the way sharing a string can. It is also expensive to hold: a tool
+//     manifest's schemas measured 4.1x their JSON text as maps, per event, on a live
+//     session.
+//   - json.RawMessage fails twice. Converting an interned string to []byte COPIES, so
+//     every event would get its own copy and the interning would buy nothing; and []byte
+//     is mutable, so genuinely sharing one across events would let any holder rewrite
+//     bytes another event has already published.
+//
+// A string is immutable, and both string(RawJSON) and RawJSON(string) are free
+// conversions, so an interned value is shared rather than copied. That is the entire
+// reason for the type.
+//
+// The MarshalJSON method is load bearing beyond serialization: OPA's ast.InterfaceToValue
+// switches on the concrete Go type and treats anything it sees as a plain string as a
+// JSON string. Reaching rego as an object depends on landing in that switch's default
+// arm, which round-trips through encoding/json — so this must stay a NAMED type (never
+// `= string`, which the switch would catch) and must keep the method. See
+// plugins/opa/tool_parameters_rego_test.go, which drives that exact conversion.
+type RawJSON string
+
+// MarshalJSON emits the value verbatim.
+//
+// Empty becomes null rather than nothing, because empty bytes are not valid JSON and
+// would fail the enclosing marshal. Not hypothetical: plugins/sparc/collect.go inserts
+// this value into a map unconditionally, without checking for absence first.
+func (r RawJSON) MarshalJSON() ([]byte, error) {
+	if r == "" {
+		return []byte("null"), nil
+	}
+	return []byte(r), nil
+}
+
+// UnmarshalJSON keeps the raw bytes without validating or reformatting them. The decoder
+// has already established that they are a well-formed JSON value.
+func (r *RawJSON) UnmarshalJSON(b []byte) error {
+	*r = RawJSON(b)
+	return nil
+}
+
 // InferenceTool is a function/tool the client declared the model may call.
-// Parameters is the OpenAI-style JSON Schema object describing valid args.
+// Parameters is the OpenAI-style JSON Schema object describing valid args, kept as
+// received — see RawJSON for why it is not decoded.
 type InferenceTool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
+	Name        string  `json:"name"`
+	Description string  `json:"description,omitempty"`
+	Parameters  RawJSON `json:"parameters,omitempty"`
 }
 
 // InferenceToolCall is a tool invocation the model emitted in its response.

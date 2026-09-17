@@ -115,7 +115,7 @@ func parseAnthropicRequest(body []byte) *pipeline.InferenceExtension {
 		ext.Tools = append(ext.Tools, pipeline.InferenceTool{
 			Name:        tool.Name,
 			Description: tool.Description,
-			Parameters:  rawMessageToMap(tool.InputSchema),
+			Parameters:  schemaObject(tool.InputSchema),
 		})
 	}
 	return ext
@@ -422,17 +422,4 @@ func parseAnthropicSSE(body []byte, ext *pipeline.InferenceExtension) {
 		foldAnthropicFrame(data, state, ext)
 	}
 	state.finalize(ext)
-}
-
-// rawMessageToMap decodes a JSON object into a map, returning nil for an absent
-// or non-object value (so a non-object input_schema doesn't fail the parse).
-func rawMessageToMap(raw json.RawMessage) map[string]any {
-	if len(raw) == 0 {
-		return nil
-	}
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil
-	}
-	return m
 }

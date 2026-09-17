@@ -61,7 +61,7 @@ func inferenceEvent() pipeline.SessionEvent {
 				{Role: "user", Content: "Refund my duplicate charge."},
 			},
 			Tools: []pipeline.InferenceTool{
-				{Name: "issue_refund", Description: "Issue a refund", Parameters: map[string]any{"type": "object"}},
+				{Name: "issue_refund", Description: "Issue a refund", Parameters: `{"type": "object"}`},
 			},
 		},
 	}

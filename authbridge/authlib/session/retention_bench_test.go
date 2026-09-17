@@ -26,6 +26,85 @@ func benchConversation(turn int) []pipeline.InferenceMessage {
 	return out
 }
 
+// benchToolManifest builds the tool manifest a client re-sends on every request, sized
+// from a live session: 27 tools, ~800 bytes of schema each. Rebuilt per call, as a parser
+// does, so nothing is shared by accident.
+//
+// nonce distinguishes the two sub-benchmarks below. Passing the turn number makes every
+// turn's manifest unique, which is what interning cannot collapse.
+func benchToolManifest(nonce int) []pipeline.InferenceTool {
+	out := make([]pipeline.InferenceTool, 0, 27)
+	for i := 0; i < 27; i++ {
+		out = append(out, pipeline.InferenceTool{
+			Name:        fmt.Sprintf("tool_%02d", i),
+			Description: fmt.Sprintf("tool %02d: %s", i, strings.Repeat("what it does ", 20)),
+			Parameters: pipeline.RawJSON(fmt.Sprintf(
+				`{"type": "object", "nonce": %d, "properties": {"arg_%02d": {"type": "string", "description": "%s"}}}`,
+				nonce, i, strings.Repeat("an argument ", 40))),
+		})
+	}
+	return out
+}
+
+// BenchmarkRetainedHeapWithTools reports what the tool manifest costs a session, which is
+// the term BenchmarkRetainedHeap does not exercise at all — and was the largest one in a
+// live proxy before the schemas were interned: measured at 84KB per event, 4.1x the JSON
+// text, because they were held as map[string]any.
+//
+// Two sub-benchmarks, because a single figure cannot show what interning did:
+//
+//   - shared: every turn re-sends the SAME manifest, which is what a real client does.
+//     One copy per session survives.
+//   - distinct: every turn's manifest differs by one nonce field, so the table can never
+//     match. Standing next to `shared` it prices the duplication that was being paid —
+//     5.26MB against 0.51MB of tool term when this was written, about 10x.
+//
+// What `distinct` is NOT is a reproduction of the old cost. It prices duplication only,
+// and the field it replaced was a map[string]any, which cost 4.1x its JSON text to hold
+// on top of being duplicated. The real change is therefore larger than the ratio here,
+// and the map figure is not reproducible in this tree by design — the type is gone.
+//
+// Reported rather than asserted, for the reasons on BenchmarkRetainedHeap:
+//
+//	go test ./session/ -bench RetainedHeapWithTools -run '^$' -benchtime 1x
+func BenchmarkRetainedHeapWithTools(b *testing.B) {
+	for _, tc := range []struct {
+		name  string
+		nonce func(turn int) int
+	}{
+		{"shared", func(int) int { return 0 }},
+		{"distinct", func(turn int) int { return turn }},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				runtime.GC()
+				var before runtime.MemStats
+				runtime.ReadMemStats(&before)
+
+				s := New(0, 0, 100)
+				for turn := 1; turn <= benchTurns; turn++ {
+					s.Append("s1", pipeline.SessionEvent{
+						Inference: &pipeline.InferenceExtension{
+							Messages: benchConversation(turn),
+							Tools:    benchToolManifest(tc.nonce(turn)),
+						},
+					})
+				}
+
+				runtime.GC()
+				var after runtime.MemStats
+				runtime.ReadMemStats(&after)
+				delta := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+				b.ReportMetric(float64(delta)/1048576, "MB/session")
+				b.ReportMetric(float64(benchTurns), "turns")
+
+				s.Close()
+				runtime.KeepAlive(s)
+			}
+		})
+	}
+}
+
 // BenchmarkRetainedHeap reports the heap a finished session holds, which is the number
 // this package's interning exists to move.
 //

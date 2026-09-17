@@ -889,7 +889,7 @@ func TestBuildInput_Inference_LeanMode(t *testing.T) {
 			{Role: "user", Content: "big conversation history..."},
 		},
 		Tools: []pipeline.InferenceTool{
-			{Name: "create_issue", Description: "Creates issues", Parameters: map[string]any{"type": "object"}},
+			{Name: "create_issue", Description: "Creates issues", Parameters: `{"type": "object"}`},
 			{Name: "list_issues", Description: "Lists issues"},
 		},
 		ToolChoice:       "auto",
@@ -1001,7 +1001,7 @@ func TestBuildInput_Inference_WithToolsDetail(t *testing.T) {
 	pctx.Extensions.Inference = &pipeline.InferenceExtension{
 		Model: "gpt-4",
 		Tools: []pipeline.InferenceTool{
-			{Name: "create_issue", Description: "Creates issues", Parameters: map[string]any{"type": "object"}},
+			{Name: "create_issue", Description: "Creates issues", Parameters: `{"type": "object"}`},
 		},
 	}
 	input := buildInput(pctx, inc, "")

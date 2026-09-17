@@ -2,6 +2,8 @@ package inferenceparser
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
@@ -194,11 +196,24 @@ func TestInferenceParser_CapturesToolDescriptionAndParameters(t *testing.T) {
 	if tool.Description != "Get weather info for a city" {
 		t.Errorf("Description = %q", tool.Description)
 	}
-	if tool.Parameters == nil {
+	if tool.Parameters == "" {
 		t.Fatal("Parameters not captured")
 	}
-	if tool.Parameters["type"] != "object" {
-		t.Errorf("Parameters[type] = %v", tool.Parameters["type"])
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(tool.Parameters), &schema); err != nil {
+		t.Fatalf("captured parameters are not valid JSON: %v\n%s", err, tool.Parameters)
+	}
+	if schema["type"] != "object" {
+		t.Errorf("parameters.type = %v, want object", schema["type"])
+	}
+	// The schema is kept as the client sent it, so key ORDER survives. This is the
+	// observable difference from decoding into a map: marshaling a map sorts keys, which
+	// would put "properties" ahead of "type" and silently hand every reader — the session
+	// API, abctl, a policy dumping its input — a rewritten schema rather than the one on
+	// the wire.
+	raw := string(tool.Parameters)
+	if strings.Index(raw, `"type"`) > strings.Index(raw, `"properties"`) {
+		t.Errorf("parameters were reformatted; want the bytes as sent, got %s", raw)
 	}
 	if ext.ToolChoice != "auto" {
 		t.Errorf("ToolChoice = %v, want \"auto\"", ext.ToolChoice)
@@ -210,7 +225,12 @@ func TestInferenceParser_CapturesToolDescriptionAndParameters(t *testing.T) {
 
 // A malformed `parameters` value (string instead of an object) must not
 // take down the whole inference capture. The tool name and description
-// still land on the extension; parameters are simply nil.
+// still land on the extension; parameters are simply absent.
+//
+// Dropping the non-object is deliberate rather than incidental to how it used to be
+// decoded: callers are written against "a schema object or nothing", and keeping a bare
+// string would forward it to sparc's collector and hand OPA an input a policy cannot
+// index into. See schemaObject.
 func TestInferenceParser_ToolParametersNotObject(t *testing.T) {
 	p := NewInferenceParser()
 	pctx := &pipeline.Context{
@@ -244,8 +264,8 @@ func TestInferenceParser_ToolParametersNotObject(t *testing.T) {
 	if ext.Tools[0].Description != "Get weather info" {
 		t.Errorf("Description = %q", ext.Tools[0].Description)
 	}
-	if ext.Tools[0].Parameters != nil {
-		t.Errorf("Parameters should be nil for non-object input, got %+v", ext.Tools[0].Parameters)
+	if ext.Tools[0].Parameters != "" {
+		t.Errorf("Parameters should be empty for non-object input, got %s", ext.Tools[0].Parameters)
 	}
 }
 

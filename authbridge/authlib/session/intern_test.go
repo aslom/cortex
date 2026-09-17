@@ -279,7 +279,7 @@ func manifest() []pipeline.InferenceTool {
 		{
 			Name:        "get_weather",
 			Description: "Look up the forecast for a place. " + strings.Repeat("schema detail ", 8),
-			Parameters:  map[string]any{"type": "object"},
+			Parameters:  `{"type": "object"}`,
 		},
 		{
 			Name:        "send_email",

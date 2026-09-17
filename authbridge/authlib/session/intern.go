@@ -22,18 +22,25 @@ import (
 // the same bytes it always did.
 //
 // SCOPE: string fields only — inference messages and completions, A2A part content, and
-// tool descriptions. The tool manifest earns its place: a client re-sends it on every
-// request, so it duplicates harder than the conversation does. Measured on a live
-// 272-event session, 10.3MB of tool JSON held against 0.1MB distinct — 154x, where the
-// conversation itself was 6.5x. Interning the descriptions takes that session's tool
-// retention from 7.12MB to 0.37MB.
+// the tool manifest's descriptions AND schemas. The manifest earns its place: a client
+// re-sends it on every request, so it duplicates harder than the conversation does.
+// Measured on a live 272-event session, 10.3MB of tool JSON held against 0.1MB distinct —
+// 154x, where the conversation itself was 6.5x. Interning the descriptions took that
+// session's tool retention from 7.12MB to 0.37MB.
 //
-// What is still duplicated, both because they are map[string]any and need a recursive walk
-// of arbitrary JSON, and in ascending order of how much they cost: InferenceTool.Parameters
-// (the JSON schema — 34.7% of that 10.3MB, so ~3.6MB per session of the same tool
-// signatures over and over) and MCP Params/Result (unmeasured on this workload). Deferred
-// rather than guessed at: a walk that rewrites map values cannot lean on string
-// immutability the way this does, so it needs its own reasoning about aliasing.
+// The schemas (InferenceTool.Parameters) were the last big duplicate and are now interned
+// too. They used to be map[string]any, which is what put them out of reach: a walk that
+// rewrites map values cannot lean on string immutability the way this does, so it needs
+// its own reasoning about aliasing. Rather than write that walk, the FIELD changed — it is
+// a pipeline.RawJSON, a named string type, so it interns here like any other string and
+// the aliasing question never arises. Two measurements motivated it: the schemas were
+// 34.7% of that 10.3MB, and as maps they cost 4.1x their JSON text to hold — 84KB per
+// event on a live session, ~172MB across one 2050-event session.
+//
+// What is still duplicated: MCP Params/Result, which remain map[string]any and would need
+// the recursive walk. Left alone deliberately — they are unmeasured on this workload (zero
+// MCP events across every live session inspected), so there is no evidence yet about what
+// they cost, and the same field-type change is available to them if there ever is.
 const (
 	// internMinLen is the shortest string worth a map lookup.
 	//
@@ -126,11 +133,16 @@ func (in *interner) internEvent(e *pipeline.SessionEvent) {
 		}
 		cp.Completion = in.intern(cp.Completion, next)
 		// Tools, like Messages, must be cloned before any field is rewritten: the same
-		// array is aliased by this request's response-phase event. Parameters is left
-		// alone — see SCOPE above.
+		// array is aliased by this request's response-phase event.
 		cp.Tools = slices.Clone(e.Inference.Tools)
 		for i := range cp.Tools {
 			cp.Tools[i].Description = in.intern(cp.Tools[i].Description, next)
+			// Both conversions are free — pipeline.RawJSON is a string underneath — so
+			// the interned schema is shared with the previous event rather than copied
+			// into this one. That is the whole reason the field is a named string type
+			// and not a json.RawMessage; see pipeline.RawJSON.
+			cp.Tools[i].Parameters = pipeline.RawJSON(
+				in.intern(string(cp.Tools[i].Parameters), next))
 		}
 		e.Inference = &cp
 	}

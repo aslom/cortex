@@ -79,7 +79,7 @@ func TestWriteSessionView_MatchesTheBufferedEncoding(t *testing.T) {
 			Inference: &pipeline.InferenceExtension{
 				Model:     "claude",
 				Messages:  []pipeline.InferenceMessage{{Role: "user", Content: "q"}},
-				Tools:     []pipeline.InferenceTool{{Name: "t", Description: "d", Parameters: map[string]any{"type": "object"}}},
+				Tools:     []pipeline.InferenceTool{{Name: "t", Description: "d", Parameters: `{"type": "object"}`}},
 				ToolCalls: []pipeline.InferenceToolCall{{ID: "1", Name: "t", Arguments: `{"a":1}`}},
 			},
 			Invocations: &pipeline.Invocations{Outbound: []pipeline.Invocation{{
