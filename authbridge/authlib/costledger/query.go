@@ -147,7 +147,22 @@ func (w *Writer) Query(ctx context.Context, from, to time.Time) ([]Row, Caveats,
 	// local window. The package dayOf preserves its argument's zone, so it would answer
 	// whichever day the caller happened to spell — near midnight, a different file from the
 	// one the row was written to.
-	for d := w.store.dayOf(fromMin); !d.After(w.store.dayOf(toMin)); d = d.AddDate(0, 0, 1) {
+	// AND BOUNDED BY WHAT COULD EXIST, not only by what was asked for. The walk is one os.Open per
+	// day, so the caller's span alone set the amount of IO: Query(time.Time{}, now) is 106,751 opens
+	// and 1.67s against a tmpdir — worse against the NFS or FUSE mount this doc names as the real
+	// target. ctx is checked per day, so a cancelled request stops, but nothing made an absurd span
+	// cheap for a caller who waits.
+	//
+	// LOSSLESS BY CONSTRUCTION, which is why it clamps rather than errors. No day file can exist
+	// outside maxRetentionDays either side of the clock's day: newStore clamps retainDays to that
+	// ceiling, and prune's own cutoff and horizon are both derived from retainDays. So a day outside
+	// this band is a day whose file was never kept, and skipping it cannot shorten an answer.
+	//
+	// NOT CLAMPED TO retainDays, which would be tighter and would narrow real answers: prune runs at
+	// startup and on day roll, so between rolls a file just outside the retention window is still
+	// live and readable, and a caller asking a wider window should still see it.
+	first, last := w.dayWalk(fromMin, toMin)
+	for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
 		if err := ctx.Err(); err != nil {
 			// Before the first read too, so a request cancelled while it queued does no IO
 			// at all. No caveats are returned with it: they describe an answer, and a
@@ -178,6 +193,28 @@ func (w *Writer) Query(ctx context.Context, from, to time.Time) ([]Row, Caveats,
 // answers the question that was meant instead of an empty result a client would
 // render as "no spend". Shared by Query and Window so one answer cannot be
 // assembled from two different readings of the same range.
+// dayWalk is the range of day files Query will open: the requested span, intersected with the days a
+// file could exist for.
+//
+// Separate from Query so the bound is assertable without doing the IO — the thing worth pinning is
+// how many days an absurd span walks, and counting os.Open calls from a test is not something this
+// package exposes. Returns a first AFTER last when the span lies wholly outside the band, which the
+// caller's `!d.After(last)` reads as an empty walk.
+func (w *Writer) dayWalk(fromMin, toMin time.Time) (first, last time.Time) {
+	today := w.store.dayOf(w.now())
+	oldest := today.AddDate(0, 0, -maxRetentionDays)
+	newest := today.AddDate(0, 0, maxRetentionDays)
+
+	first, last = w.store.dayOf(fromMin), w.store.dayOf(toMin)
+	if first.Before(oldest) {
+		first = oldest
+	}
+	if last.After(newest) {
+		last = newest
+	}
+	return first, last
+}
+
 func span(from, to time.Time) (time.Time, time.Time) {
 	if to.Before(from) {
 		from, to = to, from

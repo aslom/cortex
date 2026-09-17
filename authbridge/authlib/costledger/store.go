@@ -44,11 +44,19 @@ const defaultRetentionDays = 30
 // becomes a delay in retention instead of a loss of cost history.
 const expiredSuffix = ".expired"
 
-// maxRetentionDays mirrors config.maxCostLedgerRetentionDays, which owns the derivation.
+// MaxRetentionDays mirrors config.maxCostLedgerRetentionDays, which owns the derivation.
 // Restated rather than imported for the reason the floor is: this package must not depend on
-// the config loader. TestMaxRetentionDays_MatchesTheConfigCeiling pins the two together, so a
-// change to one fails a test instead of quietly leaving the durable side unguarded.
-const maxRetentionDays = 3650
+// the config loader.
+//
+// EXPORTED SO THE PIN CAN BE REAL. The claim here used to be that a test kept the two equal; it
+// did not — the test compared this constant against a THIRD copy of the literal in its own file,
+// so moving the config ceiling left it green and the durable side clamping to a number the
+// validator no longer admits. Two unexported constants in two packages cannot be compared by any
+// test, so one of them has to be reachable: config's own test asserts against this one.
+const MaxRetentionDays = 3650
+
+// maxRetentionDays is the internal spelling, kept so the call sites below read unchanged.
+const maxRetentionDays = MaxRetentionDays
 
 // fileMode is 0o600 because these files record spend. 0o644 would make one
 // account's bill readable by every other account on a shared machine, and there is
@@ -460,7 +468,7 @@ const maxLineBytes = 1 << 20
 // Skips are COUNTED, RETURNED and logged at Warn — not at Debug, which is below the default
 // level, and not into a local, which reaches no caller, no exported counter and no API
 // response. The count is what lets an operator tell "my ledger is fine" from "my ledger is
-// losing lines", so it has to leave this function. See dayIssues and Writer.SkippedLines.
+// losing lines", so it has to leave this function. See dayIssues and Caveats.SkippedLines.
 func (s *store) readDay(day time.Time) ([]Row, dayIssues, error) {
 	f, err := os.Open(s.path(day))
 	if os.IsNotExist(err) {
@@ -499,7 +507,16 @@ func (s *store) readDay(day time.Time) ([]Row, dayIssues, error) {
 		// Idempotent by construction, so a row this writer produced is unchanged: rowLabel is
 		// truncateLabel(sanitizeLabel(...)) and both are fixed points on their own output.
 		// That is what makes doing it twice free rather than lossy.
-		r.Endpoint, r.Model, r.Agent = rowLabel(r.Endpoint), rowLabel(r.Model), rowLabel(r.Agent)
+		//
+		// ALL FOUR, INCLUDING Provenance, which was the one left out. The write path caps every one
+		// of them, and Provenance is the field pricedBy is reconstructed from — so a foreign file's
+		// multi-KB provenance carrying a C1 CSI escape reached a series key with nothing else
+		// checking it. It is a small closed set in this process's own output ("configured",
+		// "discovered", …), which is exactly why it looked like it needed no cleaning: the set is a
+		// property of the WRITER, and this function's whole subject is a file the writer did not
+		// write.
+		r.Endpoint, r.Model = rowLabel(r.Endpoint), rowLabel(r.Model)
+		r.Agent, r.Provenance = rowLabel(r.Agent), rowLabel(r.Provenance)
 		out = append(out, r)
 	}
 	if serr := sc.Err(); serr != nil {
@@ -524,9 +541,13 @@ func (s *store) readDay(day time.Time) ([]Row, dayIssues, error) {
 // dayIssues is what one day file's read could not use.
 //
 // Returned rather than only logged, because the caller is what turns it into something
-// an operator can see: Query publishes it on Writer.SkippedLines and
-// Writer.TruncatedDays. Without that, a day file that lost half its lines produced the
-// same API response as a clean one — window:"today", priced:true, no caveat.
+// an operator can see: Query returns it on Caveats.SkippedLines and Caveats.TruncatedDays.
+// Without that, a day file that lost half its lines produced the same API response as a clean
+// one — window:"today", priced:true, no caveat.
+//
+// ON Caveats AND NOT ON THE WRITER, which is what these three references used to say. Caveats'
+// own doc gives the reason: counters on the Writer are shared, so two concurrent readers would
+// swap each other's answers. The stale names sat next to the reasoning that removed them.
 type dayIssues struct {
 	// skippedLines is undecodable lines stepped over. The rows around them survive, so the
 	// loss is bounded — but this count is a FLOOR on the rows lost, not an exact figure: a
@@ -605,15 +626,26 @@ func (s *store) prune(now time.Time) error {
 			newest = day
 		}
 	}
-	if len(days) == 0 {
-		return nil
-	}
-
+	// NO EARLY RETURN ON AN EMPTY days, and that is the whole of a defect rather than tidiness.
+	// horizon is measured from the CLOCK, so a backward step larger than retention dates every real
+	// file past it and ONE pass condemns all of them — leaving no live day file at all. Returning
+	// here then skipped the second pass forever: the condemned files were never re-judged, so they
+	// were neither unlinked nor restored when the clock came back. The bytes survive, but dayFromName
+	// rejects the .expired extension, so the whole history is invisible to every read — permanently,
+	// and in exactly the case expiredSuffix promises to make "a delay in retention instead of a loss
+	// of cost history".
+	//
 	// The day retention is counted back from: the OLDER of what the clock says today is
 	// and the newest day the ledger has written. They are the same day on a healthy host,
 	// so this changes nothing there.
+	//
+	// GUARDED ON THERE BEING A NEWEST AT ALL, which the early return used to make unnecessary. With
+	// days empty, newest is the zero time and would win this comparison outright, putting the cutoff
+	// at year zero — nothing would ever be unlinked again and every condemned file would be restored,
+	// including ones genuinely decades past retention. With no live file, the clock is the only
+	// reading there is.
 	ref := s.dayOf(now)
-	if newest.Before(ref) {
+	if len(days) > 0 && newest.Before(ref) {
 		ref = newest
 		if gap := s.dayOf(now).Sub(newest); gap > time.Duration(s.retainDays-1)*24*time.Hour {
 			// Worth a line: on a healthy host the newest day file IS today, so a gap wider
@@ -652,7 +684,8 @@ func (s *store) prune(now time.Time) error {
 				"file", d.name, "clockDay", s.dayOf(now).Format(dayLayout),
 				"horizon", horizon.Format(dayLayout), "retainDays", s.retainDays,
 				"cause", "the host clock was stepped forward when those rows were recorded, or has since stepped back",
-				"effect", "those rows are unreadable by any window this clock can express and are now gone")
+				"effect", "those rows are unreadable by any window this clock can express and are condemned; "+
+					"the file is renamed with the .expired suffix and a later prune deletes it, or restores it if the clock is corrected")
 		}
 		// CONDEMNED, NOT DELETED. The rename is the whole mitigation: see expiredSuffix.
 		from := filepath.Join(s.dir, d.name)

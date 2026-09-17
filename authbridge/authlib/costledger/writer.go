@@ -109,6 +109,20 @@ type Writer struct {
 	// directly by this package's tests, so it is not API; nil on every production path.
 	betweenWindowReads func()
 
+	// writeMu serialises write, which is the ONE-WRITER INVARIANT run and drainAndWrite document —
+	// held in code now rather than only in prose.
+	//
+	// The prose was not true. submit's `case <-w.quit` arm writes on the CALLER's goroutine, and
+	// quit closes before the writer goroutine has finished draining, so a Flush racing a Close put
+	// two goroutines into store.append — which appends to the same day file and advances the same
+	// offsets. The comment on that arm said the shutdown path does not do it, which is a statement
+	// about our callers rather than about the type: Flush and Close are both exported.
+	//
+	// Uncontended on every path that matters (one goroutine writes), so the cost is a lock per
+	// batch, not per row. Never taken while mu is held: the two call sites that hold mu release it
+	// first, deliberately.
+	writeMu sync.Mutex
+
 	mu sync.Mutex
 	// open is the minute currently accumulating, truncated to the minute.
 	open time.Time
@@ -835,6 +849,8 @@ func (w *Writer) run() {
 // store touches only the filesystem, and holding mu across an append would put a
 // hung mount back in front of every reader.
 func (w *Writer) write(b batch) {
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
 	var err error
 	if len(b.rows) > 0 {
 		var lost int
@@ -973,9 +989,11 @@ func (w *Writer) submit(b batch) error {
 	case err := <-done:
 		return err
 	case <-w.quit:
-		// Only reachable when Flush runs concurrently with Close, which the shutdown
-		// path does not do. Reported rather than retried: the batch may already be
-		// mid-write, and writing it a second time would double-count that minute.
+		// Only reachable when Flush runs concurrently with Close. Both are exported, so that
+		// is a thing a caller can do rather than a thing our shutdown path happens not to —
+		// which is why the write above it is serialised by writeMu instead of by this comment.
+		// Reported rather than retried: the batch may already be mid-write, and writing it a
+		// second time would double-count that minute.
 		return errClosedWhileFlushing
 	}
 }

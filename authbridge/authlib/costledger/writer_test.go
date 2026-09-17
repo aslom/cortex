@@ -148,7 +148,13 @@ func TestWriter_AccumulatesTheOpenMinuteWithoutWriting(t *testing.T) {
 	// The open minute stays in the writer's own accumulator. Writing it would mean the
 	// same minute existed in two places, and a reader composing them would
 	// double-count.
-	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+	// The error is checked, not dropped: a failed ReadDir returns nil, and `len(nil) != 0` is
+	// false — so "nothing was written" would pass without ever having looked.
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatalf("ReadDir: %v", rerr)
+	}
+	if len(entries) != 0 {
 		t.Errorf("wrote %d files while the minute was still open; want 0", len(entries))
 	}
 }
@@ -838,7 +844,11 @@ func TestRecord_DropsRatherThanBlocksWhenTheWriterCannotKeepUp(t *testing.T) {
 	}
 	// And the premise: with nothing draining the queue, nothing reached disk. If it had,
 	// Record would be doing IO on the request path.
-	if entries, _ := os.ReadDir(w.store.dir); len(entries) != 0 {
+	entries, rerr := os.ReadDir(w.store.dir)
+	if rerr != nil {
+		t.Fatalf("ReadDir: %v", rerr)
+	}
+	if len(entries) != 0 {
 		t.Errorf("%d files written with no writer goroutine running; Record touched disk", len(entries))
 	}
 }
@@ -912,6 +922,10 @@ func TestClose_CountsARowThatRacedItsFlush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Registered before the first t.Fatal below: that path exits with the writer goroutine and
+	// its 1ms ticker still running, for the rest of the binary. Close is idempotent, so the
+	// explicit one later is not a problem.
+	t.Cleanup(func() { _ = w.Close() })
 	wp.Store(w)
 	for deadline := time.Now().Add(2 * time.Second); !parked.Load(); {
 		if time.Now().After(deadline) {
@@ -1050,6 +1064,8 @@ func TestClose_MarksClosedOnlyAfterTheGoroutineHasStopped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// See the sibling above: without this, the t.Fatal path leaks the goroutine and its ticker.
+	t.Cleanup(func() { _ = w.Close() })
 	wp.Store(w)
 
 	// Wait until the goroutine is parked in the clock, so Close runs its ordering while
@@ -1143,7 +1159,17 @@ func TestSettleClosedMinute_LeavesTheCurrentMinuteAlone(t *testing.T) {
 	now = at.Add(20 * time.Second) // same minute
 	w.settleClosedMinute()
 
-	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+	// The sync barrier its sibling above uses, for the same reason: without it "no files" can
+	// be true because the writer goroutine has not run yet, which proves nothing about the
+	// minute having been held.
+	if serr := w.sync(); serr != nil {
+		t.Fatalf("sync: %v", serr)
+	}
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatalf("ReadDir: %v", rerr)
+	}
+	if len(entries) != 0 {
 		t.Errorf("wrote %d files for a minute that has not ended yet", len(entries))
 	}
 }
@@ -2427,5 +2453,91 @@ func TestRecord_AnUnpricedNonInferenceResponseIsStillIgnored(t *testing.T) {
 	if rows := readAllRows(t, dir); len(rows) != 0 {
 		t.Errorf("got %d rows, want 0 — non-inference traffic carrying no priced figure must "+
 			"stay out of the cost denominator: %+v", len(rows), rows)
+	}
+}
+
+// TestPrune_RestoresWhatABackwardClockStepCondemned is the other direction of the skew above, and
+// the one where the two-pass mitigation stopped working entirely.
+//
+// A BACKWARD step reaches a state a forward one cannot: horizon is measured from the clock, so every
+// real day file is dated PAST it and one pass condemns all of them — leaving no live day file at all.
+// prune then returned early on an empty `days`, which skips the second pass, so the condemned files
+// were never re-judged: not unlinked, and never restored when the clock came back. The bytes survive
+// but dayFromName rejects the .expired extension, so the entire history is invisible to every read,
+// permanently — the exact opposite of expiredSuffix's promise that a wrong prune is "a delay in
+// retention instead of a loss of cost history".
+//
+// The sibling test cannot reach this: it models forward skew and deliberately keeps a skewed-day file
+// alive, so `days` is non-empty by construction.
+func TestPrune_RestoresWhatABackwardClockStepCondemned(t *testing.T) {
+	dir := t.TempDir()
+	const retain = 3
+	s, err := newStore(dir, retain, time.Local)
+	if err != nil {
+		t.Fatalf("newStore: %v", err)
+	}
+	for i := 0; i < retain; i++ {
+		day := at.AddDate(0, 0, -i)
+		if werr := os.WriteFile(s.path(day), []byte(line(day, "gw", "m", 1, 10, 5, 100)+"\n"), 0o600); werr != nil {
+			t.Fatalf("seed: %v", werr)
+		}
+	}
+
+	// Ten days back with a three-day retention: horizon lands a week before the oldest file, so
+	// every one of them reads as dated past the window this clock can express.
+	skewed := at.AddDate(0, 0, -10)
+	if perr := s.prune(skewed); perr != nil {
+		t.Fatalf("prune under a backward-stepped clock: %v", perr)
+	}
+	// Premise: the directory now holds no live day file at all. That is the state under test, and
+	// asserting it is what stops this test passing for the wrong reason.
+	if live := liveDayFiles(t, dir); len(live) != 0 {
+		t.Fatalf("fixture premise is wrong: %v survived the skewed prune, so the empty-days path is not reached", live)
+	}
+
+	// The clock is corrected, and a prune runs on a directory whose every file is condemned.
+	if perr := s.prune(at); perr != nil {
+		t.Fatalf("prune after the clock was corrected: %v", perr)
+	}
+	live := liveDayFiles(t, dir)
+	if len(live) != retain {
+		t.Fatalf("%d readable day files after the correction (%v), want %d: with no live file left, "+
+			"the second pass never ran and the condemnation became permanent", len(live), live, retain)
+	}
+	if rows := readDaysBack(t, s, at, retain); len(rows) != retain {
+		t.Errorf("read %d rows after the restore, want %d: the names came back but their contents did not reach a window",
+			len(rows), retain)
+	}
+}
+
+// TestPrune_AnEmptyDirectoryStillUnlinksWhatIsTrulyExpired is the other half of removing that early
+// return, and the reason `ref` has to come from the clock when there are no live files.
+//
+// With `days` empty, `newest` is the zero time — so letting it win the "older of the two readings"
+// comparison would put the cutoff at year zero and NOTHING would ever be unlinked again. A condemned
+// file that really is past retention has now been judged twice and must go.
+func TestPrune_AnEmptyDirectoryStillUnlinksWhatIsTrulyExpired(t *testing.T) {
+	dir := t.TempDir()
+	const retain = 3
+	s, err := newStore(dir, retain, time.Local)
+	if err != nil {
+		t.Fatalf("newStore: %v", err)
+	}
+	// One condemned file, genuinely older than retention by the true clock, and no live day file.
+	old := at.AddDate(0, 0, -30)
+	condemned := s.path(old) + expiredSuffix
+	if werr := os.WriteFile(condemned, []byte(line(old, "gw", "m", 1, 10, 5, 100)+"\n"), 0o600); werr != nil {
+		t.Fatalf("seed: %v", werr)
+	}
+
+	if perr := s.prune(at); perr != nil {
+		t.Fatalf("prune: %v", perr)
+	}
+
+	if _, serr := os.Stat(condemned); !os.IsNotExist(serr) {
+		t.Errorf("the condemned file is still there (stat err %v): it was judged twice and is 30 days past a 3-day retention, so the second judgement must unlink it", serr)
+	}
+	if live := liveDayFiles(t, dir); len(live) != 0 {
+		t.Errorf("live day files = %v, want none: a file 30 days past retention must not be restored", live)
 	}
 }
