@@ -23,13 +23,13 @@ func TestFooter_NamesTheEventsTheSnapshotDidNotFetch(t *testing.T) {
 	m := fitModel(t, paneEvents, 200, 40, cursorRowsFixture(3))
 	m.rebuildEventsTable()
 
-	if got := m.helpView(); strings.Contains(got, "not fetched") {
+	if got := m.helpView(); strings.Contains(got, "older") {
 		t.Fatalf("an untruncated snapshot must say nothing about older events: %q", got)
 	}
 
 	m.Update(snapshotLoadedMsg{id: m.selectedSess, events: cursorRowsFixture(3), olderNotFetched: 4571})
 	got := m.helpView()
-	if !strings.Contains(got, "4571 older not fetched") {
+	if !strings.Contains(got, "4571 older ([o] to load)") {
 		t.Errorf("footer does not name the omitted events: %q", got)
 	}
 }
@@ -93,7 +93,7 @@ func TestFooter_OlderCountIsPerSession(t *testing.T) {
 
 	// And selecting that session shows its own count, not the current one's.
 	m.selectedSess = "abandoned"
-	if got := m.helpView(); !strings.Contains(got, "9999 older not fetched") {
+	if got := m.helpView(); !strings.Contains(got, "9999 older ([o] to load)") {
 		t.Errorf("the session's own count is not shown after selecting it: %q", got)
 	}
 }

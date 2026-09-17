@@ -82,6 +82,8 @@ var paneKeys = map[paneID]keyGroup{
 			{"s", "toggle passthru/skip rows"},
 			{"c", "column picker (checkboxes + descriptions)"},
 			{"c then s", "sort by a column: desc → asc → chronological"},
+			{"o", "load the page before the oldest event shown"},
+			{"t", "back to the live tail (resumes updates)"},
 			{"u", "usage charts (this session)"},
 			{"esc / ← / h", "back to sessions"},
 		},

@@ -616,6 +616,21 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.goBottom()
 		return nil
 
+	case "o":
+		// Load the page before the oldest event held. Only in the timeline: the other
+		// panes have nothing to page.
+		if m.pane != paneEvents {
+			return nil
+		}
+		return m.loadOlderPage()
+
+	case "t":
+		// Back to the live tail from a paged-back timeline.
+		if m.pane != paneEvents {
+			return nil
+		}
+		return m.returnToTail()
+
 	case "pgup", "pgdown", "pgdn", "b", "f":
 		// Page the active pane. Sessions can hold up to session.max_events
 		// (500) rows, so one-row-at-a-time nav isn't enough. b/f (less/vim
@@ -867,12 +882,22 @@ func (m *model) helpView() string {
 			base = fmt.Sprintf("%s  ·  %d hidden", base, m.hiddenInactive)
 		}
 		// Older events the snapshot did not ask for. Same reasoning as the hidden count
-		// one line up — a partial timeline should not read as the whole one — but this
-		// bound is not something the operator chose, so it says "not fetched" rather
-		// than naming a key to undo it. There is no key: the window is what the client
-		// is willing to hold.
+		// one line up — a partial timeline should not read as the whole one — and it now
+		// names the key that fetches them, because there is one.
 		if n := m.olderNotFetched[m.selectedSess]; n > 0 {
-			base = fmt.Sprintf("%s  ·  %d older not fetched", base, n)
+			base = fmt.Sprintf("%s  ·  %d older ([o] to load)", base, n)
+		}
+		// Paging backward suspends this session's live appends, and dropping a page at
+		// the cap means the timeline no longer reaches the present. Both are states the
+		// operator did not ask for explicitly and cannot otherwise see — a timeline that
+		// silently stopped updating is the same class of lie as one that silently
+		// omitted its beginning.
+		if st := m.paging[m.selectedSess]; st != nil {
+			note := "paged back, live paused ([t] for tail)"
+			if st.droppedNewer {
+				note = "paged back, newer dropped ([t] for tail)"
+			}
+			base = fmt.Sprintf("%s  ·  %s", base, note)
 		}
 		// Columns that did not fit — the whole reason issue #866 was filed: HOST was
 		// declared but never visible, and nothing said the table had been clipped.
