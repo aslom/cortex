@@ -641,9 +641,13 @@ The single edit flow covers four operations:
 All four work because they're all just lines you change inside the
 pipeline subtree.
 
-`e` is only available in picker mode. With `--endpoint`, the cluster
-fields needed to fetch and apply aren't populated; pressing `e`
-flashes a hint instead of opening a broken edit.
+`e` needs a target it can write. That means either a pod chosen through the
+picker, or a connection to the Cortex on this machine — including via
+`--endpoint`, as described above. Pointed at anything else (a hand-run
+`kubectl port-forward`, a remote session API), neither is available: there is no
+pod identity to resolve a ConfigMap from and no local config file to write, so
+pressing `e` flashes a hint naming the remedy instead of opening an edit it
+cannot finish.
 
 ### Pre-apply validation
 
@@ -668,6 +672,8 @@ populate it for the rest of the session.
 
 ### Agent-name resolution
 
+Cluster path only — a local edit has no agent and skips all of this.
+
 The per-agent ConfigMap is named `authbridge-config-<agent>`. abctl
 resolves `<agent>` from the selected pod's `app.kubernetes.io/name`
 label (operator sets this). If the label is absent, abctl
@@ -676,19 +682,25 @@ pod name (the ReplicaSet hash + pod suffix).
 
 ### Auto-rollback on reload failure
 
-If `kubectl apply` succeeds but the in-pod reload fails (unknown
-plugin name, malformed config, validation error), the framework
-keeps the previous in-memory pipeline serving requests. The on-disk
-ConfigMap, however, now holds the bad YAML. abctl detects this via
-`/reload/status` and re-applies the original ConfigMap content
-captured at Fetch time, reconciling the on-disk state back to what's
-actually running. The error overlay then reports
-`reload failed: <reason>; rolled back to previous ConfigMap`.
+If the write succeeds but the reload fails (unknown plugin name, malformed
+config, validation error), the framework keeps the previous in-memory pipeline
+serving requests — but the stored config now holds the bad YAML. abctl detects
+this via `/reload/status` and re-applies the content captured at Fetch time,
+reconciling the stored state back to what is actually running.
 
-The rollback is best-effort — with `--force-conflicts=true`, if a
-third party (controller, kubectl edit, kustomize) modified the
-ConfigMap between Fetch and the failed reload, the rollback
-overwrites their change. The running pipeline is unaffected.
+The error overlay names the target it reconciled:
+`reload failed: <reason>; rolled back to previous ConfigMap` in the cluster, and
+`…rolled back to previous config file` locally. If the rollback itself also
+fails, the message says where to look — `check kubectl` for a pod, the config's
+own path for a local edit.
+
+The rollback is best-effort in both, for the same reason and by different
+mechanisms. In the cluster, `--force-conflicts=true` means a third party
+(controller, `kubectl edit`, kustomize) who modified the ConfigMap between Fetch
+and the failed reload has their change overwritten. Locally the forward apply is
+guarded by the staleness check described above, but the rollback deliberately is
+not — it runs *because* the file changed, so checking would refuse every
+rollback. The running pipeline is unaffected either way.
 
 ### Backgrounding the watch
 
@@ -700,11 +712,13 @@ can resume navigating the TUI. When the watch terminates, the
 result lands as a one-line flash:
 
 - `hot-reload succeeded`
-- `hot-reload failed: <reason>; rolled back to previous ConfigMap`
+- `hot-reload failed: <reason>; rolled back to previous ConfigMap` — or
+  `previous config file` for a local edit
 - `hot-reload failed: <reason>; rollback failed: <err>` (rare)
 
 Flashes auto-dismiss after a few seconds; if you miss one, query
-`/reload/status` directly via the port-forward.
+`/reload/status` directly — through the port-forward for a pod, or at the
+`stats.address` in `~/.cortex/config.yaml` for a local Cortex.
 
 ### Permissions
 
