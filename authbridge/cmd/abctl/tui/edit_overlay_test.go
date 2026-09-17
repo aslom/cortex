@@ -15,6 +15,37 @@ func TestEditOverlayRender_Fetching(t *testing.T) {
 	}
 }
 
+// The rollback messages are built in the genPolledMsg / genRolledBackMsg
+// handlers, not the overlay renderer, so they were missed the first time and
+// went on sending a local operator to kubectl about a ConfigMap that does not
+// exist. Asserted on the Target directly: these strings are assembled from it.
+func TestTarget_RollbackWordingIsPerStore(t *testing.T) {
+	cm := edit.ConfigMapStore{}.Describe()
+	if cm.Noun != "ConfigMap" || cm.OutOfSyncHint != "check kubectl" {
+		t.Errorf("cluster target = %+v, want the ConfigMap/kubectl wording", cm)
+	}
+
+	fs := edit.FileStore{Path: "/home/u/.cortex/config.yaml"}.Describe()
+	if fs.Noun == "ConfigMap" {
+		t.Error("the local target must not call itself a ConfigMap")
+	}
+	// The path, not a tool: there is no kubectl locally, and the operator can
+	// open the file.
+	if !strings.Contains(fs.OutOfSyncHint, "/home/u/.cortex/config.yaml") {
+		t.Errorf("local OutOfSyncHint = %q, want it to name the file", fs.OutOfSyncHint)
+	}
+	if strings.Contains(fs.OutOfSyncHint, "kubectl") {
+		t.Errorf("local OutOfSyncHint sends the operator to kubectl: %q", fs.OutOfSyncHint)
+	}
+	// Every field a message is assembled from must be populated for both, or a
+	// sentence renders with a hole in it.
+	for name, tg := range map[string]edit.Target{"cluster": cm, "local": fs} {
+		if tg.Noun == "" || tg.WaitHint == "" || tg.UnreachableHint == "" || tg.OutOfSyncHint == "" {
+			t.Errorf("%s target has an empty field: %+v", name, tg)
+		}
+	}
+}
+
 // The overlay must name the target it is actually writing. A local edit that
 // announced "Fetching ConfigMap…" described a thing that does not exist, and
 // the cluster path's kubelet-sync wait is two orders of magnitude wrong for a

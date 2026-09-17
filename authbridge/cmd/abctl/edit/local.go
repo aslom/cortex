@@ -78,6 +78,9 @@ func (s FileStore) Describe() Target {
 		// box, like the ConfigMap hint it sits opposite.
 		WaitHint:        "the proxy watches this file; reloads land in about a second",
 		UnreachableHint: "is the local proxy still running?",
+		// The path, not a tool: there is no kubectl here, and the operator can
+		// open the file directly.
+		OutOfSyncHint: "check " + s.Path,
 	}
 }
 
@@ -142,12 +145,15 @@ func (s FileStore) Apply(ctx context.Context, payload []byte) (time.Time, error)
 	// sibling of the REAL file, which the atomicity argument needs: a rename
 	// across filesystems fails EXDEV, and an unresolved link can point anywhere.
 	//
-	// Measured on darwin/kqueue: replacing the target still delivers an event
-	// naming the link, so the proxy's reloader (which watches the link's
-	// directory and filters on its base name) picks the edit up. Where a
-	// platform's watcher misses it the edit simply is not observed, which
-	// surfaces as the visible PollDeadline timeout and a rollback — not as
-	// silent corruption.
+	// This requires the reloader to watch the resolved file's directory too,
+	// which it now does (authlib/reloader.Start). Without that, only macOS
+	// worked: kqueue watches the resolved file and so reports the replacement
+	// against the link, while Linux inotify — which reports directory-entry
+	// changes — sees nothing in the link's directory, no reload fires, and the
+	// editor's poll times out and ROLLS A CORRECT EDIT BACK two minutes later.
+	// Deterministic on the majority platform, and self-reverting rather than
+	// merely unobserved, which is why the fix went into the watcher rather than
+	// being written off here as a platform caveat.
 	target := resolvedPath(s.Path)
 	dir := filepath.Dir(target)
 

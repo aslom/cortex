@@ -73,8 +73,9 @@ type editState struct {
 func describeTarget(s edit.Store) edit.Target {
 	if s == nil {
 		return edit.Target{
-			Noun:     "config",
-			WaitHint: "waiting for the framework to pick up the change",
+			Noun:          "config",
+			WaitHint:      "waiting for the framework to pick up the change",
+			OutOfSyncHint: "inspect the stored config",
 		}
 	}
 	return s.Describe()

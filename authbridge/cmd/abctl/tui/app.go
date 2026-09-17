@@ -1283,13 +1283,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		bg := m.editState.phase == editPhaseBackground
+		// The rollback messages name the target too. Sending a local operator to
+		// kubectl about a ConfigMap that does not exist is the same lie Target
+		// was introduced to kill; the overlay renderer was only half of it.
+		rbTarget := describeTarget(m.editState.store)
 		if bg {
 			if msg.Err != nil {
 				m.setFlash("hot-reload failed: " + msg.ReloadErr +
 					"; rollback failed: " + msg.Err.Error())
 			} else {
 				m.setFlash("hot-reload failed: " + msg.ReloadErr +
-					"; rolled back to previous ConfigMap")
+					"; rolled back to previous " + rbTarget.Noun)
 			}
 			m.editState = editState{phase: editPhaseDone}
 			return m, nil
@@ -1298,11 +1302,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			m.editState.err = "reload failed: " + msg.ReloadErr +
 				"\nrollback also failed: " + msg.Err.Error() +
-				"\nConfigMap and running pipeline are out of sync; check kubectl"
+				"\n" + rbTarget.Noun + " and running pipeline are out of sync; " + rbTarget.OutOfSyncHint
 			return m, nil
 		}
 		m.editState.err = "reload failed: " + msg.ReloadErr +
-			"\nrolled back to previous ConfigMap"
+			"\nrolled back to previous " + rbTarget.Noun
 		return m, nil
 
 	case tea.KeyMsg:

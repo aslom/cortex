@@ -25,6 +25,11 @@ type Target struct {
 	// the poll gives up after consecutive transport failures. Phrased as the
 	// question the operator should chase.
 	UnreachableHint string
+	// OutOfSyncHint completes "…are out of sync; %s" on the worst path, where
+	// both the reload and the rollback failed. The one place the operator has
+	// to go look at something themselves, so it names what — a tool for the
+	// cluster, the actual file path locally.
+	OutOfSyncHint string
 }
 
 // Store is where a pipeline lives: the editor fetches the runtime YAML from
@@ -100,6 +105,7 @@ func (s ConfigMapStore) Describe() Target {
 		Noun:            "ConfigMap",
 		WaitHint:        "this can take up to 120s while kubelet syncs the ConfigMap",
 		UnreachableHint: "port-forward dropped or framework down?",
+		OutOfSyncHint:   "check kubectl",
 	}
 }
 
