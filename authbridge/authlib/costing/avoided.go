@@ -76,6 +76,13 @@ func Avoided(pctx *pipeline.Context, rates pricing.Resolver) []costevent.Saving 
 		if tokens <= 0 {
 			continue
 		}
+		// NOT CALIBRATED ON A REPORT THIS PACKAGE REFUSED. AvoidedUsage slices the response's own
+		// counters, so an impossible report produced an impossible saving — measured: 2,000,000
+		// tokens avoided at $20, on a record marked refused. The saving comes from the same numbers
+		// Settle declined, so it goes with them.
+		if !pricing.PlausibleUsage(usage) {
+			continue
+		}
 		saved, tier := pricing.AvoidedUsage(usage, tokens)
 		s := costevent.Saving{
 			Component:     component,
@@ -89,7 +96,7 @@ func Avoided(pctx *pipeline.Context, rates pricing.Resolver) []costevent.Saving 
 		// this request landed on — including a long-context premium, which keying the
 		// lookup on the slice would have dropped: 9.7k avoided tokens resolve at At(9700)
 		// and miss a 200k threshold the 641k request they came out of is well past.
-		if micros, prov, ok := modelledCost(rates, pctx.Host, model, saved, prompt); ok {
+		if micros, prov, ok, _ := modelledCost(rates, pctx.Host, model, saved, prompt); ok {
 			s.USD, s.Provenance = float64(micros)/1e6, prov.String()
 		}
 		// Published even with no dollar figure: the token saving is still known, and
