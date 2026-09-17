@@ -10,6 +10,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/pricing"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
@@ -302,6 +303,13 @@ func tokenCount(n int) int64 {
 	}
 	return int64(n)
 }
+
+// A BUILD ERROR RATHER THAN A COMMENT. Record's doc and row.go's design both rest on this Writer
+// being a second session.Recorder beside the aggregator, and nothing checked it: this package had no
+// importer outside itself, so neither side's signature drifting would have broken any build. Review
+// found the claim holding today and unenforced — which is the same shape as the pins this review has
+// already turned into tests, one level down in the type system.
+var _ session.Recorder = (*Writer)(nil)
 
 // Record implements session.Recorder.
 //
