@@ -57,7 +57,8 @@ func TestSnapshot_GroupModelReturnsTheModelSeries(t *testing.T) {
 // settles them from the gateway's own cost header. foldInto guards byMethod on a
 // non-empty model, so that spend lands in the bucket total and in no series entry. This
 // is the RING half of the claim Snapshot.UngroupedCostMicros makes about both window
-// kinds; TestFold_GatewayPricedRowWithNoModelIsDisclosedAsUngrouped is the ledger half.
+// kinds; TestFold_GatewayPricedRowWithNoModelIsDisclosedAsUngrouped is the ledger half, and lives
+// with the ledger reader rather than here.
 func TestSnapshot_GatewayPricedTrafficWithNoModelIsDisclosedAsUngrouped(t *testing.T) {
 	now := time.Now().Truncate(BucketWidth)
 	a := New(WithClock(func() time.Time { return now }))
