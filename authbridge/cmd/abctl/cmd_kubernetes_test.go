@@ -50,14 +50,23 @@ func TestChooseEndpoint(t *testing.T) {
 // the registered default fails here rather than silently changing which Cortex a
 // bare `abctl observe` connects to.
 func TestKubernetesFlag_DefaultsToFalse(t *testing.T) {
+	// registerObserveFlags, not a flag set of this test's own: declaring
+	// "kubernetes" here with a default of its own choosing would assert that false
+	// equals false, and go on passing with production flipped to true — which is the
+	// one thing this test exists to catch.
 	fs := flag.NewFlagSet("abctl", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	kubernetes := fs.Bool("kubernetes", false, "")
+	f := registerObserveFlags(fs)
 	if err := fs.Parse(nil); err != nil {
 		t.Fatal(err)
 	}
+	kubernetes := f.kubernetes
 	if *kubernetes {
 		t.Error("--kubernetes must default to false, so a bare `abctl observe` takes a live local Cortex")
+	}
+	// The flag package's own record of the default, which is what --help prints.
+	if got := fs.Lookup("kubernetes").DefValue; got != "false" {
+		t.Errorf("registered default = %q, want \"false\"", got)
 	}
 	// And the default must leave a live local Cortex selected, which is the
 	// behaviour the default exists to preserve.

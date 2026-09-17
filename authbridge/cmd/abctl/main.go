@@ -213,37 +213,63 @@ func chooseEndpoint(explicit, local string, localUp, kubernetes bool) string {
 //
 // This is the behaviour bare `abctl` has always had, extracted so the subcommand
 // and the deprecated bare invocation cannot drift apart.
+// observeFlags are the viewer's flags, registered on fs and returned as one struct.
+//
+// A helper rather than inline registration so a test can inspect what production
+// actually registers. The first attempt at pinning --kubernetes's default built its
+// own flag set and passed false to it, which asserted that false == false: it went
+// on passing with the real default flipped to true, so the one thing it existed to
+// catch was the one thing it could not. Whatever this function registers is now what
+// both runObserve and that test read.
+type observeFlags struct {
+	endpoint   *string
+	prefs      *string
+	kubernetes *bool
+}
+
+// registerObserveFlags declares the viewer's flags on fs and returns the pointers.
+//
+// fs is the caller's, so its error handling is too: runObserve uses ExitOnError
+// (a bad flag has nothing useful to fall back to), while a test uses
+// ContinueOnError so a parse failure is a failed assertion rather than a killed
+// test binary.
+func registerObserveFlags(fs *flag.FlagSet) observeFlags {
+	return observeFlags{
+		endpoint: fs.String("endpoint", "",
+			"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl connects to the Cortex on this machine if one is running, otherwise it opens a Namespaces → Pods picker; --kubernetes forces the picker either way."),
+		// Named --prefs rather than --config: `abctl service` and `abctl claude-code`
+		// already spell the PROXY's config that way, and one flag name meaning two
+		// different files in one binary is worse than a second word.
+		//
+		// No backticks in the usage string: flag.PrintDefaults reads the first
+		// backquoted word as the value's NAME, so "`abctl service`" rendered the flag as
+		// "-prefs abctl service" instead of "-prefs string".
+		prefs: fs.String("prefs", "",
+			"abctl's own settings file — events-table columns and the active filter, saved as you change them (default ~/.cortex/abctl-config.yaml). Not the Cortex proxy config, which is --config on 'abctl service' and 'abctl configure claude-code'."),
+		// --kubernetes exists because "is a local Cortex answering?" is a poor proxy for
+		// "which Cortex did you mean". Someone who runs Cortex on their laptop AND works
+		// against a cluster otherwise has no way to reach the picker: the local probe
+		// wins, every time, and --endpoint demands a namespace, a pod and a port-forward
+		// they were using abctl to avoid setting up by hand. --kubernetes is that way.
+		//
+		// Default FALSE, so the common case is unchanged: a laptop Cortex that is up is
+		// what a bare `abctl observe` connects to, which is the whole quickstart and
+		// wants no flag. Reaching a cluster is the deliberate act, so it is the one that
+		// gets spelled out — and the cluster stays reachable without the flag too, since
+		// a local Cortex that is down still falls through to the picker.
+		kubernetes: fs.Bool("kubernetes", false,
+			"open the Namespaces → Pods picker even when a Cortex is running on this machine. Without it, a running local Cortex is connected to directly and the picker appears only if none is answering. Ignored when --endpoint is given."),
+	}
+}
+
 func runObserve(args []string) int {
 	// Without this, `abctl --help` printed only -endpoint and -version, so the
 	// subcommands were invisible to anyone who asked the tool what it could do — the
 	// service commands most of all, since those are what you need when Cortex is down.
 	fs := flag.NewFlagSet("abctl", flag.ExitOnError)
 	fs.Usage = func() { writeRootUsage(fs) }
-
-	endpoint := fs.String("endpoint", "",
-		"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl connects to the Cortex on this machine if one is running, otherwise it opens a Namespaces → Pods picker; --kubernetes forces the picker either way.")
-	// Named --prefs rather than --config: `abctl service` and `abctl claude-code`
-	// already spell the PROXY's config that way, and one flag name meaning two
-	// different files in one binary is worse than a second word.
-	//
-	// No backticks in the usage string: flag.PrintDefaults reads the first
-	// backquoted word as the value's NAME, so "`abctl service`" rendered the flag as
-	// "-prefs abctl service" instead of "-prefs string".
-	prefs := fs.String("prefs", "",
-		"abctl's own settings file — events-table columns and the active filter, saved as you change them (default ~/.cortex/abctl-config.yaml). Not the Cortex proxy config, which is --config on 'abctl service' and 'abctl configure claude-code'.")
-	// --kubernetes exists because "is a local Cortex answering?" is a poor proxy for
-	// "which Cortex did you mean". Someone who runs Cortex on their laptop AND works
-	// against a cluster otherwise has no way to reach the picker: the local probe
-	// wins, every time, and --endpoint demands a namespace, a pod and a port-forward
-	// they were using abctl to avoid setting up by hand. --kubernetes is that way.
-	//
-	// Default FALSE, so the common case is unchanged: a laptop Cortex that is up is
-	// what a bare `abctl observe` connects to, which is the whole quickstart and
-	// wants no flag. Reaching a cluster is the deliberate act, so it is the one that
-	// gets spelled out — and the cluster stays reachable without the flag too, since
-	// a local Cortex that is down still falls through to the picker.
-	kubernetes := fs.Bool("kubernetes", false,
-		"open the Namespaces → Pods picker even when a Cortex is running on this machine. Without it, a running local Cortex is connected to directly and the picker appears only if none is answering. Ignored when --endpoint is given.")
+	f := registerObserveFlags(fs)
+	endpoint, prefs, kubernetes := f.endpoint, f.prefs, f.kubernetes
 	// ExitOnError, so Parse exits 2 itself (0 for -h) rather than returning — there
 	// is no error branch to write here. Chosen over ContinueOnError because a bad
 	// flag has nothing useful to fall back to: the alternative is printing usage and
