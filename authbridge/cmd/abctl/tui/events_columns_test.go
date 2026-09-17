@@ -815,6 +815,49 @@ func TestEventColumns_CellsTruncateToTheirOwnWidth(t *testing.T) {
 	}
 }
 
+// TestNumericColumns_RightAligned drives the wired cell closures for the
+// three numeric columns (DURATION, TOKENS, COST) at their real widths and
+// asserts they come out right-aligned by display width.
+func TestNumericColumns_RightAligned(t *testing.T) {
+	ev := pipeline.SessionEvent{
+		Direction: pipeline.Outbound,
+		Phase:     pipeline.SessionResponse,
+		Duration:  1230 * time.Millisecond,
+		Inference: &pipeline.InferenceExtension{OutputTokens: 42},
+	}
+	rows := []eventRow{{event: &ev}}
+	m := &model{}
+	cc := cellContext{m: m, rows: rows, i: 0, row: rows[0]}
+
+	numeric := map[eventColumnID]bool{colDuration: true, colTokens: true, colCost: true}
+	filled := 0
+	for _, col := range eventColumns {
+		if !numeric[col.id] {
+			continue
+		}
+		cc.width = col.width
+		got := col.cell(cc)
+		// Empty is legitimate — COST is blank without a cost record; the wiring
+		// still passes through padLeft, so an empty cell provides no signal on
+		// alignment. Non-empty cells go through the full check.
+		if got != "" {
+			filled++
+			// lipgloss.Width, not len: TOKENS/COST cells can carry U+2212 (3
+			// bytes, 1 column) once a saving is attached; byte length would
+			// mis-count.
+			if w := lipgloss.Width(got); w != col.width {
+				t.Errorf("%s: display width = %d, want %d (%q)", col.id, w, col.width, got)
+			}
+			if !strings.HasSuffix(got, strings.TrimSpace(got)) {
+				t.Errorf("%s: cell not right-aligned (%q)", col.id, got)
+			}
+		}
+	}
+	if filled == 0 {
+		t.Fatal("no numeric column rendered a value; the alignment assertion is vacuous")
+	}
+}
+
 // Every column must be sortable, or a column added later is silently unsortable —
 // the checkbox appears in the picker, `s` does nothing on it, and nothing says why.
 // "#" is the one deliberate exception: its order IS arrival order.
