@@ -1349,7 +1349,7 @@ func ringLabel(s string) string {
 // is a single-character CSI, so a byte scan for anything below 0x20 steps straight past a
 // working escape sequence, which is why the scan below decodes runes.
 //
-// FOURTH COPY OF A FIVE-LINE RULE, AND THE LAYERING IS WHY:
+// FOUR SANITISING SURFACES, ONE RULE, AND THE RULE IS NOW SHARED:
 //
 //   - pipeline.sanitizeUA is PRIMARY for the Agent label, at the point a User-Agent header
 //     becomes a value, so it already covers this package's byAgent.
@@ -1360,11 +1360,15 @@ func ringLabel(s string) string {
 //   - abctl's tui.sanitizeLabel is a render-time copy in a main module this library must not
 //     import, and still filters C0 and DEL only.
 //
-// Neither of the first two is reachable from here: pipeline's is unexported and costledger
-// IMPORTS this package, so referencing it would invert the layering into a cycle. A shared
-// leaf package is the real fix and cannot be done from this side alone — migrating one caller
-// to it while the other two stay put makes five copies rather than one. So: copied, with the
-// rule stated identically, and a change to any of them belongs in all of them.
+// The first three no longer each carry their own copy of WHICH RUNES COUNT: that predicate is
+// pipeline.IsControlRune, and both this package and costledger import pipeline, so there is one
+// definition repo-wide. This comment used to argue the opposite — that referencing pipeline's
+// would "invert the layering into a cycle" and so the rule had to be copied — which was wrong
+// in the direction that matters: nothing in pipeline imports this package. Three byte-identical
+// copies existed on the strength of that paragraph, only one of them tested for the bidi marks.
+//
+// What is still per-surface is the SHAPE of the sanitiser around it (what it replaces with, and
+// whether it caps), and abctl's is deliberately narrower and out of this module's reach.
 func sanitizeLabel(s string) string {
 	if !hasControlRunes(s) {
 		// The overwhelmingly common case, and no allocation for it: this runs on the fold path,

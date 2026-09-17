@@ -646,7 +646,7 @@ func main() {
 	)
 	if cfg.MTLS != nil {
 		if provider == nil {
-			log.Fatal("mtls requires the spiffe block to be configured")
+			fatalf("mtls requires the spiffe block to be configured")
 		}
 		strict := cfg.MTLS.ResolvedMode() == config.MTLSModeStrict
 		src := provider.X509Source()

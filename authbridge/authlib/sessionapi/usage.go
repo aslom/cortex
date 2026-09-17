@@ -96,18 +96,29 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if spec.Symbolic() {
 		resSpan = usage.MaxWindow
 	}
-	requestedRes := r.URL.Query().Get("resolution")
-	resolution, err := usage.ParseResolution(requestedRes, resSpan)
+	resolution, err := usage.ParseResolution(r.URL.Query().Get("resolution"), resSpan)
 	if err != nil {
 		// RESTATED FOR A SYMBOLIC WINDOW, because ParseResolution can only name the span it was
 		// GIVEN: asking for window=7d&resolution=24h came back "resolution 24h exceeds the 6h0m0s
 		// window", which names a window the caller never asked for, for a parameter the ledger path
 		// does not read. The bound is real — see resSpan above — but the reason has to travel with it.
-		if spec.Symbolic() {
-			err = fmt.Errorf("resolution %s cannot be served for window=%s: a symbolic window is "+
-				"answered as one bucket from the cost ledger, or from the ring's %s maximum where "+
-				"there is no ledger, so %s is the coarsest resolution available",
-				requestedRes, spec.Label, usage.MaxWindow, usage.MaxWindow)
+		//
+		// KEYED ON THE ERROR, NOT ON THE WINDOW KIND. Conditioning on Symbolic() alone overwrote the
+		// reason for every OTHER rejection — 30s is finer than the bucket, 90s is not a multiple, abc
+		// does not parse — and told all three of them about a 6h ceiling they never reached. That is
+		// the same defect this restatement exists to fix.
+		//
+		// AND IT INTERPOLATES NOTHING FROM THE QUERY. The first version of this message put the raw
+		// resolution parameter in the body, which is a reflection primitive on an unauthenticated
+		// endpoint — see writeUsageError, whose whole doc is that requirement, and note that the
+		// branch runs precisely BECAUSE those bytes failed validation. spec.Label is safe here and
+		// only here: it is one of two constants on the symbolic path, while for a duration window
+		// ParseWindowSpec echoes the caller's own spelling into it.
+		if spec.Symbolic() && errors.Is(err, usage.ErrResolutionExceedsWindow) {
+			err = fmt.Errorf("resolution too coarse for window=%s: a symbolic window is answered as "+
+				"one bucket from the cost ledger, or from the ring's %s maximum where there is no "+
+				"ledger, so %s is the coarsest resolution available",
+				spec.Label, usage.MaxWindow, usage.MaxWindow)
 		}
 		writeUsageError(w, err)
 		return

@@ -761,6 +761,12 @@ func ParseWindowSpec(s string, now time.Time) (Spec, error) {
 	return Spec{Label: label, Dur: d}, nil
 }
 
+// ErrResolutionExceedsWindow reports the one resolution rejection whose REASON depends on which
+// window is being served: for a symbolic window the span is the ring's maximum, not the span the
+// caller named, so sessionapi restates it. The other three rejections are self-explanatory and must
+// keep their own wording.
+var ErrResolutionExceedsWindow = errors.New("resolution exceeds the window")
+
 // ParseResolution validates a resolution parameter — the width of the buckets
 // the caller wants back, as opposed to the window's total span.
 //
@@ -788,7 +794,13 @@ func ParseResolution(s string, window time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("resolution %s is not a multiple of %s", d, BucketWidth)
 	}
 	if d > window {
-		return 0, fmt.Errorf("resolution %s exceeds the %s window", d, window)
+		// WRAPPED IN A SENTINEL, because one caller has to tell this rejection apart from the other
+		// three: sessionapi restates it for a symbolic window, where the span validated against is
+		// the ring's maximum rather than the seven days the caller named. Keyed on the error rather
+		// than on the window kind, or the restatement overwrites the reason for "finer than the
+		// bucket", "not a multiple" and "unparseable" as well — which is the same defect it exists
+		// to fix, pointing the caller at a bound they did not hit.
+		return 0, fmt.Errorf("%w: resolution %s exceeds the %s window", ErrResolutionExceedsWindow, d, window)
 	}
 	// The window must divide by the resolution, or the NEWEST bucket is a lie.
 	//

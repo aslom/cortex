@@ -194,7 +194,7 @@ func truncateLabel(s string) string {
 // a working escape sequence. An invalid byte is replaced too, so the label held in memory, the
 // label served, and the label encoding/json would have written are one string, not three.
 //
-// SHARED RULE, THREE COPIES, AND THE FIRST TWO MUST STAY IDENTICAL:
+// SHARED RULE, ONE DEFINITION, THREE SANITISERS AROUND IT:
 //
 //   - pipeline.sanitizeUA is the PRIMARY guard for the Agent label. It sits in
 //     ParseUserAgent, where a User-Agent header becomes a value, so it covers the live
@@ -209,19 +209,21 @@ func truncateLabel(s string) string {
 //     library must not import. It still filters C0 and DEL only — named here because a
 //     divergence stated is a divergence someone can fix.
 //
-// Two copies of a five-line rule beats a dependency edge the wrong way round; two copies
-// with different rules is the thing to avoid, so a change to either of the first two
-// belongs in both.
+// WHICH RUNES COUNT is not copied any more: it is pipeline.IsControlRune, imported by this
+// package and by usage, so there is one definition repo-wide. This comment used to say the
+// rule had to be duplicated to avoid a dependency edge the wrong way round — it does not;
+// nothing in pipeline imports either of us. Three byte-identical copies lived on that
+// sentence, and only pipeline's was tested against the bidi marks.
 //
 // NOT a JSON-integrity guard — encoding/json escapes control bytes, so an unsanitised
 // label could never split a line or break readDay. Every consumer downstream of the
 // decode is what this protects.
 //
-// The one consequence worth stating: usage (the ring) does not sanitise, so a label
-// carrying control bytes is now spelled differently in the two halves and group=model
-// would show it as two series. That only happens for a label that is already hostile,
-// the ring's copy dies with the process, and the ledger's is the one that survives —
-// so the divergence is the right way round. The matching fix belongs in usage.
+// AND THE DIVERGENCE THIS USED TO WARN ABOUT IS CLOSED. It read "usage (the ring) does not
+// sanitise, so a label carrying control bytes is spelled differently in the two halves and
+// group=model would show it as two series" — the ring sanitises now, with the same predicate,
+// so one hostile label is one series in both halves. abctl's render-time copy is the only
+// remaining narrower filter, and it is named above rather than left to be discovered.
 func sanitizeLabel(s string) string {
 	if !hasControlRunes(s) {
 		// The overwhelmingly common case, and no allocation for it: this runs on the

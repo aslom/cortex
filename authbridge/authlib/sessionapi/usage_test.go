@@ -203,13 +203,52 @@ func TestHandleUsage_ErrorsDoNotEchoInput(t *testing.T) {
 	ts, _ := newTestServer(t, WithUsage(usage.New()))
 	const probe = "<script>alert(1)</script>"
 
-	for _, q := range []string{"?group=" + probe, "?window=" + probe, "?resolution=" + probe} {
+	// CROSSED WITH THE WINDOW KIND, because that is the axis this test was missing. Handlers take
+	// different branches for a duration window and a symbolic one, and a message added on the
+	// symbolic branch alone reflected the resolution parameter for a whole round while this test —
+	// which probed the same parameter against the DEFAULT window — stayed green.
+	queries := []string{"?window=" + probe}
+	// group and resolution are validated on every path, so each is crossed with the window KINDS: a
+	// duration window, both symbolic ones, and the default. `session` is deliberately absent — a
+	// short session id is VALID, so it comes back in a 200 whose Session field is the id that was
+	// asked about, which is the endpoint answering rather than an error reflecting. Its rejection
+	// path is TestHandleUsage_SessionIDLengthCap.
+	for _, window := range []string{"", "today", "7d", "10m"} {
+		for _, param := range []string{"group", "resolution"} {
+			q := "?" + param + "=" + probe
+			if window != "" {
+				q = "?window=" + window + "&" + param + "=" + probe
+			}
+			queries = append(queries, q)
+		}
+	}
+	for _, q := range queries {
 		status, body := fetchUsage(t, ts.URL, q)
 		if status != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", q, status)
 		}
 		if strings.Contains(body, "script") {
-			t.Errorf("error body echoes caller input: %q", body)
+			t.Errorf("%s: error body echoes caller input: %q", q, body)
+		}
+	}
+
+	// A PROBE THAT CAN ACTUALLY REACH THE SYMBOLIC RESTATEMENT, which the script probe cannot:
+	// that branch is keyed on ErrResolutionExceedsWindow, and a value that fails to parse never
+	// gets there. So the reachable worst case is a WELL-FORMED duration — a weaker primitive than
+	// script bytes, and still caller-supplied bytes in an unauthenticated error body, which
+	// writeUsageError's contract forbids outright.
+	//
+	// Only the symbolic windows: on a duration window this rejection is usage's own message, which
+	// interpolates a RE-STRINGIFIED time.Duration rather than the caller's bytes, and is allowed to.
+	for _, window := range []string{"today", "7d"} {
+		const coarse = "72h"
+		q := "?window=" + window + "&resolution=" + coarse
+		status, body := fetchUsage(t, ts.URL, q)
+		if status != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", q, status)
+		}
+		if strings.Contains(body, coarse) {
+			t.Errorf("%s: error body echoes the caller's resolution %q: %q", q, coarse, body)
 		}
 	}
 }
@@ -1042,14 +1081,53 @@ func TestHandleUsage_ASymbolicWindowExplainsAResolutionRefusal(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: the resolution is genuinely unavailable", status)
 	}
-	for _, want := range []string{"window=7d", "24h"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("error body %q does not mention %q: the reader has to be able to tell which of their two parameters is the problem", body, want)
-		}
+	// window=7d IS quotable: on the symbolic path spec.Label is one of two constants, never the
+	// caller's spelling. The requested RESOLUTION is not, and asserting it was here is what pinned a
+	// reflection primitive into place for a round — the body must not carry those bytes at all.
+	if !strings.Contains(body, "window=7d") {
+		t.Errorf("error body %q does not say which window it is talking about", body)
 	}
-	// And it must NOT present 6h as the window that was asked for, which is what the old message did.
+	if strings.Contains(body, "24h") {
+		t.Errorf("error body %q echoes the caller's resolution parameter: this endpoint is unauthenticated, so that is a reflection primitive — see writeUsageError", body)
+	}
+	// And it must not present 6h as the window that was asked for, which is what the old message did.
 	if strings.Contains(body, "exceeds the 6h0m0s window") {
 		t.Errorf("error body %q still names a 6h window the caller never requested", body)
+	}
+}
+
+// TestHandleUsage_OnlyTheWindowBoundRejectionIsRestated is the other half of that message.
+//
+// Conditioning the restatement on Symbolic() ALONE overwrote the reason for every other resolution
+// rejection: too fine for the storage bucket, not a multiple of it, and unparseable all came back
+// "so 6h0m0s is the coarsest resolution available", which points the caller at a bound they never
+// hit. That is the same defect the restatement exists to fix, one layer along — so it is keyed on
+// ErrResolutionExceedsWindow rather than on the window kind.
+func TestHandleUsage_OnlyTheWindowBoundRejectionIsRestated(t *testing.T) {
+	ts, _ := newTestServer(t, WithUsage(usage.New()))
+
+	for _, tc := range []struct {
+		resolution string
+		wantSaid   string
+		why        string
+	}{
+		{resolution: "30s", wantSaid: "finer", why: "finer than the storage bucket"},
+		{resolution: "90s", wantSaid: "multiple", why: "not a whole number of buckets"},
+		{resolution: "abc", wantSaid: "want a duration", why: "not a duration at all"},
+	} {
+		t.Run(tc.resolution, func(t *testing.T) {
+			status, body := fetchUsage(t, ts.URL, "?window=today&resolution="+tc.resolution)
+			if status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", status, body)
+			}
+			if !strings.Contains(body, tc.wantSaid) {
+				t.Errorf("body %q does not mention %q — the caller hit %s and needs to be told that",
+					body, tc.wantSaid, tc.why)
+			}
+			if strings.Contains(body, "coarsest resolution available") {
+				t.Errorf("body %q restates the window bound for a rejection that was not about it", body)
+			}
+		})
 	}
 }
 

@@ -368,12 +368,19 @@ func TestMain_WiresTheLedgerAndFlushesItOnFatalPaths(t *testing.T) {
 						addRecorder = true
 					}
 				}
-			case pkg != nil && pkg.Name == "log" && sel.Sel.Name == "Fatalf":
-				// Only after the ledger can be open. Before that there is nothing to flush, and main
+			case pkg != nil && pkg.Name == "log" && (sel.Sel.Name == "Fatalf" ||
+				sel.Sel.Name == "Fatal" || sel.Sel.Name == "Fatalln"),
+				pkg != nil && pkg.Name == "os" && sel.Sel.Name == "Exit":
+				// EVERY SPELLING, not just Fatalf. The first version of this guard matched Fatalf
+				// alone and passed with a live log.Fatal sitting after the ledger opened — the exact
+				// half-revert it was written to catch, already present in the file it guards.
+				//
+				// Only after the ledger can be open: before that there is nothing to flush, and main
 				// runs top to bottom, so source order is execution order for this question.
 				inFatalf := v.Pos() >= fatalfDecl.Pos() && v.Pos() <= fatalfDecl.End()
 				if !inFatalf && flushPos != 0 && v.Pos() > flushPos {
-					directFatal = append(directFatal, fset.Position(v.Pos()).String())
+					directFatal = append(directFatal,
+						fset.Position(v.Pos()).String()+" ("+pkg.Name+"."+sel.Sel.Name+")")
 				}
 			}
 		}
@@ -390,6 +397,45 @@ func TestMain_WiresTheLedgerAndFlushesItOnFatalPaths(t *testing.T) {
 		t.Fatal("closeLedgerOnFatal is never assigned: a fatal startup error would discard the open minute, and the check below has no anchor")
 	}
 	for _, pos := range directFatal {
-		t.Errorf("%s calls log.Fatalf directly: it ends in os.Exit, so the ledger's open minute is lost — use fatalf", pos)
+		t.Errorf("%s exits without flushing the ledger: os.Exit runs no deferred functions, so the open minute is lost — use fatalf", pos)
+	}
+
+	// AND fatalf HAS TO ACTUALLY FLUSH, which this guard did not check: gutting it to a bare
+	// log.Fatalf, or assigning closeLedgerOnFatal = func(){}, kept every assertion above green.
+	var callsFlush bool
+	ast.Inspect(fatalfDecl, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "closeLedgerOnFatal" {
+				callsFlush = true
+			}
+		}
+		return true
+	})
+	if !callsFlush {
+		t.Error("fatalf never calls closeLedgerOnFatal: it is log.Fatalf under another name, and every site above loses its minute")
+	}
+
+	// And the closure assigned to it has to close the ledger, not merely exist.
+	var closesLedger bool
+	ast.Inspect(f, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 {
+			return true
+		}
+		if id, ok := as.Lhs[0].(*ast.Ident); !ok || id.Name != "closeLedgerOnFatal" {
+			return true
+		}
+		ast.Inspect(as.Rhs[0], func(inner ast.Node) bool {
+			if call, ok := inner.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Close" {
+					closesLedger = true
+				}
+			}
+			return true
+		})
+		return true
+	})
+	if !closesLedger {
+		t.Error("the closure assigned to closeLedgerOnFatal never calls Close: the flush is a no-op")
 	}
 }
