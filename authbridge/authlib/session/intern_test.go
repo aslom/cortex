@@ -330,11 +330,16 @@ func manifest() []pipeline.InferenceTool {
 		{
 			Name:        "get_weather",
 			Description: "Look up the forecast for a place. " + strings.Repeat("schema detail ", 8),
-			Parameters:  `{"type": "object"}`,
+			// Past internMinLen (64), or intern returns it untouched and a test asserting
+			// that schemas are shared would pass without any sharing having happened.
+			Parameters: pipeline.RawJSON(`{"type":"object","properties":{"city":{"type":"string","description":"` +
+				strings.Repeat("where to look ", 6) + `"}}}`),
 		},
 		{
 			Name:        "send_email",
 			Description: "Send a message to a recipient. " + strings.Repeat("schema detail ", 8),
+			Parameters: pipeline.RawJSON(`{"type":"object","properties":{"to":{"type":"string","description":"` +
+				strings.Repeat("who to send it to ", 6) + `"}}}`),
 		},
 	}
 }
@@ -371,6 +376,49 @@ func TestAppend_SharesRepeatedToolDescriptions(t *testing.T) {
 	// And the text still reads correctly.
 	if got, want := v.Events[turns-1].Inference.Tools[0].Description, manifest()[0].Description; got != want {
 		t.Errorf("tool description changed: %q", trunc(got))
+	}
+}
+
+// The SCHEMAS share too, which is the part the field's type change exists for and the
+// largest term measured on a live session: 84KB per event as a map, 4.1x its JSON text.
+//
+// Asserted separately from the descriptions above because it is a different mechanism —
+// interning a string field the parser used to widen into a map[string]any — and because it
+// rested on a benchmark alone, which CI does not run.
+func TestAppend_SharesRepeatedToolSchemas(t *testing.T) {
+	s := New(0, 0, 100)
+	defer s.Close()
+
+	const turns = 4
+	for i := 0; i < turns; i++ {
+		s.Append("s1", pipeline.SessionEvent{
+			Inference: &pipeline.InferenceExtension{Model: "m", Tools: manifest()},
+		})
+	}
+
+	v := s.View("s1")
+	for tool := range manifest() {
+		// The fixture has to be long enough to intern at all, or this passes vacuously.
+		if got := len(v.Events[0].Inference.Tools[tool].Parameters); got < internMinLen {
+			t.Fatalf("tool %d's schema is %d bytes, under internMinLen %d — it cannot be interned",
+				tool, got, internMinLen)
+		}
+		first := backing(string(v.Events[0].Inference.Tools[tool].Parameters))
+		for i := range v.Events {
+			if backing(string(v.Events[i].Inference.Tools[tool].Parameters)) != first {
+				t.Errorf("event %d holds its own copy of tool %d's schema", i, tool)
+			}
+		}
+	}
+
+	// Two different schemas must stay two strings.
+	if backing(string(v.Events[0].Inference.Tools[0].Parameters)) ==
+		backing(string(v.Events[0].Inference.Tools[1].Parameters)) {
+		t.Error("two tools' schemas were collapsed into one string")
+	}
+	// And the JSON still reads correctly.
+	if got, want := v.Events[turns-1].Inference.Tools[0].Parameters, manifest()[0].Parameters; got != want {
+		t.Errorf("tool schema changed: %q", trunc(string(got)))
 	}
 }
 

@@ -1,21 +1,35 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
 )
 
-// pagedEvents builds n events carrying Seq from start, which paging needs as cursors.
-// cursorRowsFixture leaves Seq zero — what a proxy predating paging sends.
+// pagingEpoch is the base timestamp for fixture events, so a test can place one batch
+// before or after another in wall-clock time independently of its Seq.
+var pagingEpoch = time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+// pagedEvents builds n events carrying Seq from start, which paging needs as cursors, and
+// timestamps that ascend with Seq — the normal case, where the two agree.
+// cursorRowsFixture leaves Seq zero, which is what a proxy predating paging sends.
 func pagedEvents(start, n int) []pipeline.SessionEvent {
+	return pagedEventsAt(start, n, pagingEpoch.Add(time.Duration(start)*time.Second))
+}
+
+// pagedEventsAt is pagedEvents with the timestamps placed explicitly, for the case Seq and
+// wall-clock time DISAGREE: a re-created session numbers its new events from 1 again.
+func pagedEventsAt(start, n int, at time.Time) []pipeline.SessionEvent {
 	out := make([]pipeline.SessionEvent, 0, n)
 	for i := 0; i < n; i++ {
 		out = append(out, pipeline.SessionEvent{
 			Seq:       uint64(start + i),
+			At:        at.Add(time.Duration(i) * time.Second),
 			SessionID: "sess-1",
 			Direction: pipeline.Outbound,
 			Phase:     pipeline.SessionRequest,
@@ -27,9 +41,15 @@ func pagedEvents(start, n int) []pipeline.SessionEvent {
 }
 
 // pagedModel is a model already one page deep, as it stands after the first [o].
+//
+// It sets a client, which fitModel does not. Without one, loadOlderPage returns at its
+// m.client == nil guard before reaching anything else — which made the request-stacking
+// test below pass whether or not the behaviour it names existed.
 func pagedModel(t *testing.T, held []pipeline.SessionEvent) *model {
 	t.Helper()
 	m := fitModel(t, paneEvents, 200, 40, held)
+	m.client = apiclient.New("http://127.0.0.1:1")
+	m.ctx = context.Background()
 	m.paging = map[string]*pagingState{
 		"sess-1": {pageSizes: []int{len(held)}},
 	}
@@ -148,12 +168,69 @@ func TestApplyOlderPage_IgnoresAPageWhosePagingEnded(t *testing.T) {
 
 // A second [o] while one request is in flight is a no-op, so holding the key down cannot
 // stack fetches that each cost a page of decode.
+//
+// The positive case is asserted first, and that is the point: without it this test passed
+// against a model with no client at all, where loadOlderPage returns nil for a reason that
+// has nothing to do with in-flight requests.
 func TestLoadOlderPage_DoesNotStackRequests(t *testing.T) {
 	m := pagedModel(t, pagedEvents(11, 10))
-	m.paging["sess-1"].loading = true
+
+	if cmd := m.loadOlderPage(); cmd == nil {
+		t.Fatal("the first request was not issued, so this test cannot show anything about the second")
+	}
+	if !m.paging["sess-1"].loading {
+		t.Fatal("loading not set by the first request")
+	}
 
 	if cmd := m.loadOlderPage(); cmd != nil {
 		t.Error("a second request was issued while one was in flight")
+	}
+}
+
+// A page whose events are NEWER than what is held must be refused rather than prepended.
+//
+// Reachable because Seq restarts at 1 for a re-created session: TTL cleanup or max_sessions
+// eviction drops the entry, traffic under the same id makes a new one, and a cursor from
+// the previous incarnation is then above everything held. ViewPage answers "everything
+// before that cursor" — the whole new session — and prepending it would put its newest
+// events in front of the older ones already on screen.
+func TestApplyOlderPage_RefusesAPageThatIsNotOlder(t *testing.T) {
+	m := pagedModel(t, pagedEvents(3000, 10)) // held: Seq 3000..3009
+	before := heldSeqs(m)
+
+	// What a re-created session returns: Seq 1..5, numbered far BELOW the cursor that asked
+	// for them — so a Seq comparison sees a well-ordered page — but recorded an hour after
+	// everything held, because the store dropped the session and started over.
+	newer := pagedEventsAt(1, 5, m.events["sess-1"][0].At.Add(time.Hour))
+	m.applyOlderPage(olderPageLoadedMsg{id: "sess-1", events: newer, serverOldest: 1})
+
+	if got := heldSeqs(m); len(got) != len(before) {
+		t.Errorf("held %d events, want %d unchanged — an out-of-order page was stitched in",
+			len(got), len(before))
+	}
+	if !strings.Contains(m.flash, "restarted") {
+		t.Errorf("flash = %q, want it to name the reason", m.flash)
+	}
+}
+
+// The dropped page must be cleared, not just sliced off. Reslicing leaves those events
+// reachable through the backing array, so the cap would hold one page more than it claims.
+func TestApplyOlderPage_ClearsTheDroppedPage(t *testing.T) {
+	m := pagedModel(t, pagedEvents(301, 100))
+	for _, start := range []int{201, 101, 1} {
+		m.applyOlderPage(olderPageLoadedMsg{
+			id: "sess-1", events: pagedEvents(start, 100), serverOldest: 1,
+		})
+	}
+
+	held := m.events["sess-1"]
+	// The dropped page sits just past the length, inside the same backing array.
+	spare := held[:len(held)+100]
+	for i := len(held); i < len(spare); i++ {
+		if spare[i].Inference != nil || spare[i].Seq != 0 {
+			t.Fatalf("dropped event at %d is still live (Seq %d): the cap holds more than it says",
+				i, spare[i].Seq)
+		}
 	}
 }
 

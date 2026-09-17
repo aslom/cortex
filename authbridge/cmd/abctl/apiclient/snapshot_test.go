@@ -213,7 +213,23 @@ func BenchmarkDecodeSessionViewHeap(b *testing.B) {
 	})
 }
 
+// heapSysTaken records that a HeapSys figure has already been measured in this process.
+//
+// Splitting the sub-benchmarks into two top-level functions would NOT fix the ordering trap
+// — one `-bench DecodeSessionViewHeap` still matches both and runs them in one process — so
+// the second measurement refuses to report instead. Without this, running both together
+// gives the streamed case a flattering ≈+0.0 MB against a heap the buffered case already
+// grew, and +0.0 MB is exactly the headline figure.
+var heapSysTaken bool
+
 func benchDecode(b *testing.B, decode func([]byte) (*pipeline.SessionView, error)) {
+	if heapSysTaken {
+		b.Skip("HeapSys does not shrink within a process, so this would measure a heap the " +
+			"previous sub-benchmark already grew. Run this one on its own: " +
+			"go test ./apiclient/ -bench 'DecodeSessionViewHeap/<buffered|streamed>' -run '^$' -benchtime 1x")
+	}
+	heapSysTaken = true
+
 	doc := benchDecodeDoc(b)
 
 	// The document is allocated before the baseline so it cancels out of both figures;

@@ -1,6 +1,9 @@
 package pipeline
 
-import "time"
+import (
+	"bytes"
+	"time"
+)
 
 // Extensions holds typed extension slots for plugin-to-plugin communication.
 // Each slot is populated by a specific plugin and consumed by downstream plugins.
@@ -220,9 +223,16 @@ type InferenceMessage struct {
 	ContentBytes int `json:"contentBytes,omitempty"`
 }
 
-// RawJSON is a JSON value held exactly as it arrived, rather than decoded into Go
-// values. It marshals back byte-for-byte, so a round trip through this type preserves
-// key order and spacing instead of normalizing them.
+// RawJSON is a JSON value held exactly as it arrived, rather than decoded into Go values.
+// What it preserves is KEY ORDER, which is what decoding into a map destroys — marshaling
+// a map sorts keys, so a schema came back reordered from the one the client sent.
+//
+// It does not preserve the bytes exactly through a re-marshal, and claiming so would be
+// wrong: encoding/json compacts a Marshaler's output and HTML-escapes it, so insignificant
+// whitespace is dropped and the characters less-than, greater-than and ampersand come back
+// as their six-byte unicode escapes. The value this type HOLDS is untouched; only a copy
+// that has been through json.Marshal is compacted. TestRawJSON_ReMarshalCompactsAndEscapes
+// pins both.
 //
 // WHY A NAMED STRING, and not the two obvious alternatives — this type exists to be
 // deduplicated by authlib/session's interner, and both of them defeat that:
@@ -263,7 +273,17 @@ func (r RawJSON) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON keeps the raw bytes without validating or reformatting them. The decoder
 // has already established that they are a well-formed JSON value.
+//
+// JSON null is the exception, and it decodes to EMPTY rather than to the four bytes
+// "null". Keeping them would make `"parameters": null` four bytes long, which passes every
+// `len(...) > 0` guard a consumer writes — plugins/opa/plugin.go tests exactly that before
+// putting the schema in its policy input — and would hand rego a null where the map-typed
+// field left the key absent. Empty also round-trips: MarshalJSON writes null back.
 func (r *RawJSON) UnmarshalJSON(b []byte) error {
+	if bytes.Equal(b, []byte("null")) {
+		*r = ""
+		return nil
+	}
 	*r = RawJSON(b)
 	return nil
 }

@@ -122,9 +122,28 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 		return
 	}
 
+	held := m.events[msg.id]
+
+	// The page must actually be older than what is held, and the test for that is the
+	// TIMESTAMP, not Seq.
+	//
+	// Seq is per store entry and restarts at 1: a session dropped by TTL cleanup or the
+	// max_sessions eviction, then re-created under the same id, numbers its new events from
+	// the beginning. A cursor from the previous incarnation is then above everything the
+	// store now holds, so ViewPage finds nothing at or after it and answers with the tail —
+	// the re-created session's NEWEST events, carrying low Seq values. Comparing Seq would
+	// find that perfectly ordered and prepend live traffic to the front of the timeline.
+	// Wall-clock time is what stays comparable across the two incarnations.
+	//
+	// Refused here rather than by teaching ViewPage to reject high cursors, because the store
+	// cannot tell a re-created session from a trimmed one, and this check does not need to.
+	if len(held) > 0 && msg.events[len(msg.events)-1].At.After(held[0].At) {
+		m.setFlash("session restarted — [t] for the tail")
+		return
+	}
+
 	// A fresh slice, oldest first: appending to the held events would put the older page
 	// after the newer ones, and growing the page in place would alias the response.
-	held := m.events[msg.id]
 	merged := make([]pipeline.SessionEvent, 0, len(msg.events)+len(held))
 	merged = append(merged, msg.events...)
 	merged = append(merged, held...)
@@ -133,6 +152,11 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 	for len(st.pageSizes) > maxPagesHeld {
 		newest := st.pageSizes[len(st.pageSizes)-1]
 		st.pageSizes = st.pageSizes[:len(st.pageSizes)-1]
+		// Cleared before the truncate, not just sliced away. Reslicing leaves the dropped
+		// events reachable through the backing array, so the three-page cap would hold four
+		// pages' worth of prompts and completions until the next page reallocated — in a
+		// change whose whole point is retained heap.
+		clear(merged[len(merged)-newest:])
 		merged = merged[:len(merged)-newest]
 		st.droppedNewer = true
 	}

@@ -14,13 +14,49 @@ func TestViewPage_ZeroCursorIsTheTail(t *testing.T) {
 	seedEvents(t, s, "s1", 100)
 
 	page := s.ViewPage("s1", 0, 10)
-	tail := s.ViewTail("s1", 10)
-	if fmt.Sprint(hosts(page)) != fmt.Sprint(hosts(tail)) {
-		t.Errorf("page = %v, tail = %v", hosts(page), hosts(tail))
+	if page == nil {
+		t.Fatal("no view")
 	}
-	if page.TotalEvents != tail.TotalEvents || page.OldestSeq != tail.OldestSeq {
-		t.Errorf("page{total:%d oldest:%d} != tail{total:%d oldest:%d}",
-			page.TotalEvents, page.OldestSeq, tail.TotalEvents, tail.OldestSeq)
+	// Asserted against the CONCRETE tail, not against ViewTail's output: ViewTail now
+	// delegates here, so comparing the two would be comparing this call to itself and would
+	// pass just as well if both returned the wrong ten events.
+	want := []string{"h0090", "h0091", "h0092", "h0093", "h0094", "h0095", "h0096", "h0097", "h0098", "h0099"}
+	if got := hosts(page); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("page = %v, want %v", got, want)
+	}
+	if got, want := page.TotalEvents, 100; got != want {
+		t.Errorf("TotalEvents = %d, want %d", got, want)
+	}
+	if page.OldestSeq == 0 {
+		t.Error("OldestSeq unset on a truncated view")
+	}
+
+	// And the delegation itself still holds.
+	if tail := s.ViewTail("s1", 10); fmt.Sprint(hosts(tail)) != fmt.Sprint(want) {
+		t.Errorf("ViewTail = %v, want %v", hosts(tail), want)
+	}
+}
+
+// A cursor ABOVE everything held returns the tail, which is the store being consistent
+// rather than a bug: every event it holds does precede that cursor.
+//
+// Pinned because a client can hold such a cursor, and the consequence is not local. Seq
+// restarts at 1 for a re-created session, so a cursor from a previous incarnation asks for
+// events "before" a number the new incarnation has not reached — and gets the newest events
+// it has. abctl refuses to prepend those by comparing timestamps rather than Seq
+// (applyOlderPage); this test records the store behaviour that makes the check necessary.
+func TestViewPage_CursorAboveEverythingHeldReturnsTheTail(t *testing.T) {
+	s := New(0, 0, 100)
+	defer s.Close()
+	seedEvents(t, s, "s1", 20)
+
+	v := s.ViewPage("s1", 1_000_000, 5)
+	if v == nil {
+		t.Fatal("no view")
+	}
+	want := []string{"h0015", "h0016", "h0017", "h0018", "h0019"}
+	if got := hosts(v); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("page = %v, want the tail %v", got, want)
 	}
 }
 

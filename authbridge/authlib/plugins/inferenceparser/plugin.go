@@ -663,8 +663,13 @@ func schemaObject(raw json.RawMessage) pipeline.RawJSON {
 	// TrimLeft returns a subslice, so establishing the first meaningful byte allocates
 	// nothing. The conversion below is the single copy, and it is the one the interner
 	// then collapses across events.
-	if trimmed := bytes.TrimLeft(raw, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
+	//
+	// The trimmed value is what gets returned, not the original: a decoder never hands us
+	// leading whitespace anyway, so the two are the same slice in practice, and keeping them
+	// the same avoids peeking at one thing while storing another.
+	trimmed := bytes.TrimLeft(raw, " \t\r\n")
+	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return ""
 	}
-	return pipeline.RawJSON(raw)
+	return pipeline.RawJSON(trimmed)
 }

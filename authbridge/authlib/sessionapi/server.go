@@ -318,9 +318,18 @@ func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
 //
 // So the response is a tail, and ?limit says how long a one. The default matches the
 // max_events cap this store used to carry, so any session that was servable before is
-// servable unchanged; the maximum is what stops an unauthenticated endpoint from being
-// asked for a gigabyte. Over-large limits clamp rather than 400, because a curl user
-// asking for more than we will give should get the most we will give.
+// servable unchanged. Over-large limits clamp rather than 400, because a curl user asking
+// for more than we will give should get the most we will give.
+//
+// What the maximum bounds is one RESPONSE, and that is all it has ever bounded. It used to
+// be described as stopping an unauthenticated endpoint from being asked for a gigabyte,
+// which now overstates it: ?before= lets a caller walk the whole retained history in
+// max-sized pages. Per-request cost stays bounded — which is the part that protects the
+// proxy's heap and the client's timeout — but total reachable data is the retained store,
+// not this number. That is a change in what one unauthenticated caller can pull, though not
+// in the trust model: this endpoint has never been authenticated, the SSE stream already
+// hands over every event as it happens, and the payloads are raw prompts either way. Bind
+// it on loopback or an in-cluster address, as the session API docs say.
 const (
 	defaultEventLimit = 500
 	maxEventLimit     = 2000
