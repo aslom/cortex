@@ -70,6 +70,15 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 	var pctx *pipeline.Context
 	var requestDirection string
 
+	// sawResponseHeaders / sawResponseBody say which response phases Envoy actually delivered,
+	// which is what makes the flush below meaningful: they distinguish "the response never
+	// finished" from "there was no response at all".
+	//
+	// BOTH, because they fail differently. A body with no end_of_stream leaves the parsers holding
+	// accumulated state; a response that ended after its HEADERS never ran the response phase at
+	// all — and the gateway's cost header arrived on those headers.
+	var sawResponseHeaders, sawResponseBody bool
+
 	// Finisher dispatch runs once when Process returns — stream end is
 	// Envoy's signal that the request is finalized (response sent or
 	// abandoned). A stream that never reached Run (no RequestHeaders
@@ -82,6 +91,87 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 		p := s.OutboundPipeline
 		if requestDirection == "inbound" {
 			p = s.InboundPipeline
+		}
+		// THE FALLBACK FOR A RESPONSE WHOSE LAST BODY MESSAGE NEVER SAID end_of_stream, and the
+		// reason gating on that flag is safe at all: Envoy omits it when TRAILERS follow, and this
+		// server asks for no trailer phase, so it can legitimately never arrive. Without this such
+		// a response never finalizes and is never recorded — its cost reaching no ledger, which is
+		// worse than the double-count the gate removes. Stream end is Envoy's own statement that
+		// the transaction is over, so it is both the last safe point to finalize and one always
+		// reached.
+		//
+		// A REJECTED RESPONSE IS ALREADY FINISHED. Its ImmediateResponse went back to Envoy, the
+		// response never went downstream and the parsers hold nothing, so recording a
+		// SessionResponse row would label a denial as an ordinary response. Request-phase rejects
+		// never reach this defer — those paths return a nil pctx.
+		if pctx.RejectingPlugin() != "" {
+			p.RunFinish(ctx, pctx, pipeline.OutcomeFromContext(pctx))
+			return
+		}
+		if (sawResponseHeaders || sawResponseBody) && !responseWasRecorded(pctx) {
+			// ONE PER DISPATCH, the rule at every finalization site: the phase below and the terminal
+			// frame each get their own budget, because they run in order and a shared one lets a slow
+			// plugin in the phase spend what the settle needs. See httpx.TeardownContext.
+			phaseCtx, cancelPhase := httpx.TeardownContext(ctx)
+			defer cancelPhase()
+			// THE RESPONSE HAS ALREADY GONE DOWNSTREAM, and saying so is what keeps a refusal
+			// recorded here from becoming this request's outcome.
+			//
+			// The flush dispatches plugins, and a plugin can reject in a response phase. The
+			// action is dropped — there is nothing left to refuse — but the REJECTION is still
+			// recorded on the context, and OutcomeFromContext maps any deny to OutcomeDeny.
+			// Every Finisher then reads "this request was denied" for a response Envoy delivered
+			// with a 200, which inverts the rule this defer states two blocks up: a rejected
+			// response is left alone precisely so a denial and an ordinary response are not
+			// confused.
+			//
+			// MarkResponseDelivered is the pipeline-side half, so the fix holds for anything
+			// that re-derives the outcome from the context rather than reading the one passed to
+			// RunFinish — which is what a plugin does. The refusal stays on the record, marked
+			// Late; what it no longer does is rename the request.
+			pctx.MarkResponseDelivered()
+			defer func() { p.RunFinish(ctx, pctx, pipeline.OutcomeFromContext(pctx)) }()
+			// THE RESPONSE PHASE, WHICH ON THIS PATH HAS DEFINITELY NOT RUN — and that is an
+			// invariant of the flush's own gate rather than something to track. Every site that runs
+			// the phase also records the response (handleResponseHeaders when it does not defer,
+			// handleResponseBody on end_of_stream), so !responseWasRecorded above already means "the
+			// phase has not run"; and a site that ran it and then REJECTED returns through the
+			// RejectingPlugin branch two blocks up. A separate mark for it was unreachable —
+			// deleting both of its call sites left every test in this package green, which is the
+			// evidence — and the once-per-response claim that does matter is pinned by
+			// TestExtProc_TornStreamRunsTheResponsePhaseOnce and its multi-message sibling.
+			//
+			// Rejecting is meaningless here (the stream is gone), so the action is dropped, exactly
+			// as it is for the terminal frame.
+			if action := p.RunResponse(phaseCtx, pctx); action.Type == pipeline.Reject {
+				// Said out loud rather than swallowed: a plugin refusing a response that Envoy has
+				// already delivered is a policy decision that did not take effect, and an operator
+				// reading an allow-shaped row needs to know one was attempted.
+				slog.Warn("ext_proc: a plugin rejected during teardown, after the response was delivered",
+					"plugin", pctx.RejectingPlugin(), "code", violationCode(action))
+			}
+			if p.HasStreamingResponders() {
+				// DETACHED FROM THE STREAM'S CONTEXT, which is the difference between this flush
+				// working and only appearing to: ctx is stream.Context(), and the case this block
+				// exists for — a hangup, a filter timeout, a shutdown — is exactly when it is
+				// already done. RunResponseFrame refuses a done context before calling any plugin,
+				// so the terminal frame would be a no-op and the request's spend would reach no
+				// aggregate, ledger or budget. RunFinish needs no wrapper: dispatchFinish detaches
+				// internally.
+				//
+				// Terminal frame, so the parsers settle from whatever state they accumulated.
+				// Rejecting here would be pointless — the response has already gone downstream —
+				// so the action is deliberately dropped.
+				// dispatchBufferedFrames rather than a bare nil frame: on the non-SSE arm
+				// the accumulated body has never been dispatched, and a nil terminal frame
+				// would finalize the parsers over a body nothing ever read. The SSE arm sends
+				// only the terminal frame, since its frames went out per message.
+				finalCtx, cancelFinal := httpx.TeardownContext(ctx)
+				defer cancelFinal()
+				dispatchTerminalFrame(finalCtx, p, pctx)
+			}
+			s.recordResponseSession(pctx, requestDirection)
+			return
 		}
 		p.RunFinish(ctx, pctx, pipeline.OutcomeFromContext(pctx))
 	}()
@@ -140,10 +230,21 @@ func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error
 			pendingDirection = ""
 
 		case *extprocv3.ProcessingRequest_ResponseHeaders:
-			resp = s.handleResponseHeaders(ctx, r.ResponseHeaders.Headers, pctx, requestDirection)
+			// end_of_stream is carried through because it is the only thing that
+			// distinguishes "a body is coming" from "this response is over" — the
+			// same question requestHasBody answers for the request phase above.
+			sawResponseHeaders = true
+			resp = s.handleResponseHeaders(ctx, r.ResponseHeaders.Headers, pctx, requestDirection,
+				r.ResponseHeaders.GetEndOfStream())
 
 		case *extprocv3.ProcessingRequest_ResponseBody:
-			resp = s.handleResponseBody(ctx, r.ResponseBody.Body, pctx, requestDirection)
+			sawResponseBody = true
+			// end_of_stream carried through for the same reason the response-header phase
+			// above carries it: it is the only thing that distinguishes the last chunk of a
+			// body from a middle one, and everything that must happen exactly once per
+			// response hangs off that distinction.
+			resp = s.handleResponseBody(ctx, r.ResponseBody.Body, pctx, requestDirection,
+				r.ResponseBody.GetEndOfStream())
 
 		default:
 			resp = &extprocv3.ProcessingResponse{}
@@ -167,6 +268,16 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
+	// Pin the calling agent HERE, at construction, from the headers as the CLIENT sent
+	// them — the same line forwardproxy's serveOutbound carries, for the same reason.
+	// pctx.Headers is this listener's own copy of the wire headers and plugins write to
+	// it, while ClientInfo's memo fills on first READ — which without this line is
+	// recordInboundSession below, downstream of the whole pipeline. A plugin that
+	// rewrote User-Agent would re-file this request's spend under a name of its
+	// choosing, and this path's request, response and denial events could disagree
+	// depending on which asked first. Latent while no plugin touches that header — and
+	// silent on the day one does, which is why it is pinned rather than watched.
+	pctx.ResolveClient()
 
 	originalHeaders := pctx.Headers.Clone()
 	action := s.InboundPipeline.Run(ctx, pctx)
@@ -192,6 +303,9 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
+	// At construction, as in handleInbound: a second Context for the same request, built one
+	// message later because a plugin wanted the body, feeding the same recorders.
+	pctx.ResolveClient()
 
 	originalHeaders := pctx.Headers.Clone()
 	action := s.InboundPipeline.Run(ctx, pctx)
@@ -249,6 +363,7 @@ func (s *Server) recordInboundSession(pctx *pipeline.Context) {
 		Host:        pctx.Host,
 		HTTPMethod:  pctx.Method,
 		HTTPPath:    pctx.Path,
+		Client:      pctx.ClientInfo(),
 	}
 	s.Sessions.Append(sid, ev)
 }
@@ -296,6 +411,7 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 			Message: message,
 		},
 		Duration: pipeline.DurationSince(pctx.StartedAt),
+		Client:   pctx.ClientInfo(),
 	}
 	s.Sessions.Append(inboundSessionID(pctx), ev)
 }
@@ -352,6 +468,7 @@ func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Ac
 			Message: message,
 		},
 		Duration: pipeline.DurationSince(pctx.StartedAt),
+		Client:   pctx.ClientInfo(),
 	}
 	s.Sessions.Append(sid, ev)
 }
@@ -391,6 +508,7 @@ func (s *Server) recordInboundResponseSession(pctx *pipeline.Context) {
 		HTTPMethod:  pctx.Method,
 		HTTPPath:    pctx.Path,
 		Duration:    pipeline.DurationSince(pctx.StartedAt),
+		Client:      pctx.ClientInfo(),
 	}
 	s.Sessions.Append(sid, ev)
 }
@@ -423,6 +541,7 @@ func (s *Server) recordOutboundResponseSession(pctx *pipeline.Context) {
 		HTTPMethod:  pctx.Method,
 		HTTPPath:    pctx.Path,
 		Duration:    pipeline.DurationSince(pctx.StartedAt),
+		Client:      pctx.ClientInfo(),
 	}
 	// Auth / Plugins alone qualify for recording; matches the widened
 	// gate in recordInboundSession so outbound denials and plugin-public
@@ -470,6 +589,7 @@ func (s *Server) recordOutboundSession(pctx *pipeline.Context) {
 		Host:        pctx.Host,
 		HTTPMethod:  pctx.Method,
 		HTTPPath:    pctx.Path,
+		Client:      pctx.ClientInfo(),
 	}
 	if ev.MCP != nil || ev.Inference != nil || ev.Invocations != nil || plugins != nil {
 		s.Sessions.Append(sid, ev)
@@ -489,6 +609,10 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
+	// At construction, as in handleInbound, and BEFORE the SkipHosts gate: a pin placed after an
+	// early return is one a later short-circuit can step in front of. The cost on a skipped host
+	// is one header lookup.
+	pctx.ResolveClient()
 
 	// SkipHosts short-circuit: forward the request as a transparent
 	// proxy without running the pipeline or recording a session event.
@@ -531,6 +655,9 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
+	// At construction, as in handleOutbound: this body-phase entry point builds its own Context
+	// and reaches the same outbound recorders.
+	pctx.ResolveClient()
 
 	// SkipHosts short-circuit: see handleOutbound for rationale. The
 	// body-phase entry point needs the same gate because Envoy may
@@ -564,7 +691,13 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 	return withBodyMutation(resp, pctx), pctx
 }
 
-func (s *Server) handleResponseHeaders(ctx context.Context, headers *corev3.HeaderMap, pctx *pipeline.Context, direction string) *extprocv3.ProcessingResponse {
+// handleResponseHeaders runs the response phase off the headers alone.
+//
+// endOfStream is Envoy's own statement that no body follows, and it is what
+// decides whether this phase defers to the body phase or finishes the response
+// here. Without it the deferral below was unconditional for every shipped
+// pipeline — see the comment on that branch.
+func (s *Server) handleResponseHeaders(ctx context.Context, headers *corev3.HeaderMap, pctx *pipeline.Context, direction string, endOfStream bool) *extprocv3.ProcessingResponse {
 	if pctx == nil {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseHeaders{
@@ -582,7 +715,19 @@ func (s *Server) handleResponseHeaders(ctx context.Context, headers *corev3.Head
 		p = s.InboundPipeline
 	}
 
-	if p.NeedsBody() {
+	// Defer to the body phase — but only when there IS one.
+	//
+	// AND !endOfStream IS THE FIX, not a refinement. NeedsBody() alone is unconditionally true for
+	// every shipped pipeline (it is NeedsRequestBody() || NeedsResponseBody(), and
+	// inference-parser's undirected ReadsBody counts toward both), so everything below this return
+	// was dead code — and a response with no body at all, a 204 or an error status ended on
+	// headers, reached NEITHER branch. Envoy sends no ResponseBody message for those, so nothing
+	// settled a cost the gateway had already reported in a header.
+	//
+	// The early return itself stays: when a body IS coming, this phase must not run the pipeline,
+	// because the body phase runs the whole buffered dispatch — terminal frame included — and
+	// running both charges twice. requestHasBody makes the same distinction on the request side.
+	if p.NeedsBody() && !endOfStream {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseHeaders{
 				ResponseHeaders: &extprocv3.HeadersResponse{},
@@ -611,11 +756,7 @@ func (s *Server) handleResponseHeaders(ctx context.Context, headers *corev3.Head
 	// No body phase will run; record the response event here. A2A responses
 	// need the body to extract contextId, so the rekey path is body-only;
 	// skip it on this header-only path.
-	if direction == "inbound" {
-		s.recordInboundResponseSession(pctx)
-	} else {
-		s.recordOutboundResponseSession(pctx)
-	}
+	s.recordResponseSession(pctx, direction)
 
 	return &extprocv3.ProcessingResponse{
 		Response: &extprocv3.ProcessingResponse_ResponseHeaders{
@@ -624,7 +765,129 @@ func (s *Server) handleResponseHeaders(ctx context.Context, headers *corev3.Head
 	}
 }
 
-func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipeline.Context, direction string) *extprocv3.ProcessingResponse {
+// violationCode names a rejected action's code for a log line, tolerating a nil Violation —
+// pipeline.Deny always sets one, but an action assembled by hand need not.
+func violationCode(a pipeline.Action) string {
+	if a.Violation == nil {
+		return ""
+	}
+	return a.Violation.Code
+}
+
+// sseCarryKey holds the bytes of a STREAMED SSE body that arrived after its last complete
+// event — the front half of an event whose terminator is still in the next ResponseBody
+// message.
+//
+// Kept on the pctx rather than in a local because the two ends are in different calls: the cut
+// happens in dispatchBufferedFrames and the join in handleResponseBody, one Envoy message
+// apart, and Process holds no per-response state of its own.
+const sseCarryKey = "extproc.sse-carry"
+
+type sseCarry struct{ tail []byte }
+
+// carrySSETail remembers the undispatched tail of an SSE body for the next message.
+//
+// COPIED, because tail points into the protobuf message Envoy's decoder owns and that message
+// does not outlive this call.
+//
+// BOUNDED BY ONE FRAME'S WORTH, and dropped rather than grown past it: a carry only grows while
+// no event terminates, so a body past this cap is not a long stream but a peer sending
+// something that is not SSE at all — for which the honest outcome is to lose the fragment and
+// say so, not to buffer without limit.
+func carrySSETail(pctx *pipeline.Context, tail []byte) {
+	if len(tail) > maxBodySize {
+		slog.Warn("extproc: SSE body has no event boundary within the frame limit; the fragment is dropped",
+			"limit", maxBodySize, "have", len(tail))
+		tail = nil
+	}
+	pipeline.SetState(pctx, sseCarryKey, &sseCarry{tail: append([]byte(nil), tail...)})
+}
+
+// withCarriedSSETail returns the previous message's unfinished tail joined to this message's
+// bytes, and clears the carry. Returns body itself when there is nothing to join, so the common
+// case allocates nothing.
+func withCarriedSSETail(pctx *pipeline.Context, body []byte) []byte {
+	c := pipeline.GetState[sseCarry](pctx, sseCarryKey)
+	if c == nil || len(c.tail) == 0 {
+		return body
+	}
+	joined := make([]byte, 0, len(c.tail)+len(body))
+	joined = append(joined, c.tail...)
+	joined = append(joined, body...)
+	c.tail = nil
+	return joined
+}
+
+// lastSSEFrameBoundary returns the offset just past the last blank line in b — the end of the
+// last COMPLETE event — or 0 when b holds no complete event at all.
+//
+// Its own scan rather than sseframe's reader, because the reader reports frames and this needs
+// an OFFSET: the question is where the complete prefix ends, and a frame's payload has had its
+// field prefixes and line folding removed, so nothing about it locates a byte. The terminator
+// rules are SSE's own and match sseframe.readLine: LF, CR, or CRLF ends a line, and an empty
+// line ends an event.
+func lastSSEFrameBoundary(b []byte) int {
+	end, lineStart := 0, 0
+	for i := 0; i < len(b); {
+		if c := b[i]; c != '\n' && c != '\r' {
+			i++
+			continue
+		}
+		next := i + 1
+		if b[i] == '\r' && next < len(b) && b[next] == '\n' {
+			next++
+		}
+		if i == lineStart {
+			// An empty line: the event before it is complete through here.
+			end = next
+		}
+		i, lineStart = next, next
+	}
+	return end
+}
+
+// responseRecordedKey and responseRecorded mark this request's response event as appended.
+const responseRecordedKey = "extproc.response-recorded"
+
+type responseRecorded struct{}
+
+// responseWasRecorded reports whether the response session event has already been appended.
+func responseWasRecorded(pctx *pipeline.Context) bool {
+	return pipeline.GetState[responseRecorded](pctx, responseRecordedKey) != nil
+}
+
+// recordResponseSession appends the response session event, AT MOST ONCE per request.
+//
+// THE COUNT IS MONEY, which is why the guard is here rather than at each caller. This
+// listener runs the whole buffered dispatch — terminal frame included — once per
+// ResponseBody message it receives (handleResponseBody -> dispatchBufferedFrames), and it
+// appended a response event at the end of each one. The cost record lives in
+// pctx.Extensions.Custom and is never cleared, so SnapshotPlugins serialised the SAME
+// figure into every one of those events, and the aggregator and the ledger summed them: one
+// request charged N times, where N is however many body messages Envoy chose to send.
+//
+// Reachable only OFF the shipped configuration — buffered mode delivers one message with
+// end_of_stream set — but "reachable only when Envoy is configured differently" is not a
+// guarantee this process makes, and a statically configured STREAMED response body mode or
+// a filter with allow_mode_override off produces it. See the ModeOverride this server asks
+// for in handleResponseHeaders, which is a request and not a contract.
+//
+// The guard is a pctx state entry rather than a local in Process because the header-only
+// path records too: a 204 records from handleResponseHeaders, and the flush at stream end
+// must be able to see that it already happened.
+func (s *Server) recordResponseSession(pctx *pipeline.Context, direction string) {
+	if responseWasRecorded(pctx) {
+		return
+	}
+	pipeline.SetState(pctx, responseRecordedKey, &responseRecorded{})
+	if direction == "inbound" {
+		s.recordInboundResponseSession(pctx)
+	} else {
+		s.recordOutboundResponseSession(pctx)
+	}
+}
+
+func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipeline.Context, direction string, endOfStream bool) *extprocv3.ProcessingResponse {
 	if pctx == nil {
 		return &extprocv3.ProcessingResponse{
 			Response: &extprocv3.ProcessingResponse_ResponseBody{
@@ -633,16 +896,54 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 		}
 	}
 
-	pctx.ResponseBody = body
+	// A ResponseBody message is a chunk of a byte stream and NOT a unit of anything else: nothing
+	// aligns Envoy's chunk boundaries with the body's own structure. Both arms exist because of
+	// that, and differ only in how much has to be kept.
+	//
+	// A NON-SSE BODY IS ACCUMULATED WHOLE. Replaced per message, each fragment reached the parser
+	// as a complete response — no fragment is valid JSON, so usage never landed and the settle
+	// latch pinned the first empty answer.
+	//
+	// AN SSE BODY KEEPS ONLY WHAT IS UNFINISHED. Its frames are dispatched as each message arrives
+	// (a plugin has to be able to reject mid-stream, and buffering a whole SSE body runs into the
+	// truncation cap on the long turns that matter), so all that must survive a boundary is the
+	// bytes after the last COMPLETE event. Without carrying them, a straddling event becomes two
+	// unparseable halves — and on the Anthropic dialect the event at risk is message_delta, so
+	// what goes missing is the OUTPUT tally while the response still settles at the prompt-only
+	// floor.
+	if isEventStream(pctx.ResponseHeaders.Get("Content-Type")) {
+		// BOUNDED LIKE THE OTHER ARM. The carry itself is capped at one frame's worth, but the join
+		// below is carry + THIS MESSAGE, and nothing else caps the message: the maxBodySize check in
+		// Process covers the REQUEST body only. appendBoundedBody puts both under the same ceiling
+		// the non-SSE arm has, warning and truncating rather than growing without limit.
+		pctx.ResponseBody = appendBoundedBody(nil, withCarriedSSETail(pctx, body))
+	} else {
+		pctx.ResponseBody = appendBoundedBody(pctx.ResponseBody, body)
+	}
 
 	p := s.OutboundPipeline
 	if direction == "inbound" {
 		p = s.InboundPipeline
 	}
 
-	action := p.RunResponse(ctx, pctx)
-	if action.Type == pipeline.Reject {
-		return rejectFromAction(action)
+	// ONCE PER RESPONSE, ON THE LAST MESSAGE — not once per ResponseBody message.
+	//
+	// A statically configured STREAMED body mode delivers N messages, and this ran the response
+	// phase on every one of them, each time over a PARTIAL body: opa, cpex, lineage and sparc
+	// would decide N times on N prefixes of a document, and their Invocation rows would all land
+	// in the recorded snapshot. It is also the same "wait for the whole body" rule the frame
+	// dispatch and the session record already follow. No double CHARGE was possible — both cost owners are StreamingResponders,
+	// which RunResponse skips — so what this protects is the audit trail and any plugin that
+	// reads pctx.ResponseBody expecting a document.
+	//
+	// AND THE FLUSH CANNOT DOUBLE IT. A stream that never says end-of-stream never reaches this
+	// branch, so the flush runs the phase once itself; a stream that does reach it is RECORDED
+	// here, and the flush skips a recorded response. That is why no separate "phase ran" mark is
+	// needed — see the flush.
+	if endOfStream {
+		if action := p.RunResponse(ctx, pctx); action.Type == pipeline.Reject {
+			return rejectFromAction(action)
+		}
 	}
 
 	// Streaming-aware plugins use a single code path for both shapes
@@ -656,7 +957,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 	// event arrives as its own frame; otherwise dispatch the whole
 	// body as one last=true frame.
 	if p.HasStreamingResponders() {
-		if frameAction := dispatchBufferedFrames(ctx, p, pctx); frameAction.Type == pipeline.Reject {
+		if frameAction := dispatchBufferedFrames(ctx, p, pctx, endOfStream); frameAction.Type == pipeline.Reject {
 			return rejectFromAction(frameAction)
 		}
 	}
@@ -669,10 +970,14 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 	// the real contextId rather than being orphaned in "default".
 	s.rekeyInboundSession(pctx, direction)
 
-	if direction == "inbound" {
-		s.recordInboundResponseSession(pctx)
-	} else {
-		s.recordOutboundResponseSession(pctx)
+	// ONLY ON THE LAST BODY MESSAGE. Envoy sends one per chunk in a streamed response body
+	// mode, so appending a session event at the end of every one would emit N events each
+	// carrying the SAME cost record — that record sits in pctx.Extensions.Custom and is never
+	// cleared, so the aggregator and the ledger would sum it once per chunk. See
+	// recordResponseSession, and the flush in Process for the case where end_of_stream never
+	// arrives.
+	if endOfStream {
+		s.recordResponseSession(pctx, direction)
 	}
 
 	// A plugin that declared WritesResponseBody: true and called pctx.SetResponseBody
@@ -710,10 +1015,9 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 }
 
 // withHeaderMutation emits every header mutation the request pipeline made to
-// pctx.Headers — including the Authorization replacement. ext_proc forwards no
-// header change it does not explicitly emit, so only Authorization used to be
-// propagated, silently dropping any other injected header (e.g. static-inject's
-// x-api-key). Symmetric to withBodyMutation, and to reverseproxy's
+// pctx.Headers — including the Authorization replacement. ext_proc forwards no header change
+// it does not explicitly emit, so emitting Authorization alone silently drops every other
+// injected header (e.g. static-inject's x-api-key). Symmetric to withBodyMutation, and to reverseproxy's
 // forwarded-request header sync. Skipped: HTTP/2 pseudo-headers, which
 // headerMapToHTTP copies into pctx.Headers and whose :authority governs routing;
 // and Content-Length / Content-Encoding, managed by withBodyMutation and the
@@ -976,6 +1280,36 @@ func immediateResponse(httpStatus int, reason string) *extprocv3.ProcessingRespo
 	}
 }
 
+// appendBoundedBody appends src to dst, stopping at maxBodySize.
+//
+// The per-message check in Process bounds one message; this bounds the SUM, which is what a
+// STREAMED response mode can make arbitrarily large. Truncating rather than refusing keeps the
+// prefix a parser may still be able to read — and says so, because a JSON body cut short parses
+// as nothing and the silence would otherwise look like a response that carried no usage.
+func appendBoundedBody(dst, src []byte) []byte {
+	// COPIED, NOT ALIASED, even for the first message. Returning src hands back the protobuf
+	// message's own slice, so a later append into its spare capacity would write into memory
+	// Envoy's decoder owns — harmless today, because that message is discarded after this
+	// call, and not a property worth resting on. An oversized first message falls through to
+	// the warning path below rather than being truncated silently; Process rejects a single
+	// message past maxBodySize before this is reached, so that path is defence in depth.
+	if len(dst) == 0 && len(src) <= maxBodySize {
+		return append([]byte(nil), src...)
+	}
+	room := maxBodySize - len(dst)
+	if room <= 0 {
+		slog.Warn("extproc: response body past the buffer limit; the rest is dropped",
+			"limit", maxBodySize, "have", len(dst), "dropped", len(src))
+		return dst
+	}
+	if len(src) > room {
+		slog.Warn("extproc: response body reached the buffer limit; truncating",
+			"limit", maxBodySize, "dropped", len(src)-room)
+		src = src[:room]
+	}
+	return append(dst, src...)
+}
+
 func requestHasBody(headers *corev3.HeaderMap) bool {
 	method := getHeader(headers, ":method")
 	if method == "GET" || method == "HEAD" || method == "OPTIONS" || method == "DELETE" {
@@ -1001,23 +1335,56 @@ func getHeader(headers *corev3.HeaderMap, key string) string {
 	return ""
 }
 
-// dispatchBufferedFrames feeds the buffered response body to
-// StreamingResponder plugins via RunResponseFrame, mirroring the
-// proxy listeners' single-dispatch contract for buffered bodies.
-// Envoy's ext_proc delivers response bodies pre-buffered (we requested
-// ResponseBodyMode_BUFFERED via ModeOverride), so we get the whole
-// body in one shot regardless of upstream framing.
+// dispatchBufferedFrames feeds the response body to StreamingResponder plugins via
+// RunResponseFrame, mirroring the proxy listeners' single-dispatch contract: application/json
+// arrives as one last=true frame, text/event-stream is re-parsed with sseframe so each event is
+// its own non-last frame followed by a terminal one.
 //
-// For application/json the entire body is one last=true frame, so
-// non-streaming JSON-RPC responses look the same to plugins as on
-// the proxy listeners. For text/event-stream we re-parse with
-// sseframe so each event arrives as its own non-last frame followed
-// by a final last=true — matches the per-message dispatch shape
-// streaming-aware plugins expect.
-func dispatchBufferedFrames(ctx context.Context, p *pipeline.Holder, pctx *pipeline.Context) pipeline.Action {
+// BOTH ARMS HONOUR `last`, which says this body message is the final one and the terminal frame
+// belongs on it. Ending EVERY message with a terminal frame makes each parser finalize per
+// message, and on the Anthropic dialect the first message holds message_start alone — prompt
+// counted, output not — so that finalizes into a floor, the settle latch pins it, and the pass
+// carrying message_delta is short-circuited by the very guard that stops a double charge. The
+// output tokens, at 10x burndown on Bedrock, go unbilled.
+//
+// The non-SSE arm needs it for a different reason: without a gateway cost header the modelled
+// figure is the only one there is, and finalizing each fragment loses it completely — measured at
+// TotalTokens 0 and no cost record at all for a JSON body split across two messages.
+// dispatchTerminalFrame finalizes the parsers at teardown, sending whatever has not been sent.
+//
+// The two arms differ because the body path treats them differently. An SSE body is dispatched
+// frame by frame as each message arrives, so only the terminal marker is left; a non-SSE body
+// is accumulated and dispatched once, so at teardown it has not been dispatched at all and the
+// terminal call has to carry it.
+//
+// A CARRIED SSE TAIL IS DROPPED HERE, DELIBERATELY. What the carry holds is the fragment of an
+// event whose terminator never arrived, so its payload is a truncated document: dispatching it
+// would hand every parser a JSON fragment to fail on, which is noise, not a lost count. The
+// counts of every event that DID complete were dispatched when their message arrived, and the
+// terminal marker below is what turns them into a settled figure.
+func dispatchTerminalFrame(ctx context.Context, p *pipeline.Holder, pctx *pipeline.Context) {
+	if isEventStream(pctx.ResponseHeaders.Get("Content-Type")) {
+		_ = p.RunResponseFrame(ctx, pctx, nil, true)
+		return
+	}
+	_ = p.RunResponseFrame(ctx, pctx, pctx.ResponseBody, true)
+}
+
+func dispatchBufferedFrames(ctx context.Context, p *pipeline.Holder, pctx *pipeline.Context, last bool) pipeline.Action {
 	contentType := pctx.ResponseHeaders.Get("Content-Type")
 	if isEventStream(contentType) && len(pctx.ResponseBody) > 0 {
-		reader := sseframe.NewReader(bytes.NewReader(pctx.ResponseBody), maxBodySize)
+		// PARSE ONLY WHAT IS COMPLETE, AND KEEP THE REST FOR THE NEXT MESSAGE. sseframe
+		// delivers an unterminated trailing event at EOF — correct for a stream that really
+		// ended, wrong for one that merely ran out of THIS chunk — so a straddling event would
+		// otherwise be split into two halves that parse to nothing. On the final message there
+		// is no next one, so everything left is genuinely the end and the cut is skipped.
+		buf := pctx.ResponseBody
+		if !last {
+			cut := lastSSEFrameBoundary(buf)
+			carrySSETail(pctx, buf[cut:])
+			buf = buf[:cut]
+		}
+		reader := sseframe.NewReader(bytes.NewReader(buf), maxBodySize)
 		for {
 			frame, err := reader.ReadFrame()
 			if err == io.EOF {
@@ -1031,7 +1398,20 @@ func dispatchBufferedFrames(ctx context.Context, p *pipeline.Holder, pctx *pipel
 				return action
 			}
 		}
+		if !last {
+			// More body to come. The scratch a StreamingResponder allocated on those frames
+			// survives on pctx, so the next message continues the same stream.
+			return pipeline.Action{Type: pipeline.Continue}
+		}
 		return p.RunResponseFrame(ctx, pctx, nil, true)
+	}
+	if !last {
+		// NOTHING IS DISPATCHED UNTIL A NON-SSE BODY IS WHOLE. The parser's contract for this
+		// arm is one call carrying the entire body, so handing it a fragment would ask it to
+		// parse an incomplete document — and its settle latch would pin that answer. The bytes
+		// are accumulating on pctx (see handleResponseBody); the terminal call below gets all
+		// of them, whether it comes from the last body message or from Process's teardown flush.
+		return pipeline.Action{Type: pipeline.Continue}
 	}
 	return p.RunResponseFrame(ctx, pctx, pctx.ResponseBody, true)
 }
