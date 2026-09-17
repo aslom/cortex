@@ -36,7 +36,7 @@ var version = "dev"
 // One list rather than two: the unknown-subcommand error used to hardcode its own
 // copy, so adding a subcommand meant editing both and forgetting one left a typo
 // getting an incomplete list. A test holds the usage block to this slice.
-var dispatchableSubcommands = []string{"observe", "service", "claude-code", "exec", "tools", "pricing"}
+var dispatchableSubcommands = []string{"observe", "service", "configure", "claude-code", "exec", "tools", "pricing"}
 
 // unknownSubcommandMessage is the error for an unrecognised first argument.
 func unknownSubcommandMessage(name string) string {
@@ -55,12 +55,15 @@ Usage:
   abctl observe              open the traffic viewer (TUI)
   abctl service <action>     run Cortex as a service: install, uninstall,
                              status, stop, start, restart
-  abctl claude-code <action> point Claude Code at Cortex: enable, disable, status
+  abctl configure <agent>    point a coding agent at Cortex: claude-code,
+                             bob, codex, opencode
   abctl exec -- CMD [ARG...] run CMD with Cortex's proxy and CA in its
                              environment, for tools with no settings file
   abctl tools <action>       tool-definition costs: scan
   abctl pricing              show the model rates in effect (--host <gateway>)
 
+  abctl claude-code <action> deprecated: same as "abctl configure claude-code".
+                             Still works; prefer the new spelling.
   abctl                      deprecated: same as "abctl observe". Bare abctl
                              will stop opening the viewer in a future release.
 
@@ -83,7 +86,22 @@ func main() {
 			os.Exit(runTools(os.Args[2:], os.Stdout, os.Stderr))
 		case "pricing":
 			os.Exit(runPricing(os.Args[2:], os.Stdout, os.Stderr))
+		case "configure":
+			os.Exit(runConfigure(os.Args[2:], os.Stdout, os.Stderr))
 		case "claude-code":
+			// The old spelling, kept working and kept discoverable. Same spirit as the
+			// bare-`abctl` notice below: on stderr and not fatal, because anyone with
+			// this in a script or in muscle memory must not have it break under them —
+			// install.sh --claude-code still runs it, and the laptop docs still print it.
+			//
+			// Printed HERE rather than inside runClaudeCode, which is what keeps the
+			// notice in exactly one place: `abctl configure claude-code` reaches
+			// the same function through runConfigure, and a notice inside it would
+			// fire for the new spelling too — telling a user who already typed the right
+			// thing to type something else.
+			fmt.Fprintln(os.Stderr, "abctl: `abctl claude-code` is now "+
+				"`abctl configure claude-code`; the old spelling still works. "+
+				"See `abctl --help`.")
 			os.Exit(runClaudeCode(os.Args[2:], os.Stdout, os.Stderr))
 		case "exec":
 			os.Exit(runExec(os.Args[2:], os.Stdout, os.Stderr))
@@ -159,8 +177,37 @@ func wantsInfoFlagOnly(args []string) bool {
 	return true
 }
 
+// chooseEndpoint decides which session API abctl connects to, or "" for the
+// Namespaces → Pods picker.
+//
+// Split out of runObserve as the one part of that function testable without a
+// terminal: runObserve goes on to open the TUI, so the decision itself had no test
+// until it was a function of its arguments.
+//
+// Precedence: an explicit --endpoint always wins — it names a specific proxy, and
+// second-guessing that would make the flag advisory. Otherwise a local Cortex is
+// taken only when it is ANSWERING and --kubernetes is off.
+//
+// kubernetes defaults true, so a running local Cortex no longer claims the session
+// merely by existing. Before that, someone who ran Cortex on their laptop and also
+// worked against a cluster could not reach the picker at all: the probe won every
+// time, and --endpoint demanded the namespace, pod and port-forward they were using
+// abctl to avoid. The local one stays one keystroke away on [l], which is why
+// preferring the cluster here costs nothing; the reverse is not true, since no key
+// summons a picker that was never wired up.
+func chooseEndpoint(explicit, local string, localUp, kubernetes bool) string {
+	if explicit != "" {
+		return explicit
+	}
+	if localUp && !kubernetes {
+		return local
+	}
+	return ""
+}
+
 // runObserve opens the traffic viewer: the Namespaces → Pods picker, or a direct
-// connection when --endpoint is given or a local Cortex is answering.
+// connection when --endpoint names one, or when a local Cortex is answering and
+// --kubernetes is off. See chooseEndpoint for the precedence.
 //
 // This is the behaviour bare `abctl` has always had, extracted so the subcommand
 // and the deprecated bare invocation cannot drift apart.
@@ -172,7 +219,7 @@ func runObserve(args []string) int {
 	fs.Usage = func() { writeRootUsage(fs) }
 
 	endpoint := fs.String("endpoint", "",
-		"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl connects to the Cortex on this machine if one is running, otherwise it opens a Namespaces → Pods picker.")
+		"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl opens a Namespaces → Pods picker; with --kubernetes=false it connects to the Cortex on this machine instead, when one is running.")
 	// Named --prefs rather than --config: `abctl service` and `abctl claude-code`
 	// already spell the PROXY's config that way, and one flag name meaning two
 	// different files in one binary is worse than a second word.
@@ -181,7 +228,19 @@ func runObserve(args []string) int {
 	// backquoted word as the value's NAME, so "`abctl service`" rendered the flag as
 	// "-prefs abctl service" instead of "-prefs string".
 	prefs := fs.String("prefs", "",
-		"abctl's own settings file — events-table columns and the active filter, saved as you change them (default ~/.cortex/abctl-config.yaml). Not the Cortex proxy config, which is --config on 'abctl service' and 'abctl claude-code'.")
+		"abctl's own settings file — events-table columns and the active filter, saved as you change them (default ~/.cortex/abctl-config.yaml). Not the Cortex proxy config, which is --config on 'abctl service' and 'abctl configure claude-code'.")
+	// --kubernetes exists because "is a local Cortex answering?" is a poor proxy for
+	// "which Cortex did you mean". Someone who runs Cortex on their laptop AND works
+	// against a cluster had no way to reach the picker: the local probe won, every
+	// time, and --endpoint demands a namespace, a pod and a port-forward they were
+	// using abctl to avoid setting up by hand.
+	//
+	// Default true, so the picker is offered whenever no --endpoint was given — the
+	// cluster is the case abctl cannot guess and the local one is a keystroke away
+	// via [l]. --kubernetes=false restores the older behaviour of preferring a
+	// running local Cortex, which is what a laptop-only user wants.
+	kubernetes := fs.Bool("kubernetes", true,
+		"offer the Namespaces → Pods picker when no --endpoint is given, even if a Cortex is running on this machine. Use --kubernetes=false to connect straight to the local one instead. Ignored when --endpoint is given.")
 	// ExitOnError, so Parse exits 2 itself (0 for -h) rather than returning — there
 	// is no error branch to write here. Chosen over ContinueOnError because a bad
 	// flag has nothing useful to fall back to: the alternative is printing usage and
@@ -210,19 +269,21 @@ func runObserve(args []string) int {
 	}
 	tui.Settings = loadUserConfig(prefsPath, os.Stderr)
 
-	// With no --endpoint, prefer a Cortex running on this machine. Before this,
-	// a bare `abctl` on a laptop demanded kubectl and opened a cluster picker,
-	// so the local install — the whole quickstart — needed
-	// `--endpoint http://localhost:47601` typed every time.
+	// Locate the Cortex on this machine, if any, and find out whether it is up.
 	//
-	// Only when it is actually answering: a stale config from an install that is
-	// no longer running must not hijack abctl away from the picker for someone
-	// working against a cluster.
+	// Probed rather than assumed from the config: a stale ~/.cortex/config.yaml left
+	// by an install that is no longer running must not hijack abctl away from the
+	// picker, and localUp is also what decides whether [l] gets the configured
+	// address or the in-cluster 9094 default.
+	//
+	// Whether a live local Cortex is CHOSEN is chooseEndpoint's call, not this
+	// block's: under the default --kubernetes it is offered on [l] rather than
+	// connected to. This once preferred it unconditionally, which is why a laptop
+	// user no longer has to type `--endpoint http://localhost:47601` — and why
+	// someone who also works against a cluster needed a way back to the picker.
 	local := localSessionEndpoint()
 	localUp := localSessionAPIUp(local)
-	if *endpoint == "" && localUp {
-		*endpoint = local
-	}
+	*endpoint = chooseEndpoint(*endpoint, local, localUp, *kubernetes)
 
 	// Friendly check: if picker mode and no kubectl, fail fast with a
 	// clear message instead of a stack trace later.
@@ -231,8 +292,10 @@ func runObserve(args []string) int {
 			msg := "abctl: kubectl not found on PATH; install it or pass --endpoint http://..."
 			// Name the more likely cause first when there is a local install that
 			// simply is not running — "install kubectl" is unhelpful advice to
-			// someone who has never wanted a cluster.
-			if local != "" && !dialable(local) {
+			// someone who has never wanted a cluster. Only under --kubernetes=false,
+			// though: with --kubernetes the user asked for the cluster, and kubectl
+			// really is what is missing.
+			if local != "" && !dialable(local) && !*kubernetes {
 				msg = "abctl: nothing is listening on " + local + " (from ~/.cortex/config.yaml).\n" +
 					"  Start it:  abctl service start   (or: abctl service install)\n" +
 					"  Or pass --endpoint http://... , or install kubectl to browse a cluster."
