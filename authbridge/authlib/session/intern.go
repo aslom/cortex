@@ -141,6 +141,13 @@ func (in *Interner) InternEvent(e *pipeline.SessionEvent) {
 	// measured on a live session, 165 of 500 events. Skipping the roll took that window's
 	// retention from 108.6MB to 89.2MB.
 	//
+	// This early return is only the cheap path — it skips the map allocation for the third
+	// of events that carry no extension at all. The predicate that actually MATTERS is at
+	// the bottom of this function: "produced nothing to intern", not "had no extension". An
+	// inbound A2A intent whose parts are all shorter than internMinLen — "continue", "yes",
+	// "do it" — has a non-nil extension, interns nothing, and would roll an empty table
+	// forward exactly as a tunnel-open used to. Same bug, different door.
+	//
 	// Safe for the reason the roll was bounded in the first place: prev then holds the last
 	// CONTENT event's strings, which that event still references, so the table pins nothing
 	// of its own. The one-event bound is unchanged — it is the same table, just not cleared
@@ -180,5 +187,11 @@ func (in *Interner) InternEvent(e *pipeline.SessionEvent) {
 		e.A2A = &cp
 	}
 
+	// Nothing was interned, so there is nothing to roll: keep the table the last event that
+	// DID intern something left behind. Strictly stronger than the early return at the top,
+	// which it subsumes — that one is an allocation shortcut, this one is the invariant.
+	if len(next) == 0 {
+		return
+	}
 	in.prev = next
 }

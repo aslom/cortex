@@ -294,6 +294,59 @@ func TestApplyOlderPage_DropsAStaleGeneration(t *testing.T) {
 	}
 }
 
+// olderNotFetched is not always allocated: the snapshot handler builds it lazily and a pod
+// switch sets it to nil. A page landing for a session whose events came over the stream
+// therefore used to write to a nil map, which panics and takes the TUI down.
+func TestApplyOlderPage_SurvivesAnUnallocatedOlderCount(t *testing.T) {
+	m := pagedModel(t, pagedEvents(11, 10))
+	m.olderNotFetched = nil // as it stands after a pod switch, or with no snapshot yet
+
+	m.applyOlderPage(olderPageLoadedMsg{id: "sess-1", events: pagedEvents(1, 10), serverOldest: 1})
+
+	if got := len(m.events["sess-1"]); got != 20 {
+		t.Errorf("held %d events, want 20", got)
+	}
+	if got := m.olderNotFetched["sess-1"]; got != 0 {
+		t.Errorf("olderNotFetched = %d, want 0 from an absent baseline", got)
+	}
+}
+
+// A page landing for a session whose events were RELEASED must be dropped, not stitched in.
+//
+// Switching sessions frees the events of the ones the server still lists, and the paging
+// state has to go with them. Left behind, a page still in flight would land with no events
+// held: the ordering guard has nothing to compare, the released session is resurrected, and
+// pageSizes starts describing pages that no longer exist — which is how a later cap drop
+// computes a negative slice bound and panics.
+func TestApplyOlderPage_DropsAPageWhoseEventsWereReleased(t *testing.T) {
+	m := pagedModel(t, pagedEvents(11, 10))
+	delete(m.events, "sess-1") // what a session switch does
+
+	m.applyOlderPage(olderPageLoadedMsg{id: "sess-1", events: pagedEvents(1, 10), serverOldest: 1})
+
+	if got := len(m.events["sess-1"]); got != 0 {
+		t.Errorf("resurrected %d events for a released session", got)
+	}
+	if m.pagedBack("sess-1") {
+		t.Error("paging state survived the release, so it would keep describing a window that is gone")
+	}
+}
+
+// The cap slices by a RECORDED page size, so a size larger than what is held must not
+// compute a negative bound. The guard above removes the way that became reachable; this
+// pins the arithmetic, because the cost of being wrong is the whole TUI.
+func TestApplyOlderPage_ClampsAnOversizedPageRecord(t *testing.T) {
+	m := pagedModel(t, pagedEvents(11, 10))
+	// A state whose bookkeeping already disagrees with reality.
+	m.paging["sess-1"].pageSizes = []int{10, 10, 500}
+
+	m.applyOlderPage(olderPageLoadedMsg{id: "sess-1", events: pagedEvents(1, 5), serverOldest: 1})
+
+	if len(m.paging["sess-1"].pageSizes) > maxPagesHeld {
+		t.Errorf("pageSizes = %v, over the cap", m.paging["sess-1"].pageSizes)
+	}
+}
+
 // A page can land after the operator has left the session or returned to the tail. It has
 // to be dropped: the window it would extend no longer exists.
 func TestApplyOlderPage_IgnoresAPageWhosePagingEnded(t *testing.T) {

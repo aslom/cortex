@@ -96,6 +96,12 @@ type SessionEvent struct {
 	// the events a session holds are ascending in Seq, which is what lets both
 	// the store and a client binary-search them.
 	//
+	// The numbering is unique within one INCARNATION of a session, not forever:
+	// the counter lives on the store's entry, so whole-session eviction followed
+	// by traffic under the same id starts again at 1. A client holding a cursor
+	// across that boundary cannot detect it from Seq and must order pages by At —
+	// see session.entry.nextSeq and abctl's applyOlderPage.
+	//
 	// Serialized via sessionEventWire like every other field here, not by a tag on
 	// this struct — SessionEvent has a custom MarshalJSON.
 	Seq uint64

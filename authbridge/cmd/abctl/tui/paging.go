@@ -184,6 +184,17 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 
 	held := m.events[msg.id]
 
+	// The window this state described is gone — the session's events were released while
+	// this page was in flight. Everything below assumes held and pageSizes agree, and with
+	// held empty they cannot: the ordering guard has nothing to compare against, and
+	// pageSizes would keep describing pages that no longer exist, until a recorded size
+	// exceeded len(merged) and the cap's slice bound went negative. Resurrecting a released
+	// session's events would also undo the release.
+	if len(held) == 0 {
+		delete(m.paging, msg.id)
+		return
+	}
+
 	// The page must actually be older than what is held, and the test for that is the
 	// TIMESTAMP, not Seq.
 	//
@@ -213,6 +224,13 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 	for len(st.pageSizes) > maxPagesHeld {
 		newest := st.pageSizes[len(st.pageSizes)-1]
 		st.pageSizes = st.pageSizes[:len(st.pageSizes)-1]
+		// Clamped, because this loop slices by a RECORDED size and a recorded size larger
+		// than what is held would compute a negative low bound and panic. The guard above
+		// removes the way that was reachable; this makes the arithmetic safe regardless,
+		// since the cost of being wrong here is taking the whole TUI down.
+		if newest > len(merged) {
+			newest = len(merged)
+		}
 		// Cleared before the truncate, not just sliced away. Reslicing leaves the dropped
 		// events reachable through the backing array, so the three-page cap would hold four
 		// pages' worth of prompts and completions until the next page reallocated — in a
@@ -230,6 +248,14 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 	// in the wrong direction. Pages are contiguous going back, so subtracting what just
 	// arrived is exact — give or take events appended since, which only ever makes this
 	// an undercount of what is now available.
+	//
+	// Created if absent, because writing to a nil map panics and this map is not always
+	// there: it is built lazily by the snapshot handler and set to nil outright on a pod
+	// switch, so a session whose events arrived over the stream — or whose snapshot failed
+	// — reaches here with nothing allocated.
+	if m.olderNotFetched == nil {
+		m.olderNotFetched = map[string]int{}
+	}
 	if n := m.olderNotFetched[msg.id] - len(msg.events); n > 0 {
 		m.olderNotFetched[msg.id] = n
 	} else {

@@ -31,10 +31,19 @@ type entry struct {
 	// conversations. See intern.go for why the table only holds one event's strings.
 	intern Interner
 
-	// nextSeq is the Seq the next appended event gets, counting from 1. Per session,
-	// and never reset — eviction removes events but must not reuse their numbers, or
-	// a client holding a cursor from before the eviction would page into the wrong
-	// place. See pipeline.SessionEvent.Seq.
+	// nextSeq is the Seq the next appended event gets, counting from 1.
+	//
+	// Never reset FOR THE LIFETIME OF THIS ENTRY: trimming events must not reuse their
+	// numbers, or a client holding a cursor from before the trim would page into the wrong
+	// place. The scope matters and is easy to overstate — this counter lives on the entry,
+	// and cleanupLocked and evictOldestLocked delete the entry outright, so a session
+	// re-created under the same id afterwards starts a NEW counter at 1. Numbers are
+	// therefore unique within one incarnation of a session, not across the id forever.
+	//
+	// Nothing here can detect that, and nothing here needs to: the store cannot tell a
+	// re-created session from a trimmed one. A paging client compares wall-clock time
+	// rather than Seq for exactly this reason — see abctl's applyOlderPage. See also
+	// pipeline.SessionEvent.Seq.
 	nextSeq uint64
 }
 
@@ -391,8 +400,15 @@ func (s *Store) ViewTail(sessionID string, limit int) *pipeline.SessionView {
 //
 // The cursor is a Seq rather than an offset because offsets do not survive eviction: a
 // FIFO trim between two requests shifts every index, so a client would silently skip or
-// repeat a page. Seq values are stable once assigned, and the events a session holds are
-// ascending in Seq (see trimEventsPinIntent), so the boundary is a binary search.
+// repeat a page. Seq survives that trim, and the events a session holds are ascending in
+// Seq (see trimEventsPinIntent), so the boundary is a binary search.
+//
+// What Seq does NOT survive is the session itself being evicted and re-created under the
+// same id, which restarts the numbering — see entry.nextSeq. A cursor from the previous
+// incarnation is then above everything held, and this function answers with the tail,
+// because from here every event held does precede that cursor. That is deliberate rather
+// than defensive: the store cannot distinguish the two cases, so the client compares
+// timestamps instead of trusting the ordering it gets back.
 //
 // before == 0 means "from the newest", making ViewPage(id, 0, n) equivalent to
 // ViewTail(id, n) — a client can then page with one code path rather than special-casing

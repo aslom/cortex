@@ -526,6 +526,11 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 						// Same reason as the wholesale reset in backToPodsPane: the
 						// count belongs to the events it describes.
 						delete(m.olderNotFetched, cached)
+						// And so does the paging window. Left behind, it described a
+						// window that no longer existed: a page still in flight would
+						// land on a session with no events, resurrect it, and leave
+						// pageSizes describing pages that were never there.
+						delete(m.paging, cached)
 					}
 				}
 				// Clear only on an actual session change, so
