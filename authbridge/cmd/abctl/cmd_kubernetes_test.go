@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +73,25 @@ func TestKubernetesFlag_DefaultsToFalse(t *testing.T) {
 	// behaviour the default exists to preserve.
 	if got := chooseEndpoint("", "http://localhost:47601", true, *kubernetes); got == "" {
 		t.Error("with the default, a live local Cortex must be connected to rather than yielding the picker")
+	}
+}
+
+// The end-to-end half: nothing above pins that runObserve still CALLS
+// registerObserveFlags, so a re-inlined fs.Bool("kubernetes", true, …) would slip
+// past every assertion in this file. This one re-execs the real binary and reads its
+// --help, which is the user-visible symptom of a flipped default.
+//
+// Asserting on the absence of "(default true)" rather than the presence of anything:
+// flag.PrintDefaults prints "(default X)" only for a non-zero default, so a false
+// bool is silent and there is no positive string to match. --kubernetes is the only
+// bool in this flag set, so that phrase can come from nothing else.
+func TestObserveHelp_DoesNotAdvertiseATrueDefault(t *testing.T) {
+	out := runObserveHelp(t)
+	if !strings.Contains(out, "-kubernetes") {
+		t.Fatalf("--help does not mention -kubernetes, so this test proves nothing:\n%s", out)
+	}
+	if strings.Contains(out, "(default true)") {
+		t.Errorf("--help advertises a true default; --kubernetes must default to false:\n%s", out)
 	}
 }
 

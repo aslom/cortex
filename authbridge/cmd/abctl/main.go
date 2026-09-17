@@ -207,20 +207,8 @@ func chooseEndpoint(explicit, local string, localUp, kubernetes bool) string {
 	return ""
 }
 
-// runObserve opens the traffic viewer: a direct connection when --endpoint names
-// one, or when a local Cortex is answering and --kubernetes was not passed;
-// otherwise the Namespaces → Pods picker. See chooseEndpoint for the precedence.
-//
-// This is the behaviour bare `abctl` has always had, extracted so the subcommand
-// and the deprecated bare invocation cannot drift apart.
-// observeFlags are the viewer's flags, registered on fs and returned as one struct.
-//
-// A helper rather than inline registration so a test can inspect what production
-// actually registers. The first attempt at pinning --kubernetes's default built its
-// own flag set and passed false to it, which asserted that false == false: it went
-// on passing with the real default flipped to true, so the one thing it existed to
-// catch was the one thing it could not. Whatever this function registers is now what
-// both runObserve and that test read.
+// observeFlags are the viewer's flags, returned as one struct by
+// registerObserveFlags.
 type observeFlags struct {
 	endpoint   *string
 	prefs      *string
@@ -228,6 +216,10 @@ type observeFlags struct {
 }
 
 // registerObserveFlags declares the viewer's flags on fs and returns the pointers.
+//
+// A function rather than inline registration in runObserve so a test can inspect
+// what production actually registers — see TestKubernetesFlag_DefaultsToFalse,
+// which reads --kubernetes's default from whatever this registers.
 //
 // fs is the caller's, so its error handling is too: runObserve uses ExitOnError
 // (a bad flag has nothing useful to fall back to), while a test uses
@@ -262,6 +254,12 @@ func registerObserveFlags(fs *flag.FlagSet) observeFlags {
 	}
 }
 
+// runObserve opens the traffic viewer: a direct connection when --endpoint names
+// one, or when a local Cortex is answering and --kubernetes was not passed;
+// otherwise the Namespaces → Pods picker. See chooseEndpoint for the precedence.
+//
+// This is the behaviour bare `abctl` has always had, extracted so the subcommand
+// and the deprecated bare invocation cannot drift apart.
 func runObserve(args []string) int {
 	// Without this, `abctl --help` printed only -endpoint and -version, so the
 	// subcommands were invisible to anyone who asked the tool what it could do — the
