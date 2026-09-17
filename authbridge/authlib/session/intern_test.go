@@ -75,6 +75,110 @@ func TestAppend_SharesRepeatedMessageContent(t *testing.T) {
 	}
 }
 
+// An event with nothing to intern must not break the chain between the turns around it.
+//
+// This is the live traffic shape, not a contrived one: every bridged HTTPS request records
+// a CONNECT tunnel-open, and it lands between the inference request and its response — 165
+// of 500 events on a real session. Rolling an empty table forward on those cleared it
+// before the next turn could match, which defeated interning almost entirely: the same
+// benchmark fixture measures 31.33MB/session without InternEvent's guard against 2.79MB
+// with it.
+func TestAppend_ContentlessEventDoesNotBreakSharing(t *testing.T) {
+	s := New(0, 0, 100)
+	defer s.Close()
+
+	const turns = 25
+	for i := 1; i <= turns; i++ {
+		// A tunnel-open before each turn: no Inference, no A2A, nothing to intern.
+		s.Append("s1", pipeline.SessionEvent{Tunnel: true, Host: "gateway:443"})
+		s.Append("s1", pipeline.SessionEvent{
+			Phase:     pipeline.SessionRequest,
+			Inference: &pipeline.InferenceExtension{Model: "m", Messages: convo(i)},
+		})
+	}
+
+	v := s.View("s1")
+	if len(v.Events) != turns*2 {
+		t.Fatalf("stored %d events, want %d", len(v.Events), turns*2)
+	}
+
+	// Message 0 appears in every inference event, and all of them must be the same bytes
+	// despite a contentless event sitting between each pair.
+	var first uintptr
+	inference := 0
+	for i := range v.Events {
+		inf := v.Events[i].Inference
+		if inf == nil {
+			continue
+		}
+		inference++
+		got := backing(inf.Messages[0].Content)
+		if first == 0 {
+			first = got
+			continue
+		}
+		if got != first {
+			t.Errorf("event %d holds its own copy of message 0; a contentless event cleared the table", i)
+		}
+	}
+	if inference != turns {
+		t.Fatalf("found %d inference events, want %d", inference, turns)
+	}
+}
+
+// An event that HAS an extension but interns nothing must not break the chain either.
+//
+// The other door into the same bug. The contentless-event guard tests for a missing
+// extension, but "no extension" and "nothing interned" are different things: an inbound A2A
+// intent whose parts are all shorter than internMinLen — "continue", "yes", "do it", the
+// most ordinary messages in an agent conversation — has a non-nil extension, produces an
+// empty table, and rolling that forward would clear the conversation just as a tunnel-open
+// did. What the code keys on is therefore whether anything was interned.
+func TestAppend_ShortContentEventDoesNotBreakSharing(t *testing.T) {
+	s := New(0, 0, 100)
+	defer s.Close()
+
+	const turns = 25
+	for i := 1; i <= turns; i++ {
+		// A short user intent between the turns. Well under internMinLen (64), so it
+		// interns nothing at all, and it carries a REAL extension.
+		s.Append("s1", pipeline.SessionEvent{
+			Direction: pipeline.Inbound,
+			Phase:     pipeline.SessionRequest,
+			A2A: &pipeline.A2AExtension{
+				Method: "message/send",
+				Parts:  []pipeline.A2APart{{Kind: "text", Content: "continue"}},
+			},
+		})
+		s.Append("s1", pipeline.SessionEvent{
+			Phase:     pipeline.SessionRequest,
+			Inference: &pipeline.InferenceExtension{Model: "m", Messages: convo(i)},
+		})
+	}
+
+	v := s.View("s1")
+	var first uintptr
+	inference := 0
+	for i := range v.Events {
+		inf := v.Events[i].Inference
+		if inf == nil {
+			continue
+		}
+		inference++
+		got := backing(inf.Messages[0].Content)
+		if first == 0 {
+			first = got
+			continue
+		}
+		if got != first {
+			t.Errorf("event %d holds its own copy of message 0; a short-content event cleared the table", i)
+		}
+	}
+	if inference != turns {
+		t.Fatalf("found %d inference events, want %d", inference, turns)
+	}
+}
+
 // Distinct content is left distinct: interning must not collapse two different messages.
 func TestAppend_DoesNotMergeDifferentContent(t *testing.T) {
 	s := New(0, 0, 100)
@@ -117,7 +221,7 @@ func TestAppend_DoesNotShareAcrossSessions(t *testing.T) {
 // Short strings skip the table: a role or a finish reason costs less to duplicate than
 // to hash, and the savings are in bodies.
 func TestIntern_SkipsShortStrings(t *testing.T) {
-	var in interner
+	var in Interner
 	next := map[string]string{}
 	short := strings.Repeat("x", internMinLen-1)
 	if got := in.intern(short, next); backing(got) != backing(short) {
@@ -279,11 +383,16 @@ func manifest() []pipeline.InferenceTool {
 		{
 			Name:        "get_weather",
 			Description: "Look up the forecast for a place. " + strings.Repeat("schema detail ", 8),
-			Parameters:  map[string]any{"type": "object"},
+			// Past internMinLen (64), or intern returns it untouched and a test asserting
+			// that schemas are shared would pass without any sharing having happened.
+			Parameters: pipeline.RawJSON(`{"type":"object","properties":{"city":{"type":"string","description":"` +
+				strings.Repeat("where to look ", 6) + `"}}}`),
 		},
 		{
 			Name:        "send_email",
 			Description: "Send a message to a recipient. " + strings.Repeat("schema detail ", 8),
+			Parameters: pipeline.RawJSON(`{"type":"object","properties":{"to":{"type":"string","description":"` +
+				strings.Repeat("who to send it to ", 6) + `"}}}`),
 		},
 	}
 }
@@ -320,6 +429,49 @@ func TestAppend_SharesRepeatedToolDescriptions(t *testing.T) {
 	// And the text still reads correctly.
 	if got, want := v.Events[turns-1].Inference.Tools[0].Description, manifest()[0].Description; got != want {
 		t.Errorf("tool description changed: %q", trunc(got))
+	}
+}
+
+// The SCHEMAS share too, which is the part the field's type change exists for and the
+// largest term measured on a live session: 84KB per event as a map, 4.1x its JSON text.
+//
+// Asserted separately from the descriptions above because it is a different mechanism —
+// interning a string field the parser used to widen into a map[string]any — and because it
+// rested on a benchmark alone, which CI does not run.
+func TestAppend_SharesRepeatedToolSchemas(t *testing.T) {
+	s := New(0, 0, 100)
+	defer s.Close()
+
+	const turns = 4
+	for i := 0; i < turns; i++ {
+		s.Append("s1", pipeline.SessionEvent{
+			Inference: &pipeline.InferenceExtension{Model: "m", Tools: manifest()},
+		})
+	}
+
+	v := s.View("s1")
+	for tool := range manifest() {
+		// The fixture has to be long enough to intern at all, or this passes vacuously.
+		if got := len(v.Events[0].Inference.Tools[tool].Parameters); got < internMinLen {
+			t.Fatalf("tool %d's schema is %d bytes, under internMinLen %d — it cannot be interned",
+				tool, got, internMinLen)
+		}
+		first := backing(string(v.Events[0].Inference.Tools[tool].Parameters))
+		for i := range v.Events {
+			if backing(string(v.Events[i].Inference.Tools[tool].Parameters)) != first {
+				t.Errorf("event %d holds its own copy of tool %d's schema", i, tool)
+			}
+		}
+	}
+
+	// Two different schemas must stay two strings.
+	if backing(string(v.Events[0].Inference.Tools[0].Parameters)) ==
+		backing(string(v.Events[0].Inference.Tools[1].Parameters)) {
+		t.Error("two tools' schemas were collapsed into one string")
+	}
+	// And the JSON still reads correctly.
+	if got, want := v.Events[turns-1].Inference.Tools[0].Parameters, manifest()[0].Parameters; got != want {
+		t.Errorf("tool schema changed: %q", trunc(string(got)))
 	}
 }
 

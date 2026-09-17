@@ -122,6 +122,34 @@ type snapshotLoadedMsg struct {
 	olderNotFetched int
 	id              string
 	events          []pipeline.SessionEvent
+	// serverOldest is the Seq of the oldest event the server still holds, so paging can
+	// tell "there is more behind me" from "this is the beginning of the session".
+	serverOldest uint64
+}
+
+// olderPageLoadedMsg carries a page from BEFORE the events already held — the result of
+// [o]. Separate from snapshotLoadedMsg because that one REPLACES the timeline and this one
+// extends it backwards; conflating them would drop everything the operator had loaded.
+//
+// gen is the request generation, so a response from a superseded request can be recognised
+// and dropped rather than stitched in as current.
+type olderPageLoadedMsg struct {
+	id           string
+	gen          uint64
+	events       []pipeline.SessionEvent
+	serverOldest uint64
+}
+
+// olderPageFailedMsg reports a failed [o] fetch.
+//
+// Its own type rather than errMsg, whose handler decides severity by string-prefixing
+// `where` and treats anything unrecognised as a terminal connection failure — so a single
+// failed page claimed the event stream was dead when it was healthy, and left the paging
+// state marked in-flight, refusing every retry.
+type olderPageFailedMsg struct {
+	id  string
+	gen uint64
+	err error
 }
 type streamMsg apiclient.StreamEvent
 type streamClosedMsg struct{}
@@ -294,8 +322,20 @@ type model struct {
 	// whole timeline?" — but that one is a filter the operator chose and this is a
 	// bound they did not.
 	olderNotFetched map[string]int
-	flash           string
-	flashUntil      time.Time
+
+	// paging holds the backward-paging state of any session the operator has walked off
+	// the tail of, keyed by session id. Absent — the normal case — means the timeline is
+	// the live tail and streamed events append to it.
+	paging map[string]*pagingState
+
+	// pageGen numbers page requests monotonically across the whole model, so a response
+	// from a superseded request is recognisable. Per-model rather than per-session state
+	// because a session's state is torn down and rebuilt by [t] followed by [o], and a
+	// per-state counter would reissue a generation an in-flight request already holds.
+	pageGen uint64
+
+	flash      string
+	flashUntil time.Time
 	// flashSticky keeps the current flash up until the next keypress instead of
 	// expiring on flashUntil. Set only by setStickyFlash (yank), so every other
 	// flash producer keeps its timed behaviour.
@@ -671,7 +711,9 @@ func (m *model) snapshotCmd(id string) tea.Cmd {
 		if view.TotalEvents > len(view.Events) {
 			older = view.TotalEvents - len(view.Events)
 		}
-		return snapshotLoadedMsg{id: id, events: view.Events, olderNotFetched: older}
+		return snapshotLoadedMsg{
+			id: id, events: view.Events, olderNotFetched: older, serverOldest: view.OldestSeq,
+		}
 	}
 }
 
@@ -827,6 +869,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.olderNotFetched = map[string]int{}
 		}
 		m.olderNotFetched[msg.id] = msg.olderNotFetched
+		// A snapshot IS the tail, so it ends any paging window over this session and
+		// resumes live appends. This is where [t] completes, and the only place the state
+		// is cleared — see returnToTail for why it has to outlive the request.
+		delete(m.paging, msg.id)
+		if m.pane == paneEvents && m.selectedSess == msg.id {
+			m.rebuildEventsTable()
+		}
+		return m, nil
+
+	case olderPageLoadedMsg:
+		m.applyOlderPage(msg)
+		if m.pane == paneEvents && m.selectedSess == msg.id {
+			m.rebuildEventsTable()
+		}
+		return m, nil
+
+	case olderPageFailedMsg:
+		m.failOlderPage(msg)
 		if m.pane == paneEvents && m.selectedSess == msg.id {
 			m.rebuildEventsTable()
 		}
@@ -865,6 +925,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// appearing.
 		if strings.HasPrefix(msg.where, "snapshot") || msg.where == "get pipeline" {
 			m.setFlash(msg.where + " failed: " + msg.err.Error())
+			// A failed tail snapshot has to re-arm [t] and leave the paged window
+			// described as it stands, rather than stranding the operator on a middle
+			// page whose footer claims a refresh is under way.
+			m.tailReturnFailed(strings.TrimPrefix(msg.where, "snapshot "))
 			return m, nil
 		}
 		m.connState.phase = connFailed
@@ -1176,8 +1240,15 @@ func (m *model) handleStreamEvent(ev apiclient.StreamEvent) {
 	}
 	e := *ev.Event
 	m.eventCt++
-	buf := append(m.events[e.SessionID], e)
-	m.events[e.SessionID] = buf
+	// Counted above but NOT appended when this session's timeline has been paged off its
+	// tail: a streamed event belongs at the end, and the end is not what is on screen, so
+	// appending would put a live event directly after one from the middle of the session
+	// and present the two as consecutive. The rate counter still moves because the traffic
+	// is real; [t] returns to the tail and picks these up in the refetch.
+	if !m.pagedBack(e.SessionID) {
+		buf := append(m.events[e.SessionID], e)
+		m.events[e.SessionID] = buf
+	}
 
 	// Bump updatedAt on the session summary if we already have it.
 	//

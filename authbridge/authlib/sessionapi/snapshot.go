@@ -95,9 +95,17 @@ func writeSessionView(w io.Writer, view *pipeline.SessionView) error {
 		_ = bw.WriteByte(']')
 	}
 
+	// These follow pipeline.SessionView's DECLARATION order, because that is the order
+	// json.Encoder emits and matching it byte-for-byte is this function's contract.
+	// TestWriteSessionView_MatchesTheBufferedEncoding fails if a field is added to the
+	// struct and not here, or is written here out of order.
 	if view.TotalEvents != 0 { // omitempty
 		_, _ = bw.WriteString(`,"totalEvents":`)
 		_, _ = bw.WriteString(strconv.Itoa(view.TotalEvents))
+	}
+	if view.OldestSeq != 0 { // omitempty
+		_, _ = bw.WriteString(`,"oldestSeq":`)
+		_, _ = bw.WriteString(strconv.FormatUint(view.OldestSeq, 10))
 	}
 	_, _ = bw.WriteString("}\n") // Encode terminates every value with a newline.
 	return bw.Flush()

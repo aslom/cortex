@@ -38,6 +38,17 @@ func TestWriteSessionView_MatchesTheBufferedEncoding(t *testing.T) {
 			ID: "s1", TotalEvents: 5071,
 			Events: []pipeline.SessionEvent{{At: at}},
 		}},
+		// Both truncation fields together, and each alone. writeSessionView emits them by
+		// hand, so a field added to SessionView and not to the writer is only caught if a
+		// fixture actually sets it — these are what make that promise true.
+		{"oldestSeq present when the view is a page", &pipeline.SessionView{
+			ID: "s1", TotalEvents: 5071, OldestSeq: 2048,
+			Events: []pipeline.SessionEvent{{At: at, Seq: 3000}},
+		}},
+		{"oldestSeq without totalEvents", &pipeline.SessionView{
+			ID: "s1", OldestSeq: 7,
+			Events: []pipeline.SessionEvent{{At: at, Seq: 9}},
+		}},
 		{"an id needing escapes", &pipeline.SessionView{
 			ID:     `a/b "c" <d>&e` + "\né世",
 			Events: []pipeline.SessionEvent{{At: at}},
@@ -79,7 +90,7 @@ func TestWriteSessionView_MatchesTheBufferedEncoding(t *testing.T) {
 			Inference: &pipeline.InferenceExtension{
 				Model:     "claude",
 				Messages:  []pipeline.InferenceMessage{{Role: "user", Content: "q"}},
-				Tools:     []pipeline.InferenceTool{{Name: "t", Description: "d", Parameters: map[string]any{"type": "object"}}},
+				Tools:     []pipeline.InferenceTool{{Name: "t", Description: "d", Parameters: `{"type": "object"}`}},
 				ToolCalls: []pipeline.InferenceToolCall{{ID: "1", Name: "t", Arguments: `{"a":1}`}},
 			},
 			Invocations: &pipeline.Invocations{Outbound: []pipeline.Invocation{{
@@ -112,9 +123,10 @@ func TestWriteSessionView_MatchesTheBufferedEncoding(t *testing.T) {
 			if err := json.Unmarshal(got.Bytes(), &back); err != nil {
 				t.Fatalf("output does not parse: %v", err)
 			}
-			if back.ID != tc.view.ID || len(back.Events) != len(tc.view.Events) || back.TotalEvents != tc.view.TotalEvents {
-				t.Errorf("round-trip lost fields: id=%q events=%d total=%d",
-					back.ID, len(back.Events), back.TotalEvents)
+			if back.ID != tc.view.ID || len(back.Events) != len(tc.view.Events) ||
+				back.TotalEvents != tc.view.TotalEvents || back.OldestSeq != tc.view.OldestSeq {
+				t.Errorf("round-trip lost fields: id=%q events=%d total=%d oldestSeq=%d",
+					back.ID, len(back.Events), back.TotalEvents, back.OldestSeq)
 			}
 		})
 	}

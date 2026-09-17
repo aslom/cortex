@@ -29,7 +29,22 @@ type entry struct {
 	// intern collapses the message content this session repeats on every turn. Per
 	// session, so it is freed with the session and never shares content between two
 	// conversations. See intern.go for why the table only holds one event's strings.
-	intern interner
+	intern Interner
+
+	// nextSeq is the Seq the next appended event gets, counting from 1.
+	//
+	// Never reset FOR THE LIFETIME OF THIS ENTRY: trimming events must not reuse their
+	// numbers, or a client holding a cursor from before the trim would page into the wrong
+	// place. The scope matters and is easy to overstate — this counter lives on the entry,
+	// and cleanupLocked and evictOldestLocked delete the entry outright, so a session
+	// re-created under the same id afterwards starts a NEW counter at 1. Numbers are
+	// therefore unique within one incarnation of a session, not across the id forever.
+	//
+	// Nothing here can detect that, and nothing here needs to: the store cannot tell a
+	// re-created session from a trimmed one. A paging client compares wall-clock time
+	// rather than Seq for exactly this reason — see abctl's applyOlderPage. See also
+	// pipeline.SessionEvent.Seq.
+	nextSeq uint64
 }
 
 // MaxSessionIDLen is the longest session ID the store keeps intact; longer ids
@@ -216,10 +231,17 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 	// outbound events that have no protocol-native session field.
 	event.SessionID = sessionID
 
+	// Stamp the cursor before publishLocked below, so a subscriber streaming events
+	// live sees the same Seq a paging client would get for that event. If this were
+	// assigned after publishing, the two views of one event would disagree and a
+	// client could not stitch a page onto its stream.
+	sess.nextSeq++
+	event.Seq = sess.nextSeq
+
 	// Before the copy is taken: an LLM request re-sends the whole conversation, so most
 	// of this event's message text is already in the session. Point at what is there
 	// rather than keeping a second copy of it.
-	sess.intern.internEvent(&event)
+	sess.intern.InternEvent(&event)
 
 	sess.Events = append(sess.Events, event)
 	sess.UpdatedAt = now
@@ -356,9 +378,46 @@ func (s *Store) View(sessionID string) *pipeline.SessionView {
 // that forgot to set it should return a small answer, not the largest one the store
 // can produce. Callers that genuinely want everything call View.
 //
-// TotalEvents on the returned view is set only when events were left out, so a tail
-// that happens to cover the whole session is byte-identical to what View produces.
+// TotalEvents and OldestSeq on the returned view are set only when events were left out,
+// so a tail that happens to cover the whole session is byte-identical to what View
+// produces. Use ViewPage to reach the events a tail leaves behind.
+// The tail IS the newest page, so this delegates rather than repeating the slicing and
+// the two-field bookkeeping — which were identical in both, and are the part a later
+// change would update in one place and not the other.
 func (s *Store) ViewTail(sessionID string, limit int) *pipeline.SessionView {
+	return s.ViewPage(sessionID, 0, limit)
+}
+
+// ViewPage returns up to limit events ending just BEFORE the given Seq — the page older
+// than a cursor the caller already holds.
+//
+// It is what makes the whole store readable. ViewTail can only ever return the most
+// recent events, capped by what one response is willing to carry, so on a long session
+// every event before that window was unreachable through any API: a laptop session held
+// 2119 events where nothing could read past the most recent 2000, while the oldest events
+// still cost memory. Paging backward from the tail reaches all of them without any single
+// response growing.
+//
+// The cursor is a Seq rather than an offset because offsets do not survive eviction: a
+// FIFO trim between two requests shifts every index, so a client would silently skip or
+// repeat a page. Seq survives that trim, and the events a session holds are ascending in
+// Seq (see trimEventsPinIntent), so the boundary is a binary search.
+//
+// What Seq does NOT survive is the session itself being evicted and re-created under the
+// same id, which restarts the numbering — see entry.nextSeq. A cursor from the previous
+// incarnation is then above everything held, and this function answers with the tail,
+// because from here every event held does precede that cursor. That is deliberate rather
+// than defensive: the store cannot distinguish the two cases, so the client compares
+// timestamps instead of trusting the ordering it gets back.
+//
+// before == 0 means "from the newest", making ViewPage(id, 0, n) equivalent to
+// ViewTail(id, n) — a client can then page with one code path rather than special-casing
+// its first request. limit <= 0 is treated as 1, as in ViewTail.
+//
+// TotalEvents and OldestSeq are set on the same terms as ViewTail: only when this page is
+// not the whole session, so a caller can tell "this is the beginning" from "there is more
+// behind me" without a second request.
+func (s *Store) ViewPage(sessionID string, before uint64, limit int) *pipeline.SessionView {
 	if limit <= 0 {
 		limit = 1
 	}
@@ -373,18 +432,30 @@ func (s *Store) ViewTail(sessionID string, limit int) *pipeline.SessionView {
 		return nil
 	}
 
-	total := len(sess.Events)
-	start := total - limit
+	// The first event whose Seq is >= before is where this page has to stop; everything
+	// at or after it either is the cursor event or is newer than it, and the caller
+	// already has those. sort.Search finds that index whether or not an event with
+	// exactly that Seq is still held, which is what makes a cursor pointing at an
+	// already-evicted event behave sensibly instead of being an error.
+	end := len(sess.Events)
+	if before > 0 {
+		end = sort.Search(len(sess.Events), func(i int) bool {
+			return sess.Events[i].Seq >= before
+		})
+	}
+	start := end - limit
 	if start < 0 {
 		start = 0
 	}
-	tail := sess.Events[start:]
-	events := make([]pipeline.SessionEvent, len(tail))
-	copy(events, tail)
+
+	page := sess.Events[start:end]
+	events := make([]pipeline.SessionEvent, len(page))
+	copy(events, page)
 
 	view := &pipeline.SessionView{ID: sessionID, Events: events}
-	if start > 0 {
-		view.TotalEvents = total
+	if start > 0 || end < len(sess.Events) {
+		view.TotalEvents = len(sess.Events)
+		view.OldestSeq = sess.Events[0].Seq
 	}
 	return view
 }

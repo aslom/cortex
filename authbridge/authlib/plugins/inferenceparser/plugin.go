@@ -131,7 +131,7 @@ func parseOpenAIRequest(body []byte) *pipeline.InferenceExtension {
 		ext.Tools = append(ext.Tools, pipeline.InferenceTool{
 			Name:        tool.Function.Name,
 			Description: tool.Function.Description,
-			Parameters:  tool.Function.paramsMap(),
+			Parameters:  schemaObject(tool.Function.Parameters),
 		})
 	}
 	return ext
@@ -642,16 +642,34 @@ type inferenceFunction struct {
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
-// paramsMap decodes Parameters into a map. Returns nil if the value is
-// absent or not a JSON object (e.g. a string or number); callers treat nil
-// as "no schema captured" without failing the whole inference parse.
-func (f inferenceFunction) paramsMap() map[string]any {
-	if len(f.Parameters) == 0 {
-		return nil
+// schemaObject keeps a tool's JSON schema as it arrived, or drops it entirely.
+//
+// It replaces two identical map-decoding helpers (one here, one in anthropic.go) whose
+// only product was a map[string]any the store no longer keeps — the schemas are held as
+// pipeline.RawJSON now so authlib/session can share one copy per session instead of one
+// per event. See pipeline.RawJSON for why the field is a string.
+//
+// Dropping a non-object preserves the previous contract rather than widening it. Those
+// helpers returned nil whenever their unmarshal failed, so a schema sent as a string, a
+// number, an array, or null was already absent by the time anything read it, and callers
+// are written against "an object or nothing" — OPA policies index into the schema, and
+// sparc forwards it to an external collector. Note null lands the same way both old and
+// new: it unmarshalled into a nil map without error before, and fails the byte check now.
+//
+// A byte peek rather than an unmarshal, which is the point of the change: the decode this
+// replaces cost time and heap proportional to the schema on every request, and a client
+// re-sends its whole tool manifest on every request.
+func schemaObject(raw json.RawMessage) pipeline.RawJSON {
+	// TrimLeft returns a subslice, so establishing the first meaningful byte allocates
+	// nothing. The conversion below is the single copy, and it is the one the interner
+	// then collapses across events.
+	//
+	// The trimmed value is what gets returned, not the original: a decoder never hands us
+	// leading whitespace anyway, so the two are the same slice in practice, and keeping them
+	// the same avoids peeking at one thing while storing another.
+	trimmed := bytes.TrimLeft(raw, " \t\r\n")
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return ""
 	}
-	var m map[string]any
-	if err := json.Unmarshal(f.Parameters, &m); err != nil {
-		return nil
-	}
-	return m
+	return pipeline.RawJSON(trimmed)
 }
