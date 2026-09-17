@@ -10,11 +10,17 @@ import (
 
 // A BUFFERED SSE BODY IS STILL SSE WITH A BOM, OR WITH CR-ONLY LINE ENDINGS.
 //
-// The event-stream format allows CRLF, LF or CR as the terminator and requires a decoder to
-// strip one leading byte-order mark. Without normalisation both shapes fall through to the JSON
-// arm — a BOM defeats the `data:` prefix check, and a CR-only body contains no "\ndata:" for the
-// fallback to find — so unmarshalling fails and usage stays unset. With no cost header there is nothing
-// else to settle from, so the whole request went unpriced.
+// The event-stream format allows CRLF, LF or CR as the terminator and requires a decoder to strip one
+// leading byte-order mark. Without normalisation both shapes can fall through to the JSON arm, where
+// unmarshalling fails and usage stays unset — and with no cost header there is nothing else to settle
+// from, so the request goes unpriced.
+//
+// HOW MUCH EACH ONE COSTS IS NOT THE SAME, and the BOM half is narrower than it reads. A BOM defeats
+// the `data:` prefix check on the FIRST line only, so it matters for a body whose first line is that
+// prefix — see the single-frame row below. Any body with a later `data:` line, which includes every
+// multi-frame `event:`-first stream Anthropic and LiteLLM send, is found by the "\ndata:" fallback
+// whatever precedes it. The CR-only half is the broad one: a CR-only body contains no "\ndata:" at all,
+// so nothing finds its framing.
 //
 // Driven through OnResponseFrame with the WHOLE body on a terminal frame, which is how a
 // reverse proxy hands a buffered event-stream response to the parser.
