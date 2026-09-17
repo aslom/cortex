@@ -20,9 +20,15 @@ WORK="$(mktemp -d)"
 # Kill the proxy BEFORE removing the tree: the config lives under $WORK and the
 # proxy watches it for hot-reload, so deleting it out from under a live watcher
 # first is a self-inflicted error in a script whose job is to be trustworthy.
+# Every step is `|| true`: with PROXY_PID unset, `wait ""` fails, and under set -e
+# that aborted the handler before the rm — so the script leaked its temp dir on the
+# go-build and --write-config failure paths. (The `[[ ]] && kill` form was already
+# safe: AND-OR lists are exempt from set -e. The bare `wait` was not.)
 cleanup() {
-  [[ -n "${PROXY_PID:-}" ]] && kill "$PROXY_PID" 2>/dev/null
-  wait "${PROXY_PID:-}" 2>/dev/null
+  if [[ -n "${PROXY_PID:-}" ]]; then
+    kill "$PROXY_PID" 2>/dev/null || true
+    wait "$PROXY_PID" 2>/dev/null || true
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT

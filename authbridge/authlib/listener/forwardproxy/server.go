@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	cryptotls "crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -1749,14 +1748,13 @@ func (s *Server) caFingerprint() string {
 		if blk == nil {
 			return
 		}
-		// Hash the DER, which is what openssl fingerprints — not the PEM bytes,
-		// whose whitespace and headers would give a different and uncomparable sum.
-		sum := sha256.Sum256(blk.Bytes)
-		hexPairs := make([]string, 0, len(sum))
-		for _, b := range sum {
-			hexPairs = append(hexPairs, fmt.Sprintf("%02X", b))
+		crt, err := x509.ParseCertificate(blk.Bytes)
+		if err != nil {
+			return
 		}
-		s.caFingerprintStr = strings.Join(hexPairs, ":")
+		// Rendering lives in tlsbridge.FingerprintSHA256 so this and the --local
+		// startup check cannot drift apart on encoding.
+		s.caFingerprintStr = tlsbridge.FingerprintSHA256(crt)
 	})
 	return s.caFingerprintStr
 }

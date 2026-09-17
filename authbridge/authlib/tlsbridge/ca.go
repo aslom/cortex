@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -12,6 +13,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -41,8 +43,19 @@ func genSelfSignedCA() (cert *x509.Certificate, key crypto.Signer, certPEM, keyP
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("tlsbridge: generate CA key: %w", err)
 	}
+	// A random serial, not 1. Renewal now deliberately produces SUCCESSIVE CAs in
+	// one directory, and with a fixed serial the old and new share subject AND
+	// serial — which is how X.509 names an issuer, so a client whose bundle briefly
+	// holds both hands OpenSSL two certificates it considers the same one and chain
+	// building picks whichever it finds first. Before renewal two of these never
+	// coexisted, so nothing could trip on it; now they can. 128 bits is the CA/B
+	// Forum floor and what every real issuer uses.
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("tlsbridge: generate CA serial: %w", err)
+	}
 	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
+		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "authbridge-tls-bridge-ca"},
 		NotBefore:             time.Now().Add(-time.Minute),
 		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
@@ -237,6 +250,27 @@ func caNeedsRenewal(certPath string) bool {
 		return false
 	}
 	return time.Now().Add(caRenewBefore).After(crt.NotAfter)
+}
+
+// FingerprintSHA256 renders a certificate's SHA-256 the way
+//
+//	openssl x509 -in ca.crt -noout -fingerprint -sha256
+//
+// prints it — uppercase hex, colon-separated. That encoding is the whole point: the
+// only use for this value is a human comparing it against that command's output on
+// the file their client actually loaded, so a bare lowercase hex string would be
+// correct and useless.
+//
+// Exported because both the forward proxy's rejection warning and the --local
+// startup check need the identical rendering, and two hand-rolled copies of a
+// byte loop are how the two drift apart.
+func FingerprintSHA256(crt *x509.Certificate) string {
+	sum := sha256.Sum256(crt.Raw)
+	pairs := make([]string, 0, len(sum))
+	for _, b := range sum {
+		pairs = append(pairs, fmt.Sprintf("%02X", b))
+	}
+	return strings.Join(pairs, ":")
 }
 
 // fileExists reports whether path exists and is statable.

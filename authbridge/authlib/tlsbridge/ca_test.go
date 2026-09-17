@@ -5,12 +5,15 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -535,5 +538,68 @@ func TestEnsureFileSource_NoGenerateNeverTouchesExpiredCA(t *testing.T) {
 	after, _ := os.ReadFile(filepath.Join(dir, "tls.crt"))
 	if !bytes.Equal(before, after) {
 		t.Error("generate=false overwrote a mounted CA")
+	}
+}
+
+// TestFingerprintSHA256_MatchesOpenSSL pins the rendering to the one form a user can
+// actually compare against. The whole value of printing a fingerprint is that someone
+// runs
+//
+//	openssl x509 -in ca.crt -noout -fingerprint -sha256
+//
+// and matches it by eye, so the encoding must be that command's: uppercase hex,
+// colon-separated. A bare lowercase hex string would be correct and useless.
+//
+// The expectation is computed from the DER rather than from the implementation, so
+// this fails if the function ever hashes the PEM (whose headers and whitespace give a
+// different, uncomparable sum).
+func TestFingerprintSHA256_MatchesOpenSSL(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := EnsureFileSource(dir, true); err != nil {
+		t.Fatalf("EnsureFileSource: %v", err)
+	}
+	pemBytes, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		t.Fatalf("read ca.crt: %v", err)
+	}
+	blk, _ := pem.Decode(pemBytes)
+	if blk == nil {
+		t.Fatal("ca.crt is not PEM")
+	}
+	crt, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	sum := sha256.Sum256(blk.Bytes)
+	want := make([]string, 0, len(sum))
+	for _, b := range sum {
+		want = append(want, fmt.Sprintf("%02X", b))
+	}
+	if got, expected := FingerprintSHA256(crt), strings.Join(want, ":"); got != expected {
+		t.Errorf("FingerprintSHA256() = %q, want %q", got, expected)
+	}
+}
+
+// TestGenSelfSignedCA_SerialsAreDistinct: renewal now produces successive CAs in one
+// directory, so a fixed serial would make old and new share BOTH subject and serial
+// — the pair X.509 uses to name an issuer. A client whose bundle briefly holds both
+// then hands OpenSSL two certificates it considers the same one.
+func TestGenSelfSignedCA_SerialsAreDistinct(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		cert, _, _, _, err := genSelfSignedCA()
+		if err != nil {
+			t.Fatalf("genSelfSignedCA: %v", err)
+		}
+		s := cert.SerialNumber.String()
+		if s == "1" {
+			t.Fatal("serial is the fixed value 1; successive renewed CAs would be " +
+				"indistinguishable by issuer name")
+		}
+		if seen[s] {
+			t.Fatalf("serial %s repeated across mints", s)
+		}
+		seen[s] = true
 	}
 }

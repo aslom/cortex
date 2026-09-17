@@ -4,9 +4,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -146,57 +146,6 @@ func TestWriteDemoConfig_PreservesAnExistingFile(t *testing.T) {
 	}
 }
 
-// TestPriorCAFromState reads the path out of the record abctl actually writes, so
-// a change to that file's shape breaks here rather than silently disabling the
-// warning.
-func TestPriorCAFromState(t *testing.T) {
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "claude-code-state.json")
-	// The shape abctl writes: managed keys, with a null for a key that was absent.
-	const state = `{
-	  "settings": "/Users/dev/sandbox/proj/.claude/settings.json",
-	  "prior": {
-	    "NODE_EXTRA_CA_CERTS": "/Users/dev/.cortex/ca/ca.crt",
-	    "SSL_CERT_FILE": null,
-	    "HTTPS_PROXY": "http://127.0.0.1:47600"
-	  }
-	}`
-	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
-		t.Fatalf("write state: %v", err)
-	}
-
-	if got := priorCAFromState(statePath); got != "/Users/dev/.cortex/ca/ca.crt" {
-		t.Errorf("priorCAFromState = %q, want the recorded NODE_EXTRA_CA_CERTS", got)
-	}
-}
-
-// TestPriorCAFromState_ToleratesMissingAndMalformed: this feeds a diagnostic, so
-// every failure mode must answer "" rather than error out or panic. A state file
-// that cannot be read is not a reason to fail a proxy boot.
-func TestPriorCAFromState_ToleratesMissingAndMalformed(t *testing.T) {
-	dir := t.TempDir()
-	cases := map[string]string{
-		"absent":            "", // no file written at all
-		"not json":          "{{{",
-		"no prior key":      `{"settings":"/x"}`,
-		"prior null entry":  `{"prior":{"NODE_EXTRA_CA_CERTS":null}}`,
-		"prior key missing": `{"prior":{"HTTPS_PROXY":"http://127.0.0.1:47600"}}`,
-	}
-	for name, body := range cases {
-		t.Run(name, func(t *testing.T) {
-			p := filepath.Join(dir, name+".json")
-			if body != "" {
-				if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-					t.Fatalf("write: %v", err)
-				}
-			}
-			if got := priorCAFromState(p); got != "" {
-				t.Errorf("priorCAFromState(%s) = %q, want \"\"", name, got)
-			}
-		})
-	}
-}
-
 // The moved-CA warning (issue #1033). `--local` derives ca_dir from $HOME via
 // defaultCortexDir, so a redirected $HOME — a sandbox, a per-project home, a
 // wrapper that sets HOME=$PWD — silently gives every environment a CA of its own.
@@ -324,23 +273,154 @@ func TestStaleClientCAWarning_SilentWithoutInputs(t *testing.T) {
 	}
 }
 
-// TestCertFingerprint_MatchesOpenSSL: the value exists to be compared by eye against
-// `openssl x509 -noout -fingerprint -sha256`, so it must be that command's encoding
-// — uppercase hex, colon-separated. Mirrors the forward proxy's caFingerprint test.
-func TestCertFingerprint_MatchesOpenSSL(t *testing.T) {
-	pemBytes := writeTestCA(t, "", "authbridge-tls-bridge-ca")
-	blk, _ := pem.Decode(pemBytes)
-	crt, err := x509.ParseCertificate(blk.Bytes)
+// The openssl-parity test for this rendering lives with the implementation, in
+// authlib/tlsbridge (TestFingerprintSHA256_MatchesOpenSSL). It used to be duplicated
+// here against a local copy of the byte loop; both collapsed into the shared helper.
+
+// clientCAFromState reads the CA the client is configured with RIGHT NOW, which is
+// the only value that can justify this warning. These tests pin why `prior` cannot:
+// abctl snapshots `prior` from the settings env block BEFORE overwriting it in the
+// same run (cmd_claudecode.go:468-478), so it is what abctl displaced, never what
+// the client holds. In the actual #1033 repro that makes it doubly wrong — the run
+// that put a foreign CA into `prior` also pointed the client at the correct one.
+
+// writeStateAndSettings lays down abctl's two files: the state record naming a
+// settings path, and that settings file with the given current CA value. Passing
+// currentCA == "" writes an env block with no NODE_EXTRA_CA_CERTS at all.
+func writeStateAndSettings(t *testing.T, dir, priorCA, currentCA string) string {
+	t.Helper()
+	settingsPath := filepath.Join(dir, "settings.json")
+	env := map[string]any{"HTTPS_PROXY": "http://127.0.0.1:47600"}
+	if currentCA != "" {
+		env["NODE_EXTRA_CA_CERTS"] = currentCA
+	}
+	settings, err := json.Marshal(map[string]any{"env": env})
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prior := map[string]any{"HTTPS_PROXY": nil}
+	if priorCA != "" {
+		prior["NODE_EXTRA_CA_CERTS"] = priorCA
+	} else {
+		prior["NODE_EXTRA_CA_CERTS"] = nil
+	}
+	state, err := json.Marshal(map[string]any{"settings": settingsPath, "prior": prior})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dir, "claude-code-state.json")
+	if err := os.WriteFile(statePath, state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return statePath
+}
+
+// TestClientCAFromState_ReadsTheCurrentValueNotPrior is the correctness of the whole
+// warning. `prior` and the live value differ on every enable; reading the wrong one
+// makes the warning fire when the client is already right.
+func TestClientCAFromState_ReadsTheCurrentValueNotPrior(t *testing.T) {
+	dir := t.TempDir()
+	statePath := writeStateAndSettings(t, dir,
+		"/old/sandbox/.cortex/ca/ca.crt", // what abctl displaced
+		"/current/.cortex/ca/ca.crt")     // what the client actually loads now
+
+	got := clientCAFromState(statePath)
+
+	if got == "/old/sandbox/.cortex/ca/ca.crt" {
+		t.Fatal("read `prior` — abctl's record of what it DISPLACED. The same enable that " +
+			"wrote that also pointed the client at the current CA, so this warns about a " +
+			"client that is already correct, and can never go quiet")
+	}
+	if got != "/current/.cortex/ca/ca.crt" {
+		t.Errorf("clientCAFromState = %q, want the live NODE_EXTRA_CA_CERTS", got)
+	}
+}
+
+// TestClientCAFromState_ToleratesEveryFailure: this drives a diagnostic, so every
+// broken shape must answer "" rather than error, panic, or guess. A state file or
+// settings file that cannot be read is not a reason to fail a proxy boot.
+func TestClientCAFromState_ToleratesEveryFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	// A state file whose settings path does not exist.
+	missing := filepath.Join(dir, "missing-settings.json")
+	state, _ := json.Marshal(map[string]any{"settings": filepath.Join(dir, "nope.json")})
+	if err := os.WriteFile(missing, state, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	sum := sha256.Sum256(crt.Raw)
-	want := make([]string, 0, len(sum))
-	for _, b := range sum {
-		want = append(want, fmt.Sprintf("%02X", b))
+	// Settings present, but no NODE_EXTRA_CA_CERTS in it (abctl not enabled here).
+	noKey := writeStateAndSettings(t, t.TempDir(), "", "")
+
+	cases := map[string]string{
+		"absent state":     filepath.Join(dir, "absent.json"),
+		"settings missing": missing,
+		"no CA key":        noKey,
 	}
-	if got, expected := certFingerprint(crt), strings.Join(want, ":"); got != expected {
-		t.Errorf("certFingerprint() = %q, want %q", got, expected)
+	for name, p := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := clientCAFromState(p); got != "" {
+				t.Errorf("clientCAFromState(%s) = %q, want \"\"", name, got)
+			}
+		})
+	}
+
+	// Malformed JSON on either side.
+	for name, body := range map[string]string{
+		"state not json":   "{{{",
+		"no settings key":  `{"prior":{"NODE_EXTRA_CA_CERTS":"/x/ca.crt"}}`,
+		"settings not str": `{"settings":42}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(dir, name+".json")
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := clientCAFromState(p); got != "" {
+				t.Errorf("clientCAFromState(%s) = %q, want \"\"", name, got)
+			}
+		})
+	}
+
+	// Settings file that is not JSON at all.
+	badSettings := filepath.Join(dir, "bad-settings.json")
+	if err := os.WriteFile(badSettings, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := json.Marshal(map[string]any{"settings": badSettings})
+	p := filepath.Join(dir, "points-at-bad.json")
+	if err := os.WriteFile(p, st, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := clientCAFromState(p); got != "" {
+		t.Errorf("clientCAFromState with unparseable settings = %q, want \"\"", got)
+	}
+}
+
+// TestStaleClientCAWarning_GoesQuietAfterTheClientIsFixed is the reflex-training
+// failure, end to end through the real files. A client pointed at another $HOME's CA
+// warns; once its settings name the CA in force, the warning stops — even though
+// abctl's frozen `prior` still names the old path forever.
+func TestStaleClientCAWarning_GoesQuietAfterTheClientIsFixed(t *testing.T) {
+	dir := t.TempDir()
+	otherCA := filepath.Join(dir, "other-ca.crt")
+	writeTestCA(t, otherCA, "authbridge-tls-bridge-ca")
+	currentCAPath := filepath.Join(dir, "current-ca.crt")
+	inForce := writeTestCA(t, currentCAPath, "authbridge-tls-bridge-ca")
+
+	// Misconfigured: settings point at another $HOME's bridge CA.
+	statePath := writeStateAndSettings(t, dir, "/whatever/prior.crt", otherCA)
+	if got := staleClientCAWarning("/current/.cortex/ca", clientCAFromState(statePath), inForce); got == nil {
+		t.Fatal("no warning while the client is genuinely pointed at a different bridge CA")
+	}
+
+	// Fixed: settings now name the CA in force. `prior` is unchanged and still stale.
+	statePath = writeStateAndSettings(t, dir, "/whatever/prior.crt", currentCAPath)
+	if got := staleClientCAWarning("/current/.cortex/ca", clientCAFromState(statePath), inForce); got != nil {
+		t.Errorf("still warning after the client was fixed — this is the every-boot-forever "+
+			"failure the comparison exists to avoid: %v", got)
 	}
 }
