@@ -1018,15 +1018,24 @@ func invocationPlugins(inv *pipeline.Invocations) []string {
 // Linear scan rather than a heap: maxSess is a few dozen, this runs only when the
 // map is full and a genuinely new session arrives, and a heap would need
 // maintaining on every write instead.
+//
+// A SEPARATE found FLAG, NOT `coldestID == ""`, because "" IS A KEY HERE. Record accepts an empty
+// session id and gives it a ring like any other — an unattributed event is a case this package
+// handles rather than rejects, and foldInto only suppresses its LABEL. Keyed on the id, two things
+// went wrong at once: the "" ring read as "nothing chosen yet", so whichever key came next
+// overwrote it regardless of lastSeen and a WARMER ring was evicted in its place; and when "" was
+// visited last, the delete was skipped entirely and the map stayed over its cap. Measured with a
+// cap of 2: "" recorded coldest, then "hot", then "new" left rings ["", "new"].
 func (a *Aggregator) evictColdestLocked() {
 	var coldestID string
 	var coldest time.Time
+	found := false
 	for id, r := range a.sessions {
-		if coldestID == "" || r.lastSeen.Before(coldest) {
-			coldestID, coldest = id, r.lastSeen
+		if !found || r.lastSeen.Before(coldest) {
+			coldestID, coldest, found = id, r.lastSeen, true
 		}
 	}
-	if coldestID != "" {
+	if found {
 		delete(a.sessions, coldestID)
 	}
 }

@@ -865,6 +865,25 @@ func fold(src []Bucket, width time.Duration) []Bucket {
 	return out
 }
 
+// addCoverageInto folds one raw bucket's request count into a coverage breakdown, saturating.
+//
+// THE UNIFORM CALL SITE Counts.Add ARGUES FOR, APPLIED WHERE IT WAS NOT. Add checks Requests, Errors
+// and the three coverage counters even though traffic cannot reach 2^63 of any of them, on the
+// stated grounds that it is exported and "a uniform call site is the only kind that cannot be
+// forgotten when a field is added". These three breakdowns are the same counters on the way out and
+// were three bare `+=` on int64: two saturated buckets summed to -2, a negative population, which is
+// read downstream as a series overshooting its own total.
+//
+// Needs a saturated bucket to reach, which Record cannot produce — so this is the cheap half of the
+// same argument, not a live defect.
+func addCoverageInto(m map[string]int64, k string, v int64, saturated *bool) {
+	sum, over := addSat(m[k], v)
+	m[k] = sum
+	if over {
+		*saturated = true
+	}
+}
+
 // Snapshot returns the last window of buckets, oldest first.
 //
 // The newest bucket is the one containing now, still filling — a client
@@ -901,8 +920,15 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 	}
 
 	newest := a.now().Truncate(BucketWidth)
+	// THE SPAN COVERED, NOT THE SPAN ASKED FOR, which is what the field promises and what a client
+	// labels its chart with. n is clamped to NumBuckets above, so echoing the request reported a 12h
+	// window over 360 one-minute buckets — six hours of data called half a day, the exact failure
+	// Snapshot.Window's own godoc names ("or it will label six hours of spend as a day's"), and
+	// "6h0m0s" is the example it gives. Whole buckets rather than the raw duration for the same
+	// reason BucketSeconds is rounded: a 90s request is answered with one bucket, so it covers 1m.
+	covered := time.Duration(n) * BucketWidth
 	out := Snapshot{
-		Window:        window.String(),
+		Window:        covered.String(),
 		BucketSeconds: int(resolution / time.Second),
 		Session:       sessionID,
 		Group:         group,
@@ -916,6 +942,9 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 	// A CostSum, not an int64: this is money, and a wrapped residual is read downstream as
 	// the series overshooting its own total. See CostSum.
 	var ungrouped CostSum
+	// Raised by addCoverageInto, and read after the totals are assigned below — Totals is derived
+	// post-loop, so setting the flag inside the loop would be overwritten.
+	var coverageSaturated bool
 	reconcilable := group.Reconcilable()
 
 	for i := n - 1; i >= 0; i-- {
@@ -956,13 +985,13 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 					if out.UnpricedBy == nil {
 						out.UnpricedBy = make(map[string]int64, len(src.byUnpriced))
 					}
-					out.UnpricedBy[k] += v.Requests
+					addCoverageInto(out.UnpricedBy, k, v.Requests, &coverageSaturated)
 				}
 				for k, v := range src.byProvenance {
 					if out.PricedBy == nil {
 						out.PricedBy = make(map[string]int64, len(src.byProvenance))
 					}
-					out.PricedBy[k] += v.Requests
+					addCoverageInto(out.PricedBy, k, v.Requests, &coverageSaturated)
 				}
 				// Same shape, same reason: summed from the raw buckets so the caveat's
 				// breakdown is unaffected by the requested resolution, and left nil rather
@@ -971,7 +1000,7 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 					if out.IncompleteBy == nil {
 						out.IncompleteBy = make(map[string]int64, len(src.byIncomplete))
 					}
-					out.IncompleteBy[k] += v.Requests
+					addCoverageInto(out.IncompleteBy, k, v.Requests, &coverageSaturated)
 				}
 			}
 		}
@@ -993,6 +1022,12 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 	// must render "cost unavailable", a declared-free window must render $0.0000. See
 	// costevent.Event.Settled, and TestPricing_SettledZeroIsNotRePriced, which pins it.
 	out.Priced = out.Totals.PricedRequests > 0
+	// A CLAMPED BREAKDOWN IS DISCLOSED ON THE SAME FLAG Counts.Add RAISES for a saturated Requests,
+	// so this is not a new meaning: Saturated already says "a count or a figure here is a floor".
+	// Set after Totals is assigned, because that assignment replaces the struct.
+	if coverageSaturated {
+		out.Totals.Saturated = true
+	}
 	// BOUNDED BEFORE IT IS SERVED, and after the totals and the residual are computed from
 	// the raw buckets — so folding a label into (other) changes what the breakdown NAMES and
 	// nothing about what it sums to. Doing it earlier would move UngroupedCostMicros, which is
