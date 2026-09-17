@@ -571,7 +571,22 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))
 		}
 
-		respAction := s.OutboundPipeline.RunResponse(r.Context(), pctx)
+		// DETACHED AND BOUNDED, because the body above is already whole. Everything from here on
+		// is finalization: a client that hung up during that read leaves a done context, and
+		// RunResponse refuses a done context before calling any plugin — returning a Deny this
+		// call site cannot tell from a policy reject, since it only tests action.Type. It would
+		// then write a rejection and RETURN, skipping the settle and the response row for a
+		// response that arrived complete. This is the BUFFERED OUTBOUND PATH, which is where
+		// most non-streamed inference responses go.
+		//
+		// ONE CONTEXT PER DISPATCH, which is the rule at every finalization site in this tree: the
+		// dispatches run in order, so a shared budget means whatever the response phase spends is
+		// taken from the TERMINAL frame — the dispatch that turns folded state into a charge. See
+		// httpx.TeardownContext, and the dispatch-site table in listener/parity.
+		phaseCtx, cancelPhase := httpx.TeardownContext(r.Context())
+		defer cancelPhase()
+
+		respAction := s.OutboundPipeline.RunResponse(phaseCtx, pctx)
 		if respAction.Type == pipeline.Reject {
 			httpx.WriteRejection(w, respAction)
 			return
@@ -583,7 +598,10 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		// Plugins that didn't migrate — i.e. don't implement
 		// StreamingResponder — are unaffected (RunResponseFrame skips them).
 		if s.OutboundPipeline.HasStreamingResponders() && resp.Body != nil {
-			respFrameAction := s.OutboundPipeline.RunResponseFrame(r.Context(), pctx, pctx.ResponseBody, true)
+			// Its own budget, per the rule above.
+			finalCtx, cancelFinal := httpx.TeardownContext(r.Context())
+			defer cancelFinal()
+			respFrameAction := s.OutboundPipeline.RunResponseFrame(finalCtx, pctx, pctx.ResponseBody, true)
 			if respFrameAction.Type == pipeline.Reject {
 				httpx.WriteRejection(w, respFrameAction)
 				return
@@ -951,11 +969,17 @@ func (s *Server) handleStreamingResponse(w http.ResponseWriter, r *http.Request,
 	// leaves inference/a2a stuck in an unfinalized state and emits no
 	// SessionResponse row to abctl.
 	defer func() {
-		// Use a detached context for finalization: the client may have
-		// cancelled the request context after reading the full stream,
-		// but aggregating plugins (inference-parser, session-budget) still
-		// need their last=true dispatch to finalize state.
-		finalCtx := context.WithoutCancel(r.Context())
+		// Use a detached, BOUNDED context for finalization: the client may have
+		// cancelled the request context after reading the full stream, but
+		// aggregating plugins (inference-parser, session-budget) still need their
+		// last=true dispatch to finalize state — and detaching alone would leave that
+		// dispatch with nothing that could ever stop it. See httpx.TeardownContext.
+		finalCtx, cancelFinal := httpx.TeardownContext(r.Context())
+		defer cancelFinal()
+		// DELIVERED: the headers and every frame are on the wire by now, which the Warn below
+		// already says. Marking it keeps a late refusal from becoming this request's OUTCOME as
+		// well — the same statement ext_proc's flush and the reverse proxy's finalize make.
+		pctx.MarkResponseDelivered()
 		finalAction := s.OutboundPipeline.RunResponseFrame(finalCtx, pctx, nil, true)
 		if finalAction.Type == pipeline.Reject {
 			// Headers already sent; we can't promote to 502, but
@@ -1126,7 +1150,12 @@ func (s *Server) streamFallbackBuffered(w http.ResponseWriter, r *http.Request, 
 	pctx.ResponseBody = respBody
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
-	respAction := s.OutboundPipeline.RunResponse(r.Context(), pctx)
+	// The same detach as the fold and the settle below, on the site the earlier fix walked
+	// past: this runs after io.ReadAll too, so a hangup during the read denies the response
+	// phase and returns before anything is recorded.
+	phaseCtx, cancelPhase := httpx.TeardownContext(r.Context())
+	defer cancelPhase()
+	respAction := s.OutboundPipeline.RunResponse(phaseCtx, pctx)
 	if respAction.Type == pipeline.Reject {
 		httpx.WriteRejection(w, respAction)
 		return
@@ -1135,6 +1164,25 @@ func (s *Server) streamFallbackBuffered(w http.ResponseWriter, r *http.Request, 
 		// Re-parse the buffered SSE body frame-by-frame so plugins see the
 		// same per-event shape as the real streaming path. A Reject is
 		// honored here — headers are not yet on the wire.
+		//
+		// ON A DETACHED, BOUNDED CONTEXT, exactly as the streaming path's finish defer is, and
+		// for a reason that is easy to miss here: the whole body is already in hand by this
+		// point (io.ReadAll above), so a client that hung up while it was being read leaves a
+		// cancelled r.Context() — and RunResponseFrame refuses a cancelled context before
+		// calling any plugin, returning a Deny this loop cannot tell apart from a policy
+		// reject. It would then write a rejection and RETURN, skipping
+		// recordOutboundResponseEvent below: no settled cost and no response row for a
+		// response that arrived complete. Detaching also restores the meaning of a Reject
+		// here — with the cancellation case gone, one can only come from a plugin.
+		//
+		// TWO CONTEXTS, ONE PER PIECE OF WORK. The fold below dispatches every frame through
+		// the pipeline, and a plugin doing anything slow per frame would spend the budget the
+		// SETTLE needs — the terminal dispatch is the one that turns the folded state into a
+		// charge, and it would inherit whatever was left. Each gets its own deadline, on the
+		// same rule the reverse proxy's finalize() follows: the clock starts when the work
+		// does, not when its parent did.
+		foldCtx, cancelFold := httpx.TeardownContext(r.Context())
+		defer cancelFold()
 		reader := sseframe.NewReader(bytes.NewReader(respBody), maxBodySize)
 		for {
 			frame, ferr := reader.ReadFrame()
@@ -1145,13 +1193,18 @@ func (s *Server) streamFallbackBuffered(w http.ResponseWriter, r *http.Request, 
 				slog.Warn("forward-proxy: streaming response read error in fallback", "host", r.Host, "error", ferr)
 				break
 			}
-			frameAction := s.OutboundPipeline.RunResponseFrame(r.Context(), pctx, frame, false)
+			frameAction := s.OutboundPipeline.RunResponseFrame(foldCtx, pctx, frame, false)
 			if frameAction.Type == pipeline.Reject {
 				httpx.WriteRejection(w, frameAction)
 				return
 			}
 		}
-		finalAction := s.OutboundPipeline.RunResponseFrame(r.Context(), pctx, nil, true)
+		// A FRESH DEADLINE FOR THE SETTLE. See the two-contexts note above: the fold has had
+		// its own budget, and the dispatch that turns folded state into a charge gets a whole
+		// one rather than the remainder.
+		finalCtx, cancelFinal := httpx.TeardownContext(r.Context())
+		defer cancelFinal()
+		finalAction := s.OutboundPipeline.RunResponseFrame(finalCtx, pctx, nil, true)
 		if finalAction.Type == pipeline.Reject {
 			httpx.WriteRejection(w, finalAction)
 			return
