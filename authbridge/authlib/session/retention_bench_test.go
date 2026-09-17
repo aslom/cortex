@@ -56,13 +56,21 @@ func benchToolManifest(nonce int) []pipeline.InferenceTool {
 //   - shared: every turn re-sends the SAME manifest, which is what a real client does.
 //     One copy per session survives.
 //   - distinct: every turn's manifest differs by one nonce field, so the table can never
-//     match. Standing next to `shared` it prices the duplication that was being paid —
-//     5.26MB against 0.51MB of tool term when this was written, about 10x.
+//     match. Standing next to `shared` it prices the duplication that was being paid.
+//
+// Measured when this was written: shared 2.78MB/session, distinct 7.53MB — the tool term
+// collapsing from ~5.3MB to ~0.6MB.
 //
 // What `distinct` is NOT is a reproduction of the old cost. It prices duplication only,
 // and the field it replaced was a map[string]any, which cost 4.1x its JSON text to hold
 // on top of being duplicated. The real change is therefore larger than the ratio here,
 // and the map figure is not reproducible in this tree by design — the type is gone.
+//
+// The interleaved tunnel-open in the loop below is load bearing, not incidental colour.
+// With it present and InternEvent's contentless-event guard removed, `shared` measures
+// 31.33MB/session against 2.79MB — 11.2x, because every turn's table was being cleared
+// before the next turn could match it. Any change to the rolling table should be measured
+// on THIS shape rather than on a clean run of turns, which is not what live traffic is.
 //
 // Reported rather than asserted, for the reasons on BenchmarkRetainedHeap:
 //
@@ -83,6 +91,11 @@ func BenchmarkRetainedHeapWithTools(b *testing.B) {
 
 				s := New(0, 0, 100)
 				for turn := 1; turn <= benchTurns; turn++ {
+					// A tunnel-open between the turns, as the live traffic has: every
+					// bridged HTTPS request records one, and it lands between an inference
+					// request and its response. It carries nothing to intern, so it is
+					// also the shape that used to reset the table — see InternEvent.
+					s.Append("s1", pipeline.SessionEvent{Tunnel: true, Host: "gateway:443"})
 					s.Append("s1", pipeline.SessionEvent{
 						Inference: &pipeline.InferenceExtension{
 							Messages: benchConversation(turn),

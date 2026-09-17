@@ -130,6 +130,24 @@ func (in *Interner) intern(s string, next map[string]string) string {
 // becomes garbage when the request completes, and the store then owns everything it
 // mutates.
 func (in *Interner) InternEvent(e *pipeline.SessionEvent) {
+	// An event with nothing to intern must leave the table ALONE rather than roll an empty
+	// one forward. Rolling is what makes turn N share with turn N-1, and a session's events
+	// are not all turns: a CONNECT tunnel-open, a denial, an MCP call all carry no interned
+	// content, and one of them landing between two inference events used to reset the table
+	// and force the second to keep its own copy of the whole conversation.
+	//
+	// That interleaving is the normal case, not an edge case. Every bridged HTTPS request
+	// records a tunnel-open, and it lands between the inference request and its response —
+	// measured on a live session, 165 of 500 events. Skipping the roll took that window's
+	// retention from 108.6MB to 89.2MB.
+	//
+	// Safe for the reason the roll was bounded in the first place: prev then holds the last
+	// CONTENT event's strings, which that event still references, so the table pins nothing
+	// of its own. The one-event bound is unchanged — it is the same table, just not cleared
+	// by traffic that had nothing to say.
+	if e.Inference == nil && e.A2A == nil {
+		return
+	}
 	next := make(map[string]string, len(in.prev))
 
 	if e.Inference != nil {

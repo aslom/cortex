@@ -75,6 +75,57 @@ func TestAppend_SharesRepeatedMessageContent(t *testing.T) {
 	}
 }
 
+// An event with nothing to intern must not break the chain between the turns around it.
+//
+// This is the live traffic shape, not a contrived one: every bridged HTTPS request records
+// a CONNECT tunnel-open, and it lands between the inference request and its response — 165
+// of 500 events on a real session. Rolling an empty table forward on those cleared it
+// before the next turn could match, which defeated interning almost entirely: the same
+// benchmark fixture measures 31.33MB/session without InternEvent's guard against 2.79MB
+// with it.
+func TestAppend_ContentlessEventDoesNotBreakSharing(t *testing.T) {
+	s := New(0, 0, 100)
+	defer s.Close()
+
+	const turns = 25
+	for i := 1; i <= turns; i++ {
+		// A tunnel-open before each turn: no Inference, no A2A, nothing to intern.
+		s.Append("s1", pipeline.SessionEvent{Tunnel: true, Host: "gateway:443"})
+		s.Append("s1", pipeline.SessionEvent{
+			Phase:     pipeline.SessionRequest,
+			Inference: &pipeline.InferenceExtension{Model: "m", Messages: convo(i)},
+		})
+	}
+
+	v := s.View("s1")
+	if len(v.Events) != turns*2 {
+		t.Fatalf("stored %d events, want %d", len(v.Events), turns*2)
+	}
+
+	// Message 0 appears in every inference event, and all of them must be the same bytes
+	// despite a contentless event sitting between each pair.
+	var first uintptr
+	inference := 0
+	for i := range v.Events {
+		inf := v.Events[i].Inference
+		if inf == nil {
+			continue
+		}
+		inference++
+		got := backing(inf.Messages[0].Content)
+		if first == 0 {
+			first = got
+			continue
+		}
+		if got != first {
+			t.Errorf("event %d holds its own copy of message 0; a contentless event cleared the table", i)
+		}
+	}
+	if inference != turns {
+		t.Fatalf("found %d inference events, want %d", inference, turns)
+	}
+}
+
 // Distinct content is left distinct: interning must not collapse two different messages.
 func TestAppend_DoesNotMergeDifferentContent(t *testing.T) {
 	s := New(0, 0, 100)
