@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -9,10 +10,28 @@ import (
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/toolscan"
 )
 
-const toolsUsage = `abctl tools scan — derive a tool-prune remove list from local transcripts
+const toolsUsage = `abctl tools — read agent logs to measure tool use
 
 Usage:
   abctl tools scan [--days N | --all] [--keep Name,Name] [--dir PATH] [--write CONFIG]
+
+Actions:
+  scan   consult local coding agent logs to determine agent tool use
+
+Run "abctl tools scan --help" for the detail.
+`
+
+const toolsScanUsage = `abctl tools scan — consult local coding agent logs to determine agent tool use
+
+Usage:
+  abctl tools scan [--days N | --all] [--keep Name,Name] [--dir PATH] [--write CONFIG]
+
+Currently scan only consults Claude Code logs.
+
+Claude Code resends its entire tool manifest on every turn, which can consume
+many tokens, often describing tools the agent will never call. scan measures tool
+use, producing a YAML fragment that can be applied to Cortex configuration
+causing some tools to be redacted from inference, saving token cost.
 
 Flags:
   --days N        window in days to consider a tool "used" (default 30)
@@ -26,7 +45,6 @@ Transcripts record tools that were called, never tools that were offered, so a
 name abctl does not recognise is never proposed for removal.
 `
 
-// runTools handles the `tools` subcommand. Returns the process exit code.
 // thinEvidenceTools is the number of distinct called tools below which the scan
 // warns that its proposal is aggressive. Chosen as a smell test, not a
 // threshold with meaning: a real session touches Read/Edit/Bash and more within
@@ -34,7 +52,20 @@ name abctl does not recognise is never proposed for removal.
 // the tools I use".
 const thinEvidenceTools = 5
 
+// runTools handles the `tools` subcommand. Returns the process exit code.
 func runTools(args []string, stdout, stderr io.Writer) int {
+	// `abctl tools --help` used to be read as an action name and answered with
+	// "unknown subcommand", which sends someone asking what this command does to the
+	// one place that refuses to say. Same fix, and the same stdout/exit-0 split, as
+	// `abctl service --help`: an explicit request for help is a successful answer, so
+	// it is pipeable; a missing or wrong action stays an error on stderr.
+	if len(args) > 0 {
+		switch args[0] {
+		case "-h", "--help", "help":
+			fmt.Fprint(stdout, toolsUsage)
+			return 0
+		}
+	}
 	if len(args) == 0 || args[0] != "scan" {
 		fmt.Fprint(stderr, toolsUsage)
 		return 2
@@ -42,12 +73,31 @@ func runTools(args []string, stdout, stderr io.Writer) int {
 
 	fs := flag.NewFlagSet("tools scan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	// Silenced, and printed from the Parse result instead. Without either, `--help`
+	// printed flag.PrintDefaults' bare "Usage of tools scan:" list — every flag
+	// named, nothing saying what scan is for.
+	//
+	// Which STREAM it belongs on depends on why it is being printed, and only Parse
+	// knows: it calls Usage for a bad flag as well as for -h. Deciding by scanning
+	// argv for "--help" cannot tell the two apart, because a flag may consume it as
+	// a VALUE — `--dir --help --nosuchflag` then put the whole help text on stdout
+	// while the error went to stderr, splitting one failure across both streams.
+	// ErrHelp is the flag package's own answer to which happened.
+	fs.Usage = func() {}
 	days := fs.Int("days", 30, "window in days")
 	all := fs.Bool("all", false, "consider every transcript, with no recency window")
 	keep := fs.String("keep", "", "comma-separated tool names to keep")
 	dir := fs.String("dir", "", "transcript directory (default ~/.claude/projects)")
 	write := fs.String("write", "", "patch the tool-prune remove: list in this config file")
 	if err := fs.Parse(args[1:]); err != nil {
+		// ErrHelp means Parse saw -h/--help, which is a successful answer and belongs
+		// on stdout at exit 0. Every other parse failure is a usage error: Parse has
+		// already written its own line to stderr, so the usage joins it there.
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(stdout, toolsScanUsage)
+			return 0
+		}
+		fmt.Fprint(stderr, toolsScanUsage)
 		return 2
 	}
 	// --days 0 is rejected rather than read as "everything": a zero-width window
