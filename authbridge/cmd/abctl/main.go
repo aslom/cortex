@@ -186,15 +186,17 @@ func wantsInfoFlagOnly(args []string) bool {
 //
 // Precedence: an explicit --endpoint always wins — it names a specific proxy, and
 // second-guessing that would make the flag advisory. Otherwise a local Cortex is
-// taken only when it is ANSWERING and --kubernetes is off.
+// taken only when it is ANSWERING and --kubernetes was not passed.
 //
-// kubernetes defaults true, so a running local Cortex no longer claims the session
-// merely by existing. Before that, someone who ran Cortex on their laptop and also
-// worked against a cluster could not reach the picker at all: the probe won every
-// time, and --endpoint demanded the namespace, pod and port-forward they were using
-// abctl to avoid. The local one stays one keystroke away on [l], which is why
-// preferring the cluster here costs nothing; the reverse is not true, since no key
-// summons a picker that was never wired up.
+// kubernetes defaults false: a live local Cortex is taken, which keeps a bare
+// `abctl observe` on a laptop working with no flag at all. Passing --kubernetes is
+// how someone who runs one locally AND works against a cluster reaches the picker,
+// which the probe would otherwise win every time — and which --endpoint could only
+// substitute for by naming a namespace, a pod and a port-forward by hand.
+//
+// The picker is still reachable without the flag whenever no local Cortex answers,
+// so this default costs a cluster user nothing on a machine that has no local
+// install; it costs them one flag on a machine that does.
 func chooseEndpoint(explicit, local string, localUp, kubernetes bool) string {
 	if explicit != "" {
 		return explicit
@@ -205,9 +207,56 @@ func chooseEndpoint(explicit, local string, localUp, kubernetes bool) string {
 	return ""
 }
 
-// runObserve opens the traffic viewer: the Namespaces → Pods picker, or a direct
-// connection when --endpoint names one, or when a local Cortex is answering and
-// --kubernetes is off. See chooseEndpoint for the precedence.
+// observeFlags are the viewer's flags, returned as one struct by
+// registerObserveFlags.
+type observeFlags struct {
+	endpoint   *string
+	prefs      *string
+	kubernetes *bool
+}
+
+// registerObserveFlags declares the viewer's flags on fs and returns the pointers.
+//
+// A function rather than inline registration in runObserve so a test can inspect
+// what production actually registers — see TestKubernetesFlag_DefaultsToFalse,
+// which reads --kubernetes's default from whatever this registers.
+//
+// fs is the caller's, so its error handling is too: runObserve uses ExitOnError
+// (a bad flag has nothing useful to fall back to), while a test uses
+// ContinueOnError so a parse failure is a failed assertion rather than a killed
+// test binary.
+func registerObserveFlags(fs *flag.FlagSet) observeFlags {
+	return observeFlags{
+		endpoint: fs.String("endpoint", "",
+			"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl connects to the Cortex on this machine if one is running, otherwise it opens a Namespaces → Pods picker; --kubernetes forces the picker either way."),
+		// Named --prefs rather than --config: `abctl service` and `abctl claude-code`
+		// already spell the PROXY's config that way, and one flag name meaning two
+		// different files in one binary is worse than a second word.
+		//
+		// No backticks in the usage string: flag.PrintDefaults reads the first
+		// backquoted word as the value's NAME, so "`abctl service`" rendered the flag as
+		// "-prefs abctl service" instead of "-prefs string".
+		prefs: fs.String("prefs", "",
+			"abctl's own settings file — events-table columns and the active filter, saved as you change them (default ~/.cortex/abctl-config.yaml). Not the Cortex proxy config, which is --config on 'abctl service' and 'abctl configure claude-code'."),
+		// --kubernetes exists because "is a local Cortex answering?" is a poor proxy for
+		// "which Cortex did you mean". Someone who runs Cortex on their laptop AND works
+		// against a cluster otherwise has no way to reach the picker: the local probe
+		// wins, every time, and --endpoint demands a namespace, a pod and a port-forward
+		// they were using abctl to avoid setting up by hand. --kubernetes is that way.
+		//
+		// Default FALSE, so the common case is unchanged: a laptop Cortex that is up is
+		// what a bare `abctl observe` connects to, which is the whole quickstart and
+		// wants no flag. Reaching a cluster is the deliberate act, so it is the one that
+		// gets spelled out — and the cluster stays reachable without the flag too, since
+		// a local Cortex that is down still falls through to the picker.
+		kubernetes: fs.Bool("kubernetes", false,
+			"open the Namespaces → Pods picker even when a Cortex is running on this machine. Without it, a running local Cortex is connected to directly and the picker appears only if none is answering. Ignored when --endpoint is given."),
+	}
+}
+
+// runObserve opens the traffic viewer: a direct connection when --endpoint names
+// one, or when a local Cortex is answering and --kubernetes was not passed;
+// otherwise the Namespaces → Pods picker. See chooseEndpoint for the precedence.
 //
 // This is the behaviour bare `abctl` has always had, extracted so the subcommand
 // and the deprecated bare invocation cannot drift apart.
@@ -217,30 +266,8 @@ func runObserve(args []string) int {
 	// service commands most of all, since those are what you need when Cortex is down.
 	fs := flag.NewFlagSet("abctl", flag.ExitOnError)
 	fs.Usage = func() { writeRootUsage(fs) }
-
-	endpoint := fs.String("endpoint", "",
-		"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl opens a Namespaces → Pods picker; with --kubernetes=false it connects to the Cortex on this machine instead, when one is running.")
-	// Named --prefs rather than --config: `abctl service` and `abctl claude-code`
-	// already spell the PROXY's config that way, and one flag name meaning two
-	// different files in one binary is worse than a second word.
-	//
-	// No backticks in the usage string: flag.PrintDefaults reads the first
-	// backquoted word as the value's NAME, so "`abctl service`" rendered the flag as
-	// "-prefs abctl service" instead of "-prefs string".
-	prefs := fs.String("prefs", "",
-		"abctl's own settings file — events-table columns and the active filter, saved as you change them (default ~/.cortex/abctl-config.yaml). Not the Cortex proxy config, which is --config on 'abctl service' and 'abctl configure claude-code'.")
-	// --kubernetes exists because "is a local Cortex answering?" is a poor proxy for
-	// "which Cortex did you mean". Someone who runs Cortex on their laptop AND works
-	// against a cluster had no way to reach the picker: the local probe won, every
-	// time, and --endpoint demands a namespace, a pod and a port-forward they were
-	// using abctl to avoid setting up by hand.
-	//
-	// Default true, so the picker is offered whenever no --endpoint was given — the
-	// cluster is the case abctl cannot guess and the local one is a keystroke away
-	// via [l]. --kubernetes=false restores the older behaviour of preferring a
-	// running local Cortex, which is what a laptop-only user wants.
-	kubernetes := fs.Bool("kubernetes", true,
-		"offer the Namespaces → Pods picker when no --endpoint is given, even if a Cortex is running on this machine. Use --kubernetes=false to connect straight to the local one instead. Ignored when --endpoint is given.")
+	f := registerObserveFlags(fs)
+	endpoint, prefs, kubernetes := f.endpoint, f.prefs, f.kubernetes
 	// ExitOnError, so Parse exits 2 itself (0 for -h) rather than returning — there
 	// is no error branch to write here. Chosen over ContinueOnError because a bad
 	// flag has nothing useful to fall back to: the alternative is printing usage and
@@ -277,10 +304,10 @@ func runObserve(args []string) int {
 	// address or the in-cluster 9094 default.
 	//
 	// Whether a live local Cortex is CHOSEN is chooseEndpoint's call, not this
-	// block's: under the default --kubernetes it is offered on [l] rather than
-	// connected to. This once preferred it unconditionally, which is why a laptop
-	// user no longer has to type `--endpoint http://localhost:47601` — and why
-	// someone who also works against a cluster needed a way back to the picker.
+	// block's: by default it is, which is why a laptop user does not have to type
+	// `--endpoint http://localhost:47601`. Under --kubernetes it is offered on [l]
+	// instead, which is how someone who also works against a cluster gets past a
+	// probe that would otherwise win every time.
 	local := localSessionEndpoint()
 	localUp := localSessionAPIUp(local)
 	*endpoint = chooseEndpoint(*endpoint, local, localUp, *kubernetes)
@@ -292,9 +319,9 @@ func runObserve(args []string) int {
 			msg := "abctl: kubectl not found on PATH; install it or pass --endpoint http://..."
 			// Name the more likely cause first when there is a local install that
 			// simply is not running — "install kubectl" is unhelpful advice to
-			// someone who has never wanted a cluster. Only under --kubernetes=false,
-			// though: with --kubernetes the user asked for the cluster, and kubectl
-			// really is what is missing.
+			// someone who has never wanted a cluster. Not under --kubernetes,
+			// though: there the user asked for the cluster, and kubectl really is
+			// what is missing.
 			if local != "" && !dialable(local) && !*kubernetes {
 				msg = "abctl: nothing is listening on " + local + " (from ~/.cortex/config.yaml).\n" +
 					"  Start it:  abctl service start   (or: abctl service install)\n" +
