@@ -254,7 +254,8 @@ type Snapshot struct {
 	// storage:
 	//   - a LEDGER window, because such a response is stored as a row with Model "" and
 	//     costledger.labelFor then returns ok=false for group=model. Pinned by
-	//     TestFold_GatewayPricedRowWithNoModelIsDisclosedAsUngrouped.
+	//     TestFold_GatewayPricedRowWithNoModelIsDisclosedAsUngrouped, which lives with the ledger
+	//     reader and so arrives after this file does.
 	//   - a RING window, because Aggregator.costOf prices any SETTLED cost record whether or
 	//     not the event carries an Inference extension, while foldInto guards byMethod on a
 	//     non-empty model — so the same spend lands in the bucket total and in no series
@@ -665,10 +666,11 @@ const Window7dSpan = 7 * 24 * time.Hour
 //
 // Distinct from the local-midnight defect StartOfLocalDay fixes: 7d's From is a plain
 // duration subtraction from now and contains no calendar arithmetic at all.
-// TestParseWindowSpec_SevenDaysTouchesAtMostWindow7dLocalDays pins the ordinary week,
-// TestParseWindowSpec_ASpringForwardWeekReachesTheNinthLocalDate pins the week that forced
-// the second +1, and TestCostLedgerConfig_TheFloorCoversEveryDayTheWindowTouches pins the
-// agreement with config.
+// TestParseWindowSpec_SevenDaysTouchesAtMostWindow7dLocalDays pins the ordinary week and
+// TestParseWindowSpec_ASpringForwardWeekReachesTheNinthLocalDate pins the week that forced the
+// second +1. The agreement with config's retention floor is pinned on the CONFIG side, by
+// TestCostLedgerConfig_TheFloorCoversEveryDayTheWindowTouches — which arrives with the
+// cost_ledger settings themselves and cannot be cited from here until it does.
 const Window7dLocalDays = int(Window7dSpan/(24*time.Hour)) + 2
 
 // Spec is a parsed window request. Either Dur is set (a fixed length the ring can
