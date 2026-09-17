@@ -1,6 +1,7 @@
 package edit
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -12,6 +13,17 @@ import (
 // create one. 0600, not 0644: this file names the TLS bridge's CA directory
 // and the addresses every local agent proxies through.
 const localConfigMode os.FileMode = 0o600
+
+// resolvedPath follows symlinks to the file a write should actually land on,
+// falling back to path itself when it cannot resolve — a file that does not
+// exist yet has nothing to resolve, and that is not an error worth failing an
+// Apply over.
+func resolvedPath(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real
+	}
+	return path
+}
 
 // FileStore edits the runtime config of a Cortex running on this machine —
 // ~/.cortex/config.yaml, the file the proxy was started with and is watching.
@@ -36,25 +48,9 @@ type FileStore struct {
 // kubectl round-trips ConfigMapStore makes. Kept in the signature because Store
 // is one interface and a context-free method on it would be the odd one out.
 func (s FileStore) Fetch(ctx context.Context) (*FetchedPipeline, error) {
-	// Refuse a symlink rather than quietly doing the wrong thing with it.
-	//
-	// Apply is a rename over Path, which would replace the link with a regular
-	// file and permanently detach a config someone deliberately points at their
-	// dotfiles. Resolving the link instead is worse: the proxy's reloader
-	// watches filepath.Dir of the path it was GIVEN and matches on
-	// filepath.Base, so writing the link's target — in another directory —
-	// fires no event, and the edit would apply, never reload, time out at
-	// PollDeadline and roll back. Failing here, before $EDITOR opens, costs the
-	// operator nothing and names the fix.
-	if fi, err := os.Lstat(s.Path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		target, rerr := filepath.EvalSymlinks(s.Path)
-		if rerr != nil {
-			target = "its target"
-		}
-		return nil, fmt.Errorf(
-			"%s is a symlink to %s; edit that file directly, or start the proxy with --config %s so it watches the real path",
-			s.Path, target, target)
-	}
+	// os.ReadFile follows a symlink, which is what we want: the content is the
+	// content wherever it lives. Apply is the half that has to be careful — see
+	// resolvedPath.
 	b, err := os.ReadFile(s.Path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", s.Path, err)
@@ -85,6 +81,35 @@ func (s FileStore) Describe() Target {
 	}
 }
 
+// CheckUnchanged reports whether the file still holds what Fetch read.
+//
+// The window is not theoretical and it is not small: the operator sits in
+// $EDITOR for as long as they like, and this exact file has other writers —
+// toolscan/patch.go, which the config's own comments tell you to run
+// (`abctl tools scan --write <this file>`), plus `abctl config migrate` and a
+// second abctl session. Apply renames a whole file built from the Fetch-time
+// bytes, so without this a concurrent write is lost silently and completely,
+// including the parts outside the pipeline subtree.
+//
+// A compare rather than a lock. It is not airtight — a writer landing between
+// this read and the rename still wins — but it converts the realistic case,
+// where a human takes minutes, from silent loss into a refusal that says what
+// happened. A cross-process lock covering every writer of this file is the
+// airtight answer and is a bigger change than this one, in files this does not
+// touch.
+func (s FileStore) CheckUnchanged(ctx context.Context, orig *FetchedPipeline) error {
+	current, err := os.ReadFile(s.Path)
+	if err != nil {
+		return fmt.Errorf("re-read %s: %w", s.Path, err)
+	}
+	if !bytes.Equal(current, orig.Original) {
+		return fmt.Errorf(
+			"%s changed since the edit began (another abctl, `abctl tools scan --write`, or an editor); "+
+				"re-open the edit to work from the current file", s.Path)
+	}
+	return nil
+}
+
 // Build returns newInner unchanged: a file has no outer document to rebuild.
 //
 // Deliberately not a yaml round-trip. Passing the config through
@@ -110,20 +135,38 @@ func (s FileStore) Build(orig *FetchedPipeline, newInner []byte) ([]byte, error)
 //
 // ctx is unused, as in Fetch: a write has no cancellable wait.
 func (s FileStore) Apply(ctx context.Context, payload []byte) (time.Time, error) {
-	dir := filepath.Dir(s.Path)
+	// Write through a symlink, not over it. rename(2) replaces the link itself,
+	// so a config symlinked into a dotfiles repo would become a regular file
+	// while the tracked copy kept the old pipeline — the two silently diverging
+	// with nothing in `git status` to show it. Resolving also keeps the temp a
+	// sibling of the REAL file, which the atomicity argument needs: a rename
+	// across filesystems fails EXDEV, and an unresolved link can point anywhere.
+	//
+	// Measured on darwin/kqueue: replacing the target still delivers an event
+	// naming the link, so the proxy's reloader (which watches the link's
+	// directory and filters on its base name) picks the edit up. Where a
+	// platform's watcher misses it the edit simply is not observed, which
+	// surfaces as the visible PollDeadline timeout and a rollback — not as
+	// silent corruption.
+	target := resolvedPath(s.Path)
+	dir := filepath.Dir(target)
 
 	// Carry the existing file's permissions across. CreateTemp makes 0600,
 	// which happens to match what Cortex writes, but inheriting rather than
 	// assuming means Apply never silently changes the mode of a file someone
 	// deliberately locked down further.
+	// Stat the resolved file, the same one the rename lands on. os.Stat follows
+	// links while os.Rename does not, so reading the mode from s.Path and
+	// writing to the target meant taking the mode off one file and applying it
+	// to another.
 	mode := localConfigMode
-	if st, err := os.Stat(s.Path); err == nil {
+	if st, err := os.Stat(target); err == nil {
 		mode = st.Mode().Perm()
 	}
 
 	tmp, err := os.CreateTemp(dir, ".abctl-config-*.yaml")
 	if err != nil {
-		return time.Time{}, fmt.Errorf("create temp beside %s: %w", s.Path, err)
+		return time.Time{}, fmt.Errorf("create temp beside %s: %w", target, err)
 	}
 	tmpName := tmp.Name()
 	// Every failure below leaves the original file untouched and takes the
@@ -157,8 +200,8 @@ func (s FileStore) Apply(ctx context.Context, payload []byte) (time.Time, error)
 	// Before the rename, so the poll's "did last_success move past this?"
 	// comparison cannot be beaten by the reload it is waiting for.
 	applyTime := time.Now()
-	if err := os.Rename(tmpName, s.Path); err != nil {
-		return time.Time{}, fmt.Errorf("replace %s: %w", s.Path, err)
+	if err := os.Rename(tmpName, target); err != nil {
+		return time.Time{}, fmt.Errorf("replace %s: %w", target, err)
 	}
 	tmpName = "" // renamed away; nothing left to clean up
 

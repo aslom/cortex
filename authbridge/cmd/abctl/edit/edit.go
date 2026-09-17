@@ -126,8 +126,18 @@ type AppliedMsg struct {
 
 // ApplyCmd returns a tea.Cmd that writes the supplied payload back through
 // store and emits AppliedMsg with the apply timestamp.
-func ApplyCmd(ctx context.Context, store Store, payload []byte) tea.Cmd {
+//
+// orig is the fetch this payload was derived from. When the store implements
+// ConflictChecker, it is consulted first and a concurrent write aborts the apply
+// instead of overwriting it. Checked here rather than at the keypress so the
+// re-read happens off the Update loop, next to the write it guards.
+func ApplyCmd(ctx context.Context, store Store, orig *FetchedPipeline, payload []byte) tea.Cmd {
 	return func() tea.Msg {
+		if cc, ok := store.(ConflictChecker); ok && orig != nil {
+			if err := cc.CheckUnchanged(ctx, orig); err != nil {
+				return AppliedMsg{Err: err}
+			}
+		}
 		at, err := store.Apply(ctx, payload)
 		return AppliedMsg{ApplyTime: at, Err: err}
 	}
@@ -146,6 +156,11 @@ type RolledBackMsg struct {
 // never moved (the framework keeps the previous pipeline on build
 // failure), so this just reconciles the stored config back to what's
 // actually serving.
+//
+// Deliberately skips ConflictChecker: the file has changed since the fetch —
+// this apply changed it — so the check would refuse every rollback. That leaves
+// the documented caveat below intact for the narrow case of a third party
+// writing between the forward apply and this one.
 func RollbackCmd(ctx context.Context, store Store, payload []byte, reloadErr string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := store.Apply(ctx, payload)

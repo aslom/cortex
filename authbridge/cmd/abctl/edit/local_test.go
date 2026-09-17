@@ -102,35 +102,79 @@ func TestFileStore_PipelineLastRunsToEndOfFile(t *testing.T) {
 	}
 }
 
-// A symlinked config is refused at Fetch, before $EDITOR opens.
+// A symlinked config — the shape you get pointing ~/.cortex/config.yaml at a
+// dotfiles repo — must be written THROUGH, not over.
 //
-// Neither alternative is acceptable: renaming over the link would replace it
-// with a regular file and detach a deliberate dotfiles setup, while writing the
-// resolved target would land outside the directory the proxy's reloader
-// watches, so the edit would never reload.
-func TestFileStore_RefusesASymlinkedConfig(t *testing.T) {
-	dir := t.TempDir()
-	real := filepath.Join(dir, "real-config.yaml")
-	if err := os.WriteFile(real, []byte(fixtureLocalConfigPipelineLast), 0o600); err != nil {
+// os.Rename replaces the link itself, so without resolving, the live config
+// becomes a regular file while the tracked copy silently keeps the old
+// pipeline, with nothing in `git status` to reveal it. The temp also has to be
+// a sibling of the real file: a rename across filesystems fails EXDEV, and a
+// link can point anywhere.
+func TestFileStore_WritesThroughASymlink(t *testing.T) {
+	linkDir := t.TempDir()
+	realDir := t.TempDir() // a separate directory, so an unresolved temp would be wrong
+	real := filepath.Join(realDir, "real-config.yaml")
+	if err := os.WriteFile(real, []byte(fixtureLocalConfigPipelineLast), 0o640); err != nil {
 		t.Fatalf("write real: %v", err)
 	}
-	link := filepath.Join(dir, "config.yaml")
+	link := filepath.Join(linkDir, "config.yaml")
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	_, err := FileStore{Path: link}.Fetch(context.Background())
-	if err == nil {
-		t.Fatal("want a refusal for a symlinked config")
+	s := FileStore{Path: link}
+	ctx := context.Background()
+	fp, err := s.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
 	}
-	for _, want := range []string{"symlink", real, "--config"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
+	newInner := Splice(fp.InnerYAML, fp.PipelineStart, fp.PipelineEnd,
+		[]byte("pipeline:\n  outbound:\n    - name: mcp-parser\n"))
+	payload, err := s.Build(fp, newInner)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if _, err := s.Apply(ctx, payload); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// The link is still a link.
+	fi, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat link: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("Apply replaced the symlink with a regular file")
+	}
+	// The real file got the edit.
+	got, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatalf("read real: %v", err)
+	}
+	if !strings.Contains(string(got), "mcp-parser") {
+		t.Errorf("the target did not receive the edit:\n%s", got)
+	}
+	// Mode came off the resolved file, not the link.
+	st, err := os.Stat(real)
+	if err != nil {
+		t.Fatalf("stat real: %v", err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o640 {
+		t.Errorf("mode = %v, want 0640 inherited from the resolved file", perm)
+	}
+	// No temp left behind in either directory.
+	for _, d := range []string{linkDir, realDir} {
+		ents, rerr := os.ReadDir(d)
+		if rerr != nil {
+			t.Fatalf("readdir %s: %v", d, rerr)
 		}
-	}
-	// The link must survive being refused.
-	if fi, lerr := os.Lstat(link); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Error("Fetch disturbed the symlink")
+		if len(ents) != 1 {
+			var names []string
+			for _, e := range ents {
+				names = append(names, e.Name())
+			}
+			t.Errorf("%s holds %v, want one entry — a temp leaked", d, names)
+		}
 	}
 }
 
@@ -302,6 +346,67 @@ func TestFileStore_ApplyingTheFetchedBytesRestoresTheFile(t *testing.T) {
 	}
 	if !bytes.Equal(back, []byte(fixtureLocalConfig)) {
 		t.Errorf("rollback did not restore the file byte-for-byte:\n%s", back)
+	}
+}
+
+// The operator sits in $EDITOR while something else writes the same file —
+// `abctl tools scan --write`, `abctl config migrate`, a second session. Apply
+// renames a whole file built from the Fetch-time bytes, so without a check that
+// write vanishes silently, including the parts outside the pipeline subtree.
+func TestFileStore_ApplyRefusesAConcurrentWrite(t *testing.T) {
+	path := writeFixture(t, 0o600)
+	s := FileStore{Path: path}
+	ctx := context.Background()
+
+	fp, err := s.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if err := s.CheckUnchanged(ctx, fp); err != nil {
+		t.Fatalf("CheckUnchanged on an untouched file: %v", err)
+	}
+
+	// Somebody else writes while $EDITOR is open.
+	sneaky := fixtureLocalConfig + "\n# added by another writer\n"
+	if err := os.WriteFile(path, []byte(sneaky), 0o600); err != nil {
+		t.Fatalf("concurrent write: %v", err)
+	}
+
+	err = s.CheckUnchanged(ctx, fp)
+	if err == nil {
+		t.Fatal("want a conflict error after a concurrent write")
+	}
+	if !strings.Contains(err.Error(), "changed since the edit began") {
+		t.Errorf("error %q should say the file moved under the edit", err)
+	}
+
+	// ApplyCmd must surface it and leave the other writer's bytes in place.
+	msg := ApplyCmd(ctx, s, fp, []byte("pipeline: {}\n"))().(AppliedMsg)
+	if msg.Err == nil {
+		t.Fatal("ApplyCmd should refuse when the store reports a conflict")
+	}
+	if !msg.ApplyTime.IsZero() {
+		t.Error("a refused apply must not report an apply time")
+	}
+	after, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("read back: %v", rerr)
+	}
+	if string(after) != sneaky {
+		t.Errorf("the concurrent write was clobbered:\n%s", after)
+	}
+}
+
+// ConfigMapStore deliberately does NOT implement ConflictChecker: it applies
+// with --force-conflicts=true and takes field-manager ownership, which is what
+// makes editing an operator-owned ConfigMap work at all. Pinned so the
+// asymmetry stays a decision.
+func TestConflictChecker_OnlyTheFileStoreImplementsIt(t *testing.T) {
+	if _, ok := any(FileStore{Path: "x"}).(ConflictChecker); !ok {
+		t.Error("FileStore should implement ConflictChecker")
+	}
+	if _, ok := any(ConfigMapStore{}).(ConflictChecker); ok {
+		t.Error("ConfigMapStore should not implement ConflictChecker — it force-conflicts on purpose")
 	}
 }
 

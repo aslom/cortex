@@ -59,6 +59,21 @@ type Store interface {
 	Apply(ctx context.Context, payload []byte) (time.Time, error)
 }
 
+// ConflictChecker is implemented by stores that can tell whether the thing they
+// fetched has been written by somebody else since. ApplyCmd consults it before
+// a forward apply; a store that does not implement it applies unconditionally.
+//
+// Optional rather than part of Store because the two backends have genuinely
+// different semantics. ConfigMapStore deliberately wins conflicts — it applies
+// with --force-conflicts=true and takes field-manager ownership, which is what
+// makes editing an operator-owned ConfigMap possible at all. FileStore has no
+// such arbiter: a rename lands on whatever is there.
+type ConflictChecker interface {
+	// CheckUnchanged returns a non-nil error if the stored config no longer
+	// matches what orig captured.
+	CheckUnchanged(ctx context.Context, orig *FetchedPipeline) error
+}
+
 // ConfigMapStore edits the per-agent ConfigMap of a pod in a cluster, through
 // kubectl. This is the picker's store: it needs a namespace and a pod, which
 // only the Namespaces → Pods flow can supply.

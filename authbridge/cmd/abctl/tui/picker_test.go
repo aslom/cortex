@@ -250,8 +250,12 @@ type fakePortForwarder struct {
 	startedNs  string
 	startedPod string
 	endpoint   string
-	startErr   error
-	closeCount int
+	// statusEndpoint is what the forward reports as its :9093 stats URL. Empty
+	// for most tests, which never read it; set where the model's statusURL
+	// matters — see TestLocalConnectClearsPodIdentity.
+	statusEndpoint string
+	startErr       error
+	closeCount     int
 }
 
 func (f *fakePortForwarder) Start(ctx context.Context, ns, pod string) (cluster.PortForward, error) {
@@ -259,16 +263,17 @@ func (f *fakePortForwarder) Start(ctx context.Context, ns, pod string) (cluster.
 		return nil, f.startErr
 	}
 	f.startedNs, f.startedPod = ns, pod
-	return &fakePortForward{endpoint: f.endpoint, parent: f}, nil
+	return &fakePortForward{endpoint: f.endpoint, statusEndpoint: f.statusEndpoint, parent: f}, nil
 }
 
 type fakePortForward struct {
-	endpoint string
-	parent   *fakePortForwarder
+	endpoint       string
+	statusEndpoint string
+	parent         *fakePortForwarder
 }
 
 func (p *fakePortForward) Endpoint() string       { return p.endpoint }
-func (p *fakePortForward) StatusEndpoint() string { return "" } // unused by current picker tests
+func (p *fakePortForward) StatusEndpoint() string { return p.statusEndpoint }
 func (p *fakePortForward) Close() error           { p.parent.closeCount++; return nil }
 
 func TestPodEnterStartsPortForwardAndTransitions(t *testing.T) {
@@ -730,6 +735,62 @@ func TestEditUsesLocalStoreAcrossLoopbackSpellings(t *testing.T) {
 	}
 	if _, ok := mm.editState.store.(edit.FileStore); !ok {
 		t.Fatalf("store is %T, want edit.FileStore", mm.editState.store)
+	}
+}
+
+// Visit a pod, Esc out, then connect to the local Cortex with `[l]`. The pod's
+// identity must not survive into that session.
+//
+// backToPodsPane clears ~20 fields but not selectedPod / selectedNamespace /
+// statusURL, so before this was fixed all three still named the pod and its
+// now-closed port-forward. pipelineStore tries local first and falls through to
+// the ConfigMap branch — whose conditions those three stale fields satisfy — so
+// `e` would fetch and kubectl-apply against a pod the screen was not showing,
+// polling a port-forward that `[l]` never established. Latent until this became
+// a store selector; a wrong-target write once it did.
+func TestLocalConnectClearsPodIdentity(t *testing.T) {
+	srv := sessionAPIStub(t)
+	pf := &fakePortForwarder{
+		endpoint:       "http://127.0.0.1:60001",
+		statusEndpoint: "http://127.0.0.1:60002",
+	}
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, pf)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	// Drill namespaces → pods → port-forward → sessions.
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(*model)
+	updated, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(*model)
+	updated, _ = mm.Update(cmd())
+	mm = updated.(*model)
+	if mm.selectedPod == "" || mm.statusURL == "" {
+		t.Fatalf("setup failed: expected a pod and a statusURL, got %q / %q", mm.selectedPod, mm.statusURL)
+	}
+
+	// Esc back to Pods, then `[l]` to the local Cortex.
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(*model)
+	updated, _ = mm.Update(connectLocalCmd(context.Background(), srv.URL)())
+	mm = updated.(*model)
+
+	if mm.selectedPod != "" || mm.selectedNamespace != "" {
+		t.Errorf("pod identity survived `[l]`: namespace=%q pod=%q", mm.selectedNamespace, mm.selectedPod)
+	}
+	if mm.statusURL != "" {
+		t.Errorf("statusURL survived `[l]`: %q — it names a closed port-forward", mm.statusURL)
+	}
+
+	// The consequence: `e` must not silently pick the pod's ConfigMap. With no
+	// local config path configured there is no store at all, so it refuses.
+	mm.pane = panePipeline
+	updated, ecmd := mm.Update(keyRune('e'))
+	mm = updated.(*model)
+	if store, _ := mm.pipelineStore(); store != nil {
+		t.Errorf("pipelineStore returned %T after `[l]`, want nil", store)
+	}
+	if ecmd != nil {
+		t.Error("`e` started an edit against stale pod state")
 	}
 }
 

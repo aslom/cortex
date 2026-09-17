@@ -610,6 +610,11 @@ func (m *model) backToPodsPane() {
 		_ = m.activePF.Close()
 		m.activePF = nil
 	}
+	// The status URL described that forward, so it dies with it. Not merely
+	// tidy: it is one of the four fields pipelineStore reads to decide an edit
+	// targets a pod, and a URL for a closed forward is never the right answer.
+	// portForwardReadyMsg sets a fresh one for the next pod.
+	m.statusURL = ""
 
 	// Reset session-view state so the next pod starts fresh.
 	m.client = nil
@@ -1058,11 +1063,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pickerErr = ""
-		// No port-forward subprocess and no pod identity: this is a
-		// direct connection to whatever is already listening locally.
-		// activePF stays nil (nothing to tear down) and selectedPod /
-		// selectedNamespace stay empty, so `e` correctly reports that
-		// pipeline editing needs the picker — same as --endpoint mode.
+		// No port-forward subprocess and no pod identity: this is a direct
+		// connection to whatever is already listening locally. activePF stays
+		// nil because there is nothing to tear down.
+		//
+		// The pod fields are CLEARED rather than assumed empty. They are only
+		// empty when no pod was ever visited: backToPodsPane clears ~20 fields
+		// but not these, so "pick a pod → esc → [l]" arrives here with
+		// selectedNamespace / selectedPod naming the pod and statusURL naming
+		// its closed port-forward. Since pipelineStore falls back to the
+		// ConfigMap branch on exactly those three, leaving them set let `e`
+		// kubectl-apply against a pod the screen was not showing — and poll a
+		// forward this path never established. Harmless while `[l]` sessions
+		// were assumed storeless; a wrong-target write once they were not.
+		m.selectedNamespace = ""
+		m.selectedPod = ""
+		m.statusURL = ""
 		m.endpoint = msg.endpoint
 		m.client = msg.client
 		m.localDirect = true

@@ -1061,7 +1061,8 @@ func (m *model) handleEditKey(msg tea.KeyMsg) tea.Cmd {
 				m.editState.err = "build payload: " + err.Error()
 				return nil
 			}
-			return withGen(m.editState.generation, edit.ApplyCmd(m.ctx, m.editState.store, payload))
+			return withGen(m.editState.generation, edit.ApplyCmd(
+				m.ctx, m.editState.store, m.editState.fetched, payload))
 		case "n", "N", "esc":
 			m.editState = editState{phase: editPhaseDone}
 			return nil

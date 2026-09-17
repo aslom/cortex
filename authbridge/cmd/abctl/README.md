@@ -611,15 +611,26 @@ pod.
 If neither target applies, `e` says so and names the remedy instead of starting
 an edit it cannot finish.
 
-Two cases it declines rather than guesses at:
+A **symlinked** `~/.cortex/config.yaml` — pointing at a dotfiles repo, say — is
+written *through*, not over. `rename(2)` replaces the link itself, so without
+resolving it the live config would become a regular file while the tracked copy
+silently kept the old pipeline, with nothing in `git status` to show it.
+Resolving also keeps the temporary file a sibling of the real one, which the
+atomicity guarantee needs: a rename across filesystems fails `EXDEV`.
 
-- **A symlinked `~/.cortex/config.yaml`.** Renaming over the link would replace
-  it with a regular file and detach a deliberate dotfiles setup; writing the
-  link's target instead would land outside the directory the proxy's reloader
-  watches, so the edit would apply and never reload. `e` refuses before
-  `$EDITOR` opens and tells you to point `--config` at the real path.
-- **A config with no top-level `pipeline:` key.** There is nothing to edit, and
-  inventing the block is not the editor's job.
+**A concurrent write aborts the apply.** This file has other writers — `abctl
+tools scan --write`, `abctl config migrate`, a second abctl session — and
+`$EDITOR` can be open for minutes. The apply re-reads the file first and refuses
+if it moved, rather than renaming a whole file built from stale bytes over
+somebody else's change. The refusal names the likely culprits; re-open the edit
+to work from the current file. This is a compare, not a lock, so a writer
+landing in the last moment before the rename still wins — it closes the
+realistic window, not every window. The cluster path has no equivalent check on
+purpose: it applies with `--force-conflicts=true` and takes field-manager
+ownership, which is what makes editing an operator-owned ConfigMap possible.
+
+A config with no top-level `pipeline:` key is reported as such; inventing the
+block is not the editor's job.
 
 The single edit flow covers four operations:
 - **Edit a value** — change a config field of an existing plugin

@@ -51,7 +51,7 @@ func TestApplyCmd_Success(t *testing.T) {
 	stub := func(ctx context.Context, args ...string) ([]byte, error) {
 		return []byte("applied"), nil
 	}
-	cmd := ApplyCmd(context.Background(), cmStore(stub), []byte("manifest"))
+	cmd := ApplyCmd(context.Background(), cmStore(stub), nil, []byte("manifest"))
 	msg := cmd().(AppliedMsg)
 	if msg.Err != nil {
 		t.Fatalf("err = %v", msg.Err)
