@@ -81,18 +81,23 @@ With no `--endpoint`, abctl decides between the cluster picker and the Cortex
 running on this machine (read from `~/.cortex/config.yaml`, and probed first —
 a stale config from an install that is no longer running is ignored).
 
-`--kubernetes` controls that choice and **defaults to true**, so the picker is
-offered even when a local Cortex is answering:
+`--kubernetes` controls that choice and **defaults to false**, so a local Cortex
+that is answering wins and the picker appears only when none is:
 
 ```sh
-./abctl observe                      # picker, even with a local Cortex running
-./abctl observe --kubernetes=false   # connect to the local Cortex instead
+./abctl observe                # the local Cortex, when one is running
+./abctl observe --kubernetes   # the picker, even with a local Cortex running
 ```
 
-The default favours the cluster because it is the case abctl cannot guess:
-reaching a pod otherwise means naming a namespace, a pod and a port-forward by
-hand, whereas the local one is a single `[l]` away on the Namespaces pane. Set
-`--kubernetes=false` if you only ever watch a laptop Cortex.
+The default favours the local one because that is the quickstart, and it should
+need no flag: install Cortex on your laptop, run `abctl observe`, watch traffic.
+`--kubernetes` is for the machine that has both — a local install AND cluster
+work — where the probe would otherwise win every time and `--endpoint` could
+only substitute for the picker by naming a namespace, a pod and a port-forward
+by hand.
+
+A machine with no local install needs no flag either: with nothing answering,
+`abctl observe` opens the picker on its own.
 
 The flag is ignored when `--endpoint` is given — an explicit address always
 wins. Resolution in full:
@@ -100,8 +105,8 @@ wins. Resolution in full:
 | `--endpoint` | Local Cortex answering | `--kubernetes` | Result |
 |---|---|---|---|
 | given | — | — | that endpoint |
-| — | yes | true (default) | Namespaces picker |
-| — | yes | false | the local Cortex |
+| — | yes | absent (default) | the local Cortex |
+| — | yes | passed | Namespaces picker |
 | — | no | either | Namespaces picker |
 
 ## Running one command through Cortex (`abctl exec`)
@@ -409,8 +414,8 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 - **Kubernetes Namespaces** (optional): the way in when abctl has no endpoint
   to connect to — one row per namespace holding an AuthBridge agent, then a
   Pods pane, then an automatic `kubectl port-forward` into the session view.
-  Offered whenever `--endpoint` was not given and `--kubernetes` is on, which
-  it is by default; `[l]` skips it and connects to the Cortex on this machine.
+  Shown when `--endpoint` was not given and either no local Cortex is answering
+  or `--kubernetes` was passed; `[l]` leaves it for the Cortex on this machine.
 
   ```
   abctl · pick namespace
@@ -423,9 +428,9 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   [↑↓/jk] nav  [↵] open  [l] localhost:47601  [r] reload  [?] keys  [q] quit
   ```
 
-  `--kubernetes=false` connects straight to a running local Cortex instead and
-  never shows this pane. With `--endpoint` the flag is moot: an explicit address
-  always wins.
+  Without `--kubernetes`, a running local Cortex is connected to directly and
+  this pane never appears. With `--endpoint` the flag is moot: an explicit
+  address always wins.
 
 Layered on top of all of them:
 
