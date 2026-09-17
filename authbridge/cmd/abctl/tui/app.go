@@ -469,6 +469,10 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 	// and the two fields are two halves of one answer.
 	sortCol, sortDesc := Settings.sortSelection()
 
+	// The usage pane's view, restored once at startup rather than in openUsage:
+	// re-entering the pane must not reset a choice made during the session.
+	usageMetric, usageWindowIdx, usageGroup := Settings.usageSelection()
+
 	return &model{
 		endpoint:     c.Endpoint(),
 		client:       c,
@@ -479,6 +483,7 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 		eventColumns: Settings.columnSelection(),
 		sortCol:      sortCol,
 		sortDesc:     sortDesc,
+		usage:        usageState{metric: usageMetric, windowIdx: usageWindowIdx, group: usageGroup},
 		filter:       Settings.Filter,
 		sessionsTbl:  newSessionsTable(),
 		eventsTbl:    newEventsTable(),
@@ -1619,8 +1624,9 @@ type RunOptions struct {
 	// LocalEndpoint overrides where `[l]` connects. Empty means
 	// defaultLocalEndpoint.
 	LocalEndpoint string
-	// Save persists the user's settings when one changes — the column picker
-	// closing, a filter being committed or cleared. A callback rather than a path
+	// Save persists the user's settings whenever one changes. Deliberately not a
+	// list of the keypresses that trigger it: the list was already stale once, and
+	// the triggers live with the settings they write. A callback rather than a path
 	// keeps $HOME and the YAML out of this package, so its tests need neither.
 	//
 	// Nil disables persistence: what tests pass, and what main passes when there is
