@@ -506,10 +506,14 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	// applied to an impossible COUNT above. It stays distinct from RefusalNoRate, where a lone
 	// survivor is the legitimate case (TestSettle_OnePricedHalfSurvivesAlone).
 	//
-	// RefusalUnrepresentable is deliberately NOT listed: Cost refuses any half past $10,000 as
-	// implausible long before micros stop being representable near $9x10^9, so an unrepresentable
-	// whole cannot leave a priced half. Adding it would be a clause no traffic can reach.
-	if refusal == pricing.RefusalImplausibleTotal ||
+	// ASKED OF ImpossibleFigure RATHER THAN OF ONE LABEL, because the two magnitude refusals are
+	// ordered by CHECK ORDER and not by size: Cost tests representability first, so anything past
+	// ~$9.007e9 is RefusalUnrepresentable and never carries the plausibility label at all. Keyed on
+	// RefusalImplausibleTotal alone this clause covered $10,000 to $9 billion and let everything
+	// above it through — measured at $1e6 per input token, the output half came back priced at
+	// $5,000 with the record carrying NO RejectedReason, because the disclosure below keyed on the
+	// same single label. Worse than the leak it was written to close, and unnameable.
+	if refusal.ImpossibleFigure() ||
 		out.HasPrompt && out.HasOutput && !pricing.PlausibleRequestCostUSD(out.PromptUSD+out.OutputUSD) {
 		out.PromptUSD, out.HasPrompt = 0, false
 		out.OutputUSD, out.HasOutput = 0, false
@@ -566,7 +570,15 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	// unpriced to every consumer, so disclosing a derived figure's refusal on a response the
 	// GATEWAY priced would discard an authoritative charge in order to complain about a
 	// number that lost anyway. See TestSettle_AHeaderFigureSurvivesAnImpossibleTokenReport.
-	if !out.Priced && out.RejectedReason == "" && refusal == pricing.RefusalImplausibleTotal {
+	//
+	// BOTH MAGNITUDE REFUSALS ARE DISCLOSED, under the one reason. Keyed on
+	// RefusalImplausibleTotal alone, a figure past representability (~$9.007e9) came back with
+	// RejectedReason EMPTY — refused, unpriced, and silent about why, which is the one outcome
+	// this field exists to rule out. Both are published as RejectedImplausible rather than
+	// splitting the wire value: an operator needs to know the figure was impossible, and WHICH
+	// bound tripped is a pricing-layer detail that a second reason would make every consumer
+	// learn. See pricing.Refusal.ImpossibleFigure for why the labels split where they do.
+	if !out.Priced && out.RejectedReason == "" && refusal.ImpossibleFigure() {
 		out.RejectedReason = costevent.RejectedImplausible
 	}
 	return out

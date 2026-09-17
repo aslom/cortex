@@ -498,37 +498,54 @@ func TestSettle_AHeaderKeepsItsFigureAndTheCountsAreStillRefused(t *testing.T) {
 // Driven at $1 per token, the same six-order-of-magnitude rate typo as the fixture above, in both
 // directions: whichever half is the larger one is the one Cost refuses, and the survivor is drawn
 // from the same condemned table at the same prompt total.
+//
+// THE LAST TWO ROWS ARE A SECOND, WORSE LEAK, and the reason the guard asks ImpossibleFigure rather
+// than naming one refusal. Cost tests representability BEFORE the plausibility ceiling, so a figure
+// past ~$9.007e9 is labelled RefusalUnrepresentable and carried no disclosure at all: refused,
+// unpriced, both halves' sibling still standing, and RejectedReason EMPTY. Keying on the smaller
+// bound covered $10,000 to $9 billion and let everything above it through.
 func TestSettle_ARefusedWholeLeavesNoHalfStanding(t *testing.T) {
-	var r pricing.Rates
-	r.Base[pricing.TierInput], r.Set[pricing.TierInput] = 1.0, true
-	r.Base[pricing.TierOutput], r.Set[pricing.TierOutput] = 1.0, true
-	tab, err := pricing.NewTable([]pricing.Entry{{Host: "*", Model: "*", Rates: r, Prov: pricing.ProvConfigured}})
-	if err != nil {
-		t.Fatal(err)
+	rates := func(in, out float64) pricing.Resolver {
+		var r pricing.Rates
+		r.Base[pricing.TierInput], r.Set[pricing.TierInput] = in, true
+		r.Base[pricing.TierOutput], r.Set[pricing.TierOutput] = out, true
+		tab, err := pricing.NewTable([]pricing.Entry{{Host: "*", Model: "*", Rates: r, Prov: pricing.ProvConfigured}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pricing.NewRegistry(tab)
 	}
-	reg := pricing.NewRegistry(tab)
 
 	for _, tc := range []struct {
-		name          string
-		input, output int
+		name            string
+		inRate, outRate float64
+		input, output   int
 	}{
 		// $15,000 prompt half refused, $5,000 output half was published.
-		{"the prompt half is the one over the ceiling", 15000, 5000},
+		{"the prompt half is the one over the ceiling", 1.0, 1.0, 15000, 5000},
 		// The mirror image, which the same guard has to cover.
-		{"the output half is the one over the ceiling", 5000, 15000},
+		{"the output half is the one over the ceiling", 1.0, 1.0, 5000, 15000},
 		// Neither half over, sum over: the case the original pair test was written for, kept
 		// here so one test states the whole rule.
-		{"neither half over, the pair is", 8000, 8000},
+		{"neither half over, the pair is", 1.0, 1.0, 8000, 8000},
+		// Past representability, where the refusal carries the OTHER label: $1e6 per input token
+		// makes the whole and the prompt half unrepresentable while the output half stays ordinary.
+		{"the prompt half is past representability", 1e6, 1.0, 15000, 5000},
+		{"the output half is past representability", 1.0, 1e6, 5000, 15000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			reg := rates(tc.inRate, tc.outRate)
 			pctx := ctx(map[string]string{"Content-Type": "application/json"}, tc.input, tc.output)
 
 			got := Settle(pctx, reg)
 
-			// Precondition: the whole really was refused for magnitude, which is what makes the
-			// halves suspect. Without this the row could pass on a table that priced nothing.
+			// TWO THINGS AT ONCE, deliberately. It is the precondition — a whole refused for
+			// magnitude is what makes the halves suspect, and without it a row could pass on a
+			// table that priced nothing — AND it is the disclosure, which is the half of this
+			// that went missing: keyed on one label, a figure past representability came back
+			// refused, unpriced and silent, so an operator saw no reason at all.
 			if got.RejectedReason != costevent.RejectedImplausible {
-				t.Fatalf("RejectedReason = %q, want %q: this row is not exercising a refused whole",
+				t.Fatalf("RejectedReason = %q, want %q: a magnitude refusal must be disclosed, and an undisclosed one is also the case this row cannot otherwise reach",
 					got.RejectedReason, costevent.RejectedImplausible)
 			}
 			if got.HasPrompt || got.PromptUSD != 0 {

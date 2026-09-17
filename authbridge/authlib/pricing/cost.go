@@ -231,6 +231,26 @@ const (
 	RefusalImplausibleTotal Refusal = "implausible-total"
 )
 
+// ImpossibleFigure reports whether a refusal was about the SIZE of the derived figure rather than a
+// missing or unusable input.
+//
+// EXPORTED FOR THE SAME REASON AS PlausibleUsage: the question is asked in two places and must have
+// one answer. costing.Settle asks it to refuse both HALVES of a request whose whole was refused, and
+// again to disclose that refusal on the record.
+//
+// TWO REFUSALS SAY IT, AND WHICH ONE APPEARS IS DECIDED BY CHECK ORDER, NOT BY MAGNITUDE. Cost tests
+// MicrosFromUSD before MaxPlausibleRequestCostMicros, so a figure is RefusalImplausibleTotal only
+// while it stays under MaxCostMicros (~$9.007e9); past that it is RefusalUnrepresentable, which is
+// the LARGER and more obviously broken case. Keying a caller on the plausibility label alone
+// therefore covers the smaller half of the range and silently drops the rest — measured at $1e6 per
+// input token: the whole and the prompt half were refused as unrepresentable, the $5,000 output half
+// came back priced, and because the disclosure keyed on the same label the record carried NO
+// RejectedReason at all. An unnameable coverage gap is the failure refusing-rather-than-clamping
+// exists to prevent, so both labels are named here, once.
+func (r Refusal) ImpossibleFigure() bool {
+	return r == RefusalImplausibleTotal || r == RefusalUnrepresentable
+}
+
 // PlausibleUsage reports whether every counter in u could be a real report: non-negative, and no
 // larger than one request could bill for.
 //
