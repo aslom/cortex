@@ -84,14 +84,10 @@ func (c *Client) GetSession(ctx context.Context, id string) (*pipeline.SessionVi
 	return c.GetSessionTail(ctx, id, SnapshotEventLimit)
 }
 
-// GetSessionTail fetches the most recent limit events of a session.
+// GetSessionTail fetches the most recent limit events of a session. The tail is the newest
+// page, so this is GetSessionPage with no cursor.
 func (c *Client) GetSessionTail(ctx context.Context, id string, limit int) (*pipeline.SessionView, error) {
-	var view pipeline.SessionView
-	path := fmt.Sprintf("/v1/sessions/%s?limit=%d", url.PathEscape(id), limit)
-	if err := c.getJSON(ctx, path, &view); err != nil {
-		return nil, err
-	}
-	return &view, nil
+	return c.GetSessionPage(ctx, id, 0, limit)
 }
 
 // ErrNotFound is returned when the server responds 404.
@@ -179,24 +175,41 @@ func (c *Client) GetPluginCatalog(ctx context.Context) (*PluginCatalog, error) {
 	return &cat, nil
 }
 
-func (c *Client) getJSON(ctx context.Context, path string, out any) error {
+// getBody issues the GET and hands back the body for the caller to read and close.
+//
+// Split out of getJSON so a caller that must NOT buffer the whole response — the session
+// snapshot, which reaches hundreds of megabytes — can stream the body while still sharing
+// this one place that knows how the API reports 404 and other statuses. See snapshot.go.
+func (c *Client) getBody(ctx context.Context, path string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.endpoint+path, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		io.Copy(io.Discard, resp.Body)
-		return fmt.Errorf("%s: %w", path, ErrNotFound)
+		// Drained before closing so the connection returns to the pool rather than
+		// being torn down — abctl polls this API.
+		io.Copy(io.Discard, resp.Body) //nolint:errcheck // draining a discarded body
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("%s: %w", path, ErrNotFound)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: unexpected status %d", path, resp.StatusCode)
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("%s: unexpected status %d", path, resp.StatusCode)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	return resp.Body, nil
+}
+
+func (c *Client) getJSON(ctx context.Context, path string, out any) error {
+	body, err := c.getBody(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer body.Close() //nolint:errcheck // read-only body
+	if err := json.NewDecoder(body).Decode(out); err != nil {
 		return fmt.Errorf("%s: decode: %w", path, err)
 	}
 	return nil

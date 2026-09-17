@@ -117,7 +117,7 @@ func TestAppend_DoesNotShareAcrossSessions(t *testing.T) {
 // Short strings skip the table: a role or a finish reason costs less to duplicate than
 // to hash, and the savings are in bodies.
 func TestIntern_SkipsShortStrings(t *testing.T) {
-	var in interner
+	var in Interner
 	next := map[string]string{}
 	short := strings.Repeat("x", internMinLen-1)
 	if got := in.intern(short, next); backing(got) != backing(short) {

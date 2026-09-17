@@ -29,7 +29,7 @@ type entry struct {
 	// intern collapses the message content this session repeats on every turn. Per
 	// session, so it is freed with the session and never shares content between two
 	// conversations. See intern.go for why the table only holds one event's strings.
-	intern interner
+	intern Interner
 
 	// nextSeq is the Seq the next appended event gets, counting from 1. Per session,
 	// and never reset — eviction removes events but must not reuse their numbers, or
@@ -232,7 +232,7 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 	// Before the copy is taken: an LLM request re-sends the whole conversation, so most
 	// of this event's message text is already in the session. Point at what is there
 	// rather than keeping a second copy of it.
-	sess.intern.internEvent(&event)
+	sess.intern.InternEvent(&event)
 
 	sess.Events = append(sess.Events, event)
 	sess.UpdatedAt = now

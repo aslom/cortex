@@ -50,7 +50,7 @@ const (
 	internMinLen = 64
 )
 
-// interner maps a string to the one copy the session keeps of it.
+// Interner maps a string to the one copy the session keeps of it.
 //
 // It holds only the strings of the LAST event interned, which is enough to collapse the
 // whole history: turn N's array is turn N-1's array plus a message or two, so interning N
@@ -68,7 +68,14 @@ const (
 // back later (a compaction that rewrites history, say) misses the table and gets a second
 // copy. Best-effort dedup with a bounded table beats exact dedup with a table that
 // outlives what it describes.
-type interner struct {
+//
+// Exported for readers outside this package, because the store is not the only place these
+// events pile up: abctl decodes the same events off the session API and held more memory
+// than the proxy it was watching. Feed events through one Interner in the order they were
+// recorded — the rolling table depends on consecutive events being neighbours, so shuffled
+// input still returns correct strings but shares almost nothing. The zero value is ready
+// to use, and one Interner is for one goroutine.
+type Interner struct {
 	prev map[string]string
 }
 
@@ -83,7 +90,7 @@ type interner struct {
 // on BenchmarkRetainedHeap it is 2.358MB keyed on the duplicate against 2.205MB keyed on
 // the canonical, a 0.15MB difference and not the multiplier it first looks like. Worth
 // fixing because it is free, and worth measuring before claiming more than that.
-func (in *interner) intern(s string, next map[string]string) string {
+func (in *Interner) intern(s string, next map[string]string) string {
 	if len(s) < internMinLen {
 		return s
 	}
@@ -95,7 +102,7 @@ func (in *interner) intern(s string, next map[string]string) string {
 	return canon
 }
 
-// internEvent gives the event its own extension and message slice, with content
+// InternEvent gives the event its own extension and message slice, with content
 // pointing at the session's existing copies, then rolls the table forward.
 //
 // It CLONES rather than rewriting in place, and that is not defensive habit — writing in
@@ -122,7 +129,7 @@ func (in *interner) intern(s string, next map[string]string) string {
 // Cloning costs one slice copy per event and nothing in steady state: the original array
 // becomes garbage when the request completes, and the store then owns everything it
 // mutates.
-func (in *interner) internEvent(e *pipeline.SessionEvent) {
+func (in *Interner) InternEvent(e *pipeline.SessionEvent) {
 	next := make(map[string]string, len(in.prev))
 
 	if e.Inference != nil {
