@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -207,29 +210,34 @@ func TestLedgerDefaultOn_NeedsEvidenceOfSomewhereDurable(t *testing.T) {
 		name string
 		dir  string
 		home string
-		// installed creates <home>/.cortex, which is what a local install leaves behind and the
-		// only thing separating a laptop from a container that merely has a HOME.
-		installed bool
-		local     bool
-		want      bool
-		wantWhy   string
+		// configIn names where this process was started from, relative to $HOME: ".cortex" is a
+		// local install, anything else is not. Empty means no --config at all.
+		configIn string
+		// installedDir creates <home>/.cortex without starting from it, which is the leftover case.
+		installedDir bool
+		want         bool
+		wantWhy      string
 	}{
 		{
 			// The case that regressed: a service install, no dir named, real home. It runs with
-			// --config, so localMode is false and only the state directory identifies it.
-			name: "installed service with a home directory", home: t.TempDir(), installed: true,
-			want: true, wantWhy: "exists",
+			// --config pointing into ~/.cortex, which is what identifies it — localMode is false.
+			// --local reaches this same row, because it writes that file and points --config at it.
+			name: "started from a local install's config", home: t.TempDir(), configIn: ".cortex",
+			want: true, wantWhy: "inside a local install",
 		},
 		{
 			// The case the HOME-only rule got wrong: os.UserHomeDir succeeds in almost every
-			// container, so this row was ON and writing day files to ephemeral storage.
-			name: "container with a home but no install", home: t.TempDir(),
-			want: false, wantWhy: "discarded on restart",
+			// container, so this row was ON and writing day files to ephemeral storage. The
+			// directory-exists rule got it wrong too — see the next row.
+			name: "container with a home and a config elsewhere", home: t.TempDir(), configIn: "etc",
+			want: false, wantWhy: "not inside",
 		},
 		{
-			// --local names it outright, and needs no directory to exist yet.
-			name: "--local on a fresh machine", home: t.TempDir(), local: true,
-			want: true, wantWhy: "--local",
+			// A LEFTOVER ~/.cortex is not a decision. The directory-exists rule turned this on,
+			// which is 30-day disk writes bought by a stale directory in an image.
+			name: "leftover .cortex but started from elsewhere", home: t.TempDir(),
+			configIn: "etc", installedDir: true,
+			want: false, wantWhy: "not inside",
 		},
 		{
 			// Kubernetes done properly: the operator mounted a volume and named it.
@@ -249,9 +257,16 @@ func TestLedgerDefaultOn_NeedsEvidenceOfSomewhereDurable(t *testing.T) {
 			// HOME drives os.UserHomeDir on the platforms this runs on; empty makes it
 			// fail, which is the container-with-no-home case.
 			t.Setenv("HOME", tc.home)
-			if tc.installed {
+			var configPath string
+			switch tc.configIn {
+			case ".cortex":
+				configPath = filepath.Join(tc.home, cortexDirName, localConfigName)
+			case "etc":
+				configPath = filepath.Join(t.TempDir(), "authbridge", "config.yaml")
+			}
+			if tc.installedDir {
 				if merr := os.MkdirAll(filepath.Join(tc.home, cortexDirName), 0o700); merr != nil {
-					t.Fatalf("seed the install marker: %v", merr)
+					t.Fatalf("seed the leftover directory: %v", merr)
 				}
 			}
 			cfg := &config.Config{Mode: config.ModeProxySidecar}
@@ -259,7 +274,7 @@ func TestLedgerDefaultOn_NeedsEvidenceOfSomewhereDurable(t *testing.T) {
 				cfg.CostLedger = &config.CostLedgerConfig{Dir: tc.dir}
 			}
 
-			got, why := ledgerDefaultOn(cfg, tc.local)
+			got, why := ledgerDefaultOn(cfg, configPath)
 			if got != tc.want {
 				t.Errorf("ledgerDefaultOn() = %v, want %v (reason given: %q)", got, tc.want, why)
 			}
@@ -279,13 +294,102 @@ func TestLedgerEnabled_ExplicitSettingOverridesTheDerivedDefault(t *testing.T) {
 	on, off := true, false
 	t.Setenv("HOME", "") // derived default would be OFF here
 	cfg := &config.Config{Mode: config.ModeProxySidecar, CostLedger: &config.CostLedgerConfig{Enabled: &on}}
-	if !cfg.CostLedger.LedgerEnabled(ledgerDefaultOnValue(cfg, false)) {
+	if !cfg.CostLedger.LedgerEnabled(ledgerDefaultOnValue(cfg, "")) {
 		t.Error("enabled: true did not override a derived default of off")
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home) // derived default would be ON here
 	cfg = &config.Config{Mode: config.ModeProxySidecar, CostLedger: &config.CostLedgerConfig{Enabled: &off}}
-	if cfg.CostLedger.LedgerEnabled(ledgerDefaultOnValue(cfg, false)) {
+	if cfg.CostLedger.LedgerEnabled(ledgerDefaultOnValue(cfg, "")) {
 		t.Error("enabled: false did not override a derived default of on")
+	}
+}
+
+// TestMain_WiresTheLedgerAndFlushesItOnFatalPaths is a source-shaped guard, and says so.
+//
+// Nothing here runs main(), so review is right that the wiring has no behavioural test: deleting the
+// whole ledger block from main.go left this package green. What CAN be checked cheaply is that the
+// four things the wiring consists of are present, so a deletion or a half-revert fails rather than
+// passing silently:
+//
+//   - the ledger is constructed (costledger.New),
+//   - it is registered on the session store, which is the only way events reach it,
+//   - a fatal exit flushes it (closeLedgerOnFatal assigned),
+//   - and no fatal site after that point still calls log.Fatalf directly, which would skip the flush
+//     because os.Exit runs no deferred functions.
+//
+// A behavioural test would need main() split into a runnable unit; that is worth doing and is not
+// this change.
+func TestMain_WiresTheLedgerAndFlushesItOnFatalPaths(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+
+	var newLedger, addRecorder bool
+	var flushPos token.Pos
+	var directFatal []string
+	// inFatalf skips the one log.Fatalf that is allowed: the one inside fatalf itself.
+	var fatalfDecl *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "fatalf" {
+			fatalfDecl = fd
+		}
+	}
+	if fatalfDecl == nil {
+		t.Fatal("no fatalf function: the fatal paths cannot be flushing the ledger")
+	}
+
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range v.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && id.Name == "closeLedgerOnFatal" && flushPos == 0 {
+					flushPos = v.Pos()
+				}
+			}
+		case *ast.CallExpr:
+			sel, ok := v.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkg, _ := sel.X.(*ast.Ident)
+			switch {
+			case pkg != nil && pkg.Name == "costledger" && sel.Sel.Name == "New":
+				newLedger = true
+			case sel.Sel.Name == "AddRecorder":
+				for _, a := range v.Args {
+					if id, ok := a.(*ast.Ident); ok && id.Name == "costLedger" {
+						addRecorder = true
+					}
+				}
+			case pkg != nil && pkg.Name == "log" && sel.Sel.Name == "Fatalf":
+				// Only after the ledger can be open. Before that there is nothing to flush, and main
+				// runs top to bottom, so source order is execution order for this question.
+				inFatalf := v.Pos() >= fatalfDecl.Pos() && v.Pos() <= fatalfDecl.End()
+				if !inFatalf && flushPos != 0 && v.Pos() > flushPos {
+					directFatal = append(directFatal, fset.Position(v.Pos()).String())
+				}
+			}
+		}
+		return true
+	})
+
+	if !newLedger {
+		t.Error("main.go never calls costledger.New: the ledger is not constructed")
+	}
+	if !addRecorder {
+		t.Error("main.go never passes costLedger to AddRecorder: nothing would reach the ledger, and every window=today would read an empty file")
+	}
+	if flushPos == 0 {
+		t.Fatal("closeLedgerOnFatal is never assigned: a fatal startup error would discard the open minute, and the check below has no anchor")
+	}
+	for _, pos := range directFatal {
+		t.Errorf("%s calls log.Fatalf directly: it ends in os.Exit, so the ledger's open minute is lost — use fatalf", pos)
 	}
 }

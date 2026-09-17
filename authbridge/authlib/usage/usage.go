@@ -1375,7 +1375,7 @@ func sanitizeLabel(s string) string {
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+		if pipeline.IsControlRune(r) || (r == utf8.RuneError && size == 1) {
 			b.WriteRune('�')
 			i += size
 			continue
@@ -1395,37 +1395,10 @@ func sanitizeLabel(s string) string {
 func hasControlRunes(s string) bool {
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+		if pipeline.IsControlRune(r) || (r == utf8.RuneError && size == 1) {
 			return true
 		}
 		i += size
-	}
-	return false
-}
-
-// isControlRune is the shared rule: C0, DEL, C1, and the bidi and zero-width runes that
-// rewrite or hide the text around them. Identical to costledger.isControlRune and pipeline's,
-// deliberately — see sanitizeLabel.
-//
-// THE THREE COPIES MOVE TOGETHER. This one is the /v1/usage serving path, so a rune that gets
-// past it reaches every client of that endpoint whatever the other two do — which is the
-// reason the identical-rule rule exists rather than being tidiness. See
-// pipeline.isControlRune for why bidi and zero-width belong in the same set as C1.
-func isControlRune(r rune) bool {
-	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-		return true
-	}
-	switch r {
-	case // Bidi overrides and isolates: reorder the glyphs around them.
-		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
-		'\u2066', '\u2067', '\u2068', '\u2069',
-		// Bidi MARKS, which are the same class and strictly easier to use: a mark needs no
-		// matching pop, so one LRM reorders the neutral characters around it on its own.
-		// U+200E LRM, U+200F RLM, U+061C ALM.
-		'\u200e', '\u200f', '\u061c',
-		// Zero-width: make two distinct labels render identically.
-		'\u200b', '\u200c', '\u200d', '\u2060', '\ufeff':
-		return true
 	}
 	return false
 }

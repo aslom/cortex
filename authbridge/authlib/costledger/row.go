@@ -50,6 +50,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 // Row is one minute's totals for one (endpoint, model, agent, provenance) key.
@@ -230,7 +232,7 @@ func sanitizeLabel(s string) string {
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+		if pipeline.IsControlRune(r) || (r == utf8.RuneError && size == 1) {
 			b.WriteRune('\uFFFD')
 			i += size
 			continue
@@ -255,43 +257,10 @@ func sanitizeLabel(s string) string {
 func hasControlRunes(s string) bool {
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+		if pipeline.IsControlRune(r) || (r == utf8.RuneError && size == 1) {
 			return true
 		}
 		i += size
-	}
-	return false
-}
-
-// isControlRune reports whether r is a C0 control, DEL, a C1 control, or a rune that
-// rewrites or hides the text around it without being a control character at all.
-//
-// The one predicate the scan and the rewrite both read, so they cannot disagree about what a
-// control character is. pipeline.isControlRune has the same clauses in the same order and
-// both copies move together; see sanitizeLabel for why there are two. There is a THIRD copy
-// in cmd/abctl/tui/usage_render.go which is still C0+DEL only; it belongs to the abctl PR and
-// is named here so the divergence is recorded rather than discovered.
-//
-// The bidi and zero-width clause is the C1 argument applied to the runes that reasoning
-// missed. C1 is here because U+009B opens a terminal escape sequence; a bidi override needs
-// no escape sequence and no terminal to make one label render as another's name, and a
-// zero-width rune makes two distinct keys look identical in a table a reader is comparing.
-// Same class, same choke point. See pipeline.isControlRune for the full argument.
-func isControlRune(r rune) bool {
-	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-		return true
-	}
-	switch r {
-	case // Bidi overrides and isolates: reorder the glyphs around them.
-		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
-		'\u2066', '\u2067', '\u2068', '\u2069',
-		// Bidi MARKS, which are the same class and strictly easier to use: a mark needs no
-		// matching pop, so one LRM reorders the neutral characters around it on its own.
-		// U+200E LRM, U+200F RLM, U+061C ALM.
-		'\u200e', '\u200f', '\u061c',
-		// Zero-width: make two distinct labels render identically.
-		'\u200b', '\u200c', '\u200d', '\u2060', '\ufeff':
-		return true
 	}
 	return false
 }

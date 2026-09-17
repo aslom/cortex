@@ -505,7 +505,8 @@ func TestCostLedgerDir_DefaultsUnderCortexDirAndIsAbsolute(t *testing.T) {
 // installed service had it off for its whole life, silently.
 //
 // ledgerDefaultOn has since replaced that rule with one keyed on whether anything survives a
-// restart, so a resolvable home directory is enough and this block is no longer the mechanism.
+// restart — an explicit cost_ledger.dir, or a config inside ~/.cortex, which is where this
+// generated file lives — so this block is no longer the mechanism.
 // The test stays, and stays written with defaultOn = FALSE, because it now pins something
 // different and still worth pinning: that the generated config states the intent explicitly
 // rather than relying on a derivation, so a future change to that derivation cannot silently

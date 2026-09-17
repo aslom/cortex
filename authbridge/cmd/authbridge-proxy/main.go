@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -162,22 +163,25 @@ func pluginUsesSPIFFEIdentity(p config.PluginEntry) bool {
 //	an explicit cost_ledger.dir   an operator named a path, which in Kubernetes means a
 //	                              volume is mounted there. Nothing else in this process can
 //	                              see a volume, so this is the signal.
-//	--local                       the flag says so outright.
-//	an existing ~/.cortex         the laptop case: a local install creates that directory 0700
-//	                              for its config and CA (see writeBuiltinConfig), so its
-//	                              presence is evidence of an install whose state survives a
-//	                              restart — and ~/.cortex/cost then persists too.
+//	a config inside ~/.cortex     the laptop case: this process was started from a local
+//	                              install's own config, so ~/.cortex/cost sits beside it and
+//	                              persists the same way. Covers both shapes — the installed
+//	                              service passes --config ~/.cortex/config.yaml, and --local
+//	                              writes that file and points --config at it (see the flag
+//	                              parsing below).
 //
-// A RESOLVABLE $HOME IS NOT ONE OF THEM, though it used to be, and review was right that it is
-// the wrong test: os.UserHomeDir succeeds in almost every container (HOME=/root), so that rule
-// turned the ledger ON in precisely the place the paragraph below says it must be OFF. The
-// directory has to EXIST, which is the difference between "this process has a HOME" and "this
-// host has a local install".
+// A RESOLVABLE $HOME IS NOT ONE OF THEM, though it was: os.UserHomeDir succeeds in almost every
+// container (HOME=/root), so that rule turned the ledger ON in precisely the place the paragraph
+// below says it must be OFF.
 //
-// NOT KEYED ON --local ALONE either, which was review's suggested fix and would reintroduce the
-// regression this rule replaced: --local and --config are mutually exclusive (see the flag
-// parsing below) and every service install runs --config, so a laptop running as a service has
-// localMode false. It is both, because they are different populations.
+// NOR IS AN EXISTING ~/.cortex, which was the first fix and is still too weak — a leftover
+// directory is not a decision, and a k8s image with one baked in would turn on disk writes at
+// 30-day retention. NOR --local ALONE, which sounds right and would reintroduce the regression
+// this rule replaced: --local and --config are mutually exclusive, and every service install
+// runs --config, so an installed laptop has localMode false.
+//
+// The config's LOCATION is the one signal that is a decision rather than a side effect: somebody
+// installed this proxy into their home directory and started it from there.
 //
 // And the way to be neither: no dir, no --local, no ~/.cortex. That is a container with no
 // volume, where the only writable place is the image layer — wiped on every restart, so the
@@ -187,33 +191,68 @@ func pluginUsesSPIFFEIdentity(p config.PluginEntry) bool {
 //
 // The reason is returned rather than logged here so the caller can log it once, next to the
 // other ledger lines, instead of this being a function with a side effect.
-func ledgerDefaultOn(cfg *config.Config, local bool) (bool, string) {
+func ledgerDefaultOn(cfg *config.Config, configPath string) (bool, string) {
 	if cfg.CostLedger.DirSet() {
 		return true, "cost_ledger.dir names a durable location"
-	}
-	if local {
-		return true, "--local, so ~/" + cortexDirName + "/cost persists across restarts"
 	}
 	dir, err := defaultCortexDir()
 	if err != nil {
 		return false, "no cost_ledger.dir and no resolvable home directory, so the only writable " +
 			"location is a container layer that is discarded on restart"
 	}
-	// Stat, not "does $HOME resolve": see the doc above for why the two are different questions.
-	if fi, serr := os.Stat(dir); serr == nil && fi.IsDir() {
-		return true, "a local install's " + dir + " exists, so ~/" + cortexDirName +
-			"/cost persists across restarts"
+	if under, abs := pathUnder(dir, configPath); under {
+		return true, "started from " + abs + ", inside a local install's " + dir
 	}
-	return false, "no cost_ledger.dir, not --local, and no " + dir + " to suggest a local " +
-		"install, so the only writable location may be a container layer that is discarded on restart"
+	return false, "no cost_ledger.dir and the config is not inside " + dir + ", so this is not a " +
+		"local install and the only writable location may be a container layer discarded on restart"
+}
+
+// pathUnder reports whether p is inside dir, and returns p absolute for the log line.
+//
+// filepath.Rel rather than a string prefix, so /home/u/.cortex-old cannot pass for /home/u/.cortex
+// and a relative --config is judged the same way an absolute one is. A path that cannot be made
+// absolute is treated as outside: the question is whether this is demonstrably a local install, so
+// anything unresolvable answers no.
+func pathUnder(dir, p string) (bool, string) {
+	if p == "" {
+		return false, ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return false, p
+	}
+	rel, err := filepath.Rel(dir, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false, abs
+	}
+	return true, abs
 }
 
 // ledgerDefaultOnValue is ledgerDefaultOn without the reason, for call sites that only need
 // the decision. Kept separate rather than making the reason optional, so no caller can pass a
 // default that disagrees with the one the ledger was built from.
-func ledgerDefaultOnValue(cfg *config.Config, local bool) bool {
-	on, _ := ledgerDefaultOn(cfg, local)
+func ledgerDefaultOnValue(cfg *config.Config, configPath string) bool {
+	on, _ := ledgerDefaultOn(cfg, configPath)
 	return on
+}
+
+// closeLedgerOnFatal hands the ledger's open minute back before a fatal exit. Set once, when the
+// ledger opens; nil whenever there is no ledger to flush.
+//
+// PACKAGE LEVEL BECAUSE THE FATAL SITES ARE, and a defer cannot do this job at all: log.Fatalf ends
+// in os.Exit, which runs no deferred functions. startTransparentProxy fails from its own function
+// and from a goroutine inside it, so a closure in main would not reach either.
+var closeLedgerOnFatal func()
+
+// fatalf is log.Fatalf plus that flush. Every startup failure after the ledger opens happens with a
+// minute of cost in memory, and exiting through log.Fatalf directly threw it away — the same loss the
+// shutdown comment at the bottom of main says an orderly stop does not have. Close is guarded by a
+// sync.Once, so flushing here and again on the normal path is free, and safe from a goroutine.
+func fatalf(format string, args ...any) {
+	if closeLedgerOnFatal != nil {
+		closeLedgerOnFatal()
+	}
+	log.Fatalf(format, args...)
 }
 
 func warnCostLedgerNeedsSessions(cfg *config.Config, defaultOn bool, logger *slog.Logger) {
@@ -223,8 +262,12 @@ func warnCostLedgerNeedsSessions(cfg *config.Config, defaultOn bool, logger *slo
 	if cfg.Session.SessionEnabled() || !cfg.CostLedger.LedgerEnabled(defaultOn) {
 		return
 	}
+	// NOT `"cost_ledger.enabled", true` — this line is reachable only when the key is ABSENT,
+	// because an explicit true with sessions off is refused at load (config.Validate). Printing the
+	// key as though the operator had set it sends them to grep a config they never wrote; what is
+	// true is that the default resolved to on.
 	logger.Warn("cost ledger will NOT run — session tracking is disabled",
-		"cost_ledger.enabled", true,
+		"cost_ledger.enabled", "unset, defaulted to on",
 		"session.enabled", false,
 		"reason", "the ledger records through the session store (registered as a Recorder on it), so with the store off nothing reaches it",
 		"effect", "no durable cost history; window=today and window=7d have nothing to read",
@@ -517,11 +560,12 @@ func main() {
 		// runs --config, which made the documented default false on every installed
 		// laptop. ledgerDefaultOn asks the question that actually decides it: is there a
 		// location that survives a restart? An explicit cost_ledger.dir (a mounted volume
-		// in Kubernetes) or a resolvable home directory both qualify; a container with
-		// neither does not, because its only writable place is discarded on restart and
-		// counted against ephemeral-storage, where the limit evicts the pod rather than
-		// dropping a figure. cost_ledger.enabled still overrides in either direction.
-		defaultOn, whyDefault := ledgerDefaultOn(cfg, localMode)
+		// in Kubernetes) qualifies, and so does being started from a config inside
+		// ~/.cortex, which is what a local install is. A container with neither does not,
+		// because its only writable place is discarded on restart and counted against
+		// ephemeral-storage, where the limit evicts the pod rather than dropping a figure.
+		// cost_ledger.enabled still overrides in either direction.
+		defaultOn, whyDefault := ledgerDefaultOn(cfg, *configPath)
 		if cfg.CostLedger.LedgerEnabled(defaultOn) {
 			dir, derr := costLedgerDir(cfg)
 			if derr != nil {
@@ -540,6 +584,12 @@ func main() {
 						"dir", dir, "error", lerr, "effect", "cost history will not survive a restart")
 				} else {
 					costLedger = led
+					closeLedgerOnFatal = func() {
+						if cerr := costLedger.Close(); cerr != nil {
+							slog.Warn("cost ledger: final flush failed during a fatal startup error",
+								"error", cerr)
+						}
+					}
 					sessions.AddRecorder(costLedger)
 					slog.Info("cost ledger enabled — durable cost history for window=today and window=7d",
 						"dir", dir, "retentionDays", retention,
@@ -579,7 +629,7 @@ func main() {
 	// anything to say, so this call is unconditional rather than branch-local —
 	// a warning that only exists down one arm of an if is the shape that produced
 	// the silence in the first place.
-	warnCostLedgerNeedsSessions(cfg, ledgerDefaultOnValue(cfg, localMode), slog.Default())
+	warnCostLedgerNeedsSessions(cfg, ledgerDefaultOnValue(cfg, *configPath), slog.Default())
 
 	var httpServers []*http.Server
 
@@ -632,7 +682,7 @@ func main() {
 		// in-cluster a missing Secret still fails loudly).
 		src, generated, cerr := tlsbridge.EnsureFileSource(cfg.TLSBridge.CADir, cfg.TLSBridge.GenerateCA)
 		if cerr != nil {
-			log.Fatalf("tls-bridge CA init failed: %v", cerr)
+			fatalf("tls-bridge CA init failed: %v", cerr)
 		}
 		if generated {
 			// "already running" is the half people miss. A client reads its CA file
@@ -704,12 +754,12 @@ func main() {
 		var extra []byte
 		if cfg.TLSBridge.UpstreamCABundle != "" {
 			if extra, err = os.ReadFile(cfg.TLSBridge.UpstreamCABundle); err != nil {
-				log.Fatalf("tls-bridge upstream_ca_bundle read failed: %v", err)
+				fatalf("tls-bridge upstream_ca_bundle read failed: %v", err)
 			}
 		}
 		up, uerr := tlsbridge.NewUpstreamClient(extra, cfg.TLSBridge.UpstreamInsecure)
 		if uerr != nil {
-			log.Fatalf("tls-bridge upstream client failed: %v", uerr)
+			fatalf("tls-bridge upstream client failed: %v", uerr)
 		}
 		if cfg.TLSBridge.UpstreamInsecure {
 			slog.Warn("tls-bridge: re-origination does NOT verify the upstream TLS cert", "upstream_insecure", true)
@@ -729,7 +779,7 @@ func main() {
 			Ports: ports, SkipHosts: cfg.TLSBridge.PassthroughHosts,
 		})
 		if derr != nil {
-			log.Fatalf("tls-bridge: %v", derr)
+			fatalf("tls-bridge: %v", derr)
 		}
 		bridge = &tlsbridge.Engine{
 			Decision: decision,
@@ -758,7 +808,7 @@ func main() {
 		if cfg.Listener.InboundTransparent() {
 			rpSrv, rerr := reverseproxy.NewTransparentServer(inboundH, sessions, rpMTLS)
 			if rerr != nil {
-				log.Fatalf("creating transparent inbound proxy: %v", rerr)
+				fatalf("creating transparent inbound proxy: %v", rerr)
 			}
 			rpSrv.Shared = sharedStore
 			// Skipped in --local: there is no iptables there, so nothing would ever
@@ -768,19 +818,19 @@ func main() {
 			} else {
 				rpHTTP, rerr := runtimeutil.StartTransparentInboundServer("transparent-inbound", rpSrv, cfg.Listener.TransparentInboundAddr)
 				if rerr != nil {
-					log.Fatalf("transparent-inbound listen: %v", rerr)
+					fatalf("transparent-inbound listen: %v", rerr)
 				}
 				httpServers = append(httpServers, rpHTTP)
 			}
 		} else {
 			rpSrv, rerr := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
 			if rerr != nil {
-				log.Fatalf("creating reverse proxy: %v", rerr)
+				fatalf("creating reverse proxy: %v", rerr)
 			}
 			rpSrv.Shared = sharedStore
 			rpHTTP, rerr := runtimeutil.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr)
 			if rerr != nil {
-				log.Fatalf("reverse-proxy listen: %v", rerr)
+				fatalf("reverse-proxy listen: %v", rerr)
 			}
 			httpServers = append(httpServers, rpHTTP)
 		}
@@ -792,7 +842,7 @@ func main() {
 	if roles[config.RoleForward] {
 		fpSrv, ferr := forwardproxy.NewServer(outboundH, sessions, fpMTLS)
 		if ferr != nil {
-			log.Fatalf("creating forward proxy: %v", ferr)
+			fatalf("creating forward proxy: %v", ferr)
 		}
 		// SkipHosts: outbound destinations that bypass the pipeline AND
 		// session recording entirely. See ListenerConfig.SkipHosts for the
@@ -800,7 +850,7 @@ func main() {
 		// inbound A2A user intent from the session FIFO).
 		skipHosts, serr := skiphost.New(cfg.Listener.SkipHosts)
 		if serr != nil {
-			log.Fatalf("listener.skip_hosts: %v", serr)
+			fatalf("listener.skip_hosts: %v", serr)
 		}
 		fpSrv.SkipHosts = skipHosts
 		fpSrv.TLSBridge = bridge
@@ -812,7 +862,7 @@ func main() {
 		fpSrv.SessionIDHeaders = cfg.Session.SessionIDHeaders()
 		fpHTTP, herr := runtimeutil.StartHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr)
 		if herr != nil {
-			log.Fatalf("forward-proxy listen: %v", herr)
+			fatalf("forward-proxy listen: %v", herr)
 		}
 		httpServers = append(httpServers, fpHTTP)
 
@@ -835,7 +885,7 @@ func main() {
 	}
 	statSrv, statErr := runtimeutil.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler(), pricingRegistry.Handler(), cfg.Stats.StatsAddress)
 	if statErr != nil {
-		log.Fatalf("stat server listen: %v", statErr)
+		fatalf("stat server listen: %v", statErr)
 	}
 
 	// Warm the plugin catalog at boot so any factory that violates the
@@ -859,7 +909,7 @@ func main() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",
 				"addr", cfg.Listener.SessionAPIAddr)
 			if err := sessionAPISrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("session API: %v", err)
+				fatalf("session API: %v", err)
 			}
 		}()
 	}
@@ -868,7 +918,7 @@ func main() {
 
 	healthSrv, healthErr := runtimeutil.StartHealthServer(inboundH, outboundH, cfg.Listener.HealthAddr)
 	if healthErr != nil {
-		log.Fatalf("health server listen: %v", healthErr)
+		fatalf("health server listen: %v", healthErr)
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -927,17 +977,17 @@ func startTransparentProxy(fp *forwardproxy.Server, addr string) *net.TCPListene
 	}
 	la, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		log.Fatalf("resolve transparent-proxy addr %q: %v", addr, err)
+		fatalf("resolve transparent-proxy addr %q: %v", addr, err)
 	}
 	ln, err := net.ListenTCP("tcp", la)
 	if err != nil {
-		log.Fatalf("transparent-proxy listen on %q: %v", addr, err)
+		fatalf("transparent-proxy listen on %q: %v", addr, err)
 	}
 	srv := transparentproxy.NewServer(fp.HandleTransparentConn)
 	go func() {
 		slog.Info("transparent proxy listening", "addr", addr)
 		if err := srv.Serve(ln); err != nil {
-			log.Fatalf("transparent-proxy serve: %v", err)
+			fatalf("transparent-proxy serve: %v", err)
 		}
 	}()
 	return ln

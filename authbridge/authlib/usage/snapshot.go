@@ -361,6 +361,15 @@ type Degraded struct {
 	// line by an unbounded amount: the rest of that file is missing, and a file holds a
 	// whole day.
 	TruncatedDays int64 `json:"truncatedDays,omitempty"`
+	// UnreadableDays is how many day files could not be opened or scanned at all — a
+	// permission change, a vanished mount, an IO error on the first read.
+	//
+	// THE WORST OF THE THREE, and the one this struct was missing. A producer reports a
+	// caveat when any of them is non-zero, so a read whose only fault was an unopenable
+	// day serialised as `"degraded":{}` — every field omitempty, nothing quantified — which
+	// says "something was wrong" and withholds what. A whole day of spend is missing on
+	// this path, which is more than a truncated file loses.
+	UnreadableDays int64 `json:"unreadableDays,omitempty"`
 }
 
 // Reconcilable reports whether a client can reconcile this group's series against

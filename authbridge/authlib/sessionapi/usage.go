@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -95,8 +96,19 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if spec.Symbolic() {
 		resSpan = usage.MaxWindow
 	}
-	resolution, err := usage.ParseResolution(r.URL.Query().Get("resolution"), resSpan)
+	requestedRes := r.URL.Query().Get("resolution")
+	resolution, err := usage.ParseResolution(requestedRes, resSpan)
 	if err != nil {
+		// RESTATED FOR A SYMBOLIC WINDOW, because ParseResolution can only name the span it was
+		// GIVEN: asking for window=7d&resolution=24h came back "resolution 24h exceeds the 6h0m0s
+		// window", which names a window the caller never asked for, for a parameter the ledger path
+		// does not read. The bound is real — see resSpan above — but the reason has to travel with it.
+		if spec.Symbolic() {
+			err = fmt.Errorf("resolution %s cannot be served for window=%s: a symbolic window is "+
+				"answered as one bucket from the cost ledger, or from the ring's %s maximum where "+
+				"there is no ledger, so %s is the coarsest resolution available",
+				requestedRes, spec.Label, usage.MaxWindow, usage.MaxWindow)
+		}
 		writeUsageError(w, err)
 		return
 	}
@@ -267,16 +279,23 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 	// saved the rest of the day was invisible to everyone downstream of it.
 	var degraded *usage.Degraded
 	if !caveats.Clean() {
-		degraded = &usage.Degraded{SkippedLines: caveats.SkippedLines, TruncatedDays: caveats.TruncatedDays}
+		// EVERY FIELD Clean() TESTS, or the disclosure is emptier than the fault. Clean() is
+		// `c == Caveats{}` over all three counters while this copied only two, so a read whose
+		// only fault was an unopenable day file produced `"degraded":{}` — the caveat raised
+		// and nothing in it. TestLedgerSnapshot_EveryCaveatFieldReachesTheWire keeps the two
+		// structs in step by counting fields, because adding a fourth counter to Caveats would
+		// otherwise reintroduce exactly this.
+		degraded = degradedFrom(caveats)
 		// At Warn, and unconditionally: a client may not render the field, and an operator
 		// with a corrupt day file wants to hear about it once per read rather than never.
 		slog.Warn("sessionapi: cost ledger read was incomplete — the total is short",
 			"window", spec.Label, "skippedLines", caveats.SkippedLines,
-			"truncatedDays", caveats.TruncatedDays)
+			"truncatedDays", caveats.TruncatedDays,
+			"unreadableDays", caveats.UnreadableDays)
 	}
 	snap := usage.Snapshot{
 		Window:        spec.Label,
-		BucketSeconds: int(spec.To.Sub(spec.From).Seconds()),
+		BucketSeconds: bucketSecondsFor(spec.From, spec.To),
 		// The grouping SERVED, on the same rule as Window above: a response says what it
 		// actually did, and a client that asked for something else learns so by comparing.
 		Group:    applied,
@@ -312,4 +331,36 @@ func writeUsageError(w http.ResponseWriter, err error) {
 	}{Error: err.Error()}); encErr != nil {
 		slog.Debug("sessionapi: usage error encode failed", "error", encErr)
 	}
+}
+
+// degradedFrom is the whole of the Caveats-to-wire conversion, in one place so a field cannot be
+// added on one side and forgotten on the other.
+//
+// Extracted rather than left inline because that is what makes it testable: the defect it replaces
+// was a literal that copied two of three counters, which no test of the handler could see — a
+// response saying "degraded" with an empty object looks like a client-side rendering problem, not a
+// producer dropping a number. TestDegradedFrom_CarriesEveryCaveatField compares the two structs
+// field by field through reflection, so a fourth counter fails here rather than shipping silently.
+func degradedFrom(c costledger.Caveats) *usage.Degraded {
+	return &usage.Degraded{
+		SkippedLines:   c.SkippedLines,
+		TruncatedDays:  c.TruncatedDays,
+		UnreadableDays: c.UnreadableDays,
+	}
+}
+
+// bucketSecondsFor is the length of a ledger window's single bucket, floored at one second.
+//
+// A ledger window returns ONE bucket spanning the whole window, so this is the window's own length —
+// and truncating that to an int makes it ZERO in the first second of the local day, once a day, for
+// every polling client. BucketSeconds is omitempty, so the zero also disappears from the wire rather
+// than looking wrong, and anything dividing by it for a burn rate divides by zero.
+//
+// A separate function so the boundary is testable: the handler reads time.Now() directly, so there is
+// no seam through which a test could stand at midnight.
+func bucketSecondsFor(from, to time.Time) int {
+	if s := int(to.Sub(from).Seconds()); s > 1 {
+		return s
+	}
+	return 1
 }

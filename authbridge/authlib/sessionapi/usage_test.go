@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -985,5 +986,94 @@ func TestInsideTodayAt_ClampsAtThirtySecondsPastMidnight(t *testing.T) {
 	if got := insideTodayAt(start, now, 10*time.Second); !got.Equal(start.Add(10 * time.Second)) {
 		t.Errorf("insideTodayAt(10s) = %s, want %s: an offset inside the window is not clamped",
 			got, start.Add(10*time.Second))
+	}
+}
+
+// TestDegradedFrom_CarriesEveryCaveatField keeps the ledger's caveat counters and the wire's in step.
+//
+// The conversion was a struct literal copying two of the three counters, and Caveats.Clean() tests all
+// three — so a read whose only fault was an unopenable day file set the caveat and serialised
+// `"degraded":{}`: the disclosure raised with nothing in it, which is worse than silence because it
+// looks like the client's fault. Reflection rather than three assertions, so the NEXT counter added to
+// Caveats fails here instead of shipping.
+func TestDegradedFrom_CarriesEveryCaveatField(t *testing.T) {
+	var c costledger.Caveats
+	cv := reflect.ValueOf(&c).Elem()
+	ct := cv.Type()
+	// A distinct non-zero value per field, so a copy that reads the wrong source field is caught too.
+	for i := 0; i < ct.NumField(); i++ {
+		if cv.Field(i).Kind() != reflect.Int64 {
+			t.Fatalf("Caveats.%s is %s, not int64: this test assumes counters and must be updated with the type",
+				ct.Field(i).Name, cv.Field(i).Kind())
+		}
+		cv.Field(i).SetInt(int64(i + 1))
+	}
+	if ct.NumField() < 3 {
+		t.Fatalf("Caveats has %d fields; the reflection is not seeing the type, so this proves nothing", ct.NumField())
+	}
+
+	got := reflect.ValueOf(degradedFrom(c)).Elem()
+
+	for i := 0; i < ct.NumField(); i++ {
+		name := ct.Field(i).Name
+		f := got.FieldByName(name)
+		if !f.IsValid() {
+			t.Errorf("usage.Degraded has no %s field: a caveat the ledger counts cannot reach a client, so the disclosure is emptier than the fault", name)
+			continue
+		}
+		if f.Int() != cv.Field(i).Int() {
+			t.Errorf("Degraded.%s = %d, want %d from Caveats.%s", name, f.Int(), cv.Field(i).Int(), name)
+		}
+	}
+}
+
+// TestHandleUsage_ASymbolicWindowExplainsAResolutionRefusal covers a message that named the wrong
+// window.
+//
+// The bound is real: a symbolic window is one ledger-backed bucket, or the ring's maximum where there
+// is no ledger, so a resolution coarser than that cannot be honoured. But ParseResolution can only
+// name the span it was handed, so ?window=7d&resolution=24h answered "resolution 24h exceeds the
+// 6h0m0s window" — a window the caller never asked for, for a parameter the ledger path does not read.
+func TestHandleUsage_ASymbolicWindowExplainsAResolutionRefusal(t *testing.T) {
+	ts, _ := newTestServer(t, WithUsage(usage.New()))
+
+	status, body := fetchUsage(t, ts.URL, "?window=7d&resolution=24h")
+
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: the resolution is genuinely unavailable", status)
+	}
+	for _, want := range []string{"window=7d", "24h"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("error body %q does not mention %q: the reader has to be able to tell which of their two parameters is the problem", body, want)
+		}
+	}
+	// And it must NOT present 6h as the window that was asked for, which is what the old message did.
+	if strings.Contains(body, "exceeds the 6h0m0s window") {
+		t.Errorf("error body %q still names a 6h window the caller never requested", body)
+	}
+}
+
+// TestBucketSecondsFor_IsNeverZero is the first second of the local day, once a day, for every
+// polling client.
+//
+// A ledger window returns one bucket whose length is the window's own, and int truncation makes that
+// zero at the start of the day. BucketSeconds is omitempty, so zero vanishes from the wire rather than
+// reading as wrong, and a client dividing by it for a burn rate divides by zero.
+func TestBucketSecondsFor_IsNeverZero(t *testing.T) {
+	start := time.Date(2026, 9, 17, 0, 0, 0, 0, time.Local)
+	for _, tc := range []struct {
+		name string
+		to   time.Time
+		want int
+	}{
+		{"the very first instant of the day", start, 1},
+		{"half a second in", start.Add(500 * time.Millisecond), 1},
+		{"three hours in", start.Add(3 * time.Hour), 10800},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bucketSecondsFor(start, tc.to); got != tc.want {
+				t.Errorf("bucketSecondsFor = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

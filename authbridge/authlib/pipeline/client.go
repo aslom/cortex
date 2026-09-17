@@ -143,7 +143,7 @@ func sanitizeUA(s string) string {
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+		if IsControlRune(r) || (r == utf8.RuneError && size == 1) {
 			b.WriteRune('\uFFFD')
 			i += size
 			continue
@@ -165,7 +165,7 @@ func sanitizeUA(s string) string {
 func hasControlRunes(s string) bool {
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+		if IsControlRune(r) || (r == utf8.RuneError && size == 1) {
 			return true
 		}
 		i += size
@@ -194,9 +194,14 @@ func hasControlRunes(s string) bool {
 // ONE MEMBER IS REACHABLE BY A COMPLIANT CLIENT, and it is worth naming rather than implying
 // otherwise: RFC 9110's User-Agent separator is RWS = 1*( SP / HTAB ), so a tab is legal
 // there. It is still replaced here like any other C0 control — ParseUserAgent normalises tabs
-// to spaces before this runs, so the legal-whitespace reading is honoured without weakening
-// the rule this predicate has to keep identical to the ledger's copy.
-func isControlRune(r rune) bool {
+// to spaces before this runs, so the legal-whitespace reading is honoured.
+//
+// EXPORTED, AND NOW THE ONLY COPY. usage and costledger each held a byte-identical duplicate under a
+// comment asserting "THE THREE COPIES MOVE TOGETHER" — which nothing enforced, and only this one had
+// test coverage for the bidi marks. Both import this package, so there was never a reason for the
+// other two to exist; a shared predicate is what makes the identical-rule rule true instead of
+// aspirational.
+func IsControlRune(r rune) bool {
 	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 		return true
 	}
@@ -297,9 +302,9 @@ func ParseUserAgent(ua string) *EventClient {
 	//
 	// NORMALISATION, NOT SANITISATION, which is why it sits on this side of sanitizeUA
 	// instead of inside it. Mapping legal whitespace onto the canonical whitespace is not
-	// the same job as neutralising what a terminal would act on, and the rule inside
-	// sanitizeUA has to stay identical to the ledger's copy of it. Byte-length-neutral, so
-	// the cap arithmetic is untouched.
+	// the same job as neutralising what a terminal would act on. The rule inside sanitizeUA is
+	// shared rather than merely kept identical — every surface calls IsControlRune now — so this
+	// side only has to leave it alone. Byte-length-neutral, so the cap arithmetic is untouched.
 	ua = capUA(sanitizeUA(strings.ReplaceAll(ua, "\t", " ")))
 	c := &EventClient{Raw: ua}
 	// The product token is the first SPACE-delimited word, so the trailing comment Claude

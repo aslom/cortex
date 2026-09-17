@@ -43,6 +43,18 @@ func TestHandleUsage_ALedgerWindowSaysWhichGroupingItCouldApply(t *testing.T) {
 		{asked: "model", served: usage.GroupModel, why: "model is a column on every row"},
 		{asked: "endpoint", served: usage.GroupEndpoint, why: "endpoint is a column on every row"},
 		{asked: "agent", served: usage.GroupAgent, why: "agent is a column on every row"},
+		// THE TWO THE TABLE OMITTED, and the handler's own doc lists both as valid groups. Neither
+		// behaviour was pinned, so either could have flipped unnoticed.
+		//
+		// method is an alias for model and is answered as itself, because the response echoes the
+		// grouping requested rather than rewriting it into a name the caller did not use.
+		{asked: "method", served: usage.GroupMethod, why: "method is the model column under its older name"},
+		// host is NOT answerable here, and that is a real gap rather than a definition: a ledger row
+		// carries endpoint, which is the same authority with its port left on, while group=host is
+		// the port-stripped axis the ring added later. Serving one as the other would make the same
+		// upstream one row in one window and two in another, so it downgrades and says so. Unifying
+		// the two axes is the open question, flagged on the ring side too.
+		{asked: "host", served: usage.GroupNone, why: "a ledger row carries endpoint, not the port-stripped host the ring groups by"},
 	} {
 		t.Run("group="+tc.asked, func(t *testing.T) {
 			led := ledgerWithOneCostedMinute(t, at, "gw.example", "m", 1.0)

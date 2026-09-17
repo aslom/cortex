@@ -255,9 +255,11 @@ tls_bridge:
 # otherwise", and since "abctl service install" runs this file with --config
 # and never --local, every INSTALLED laptop had the ledger off while the docs
 # promised it was on. The default is no longer keyed on the flag at all: it is
-# on wherever the ledger can survive a restart, which a resolvable home
-# directory satisfies -- see ledgerDefaultOn. This line therefore states what
-# would happen anyway, and keeps saying it if that rule ever changes.
+# on wherever the ledger can survive a restart, which means an explicit
+# cost_ledger.dir or a config inside ~/.cortex -- this file's own location, and
+# what both an installed service and --local pass. See ledgerDefaultOn. This
+# line therefore states what would happen anyway, and keeps saying it if that
+# rule ever changes.
 #
 # Set enabled: false to turn it off. Restart-only, not hot-reloaded: the ledger
 # is opened once at startup, so an edit here is REFUSED by the reloader (the

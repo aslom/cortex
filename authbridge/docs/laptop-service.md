@@ -160,9 +160,11 @@ Size a mounted volume from that table, not from the laptop number, and lower
 
 **Where that default comes from.** It is **on wherever the ledger can survive a restart** —
 which means either an explicit `cost_ledger.dir` (in Kubernetes, a path on a mounted volume) or
-a resolvable home directory, so `~/.cortex/cost` persists. A container with neither can only
-write to a layer that is discarded on restart, so there it stays off and says why in a startup
-log line.
+being started from a config inside `~/.cortex`, which is what a local install is and what both
+`abctl service install` and `--local` do. A resolvable `$HOME` is deliberately *not* enough:
+`HOME=/root` resolves in almost every container, and neither is a leftover `~/.cortex` directory,
+which is not a decision anybody made. A container with neither signal can only write to a layer
+that is discarded on restart, so there it stays off and says why in a startup log line.
 
 That rule replaced an earlier one keyed on `--local`, which was the cause of a real bug: the
 installed service runs `authbridge-proxy --config ~/.cortex/config.yaml` and never `--local`, so
@@ -184,9 +186,13 @@ dollar figures and a timestamp. **No prompt content, no completions, no tool arg
 that is a promise a test asserts against the serialized bytes, not a convention.
 
 **Who can read them.** Anything that can read your home directory, and anything that can
-reach the session API — `abctl` serves its cost views from it over `GET /v1/usage`, and
-that endpoint is **unauthenticated** (the proxy logs `UNAUTHENTICATED; contains raw user
-content; never expose via ingress` when it starts). On a laptop it binds to localhost.
+reach the session API, which is **unauthenticated** (the proxy logs `UNAUTHENTICATED; contains
+raw user content; never expose via ingress` when it starts). On a laptop it binds to localhost.
+
+`abctl` is not yet one of those readers, and the distinction is worth being exact about:
+`GET /v1/usage` reaches these files only for the symbolic windows `today` and `7d`, and
+`apiclient.GetUsage` takes a duration, so every view abctl draws today is served from the
+6-hour ring instead. Reading the ledger from abctl is the next step, not this one.
 Nothing about the ledger makes that worse, but "my spend is on disk and readable" is worth
 knowing rather than discovering.
 
