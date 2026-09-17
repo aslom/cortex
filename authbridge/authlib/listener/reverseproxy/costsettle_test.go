@@ -242,7 +242,7 @@ func postThrough(t *testing.T, proxyURL, path, body string) {
 	if err != nil {
 		t.Fatalf("Post: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if _, err := io.ReadAll(resp.Body); err != nil {
 		t.Fatalf("ReadAll: %v", err)
 	}
@@ -815,5 +815,68 @@ func TestReverseProxy_TruncatedStreamToANonStreamRequest_IsAFloor(t *testing.T) 
 	// AND THE RECORD CARRIES IT, since the caveat only matters where the money is read.
 	if rec := costing.NewRecord(settled, nil); !rec.Incomplete || rec.Trust() != costevent.TrustFloor {
 		t.Errorf("record Incomplete = %v / Trust = %q, want true / %q", rec.Incomplete, rec.Trust(), costevent.TrustFloor)
+	}
+}
+
+// truncatedSSEBackend is a stream that dies mid-generation: a usage-bearing chunk restating the
+// running totals, and then nothing — no finish_reason and no [DONE], which is what a dropped
+// upstream connection or a gateway timeout leaves behind.
+func truncatedSSEBackend(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set(costing.ResponseCostHeader, "0")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for _, chunk := range []string{
+			`{"choices":[{"delta":{"content":"Hel"}}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`,
+		} {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
+			flusher.Flush()
+		}
+	}))
+}
+
+// TestReverseProxy_BufferedSSEFallbackStillFlagsATruncatedStream proves the buffered arm is
+// REACHED, not just that the parser handles it.
+//
+// bodyMutator declares WritesResponseBody, which makes this listener buffer an event-stream
+// response rather than dispatching it frame by frame — a body a plugin may rewrite cannot also be
+// forwarded as it arrives. Everything about the response is then identical to the streamed case
+// except the shape it was handed over in, and that shape was the whole defect: the flag
+// pricing.IncompleteReason reads was set only on the per-frame path, so this arm published a
+// running total as an exact figure. A rewriting chain is an ordinary deployment, so this is the
+// path a cost consumer sees, not a corner.
+func TestReverseProxy_BufferedSSEFallbackStillFlagsATruncatedStream(t *testing.T) {
+	backend := truncatedSSEBackend(t)
+	defer backend.Close()
+
+	probe := &costProbe{}
+	srv, err := NewServer(costPipeline(t, probe, bodyMutator{}), nil, backend.URL, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	postThrough(t, proxy.URL, "/v1/chat/completions",
+		`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	settled, loaded, prompt, output, total := probe.snapshotCost()
+	if !loaded {
+		t.Fatal("no Settled stored: the parser's response pass never ran")
+	}
+	// Precondition: the counters that make this the case under test — a tally with no stop reason.
+	if prompt != 5 || output != 3 || total != 8 {
+		t.Fatalf("usage = (%d,%d,%d), want (5,3,8): the buffered body did not reach the SSE parser",
+			prompt, output, total)
+	}
+	if !settled.Priced {
+		t.Fatalf("settled = %+v; want Priced: a floor is still money owed", settled)
+	}
+	if !settled.Incomplete || settled.IncompleteReason != pricing.ReasonOutputUncounted {
+		t.Errorf("Incomplete = %v (%q), want true (%q): an OpenAI stream restates a RUNNING total on every usage chunk, so a tally with no stop reason is a floor — and delivering it whole must not make it read as exact",
+			settled.Incomplete, settled.IncompleteReason, pricing.ReasonOutputUncounted)
 	}
 }

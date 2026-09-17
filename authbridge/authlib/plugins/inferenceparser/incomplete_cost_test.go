@@ -124,3 +124,152 @@ func TestCompleteAnthropicStream_CarriesNoCaveat(t *testing.T) {
 // written twice: anthropicStreamCtx() and bodylessCtx("0", true) with an SSE content type are the
 // same context, driven the same way, asserting the same thing — and the surviving copy sits in the
 // family whose subject is exactly that Content-Type discrimination.
+
+// openAIStreamCtx is a text/event-stream response to a /v1/chat/completions request, with
+// LiteLLM's placeholder zero cost header. reqStream is what the REQUEST asked for, which the
+// rows below vary independently of what arrived.
+func openAIStreamCtx(contentType string, reqStream bool) *pipeline.Context {
+	h := http.Header{}
+	h.Set("Content-Type", contentType)
+	h.Set(costing.ResponseCostHeader, "0")
+	pctx := &pipeline.Context{
+		Direction:       pipeline.Outbound,
+		Host:            "gw.internal",
+		Path:            "/v1/chat/completions",
+		ResponseHeaders: h,
+		Extensions: pipeline.Extensions{Inference: &pipeline.InferenceExtension{
+			Model:  "claude-opus-5",
+			Stream: reqStream,
+		}},
+	}
+	pctx.SetCurrentPlugin("inference-parser", pipeline.InvocationPhaseResponse)
+	return pctx
+}
+
+// A truncated OpenAI stream: a usage-bearing chunk with a RUNNING total, and no finish_reason
+// because the stream died before one arrived.
+const openAITruncatedSSE = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+	"data: {\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":500,\"total_tokens\":1500}}\n\n"
+
+// The same stream reaching its end: the last chunk carries finish_reason, so the tally is final.
+const openAICompleteSSE = openAITruncatedSSE +
+	"data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":" +
+	"{\"prompt_tokens\":1000,\"completion_tokens\":500,\"total_tokens\":1500}}\n\ndata: [DONE]\n\n"
+
+// TestTruncatedStream_IsFlaggedWhicheverWayItWasDelivERED is the parity the caveat depends on.
+//
+// pricing.IncompleteReason asks whether the RESPONSE arrived as a stream, because a counted output
+// on a stream is a running total and on a whole body is final. Only the per-frame path answered:
+// StreamedResponse is set by getOrCreateStreamState, which a buffered dispatch never reaches — so
+// the SAME BYTES were flagged as a floor when delivered frame by frame and published as an exact
+// figure when delivered whole. Both proxies buffer an event-stream response whenever a plugin in
+// the chain declares WritesResponseBody, so the unflagged path is the one a rewriting chain takes.
+//
+// The last two rows are why the mark is taken from the BYTES rather than from "an SSE parser ran":
+// OnResponse picks its parser from the request's Stream flag, and a JSON envelope answered to a
+// streaming request is routine. Marking that would print "+ partial" over a figure that is exact.
+func TestTruncatedStream_IsFlaggedWhicheverWayItWasDelivered(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		body         string
+		contentType  string
+		reqStream    bool
+		perFrame     bool
+		wantStreamed bool
+		wantReason   string
+		// noCounters marks the row where the body parses to nothing, so the mark is the only
+		// observable there.
+		noCounters bool
+	}{
+		{
+			name:         "truncated stream buffered whole",
+			body:         openAITruncatedSSE,
+			contentType:  "text/event-stream",
+			wantStreamed: true,
+			wantReason:   pricing.ReasonOutputUncounted,
+		},
+		{
+			name:         "truncated stream frame by frame",
+			body:         openAITruncatedSSE,
+			contentType:  "text/event-stream",
+			perFrame:     true,
+			wantStreamed: true,
+			wantReason:   pricing.ReasonOutputUncounted,
+		},
+		{
+			name:         "complete stream buffered whole carries no caveat",
+			body:         openAICompleteSSE,
+			contentType:  "text/event-stream",
+			wantStreamed: true,
+			wantReason:   "",
+		},
+		{
+			// A JSON envelope on the request-flag arm, which is what every gateway error page is.
+			// The SSE parser reads no `data:` line here so nothing is counted — measured, and the
+			// pre-existing behaviour this arm's own comment describes — which is precisely why the
+			// MARK is what this row asserts: it must stay false on bytes that never streamed, or the
+			// caveat would ride on whatever a later parser did manage to count.
+			name:         "json envelope answered to a streaming request",
+			body:         `{"usage":{"prompt_tokens":1000,"completion_tokens":500,"total_tokens":1500}}`,
+			contentType:  "application/json",
+			reqStream:    true,
+			wantStreamed: false,
+			wantReason:   "",
+			noCounters:   true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewInferenceParser()
+			p.SetPricingResolver(bodylessRates(t))
+			pctx := openAIStreamCtx(tc.contentType, tc.reqStream)
+
+			if tc.perFrame {
+				// sseframe strips the framing, so each frame is a bare payload.
+				for _, frame := range []string{
+					`{"choices":[{"delta":{"content":"hi"}}]}`,
+					`{"usage":{"prompt_tokens":1000,"completion_tokens":500,"total_tokens":1500}}`,
+				} {
+					p.OnResponseFrame(context.Background(), pctx, []byte(frame), false)
+				}
+				p.OnResponseFrame(context.Background(), pctx, nil, true)
+			} else if tc.reqStream && tc.contentType == "application/json" {
+				pctx.ResponseBody = []byte(tc.body)
+				p.OnResponse(context.Background(), pctx)
+			} else {
+				// One terminal frame carrying the whole wire body, framing intact.
+				p.OnResponseFrame(context.Background(), pctx, []byte(tc.body), true)
+			}
+
+			ext := pctx.Extensions.Inference
+			if ext.StreamedResponse != tc.wantStreamed {
+				t.Errorf("StreamedResponse = %v, want %v: this is the fact the caveat is derived from",
+					ext.StreamedResponse, tc.wantStreamed)
+			}
+			if tc.noCounters {
+				if ext.OutputTokens != 0 || ext.CompletionTokens != 0 {
+					t.Fatalf("output = %d/%d counted; this row is the one where nothing parses, so it no longer says what it claims",
+						ext.OutputTokens, ext.CompletionTokens)
+				}
+				return
+			}
+			// Precondition: every other row must reach the branch under test with a counted output.
+			if ext.OutputTokens == 0 && ext.CompletionTokens == 0 {
+				t.Fatalf("no output counted; the fixture does not reach the branch under test")
+			}
+			ev, ok := publishedCost(t, pctx)
+			if !ok {
+				t.Fatal("no cost record published")
+			}
+			if ev.IncompleteReason != tc.wantReason {
+				t.Errorf("IncompleteReason = %q, want %q", ev.IncompleteReason, tc.wantReason)
+			}
+			if ev.Incomplete != (tc.wantReason != "") {
+				t.Errorf("Incomplete = %v with reason %q", ev.Incomplete, ev.IncompleteReason)
+			}
+			// The dollars stand either way — a floor is still money owed.
+			if !ev.Priced() {
+				t.Errorf("Priced() = false: the caveat qualifies the figure, it does not withdraw it")
+			}
+		})
+	}
+}

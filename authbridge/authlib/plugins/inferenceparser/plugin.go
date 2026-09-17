@@ -452,6 +452,33 @@ func carriesSSEFraming(frame []byte) bool {
 	return bytes.Contains(frame, []byte("\ndata:"))
 }
 
+// markStreamedResponse records that the RESPONSE arrived as a stream, which is what
+// pricing.IncompleteReason reads to decide whether a counted output tally is FINAL.
+//
+// THE PER-FRAME PATH ALREADY SAID SO AND THE BUFFERED ONE DID NOT. getOrCreateStreamState sets the
+// flag, and it is reached only from a per-frame dispatch — so a text/event-stream response that a
+// listener handed over WHOLE was parsed as a stream and then described as a non-stream. Both
+// proxies take that path for real: they fall back to buffering an event-stream response when a
+// plugin in the chain declares WritesResponseBody. Measured on the OpenAI dialect, same bytes, same
+// counters: frame by frame gave Incomplete=true "output-uncounted", buffered gave Incomplete=false
+// — a floor published as a whole figure, which is the exact failure the field exists to close.
+//
+// ON THE EVIDENCE OF THE BYTES, NOT THE REQUEST'S FLAG, and not on the mere fact that an SSE parser
+// was called. OnResponse picks its parser from ext.Stream, and a JSON reply to a streaming request
+// is routine — every gateway error page is one — so marking whatever that arm parses would print
+// the "+ partial" caveat over figures that are exact. A caveat on correct figures is one readers
+// learn to ignore, so the claim has to come from the wire: data: fields present means the response
+// really did arrive as a stream. That is the same rule the dispatch already follows.
+//
+// Anthropic is unaffected by the underlying gap — its Output is assigned only in the message_delta
+// arm, which carries stop_reason on the same frame — but it is marked here too, because the fact is
+// about the response's shape and not about who reads it.
+func markStreamedResponse(body []byte, ext *pipeline.InferenceExtension) {
+	if ext != nil && carriesSSEFraming(body) {
+		ext.StreamedResponse = true
+	}
+}
+
 // normalizeSSE puts a buffered SSE body into the one shape the parsers below read: no leading
 // byte-order mark, and LF line endings.
 //
@@ -609,6 +636,7 @@ func parseInferenceJSON(body []byte, ext *pipeline.InferenceExtension) {
 // a local TokenUsage and Fill once at the end — matching foldOpenAIFrame's
 // contract, so PresentKinds and ReportedTotal reflect only the final chunk.
 func parseInferenceSSE(body []byte, ext *pipeline.InferenceExtension) {
+	markStreamedResponse(body, ext)
 	var completion strings.Builder
 	var usage parsercommon.TokenUsage
 	var hasUsage bool

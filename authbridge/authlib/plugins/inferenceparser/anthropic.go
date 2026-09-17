@@ -409,6 +409,7 @@ func mergeAnthropicPromptMaxSeen(state *inferenceStreamState, incoming parsercom
 // parseInferenceSSE for the legacy OnResponse path; the live listener uses
 // foldAnthropicFrame via OnResponseFrame instead.
 func parseAnthropicSSE(body []byte, ext *pipeline.InferenceExtension) {
+	markStreamedResponse(body, ext)
 	state := &inferenceStreamState{}
 	// normalizeSSE for the reason given where it is defined: a BOM or CR-only line endings are
 	// wire-legal, and splitting on LF alone reads such a body as one unparseable line.
