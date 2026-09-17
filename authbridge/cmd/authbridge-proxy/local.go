@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Everything Cortex writes for a user lives under ~/.cortex, so a laptop ends up
@@ -59,6 +64,11 @@ func defaultCortexDir() (string, error) {
 // only for the CA path it captured; abctl owns the file's shape and lifecycle.
 const stateRelPath = "claude-code-state.json"
 
+// bridgeCACommonName is the subject every generated bridge CA carries
+// (genSelfSignedCA). It is what makes one of our CAs recognisable as ours, and
+// what makes two of them indistinguishable from each other.
+const bridgeCACommonName = "authbridge-tls-bridge-ca"
+
 // priorCAFromState returns the NODE_EXTRA_CA_CERTS value abctl displaced when it
 // configured a client, or "" when there is no usable record.
 //
@@ -66,8 +76,13 @@ const stateRelPath = "claude-code-state.json"
 // absent, truncated, hand-edited, or from a future abctl is not a reason to fail a
 // proxy boot. A nil JSON entry means the key was unset before abctl touched it,
 // which is also nothing to compare against.
+//
+// Note what this value is NOT: it is whatever the user's settings held before the
+// first `abctl claude-code enable`, so it is frequently not a Cortex CA at all
+// (behind a corporate proxy, commonly a system root bundle). Callers must decide
+// that from the certificate, never from the path — see staleClientCAWarning.
 func priorCAFromState(statePath string) string {
-	b, err := os.ReadFile(statePath) //nolint:gosec // operator-supplied path
+	b, err := os.ReadFile(statePath) //nolint:gosec // path is derived from $HOME
 	if err != nil {
 		return ""
 	}
@@ -83,9 +98,8 @@ func priorCAFromState(statePath string) string {
 	return ""
 }
 
-// staleClientCAWarning reports a client configured against a CA in a DIFFERENT
-// directory than the one now in force, returning slog args or nil when there is
-// nothing to say.
+// staleClientCAWarning reports a client pointed at a DIFFERENT bridge CA than the
+// one now in force, returning slog args or nil when there is nothing to say.
 //
 // This is the sandbox / redirected-$HOME failure from issue #1033. defaultCortexDir
 // resolves ca_dir from $HOME, so each $HOME gets its own generated CA — and since
@@ -96,26 +110,87 @@ func priorCAFromState(statePath string) string {
 // their agent's generic "self-signed certificate" error, which points at a
 // corporate proxy rather than at this.
 //
-// Compared by resolved directory, not by string: `..` and trailing slashes are
-// spelling. A false positive would tell someone their working setup is broken,
-// which is worse than staying quiet.
-func staleClientCAWarning(currentCADir, priorCAPath string) []any {
-	if priorCAPath == "" {
+// The comparison is on the CERTIFICATES, not on their paths, and that distinction
+// is the whole correctness of this warning:
+//
+//   - The recorded path is not necessarily one of ours. It is whatever the user had
+//     configured before enable, which behind a corporate proxy is routinely a system
+//     root bundle. Comparing directories fired on that — a setup that was never
+//     broken — and then advised --ca-dir /etc/ssl/certs, which would point the
+//     bridge's generate path at a system directory.
+//   - A path comparison could never go quiet. abctl records `prior` on the FIRST
+//     enable only and refuses to overwrite it (writeState), so a mismatched path is
+//     frozen on disk: the user restarts the client as advised, the client becomes
+//     correct, and a path-based warning still fires on every boot forever — training
+//     exactly the "ignore this message" reflex it exists to prevent.
+//
+// Reading the file fixes both. It goes quiet the moment the client's file IS the CA
+// in force (identical bytes → identical fingerprint), and it stays quiet for any
+// file that is not one of our generated CAs.
+func staleClientCAWarning(currentCADir, priorCAPath string, currentCAPEM []byte) []any {
+	if priorCAPath == "" || len(currentCAPEM) == 0 {
 		return nil
 	}
-	priorDir, perr := filepath.Abs(filepath.Dir(priorCAPath))
-	currentDir, cerr := filepath.Abs(currentCADir)
-	if perr != nil || cerr != nil || priorDir == currentDir {
+	prior := parseBridgeCA(priorCAPath)
+	current := parseBridgeCAPEM(currentCAPEM)
+	// Only speak when both sides are certificates we recognise as our own. Anything
+	// else — a corporate root, a bundle, an unreadable file, a CA we did not mint —
+	// is not evidence of this failure.
+	if prior == nil || current == nil {
 		return nil
+	}
+	if bytes.Equal(prior.Raw, current.Raw) {
+		return nil // the client already holds the CA in force
 	}
 	return []any{
 		"client_ca", priorCAPath,
-		"now_using", currentDir,
-		"why", "each $HOME gets its own generated CA and they share one name (CN=authbridge-tls-bridge-ca), " +
+		"client_ca_fingerprint", certFingerprint(prior),
+		"now_using", currentCADir,
+		"ca_fingerprint", certFingerprint(current),
+		"why", "each $HOME gets its own generated CA and they share one name (CN=" + bridgeCACommonName + "), " +
 			"so a client holding the other one rejects every forged leaf",
 		"fix", "restart the client so it re-reads the CA, or run the proxy with --ca-dir " +
 			filepath.Dir(priorCAPath) + " to keep using the CA that client already trusts",
 	}
+}
+
+// parseBridgeCA reads path and returns the certificate only if it is one of our
+// generated bridge CAs. Any failure answers nil: this drives a diagnostic, so an
+// unreadable, non-PEM, or foreign certificate must produce silence rather than a
+// claim. A file holding several certificates (a bundle) is deliberately not
+// searched — our generated ca.crt holds exactly one, so a bundle here means the
+// client was pointed at something else.
+func parseBridgeCA(path string) *x509.Certificate {
+	b, err := os.ReadFile(path) //nolint:gosec // path comes from abctl's own record
+	if err != nil {
+		return nil
+	}
+	return parseBridgeCAPEM(b)
+}
+
+// parseBridgeCAPEM is parseBridgeCA on bytes already in hand.
+func parseBridgeCAPEM(pemBytes []byte) *x509.Certificate {
+	blk, _ := pem.Decode(pemBytes)
+	if blk == nil {
+		return nil
+	}
+	crt, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil || crt.Subject.CommonName != bridgeCACommonName {
+		return nil
+	}
+	return crt
+}
+
+// certFingerprint renders a certificate's SHA-256 the way
+// `openssl x509 -noout -fingerprint -sha256` does, so the two values can be
+// compared by eye. Mirrors the forward proxy's caFingerprint.
+func certFingerprint(crt *x509.Certificate) string {
+	sum := sha256.Sum256(crt.Raw)
+	pairs := make([]string, 0, len(sum))
+	for _, b := range sum {
+		pairs = append(pairs, fmt.Sprintf("%02X", b))
+	}
+	return strings.Join(pairs, ":")
 }
 
 // builtinConfigYAML returns the built-in --local config with caDir interpolated: a

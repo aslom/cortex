@@ -16,21 +16,31 @@ HOST="${HOST:-example.com}"
 
 cd "$(dirname "$0")/.."   # authbridge/
 
+WORK="$(mktemp -d)"
+# Kill the proxy BEFORE removing the tree: the config lives under $WORK and the
+# proxy watches it for hot-reload, so deleting it out from under a live watcher
+# first is a self-inflicted error in a script whose job is to be trustworthy.
+cleanup() {
+  [[ -n "${PROXY_PID:-}" ]] && kill "$PROXY_PID" 2>/dev/null
+  wait "${PROXY_PID:-}" 2>/dev/null
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+HOME_A="$WORK/home-a"   # stands in for your real $HOME
+HOME_B="$WORK/home-b"   # stands in for a sandbox's redirected $HOME
+mkdir -p "$HOME_A" "$HOME_B"
+
 BIN="${1:-}"
 if [[ -z "$BIN" ]]; then
   echo "==> building authbridge-proxy"
-  BIN="$(mktemp -d)/authbridge-proxy"
+  # Inside $WORK so cleanup removes it; a separate mktemp -d would leak a
+  # directory on every run.
+  BIN="$WORK/authbridge-proxy"
   # Plugins are all opt-in build tags, and the built-in --local config names four
   # of them. Without the `local` profile's tags the binary starts, fails to build
   # its pipeline, and exits — so the tags are required, not an optimisation.
   go build -tags "$(go -C scripts/profile-tags run . local)" -o "$BIN" ./cmd/authbridge-proxy
 fi
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"; [[ -n "${PROXY_PID:-}" ]] && kill "$PROXY_PID" 2>/dev/null || true' EXIT
-HOME_A="$WORK/home-a"   # stands in for your real $HOME
-HOME_B="$WORK/home-b"   # stands in for a sandbox's redirected $HOME
-mkdir -p "$HOME_A" "$HOME_B"
 
 # start_proxy <home> [ca-dir] — boots against that HOME on our own ports.
 #

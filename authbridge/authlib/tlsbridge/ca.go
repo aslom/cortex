@@ -165,15 +165,21 @@ func NewGeneratedFileSource(certPath, keyPath, trustPath string) (CASource, erro
 }
 
 // caRenewBefore is how long before expiry a generated CA is replaced. The CA is
-// minted for 365 days (genSelfSignedCA) and nothing else renews it, so without a
-// margin the first sign of trouble is clients rejecting leaves — and the advice
-// that rejection carries ("restart clients started before ca_not_before") cannot
-// fix an expired CA. Replacing it while it still works keeps the swap invisible:
-// a client restarted any time in the last month already trusts the new one.
+// minted for 365 days (genSelfSignedCA) and nothing else renews it.
 //
-// A month is chosen against how long a laptop's proxy actually runs. Renewal is
-// only evaluated at startup, so the margin has to exceed a realistic uptime or a
-// long-running proxy sails past it and expires anyway.
+// The margin does not spare any client. The replacement is minted at the renewal
+// boot, so no client that started earlier can trust it — every one of them must
+// restart either way, exactly as on a first install. What the margin buys is that
+// the breakage is DIAGNOSABLE: renewing early means clients meet a fresh CA and get
+// client-rejected-ca with a ca_not_before of minutes ago, where the advice to
+// restart clients older than it is correct. Let the CA actually expire and clients
+// are rejected by a CA that cannot sign anything usable at all, reported with a
+// ca_not_before a year in the past — advice that reads as absurd and cannot work.
+//
+// A month, because renewal is only evaluated at startup: the margin has to exceed a
+// realistic proxy uptime, or a long-running process sails past the window and
+// expires anyway. Raising it costs nothing but shortening a CA's useful life;
+// lowering it below typical uptime defeats the mechanism.
 const caRenewBefore = 30 * 24 * time.Hour
 
 // EnsureFileSource loads the signing CA (tls.crt/tls.key) from caDir. With

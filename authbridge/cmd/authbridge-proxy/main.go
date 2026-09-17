@@ -70,6 +70,12 @@ var version = "dev"
 // gate is the only way to keep the demo to the listeners it actually uses.
 var localMode bool
 
+// localStatePath is abctl's state file for this --local install, resolved while
+// --local sets up and consumed later, once the bridge CA has been loaded, to warn
+// about a client pointed at a different CA. Empty when not in --local: outside it
+// there is no abctl-managed client to compare against.
+var localStatePath string
+
 // spiffeProviderNeeded reports whether any configured feature actually consumes
 // the SPIFFE Provider: top-level mTLS (needs the X509Source on both listeners)
 // or a plugin whose identity is spiffe-based (needs the JWT-SVID source — today
@@ -193,15 +199,10 @@ func main() {
 		if cerr != nil {
 			log.Fatalf("--local: resolving %q: %v", cortexDir, cerr)
 		}
-		// A client configured against a CA in some OTHER .cortex — the redirected-$HOME
-		// case, where each sandbox silently gets its own CA under the same
-		// ~/.cortex/ca name. Warn before anything binds: the client is already holding
-		// the wrong anchor, and its only symptom will be a generic
-		// "self-signed certificate" error that names neither CA. Same shape as the
-		// stale-./cortex-ca warning above, from abctl's own record of what it displaced.
-		if args := staleClientCAWarning(absCA, priorCAFromState(filepath.Join(absCortex, stateRelPath))); args != nil {
-			slog.Warn("a client was configured against a CA in a different directory than the one now in force", args...)
-		}
+		// The CA a client was configured against is compared once the CA in force has
+		// actually been loaded — see the tls_bridge setup below. It cannot happen here:
+		// the comparison is on certificates, and ours does not exist yet.
+		localStatePath = filepath.Join(absCortex, stateRelPath)
 		// Drive the normal file-based load + hot-reload path, so editing the
 		// config reloads live.
 		p, werr := writeBuiltinConfig(absCortex, absCA)
@@ -467,13 +468,25 @@ func main() {
 			// so the traffic still flows and every body-reading plugin goes blind
 			// with nothing on the client side to notice.
 			//
-			// Reached on a first install and after ~/.cortex is deleted and
-			// recreated — which the uninstall instructions tell people to do. A
-			// plain upgrade preserves the CA and is unaffected.
+			// Reached on a first install, after ~/.cortex is deleted and recreated —
+			// which the uninstall instructions tell people to do — and when the CA is
+			// RENEWED near its 365-day expiry (EnsureFileSource). The renewal case is
+			// the one nobody expects: a proxy that has been working for a year
+			// suddenly needs every client restarted, on a boot where nothing else
+			// changed. A plain upgrade preserves the CA and is unaffected.
 			slog.Warn("tls-bridge: generated self-signed CA (generate_ca=true; standalone/demo)",
 				"ca_dir", cfg.TLSBridge.CADir,
 				"hint", "clients must trust it, e.g. NODE_EXTRA_CA_CERTS="+cfg.TLSBridge.CADir+"/ca.crt",
 				"restart_clients", "agents already running trust a different CA (or none) and cannot be observed until restarted")
+		}
+		// Now that the CA in force is loaded, compare it against the one a client was
+		// configured with. This has to happen here rather than during --local setup:
+		// the comparison is on certificates, so ours must exist first. Skipped outside
+		// --local, where there is no abctl-managed client to reason about.
+		if localStatePath != "" {
+			if args := staleClientCAWarning(cfg.TLSBridge.CADir, priorCAFromState(localStatePath), src.CACertPEM()); args != nil {
+				slog.Warn("a client is configured against a different bridge CA than the one now in force", args...)
+			}
 		}
 		// Assemble the CA + platform-roots bundle for tools whose CA setting
 		// REPLACES their trust store rather than extending it (Go's SSL_CERT_FILE,

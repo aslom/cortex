@@ -300,8 +300,16 @@ authbridge-proxy --local --ca-dir /Users/you/.cortex/ca
 ```
 
 `--ca-dir` moves only the CA; the config stays at its usual path. On startup the
-proxy also warns on its own when `abctl`'s record shows a client configured against
-a CA in some other directory.
+proxy also warns on its own when a client's recorded CA file is a bridge CA whose
+fingerprint differs from the one in force.
+
+**A third cause, once a year: the CA was renewed under you.** The generated CA is
+valid for 365 days, and the proxy replaces it about a month before it expires. That
+is a new CA, so — exactly as on a first install — every client has to restart to
+pick it up. It is the one case nobody expects, because nothing else changed on that
+boot. The startup log says so plainly (`tls-bridge: generated self-signed CA`, with
+`restart_clients`), and the rejection that follows carries a `ca_not_before` of
+minutes ago rather than a year back, so the restart advice is the right advice.
 
 The other reasons you may see, and what each one asks of you:
 
