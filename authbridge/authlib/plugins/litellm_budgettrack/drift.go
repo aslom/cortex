@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/costing"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/pricing"
@@ -79,12 +80,34 @@ func (p *BudgetTrack) SetDriftLogger(l *slog.Logger) {
 // The ledger keeps using the authoritative figure regardless: drift is a diagnostic about the
 // rate TABLE, never a reason to distrust the gateway's own number.
 func (p *BudgetTrack) checkDrift(pctx *pipeline.Context, settled costing.Settled) {
+	// ONLY A GATEWAY FIGURE IS WORTH COMPARING AGAINST THE TABLE. Off that arm the charged figure
+	// IS the modelled one, so the ratio is 1.0 by construction and the comparison says nothing —
+	// and a future change that made it say something would be measuring the table against itself.
+	// Here rather than at the call site, so every precondition this check has is in one place and
+	// each one can be tested; the call-site half could not be.
+	if settled.Source != costevent.SourceGatewayHeader {
+		return
+	}
 	authoritative := settled.CostUSD
 	if authoritative <= 0 || !settled.HasModelled {
 		return // unpriced by the table is a coverage gap, already reported as one
 	}
 	inf := pctx.Extensions.Inference
 	if inf == nil || inf.Model == "" {
+		return
+	}
+	// A FLOOR CANNOT MEASURE A RATE TABLE. When the modelled figure is known-low — a truncated
+	// stream, a stop reason with no output tally, a response whose own total exceeds the
+	// counters it reported — the ratio below is short by whatever went uncounted, and every
+	// such response would be reported as rate-table drift. That is the wrong operator sent to
+	// the wrong problem: the table may be perfect and the RESPONSE was incomplete.
+	//
+	// Read off the modelled figure's own qualifier rather than Settled.Incomplete, which is a
+	// claim about the CHARGED figure and is correctly false here — the gateway's header won, and
+	// a header is exact by assertion. See Settled.ModelledIncomplete.
+	if settled.ModelledIncomplete {
+		slog.Debug("litellm-budget-track: drift not measured, the modelled figure is not an exact total",
+			"reason", settled.ModelledIncompleteReason, "model", inf.Model)
 		return
 	}
 	modelled, prov := settled.ModelledUSD, settled.ModelledProv

@@ -8,14 +8,20 @@
 // aggregator — which is the duplication cortex #910 exists to remove.
 //
 // Dependency-light on purpose: the aggregator links this on every build,
-// including the trimmed "lite" images that exclude the plugin entirely.
+// including the trimmed "lite" images that exclude the plugin entirely. authlib/pricing
+// is the one non-pipeline dependency, for the single micros bound both packages must
+// agree on (see Micros).
+//
+// THAT EDGE ADDS NOTHING ANYWHERE, and the check is `go list -deps`, not a grep for a direct
+// import: every module that links this package already linked pricing — authlib and
+// authbridge-proxy price traffic, and abctl reaches it through authlib/usage and authlib/config.
 package costevent
 
 import (
 	"encoding/json"
-	"math"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pricing"
 )
 
 // Key is the session-event key the cost record is published under.
@@ -60,6 +66,30 @@ const (
 	SourceUsageFallback = "usage-fallback"
 )
 
+// Reasons a producer REFUSED a cost figure that was on the wire. Carried in
+// RejectedReason, which is the only evidence such a figure existed at all.
+//
+// A wire string, spelled like Source and IncompleteReason: hyphenated lowercase.
+const (
+	// RejectedImplausible: a COST FIGURE larger than one inference call could plausibly be
+	// (pricing.MaxPlausibleRequestCostMicros). Two producers of it, and the reason is the
+	// same claim in both: a gateway's own header on an endpoint this pipeline could not
+	// parse, so nothing corroborated it (see costing.headerCost), or a figure MODELLED from
+	// plausible counts at an implausible rate — an operator's typo, or a rate discovered
+	// from a gateway's /model/info. The second one matters because its cause is ours: it
+	// unprices every request the rate touches while looking exactly like traffic nobody had
+	// rates for.
+	RejectedImplausible = "cost-implausible"
+
+	// RejectedImplausibleUsage: a TOKEN COUNT no request could have reported — negative, or
+	// past pricing.MaxPlausibleTokens — so every figure derived from it was refused,
+	// including the halves. Distinct from RejectedImplausible because the two say different
+	// things about where the impossibility is: there, a dollar figure nobody could have
+	// charged; here, a counter nobody could have counted, which also makes the token totals
+	// rendered beside the money untrustworthy. See costing.Settle.
+	RejectedImplausibleUsage = "usage-implausible"
+)
+
 // Event is one request's settled cost. Unlike tool-prune's event, which carries
 // rates and leaves the arithmetic to the consumer, this carries a finished
 // figure.
@@ -85,15 +115,32 @@ type Event struct {
 
 	// Settled marks a figure the producer settled deliberately, INCLUDING zero.
 	//
-	// Cost of zero used to be indistinguishable from "no figure": litellm-budget-track
-	// charges nothing for a gateway that reported a present 0 cost — a genuine free
-	// call, a cache hit or an error — and then emitted no event, because it gates on
-	// cost > 0. Decode rejected CostUSD <= 0 for the same reason. So the usage
-	// aggregator saw nothing, fell through to its rate table, and FABRICATED a cost
-	// for a call the gateway had explicitly declared free, counting it as priced.
+	// A COST OF ZERO MUST NOT READ AS "NO FIGURE". Gate a producer on cost > 0 — as
+	// litellm-budget-track's own charging does — and a gateway that reported a present 0
+	// (a genuine free call, a cache hit, an error) emits no event at all; have Decode
+	// reject CostUSD <= 0 and the same figure disappears on the read side. The usage
+	// aggregator then sees nothing, falls through to its rate table, and FABRICATES a cost
+	// for a call the gateway explicitly declared free, counting it as priced.
 	//
 	// A settled zero is now a real answer that suppresses the fallback.
 	Settled bool `json:"settled,omitempty"`
+
+	// Incomplete marks CostUSD as not an EXACT total, and IncompleteReason says which way it is
+	// inexact — see pricing's reasons: a known-LOW figure (a stream that died before its output
+	// count arrived), or one approximate in no known direction (a gateway reporting only
+	// total_tokens). A reason beside the flag rather than one bit, because a floor is bounded on
+	// one side and usually transient while an approximation is a standing property of the
+	// gateway, and collapsed they would be indistinguishable.
+	//
+	// DISCLOSURE, not adjustment. CostUSD keeps the figure and Priced still returns true, so a
+	// consumer keeps these dollars in its total: the figure is the best available, and what the
+	// flag withdraws is only the claim of EXACTNESS. It stays in every priced count — coverage
+	// answers a different question — and is disclosed alongside.
+	//
+	// ADDITIVE and omitempty: an event from an older producer decodes with Incomplete false,
+	// which is the pre-fix reading, so a consumer ignoring these fields is as correct as before.
+	Incomplete       bool   `json:"incomplete,omitempty"`
+	IncompleteReason string `json:"incomplete_reason,omitempty"`
 
 	// PromptUSD is the modelled cost of the PROMPT alone, output excluded.
 	//
@@ -115,6 +162,42 @@ type Event struct {
 	// here with OutputUSD zero, which a consumer must read as "no figure" rather than as
 	// a free completion.
 	OutputUSD float64 `json:"output_usd,omitempty"`
+
+	// UsageRefused says the response's TOKEN COUNTS were impossible — negative, or past
+	// pricing.MaxPlausibleTokens — whatever happened to the money.
+	//
+	// SEPARATE FROM RejectedReason, which is about a figure and reads as UNPRICED everywhere. When
+	// a gateway's header priced the response, that header is what the call charged whatever the
+	// counters claimed, so refusing the money would discard a real charge; but the counts are still
+	// impossible, and a client renders them beside it. Carried alone, this is the only way to say
+	// "the dollars are good, the token totals are not" — and without it that record read as fully
+	// exact, with impossible counts next to exact money.
+	//
+	// Never spendable on its own and never a reason to drop the charge: Trust() is unaffected,
+	// because trust is about the FIGURE. A consumer rendering token totals is the one that must
+	// read this.
+	UsageRefused bool `json:"usage_refused,omitempty"`
+
+	// RejectedReason names a cost figure the producer REFUSED — RejectedImplausible
+	// today — and is the ONLY evidence that a figure was on the wire at all.
+	//
+	// It exists so a refusal is a DISCLOSED COVERAGE GAP rather than silence: publishing nothing
+	// instead makes a response that reported $9,000,000,000 and one that reported nothing the same
+	// event to every consumer, hiding both the misconfiguration and the attack.
+	//
+	// NOT A FIGURE, and never clamped. CostUSD stays 0 and Priced() returns false whenever this is
+	// set, so no consumer can read a refused figure as money however the other fields arrive. A
+	// clamped figure is a wrong number wearing a right label, and worse than a named gap: the ring
+	// forgets a gap in six hours, the durable ledger keeps a wrong number for thirty days.
+	//
+	// LIMIT OF THE DISCLOSURE: it does not reach usage.Snapshot.UnpricedBy, which keys on
+	// "<endpoint> <model>" and counts requests that COULD have been priced — and this refusal
+	// lands on traffic carrying no model at all, which is why the figure could not be
+	// corroborated. The evidence is this field plus the operator warning costing emits.
+	//
+	// ADDITIVE and omitempty: an older consumer sees an unsettled zero, which is the pre-fix
+	// reading of a refused figure.
+	RejectedReason string `json:"rejected_reason,omitempty"`
 
 	// Avoided is cost that was NOT incurred. Nothing in here is spend.
 	//
@@ -186,7 +269,155 @@ func (e Event) TotalAvoidedUSD() float64 {
 // exact and JSON round-tripping lossless, which float dollars are not. A cost
 // below half a micro rounds to 0 while still counting as priced — a real
 // sub-micro charge, not an unknown one.
-func (e Event) Micros() int64 { return int64(math.Round(e.CostUSD * 1e6)) }
+//
+// BOUNDED, through the same pricing.MicrosFromUSD that prices a token tally: the header path
+// accepts any finite non-negative float, so a gateway reporting 1e13 saturated to MaxInt64 and two
+// such requests wrapped usage.Counts.Add to −2 micros — an aggregate that then sat in the durable
+// ledger for thirty days.
+//
+// The bound removes the SATURATION, not the wrap: 1024 figures at the bound wrap the same sum, and
+// no per-request bound can fix that — see MaxCostMicros.
+//
+// Zero for an out-of-range figure, and Priced returns false for the same one, so no
+// consumer reaches this value believing it is a price. NOT clamped to the bound: a
+// clamped figure is a wrong number wearing a right label, and unpriced is the honest
+// answer for a figure this package cannot represent.
+//
+// Zero for a REFUSED figure too, on the same rule. Micros and Priced must agree — a
+// consumer that read a figure here while Priced said no would add money to a total while
+// counting the request as uncovered — and RejectedReason means there is no figure to
+// convert, whatever CostUSD happens to hold.
+func (e Event) Micros() int64 {
+	if e.RejectedReason != "" {
+		return 0
+	}
+	m, ok := pricing.MicrosFromUSD(e.CostUSD)
+	if !ok {
+		return 0
+	}
+	return m
+}
+
+// Trust is the ONE answer to "what may be believed about this figure", derived from the record
+// rather than stored beside it.
+//
+// WHY IT EXISTS. Seven rounds of review added a field or a string every time a case turned up
+// where the existing labels lied: RejectedReason (two values), IncompleteReason (three), Settled,
+// and the Priced predicate that has to agree with all of them. Each addition was justified on its
+// own; together they were a taxonomy nobody designed, whose COMBINATIONS nothing enumerated —
+// while every consumer had to reconstruct the same verdict from the parts, and one of them
+// (a renderer testing PromptUSD > 0) got it wrong in a way that showed a refused figure.
+//
+// DERIVED, NOT A NEW WIRE FIELD, deliberately. A stored verdict is a second source of truth that
+// can disagree with the fields it summarises, on old records most of all: this repo's own ledger
+// keeps thirty days of them, so a field added today would be absent from most of the file and
+// every reader would need the derivation anyway. As a method it is exactly one rule, and
+// TestTrust_CoversEveryCombination enumerates the cross-product it is a rule over.
+type Trust string
+
+const (
+	// TrustExact: a figure, and the counters or the gateway support it as a total.
+	TrustExact Trust = "exact"
+	// TrustFloor: a real figure known to be LOW — an output tally that never arrived, or a
+	// response whose own total exceeds the counters that were priced. Spendable: it is the best
+	// available number and understating is disclosed, not corrected.
+	TrustFloor Trust = "floor"
+	// TrustApproximate: a figure inexact in no known direction, from a gateway that reported a
+	// total with no per-kind split. Spendable, with the caveat carried.
+	TrustApproximate Trust = "approximate"
+	// TrustRefused: a figure was on the wire and this process declined it — implausible cost, or
+	// an impossible token report. NOT spendable, and the record exists so the gap is nameable.
+	TrustRefused Trust = "refused"
+	// TrustUnpriced: no figure to believe. An unsettled zero, a negative, or one the micros unit
+	// cannot hold. NOT spendable, and distinct from a settled zero, which is a gateway saying a
+	// call was free.
+	TrustUnpriced Trust = "unpriced"
+)
+
+// WHICH QUESTION IS WHICH, because "consumers ask different questions" was half the complaint and
+// the answer is not "always ask Trust". Measured across this repo, three consumers read a money
+// field directly, and two of them are RIGHT to:
+//
+//	may this be added to a total?          Priced(), i.e. Trust().Spendable(). Never a comparison
+//	                                       against zero: a refused record can carry a number, and
+//	                                       an unsettled zero is not a free call.
+//	what caveat do I render beside it?     TrustReason(), which returns the reason belonging to the
+//	                                       verdict rather than leaving a consumer to pick a field.
+//	is there a figure for THIS cell?       PromptUSD > 0 / OutputUSD > 0 is the right test. A row
+//	                                       with no prompt figure renders blank, and that is a
+//	                                       question about presence, not about trust — abctl's
+//	                                       promptCost and outputCost are this case, deliberately.
+//	do I have a divisor?                   The number itself. litellm-budget-track's drift check
+//	                                       needs a positive authoritative figure to divide by,
+//	                                       which is arithmetic, not a verdict.
+//
+// The bug that made this worth writing down was none of the four: a renderer showed a prompt figure
+// for a record whose token report had been refused. That was fixed where it belonged, at the
+// producer — the halves are dropped with the whole — because a consumer cannot be expected to
+// re-derive a producer's refusal from the parts.
+
+// Spendable reports whether a figure carrying this trust may be added to a total.
+//
+// The whole point of one verdict: every admission guard in the system — the ledger writer's, the
+// aggregator's Decode, a budget's accumulate — asks this one question, and the disclosure of HOW
+// approximate a spendable figure is travels separately, in the reason.
+func (tr Trust) Spendable() bool {
+	switch tr {
+	case TrustExact, TrustFloor, TrustApproximate:
+		return true
+	default:
+		return false
+	}
+}
+
+// Trust returns what may be believed about this record's figure.
+//
+// ORDERED MOST-DAMNING FIRST, and the order is the semantics. A refusal beats everything, because
+// the figure was declined; unpriced beats the qualifiers, because there is nothing to qualify; and
+// a floor beats an approximation when both could apply, which under-claims precision rather than
+// over-claiming it — the same ordering pricing.IncompleteReason itself uses.
+func (e Event) Trust() Trust {
+	if e.RejectedReason != "" {
+		return TrustRefused
+	}
+	if e.CostUSD < 0 {
+		return TrustUnpriced
+	}
+	if _, ok := pricing.MicrosFromUSD(e.CostUSD); !ok {
+		return TrustUnpriced
+	}
+	if !(e.CostUSD > 0 || e.Settled) {
+		return TrustUnpriced
+	}
+	if !e.Incomplete {
+		return TrustExact
+	}
+	switch e.IncompleteReason {
+	case pricing.ReasonSplitUnreported:
+		return TrustApproximate
+	default:
+		// Every other reason names a figure known to be LOW — and so does an EMPTY one, which is
+		// a producer that set Incomplete without saying why. Treating that as approximate would
+		// let a missing reason quietly upgrade the claim.
+		return TrustFloor
+	}
+}
+
+// TrustReason is the record's own explanation for a verdict that is not exact, or "" when it is.
+//
+// One accessor rather than a consumer choosing between two fields by inspecting a third: which of
+// RejectedReason and IncompleteReason applies is decided by Trust, and asking the record removes
+// the chance of rendering an incomplete-reason on a refused record or the reverse.
+func (e Event) TrustReason() string {
+	switch e.Trust() {
+	case TrustRefused:
+		return e.RejectedReason
+	case TrustFloor, TrustApproximate:
+		return e.IncompleteReason
+	default:
+		return ""
+	}
+}
 
 // Priced reports whether this record carries a usable dollar figure.
 //
@@ -197,12 +428,23 @@ func (e Event) Micros() int64 { return int64(math.Round(e.CostUSD * 1e6)) }
 // A settled zero is priced: the producer means "this call was free". An unsettled zero is
 // not: it means nobody priced this, and rendering $0.00 for it would report unpriced
 // traffic as free. A negative figure is never a price.
-func (e Event) Priced() bool {
-	if e.CostUSD < 0 {
-		return false
-	}
-	return e.CostUSD > 0 || e.Settled
-}
+//
+// Nor is a figure OUT OF RANGE for the micros unit every consumer accumulates in —
+// at or above pricing.MaxCostMicros, or NaN, or an infinity. This is the validation point:
+// the producer's header path accepts any finite non-negative float, and nothing
+// downstream re-derives a total once a saturated value has been added to it. Unpriced
+// rather than clamped, for the reason in Micros.
+//
+// Nor is a figure the producer REFUSED. RejectedReason is checked here rather than left to
+// the producer's zeroing of CostUSD, because this predicate is the one every consumer
+// already asks — the ledger writer's admission guard and the aggregator's Decode both go
+// through it — so one line here means a refused figure cannot read as spend anywhere, even
+// if a future producer sets the reason and forgets to drop the number.
+// ONE RULE, IN ONE PLACE: this is Trust().Spendable(), not a second copy of the same reasoning.
+// The four conditions above are still the rule — they are written out in Trust, where the
+// combinations they form are enumerable — and keeping a parallel implementation here is exactly
+// how two predicates that must agree stop agreeing.
+func (e Event) Priced() bool { return e.Trust().Spendable() }
 
 // Record pulls the cost record off a session event, whether or not it carries a price.
 //
