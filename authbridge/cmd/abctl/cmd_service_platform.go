@@ -128,6 +128,14 @@ func renderUnitFor(goos string, p servicePaths) string {
 	// No After=network-online.target: that target is not part of a user manager, and
 	// every listener here is loopback, so ordering against the network would be a
 	// dependency that never arrives.
+	//
+	// TimeoutStopSec=20: without it, `systemctl --user stop` falls back to systemd's
+	// own default (90s at the time of writing, undocumented here and not ours to rely
+	// on). The proxy's own graceful shutdown deadline is 15s
+	// (cmd/authbridge-proxy/main.go); 20s gives it deliberate headroom to finish that
+	// drain — mirroring the macOS supervisor's 20s wait for the same proxy shutdown
+	// before it insists with a kill (supervise.go) — rather than depending on a value
+	// this file never states.
 	return `[Unit]
 Description=Cortex local proxy (authbridge-proxy)
 Documentation=https://github.com/rossoctl/cortex
@@ -140,6 +148,7 @@ Type=simple
 ExecStart=` + shQuote(p.binary) + ` --config ` + shQuote(p.configFile) + `
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=20
 StandardOutput=append:` + p.logFile + `
 StandardError=append:` + p.logFile + `
 

@@ -80,6 +80,14 @@ func TestRenderUnit_BothPlatforms(t *testing.T) {
 				t.Errorf("unit missing %q:\n%s", want, u)
 			}
 		}
+		// TimeoutStopSec must exceed the proxy's own 15s graceful-shutdown deadline
+		// (cmd/authbridge-proxy/main.go), explicitly — not by accident of whatever
+		// systemd's own default happens to be. See the rationale comment above
+		// renderUnitFor's linux branch.
+		if !strings.Contains(u, "TimeoutStopSec=") {
+			t.Error("no explicit TimeoutStopSec; stop relies on systemd's undocumented default, " +
+				"which could end up shorter than the proxy's 15s drain")
+		}
 		// StartLimit* must sit in [Unit]. systemd moved them there in v229 and
 		// deprecated them in [Service], where they can be ignored outright —
 		// silently voiding the crash-loop throttle.
