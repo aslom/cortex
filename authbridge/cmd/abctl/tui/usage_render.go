@@ -349,7 +349,26 @@ func renderCostSummary(snap *usage.Snapshot) string {
 		// only one of them means the traffic was free.
 		return "COST unavailable"
 	}
-	cell := fmt.Sprintf("COST $%.4f", float64(snap.Totals.CostMicros)/1e6)
+	// Integer cent rounding, not %.2f on float64(micros)/1e6: 1_005_000 micros
+	// is exactly $1.005 but the float is 1.0049999… so %.2f prints $1.00.
+	// A positive-but-sub-cent total falls back to "<$0.01" so small does not
+	// read as free — same floor rule formatUSDCell applies at $0.0001.
+	micros := snap.Totals.CostMicros
+	var cell string
+	switch {
+	case micros < 0:
+		// Go's / and % truncate toward zero, so a negative would render
+		// "$0.-1" through the integer-cents branch below.
+		cell = "COST unavailable"
+	case micros > 0 && micros < 5_000:
+		cell = "COST <$0.01"
+	default:
+		cents := micros / 10_000
+		if micros%10_000 >= 5_000 {
+			cents++
+		}
+		cell = fmt.Sprintf("COST $%d.%02d", cents/100, cents%100)
+	}
 	// Compared against PRICEABLE requests, not all of them. Requests counts every
 	// proxied response — MCP tool calls, health checks, anything else the sidecar
 	// handled — while only inference can ever be priced, so the old ratio left a

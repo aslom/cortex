@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -1137,6 +1138,31 @@ func TestKeyOf_SameInstantSameKey(t *testing.T) {
 	}
 }
 
+// TestPadLeft — right-aligns numeric cells so decimal points and digit
+// magnitudes line up under each other. Blank stays blank so the eye can
+// still scan for missing values.
+func TestPadLeft(t *testing.T) {
+	cases := []struct {
+		in    string
+		width int
+		want  string
+	}{
+		{"1.23s", 10, "     1.23s"},
+		{"", 10, ""},
+		{"exactly10c", 10, "exactly10c"},
+		{"toolongforthisfield", 10, "toolongforthisfield"},
+		// Display-width padding: "1,048,576(−12.3k)" is 19 bytes but 17
+		// display columns (U+2212 is 3 bytes, 1 column). A byte-length guard
+		// would skip padding at width 19 and leave the cell left-shifted.
+		{"1,048,576(−12.3k)", 19, "  1,048,576(−12.3k)"},
+	}
+	for _, tc := range cases {
+		if got := padLeft(tc.in, tc.width); got != tc.want {
+			t.Errorf("padLeft(%q, %d) = %q, want %q", tc.in, tc.width, got, tc.want)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Sorting (#865)
 // ---------------------------------------------------------------------------
@@ -1204,10 +1230,12 @@ func TestSort_DurationIsNumericNotLexical(t *testing.T) {
 	}
 
 	// The rendered cells confirm the values really are the ones being compared.
-	if got := cellAt(t, m, 0, colDuration); got != "90ms" {
+	// TrimSpace strips the right-align padding — asserting on the value, not the
+	// display format.
+	if got := strings.TrimSpace(cellAt(t, m, 0, colDuration)); got != "90ms" {
 		t.Errorf("first ascending DURATION cell = %q, want 90ms", got)
 	}
-	if got := cellAt(t, m, 2, colDuration); got != "1.20s" {
+	if got := strings.TrimSpace(cellAt(t, m, 2, colDuration)); got != "1.20s" {
 		t.Errorf("last ascending DURATION cell = %q, want 1.20s", got)
 	}
 }
@@ -1390,7 +1418,7 @@ func TestSort_TokensIsNumericAcrossThePair(t *testing.T) {
 	if first.event.Host != "big" || first.event.Phase != pipeline.SessionRequest {
 		t.Errorf("first row = %s/%s, want big/request", first.event.Host, first.event.Phase)
 	}
-	if got := cellAt(t, m, 0, colTokens); got != "1,048,576" {
+	if got := strings.TrimSpace(cellAt(t, m, 0, colTokens)); got != "1,048,576" {
 		t.Errorf("first TOKENS cell = %q, want 1,048,576", got)
 	}
 }

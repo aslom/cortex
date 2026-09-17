@@ -306,7 +306,7 @@ func TestRenderCostSummary(t *testing.T) {
 				Totals: usage.Counts{Requests: 40, PriceableRequests: 40, PricedRequests: 40, CostMicros: 1_842_100},
 				Priced: true,
 			},
-			want: "COST $1.8421",
+			want: "COST $1.84",
 		},
 		// PriceableRequests is the denominator now, not Requests: the latter counts
 		// non-inference traffic that can never be priced, so a correct deployment read
@@ -318,7 +318,7 @@ func TestRenderCostSummary(t *testing.T) {
 				Totals: usage.Counts{Requests: 57, PriceableRequests: 57, PricedRequests: 42, CostMicros: 1_842_100},
 				Priced: true,
 			},
-			want: "COST $1.8421 (42/57 priced)",
+			want: "COST $1.84 (42/57 priced)",
 		},
 		{
 			name: "one priced request out of many",
@@ -326,7 +326,27 @@ func TestRenderCostSummary(t *testing.T) {
 				Totals: usage.Counts{Requests: 100, PriceableRequests: 100, PricedRequests: 1, CostMicros: 500},
 				Priced: true,
 			},
-			want: "COST $0.0005 (1/100 priced)",
+			want: "COST <$0.01 (1/100 priced)",
+		},
+		{
+			// float64(1_005_000)/1e6 is 1.0049999…; %.2f on it prints $1.00.
+			// Integer cent rounding rounds the half-cent up to $1.01.
+			name: "half-cent boundary rounds up under integer rounding",
+			snap: usage.Snapshot{
+				Totals: usage.Counts{Requests: 1, PriceableRequests: 1, PricedRequests: 1, CostMicros: 1_005_000},
+				Priced: true,
+			},
+			want: "COST $1.01",
+		},
+		{
+			// Go's / and % truncate toward zero, so integer-cent rendering
+			// on a negative would print "$0.-1".
+			name: "negative micros renders unavailable rather than malformed",
+			snap: usage.Snapshot{
+				Totals: usage.Counts{Requests: 1, PriceableRequests: 1, PricedRequests: 1, CostMicros: -10_000},
+				Priced: true,
+			},
+			want: "COST unavailable",
 		},
 	}
 	for _, tc := range tests {
