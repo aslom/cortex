@@ -49,19 +49,25 @@ context abctl uses. There's no separate auth.
 
 ### Connecting to an existing port-forward
 
-Press `l` on the Namespaces pane to skip the cluster entirely and
-connect straight to `http://localhost:9094` — the session API's default
-port on the local host. Useful when you already have your own
-`kubectl port-forward` running, when abctl runs inside the mesh, or when
-your kubeconfig can't list pods but a tunnel is up.
+Press `l` on the Namespaces pane to skip the cluster entirely and connect to a
+session API on this host. Where that is depends on whether you have a Cortex
+installed: it goes to the address in `~/.cortex/config.yaml` when one answered
+there (47601 by default), and otherwise to `http://localhost:9094`, the
+in-cluster default port. The second case is the useful one when you already have
+your own `kubectl port-forward` running, when abctl runs inside the mesh, or
+when your kubeconfig can't list pods but a tunnel is up.
 
 abctl probes `/v1/sessions` before switching panes, so an endpoint with
 nothing listening surfaces as a footer error and leaves you in the
 picker rather than dropping you into a silently empty session view.
 `Esc` from a session entered this way returns to the Namespaces pane
-(there's no pod to go back to). Pipeline editing (`e`) is unavailable,
-same as `--endpoint` mode: the cluster fields needed to fetch and apply
-the ConfigMap aren't populated.
+(there's no pod to go back to).
+
+Pipeline editing (`e`) follows the same split. Connected to this machine's
+Cortex, `e` edits its config file — see [Editing the pipeline](#editing-the-pipeline).
+Connected to `:9094` through somebody else's port-forward, there is neither a pod
+identity to resolve a ConfigMap from nor a local config file to write, so `e`
+flashes a hint instead.
 
 ### Power-user / scripting bypass
 
@@ -468,7 +474,7 @@ Layered on top of all of them:
 | `↑ ↓` / `k j`, `b`/`f`, `u`/`d`, `g`/`G` | key help | scroll the overlay |
 | `↑ ↓` / `k j` | picker, list | navigate rows |
 | `Enter` | namespaces | open the namespace |
-| `l` | namespaces | connect directly to `localhost:9094` |
+| `l` | namespaces | connect directly to this machine's Cortex, or to `localhost:9094` when none is installed |
 | `Enter` | pods | port-forward + connect |
 | `Esc` | pods | back to namespaces |
 | `r` | namespaces, pods | reload agent list from cluster |
@@ -748,10 +754,13 @@ automatically — no manual cleanup needed.
 
 ### Hot-reload window
 
-The framework reloads via a config-file watcher; kubelet syncs
-ConfigMap edits into the pod's mount within ~60s, then the framework
-debounces and reloads. Total wall-clock from `apply` to reload is
-typically under 90s. abctl shows a spinner during the wait.
+The framework reloads via a config-file watcher, so how long the wait is depends
+on how the edit reaches that file. In a cluster, kubelet syncs ConfigMap edits
+into the pod's mount within ~60s and the framework then debounces and reloads —
+typically under 90s wall-clock from apply. Locally there is nothing to sync: the
+proxy is already watching the file abctl wrote, so a reload normally lands in
+about a second. The overlay says which of the two you are waiting on. abctl shows
+a spinner either way.
 
 The poller terminates with one of:
 
@@ -759,13 +768,16 @@ The poller terminates with one of:
   time.
 - **Failure** — `reloads_failed` increments past its baseline; the
   framework's `last_error` is shown.
-- **Unreachable** — 5 consecutive transport errors against
-  `:9093/reload/status` (port-forward dropped, framework crashed,
-  etc.) surface as `reload status endpoint unreachable` after a few
-  seconds rather than waiting the full deadline.
-- **Timeout** — none of the above within 120s. Triggers an
-  auto-rollback so the on-disk ConfigMap doesn't drift from the
-  running pipeline.
+- **Unreachable** — 5 consecutive transport errors against `/reload/status`
+  surface as `reload status endpoint unreachable` after a few seconds rather than
+  waiting the full deadline. The endpoint is the port-forward's `:9093` for a pod
+  and the local proxy's `stats.address` otherwise, so the message asks the
+  question that fits: a dropped port-forward or crashed framework in the cluster,
+  or simply whether the local proxy is still running.
+- **Timeout** — none of the above within 120s. Triggers an auto-rollback so the
+  stored config — the ConfigMap, or the local file — doesn't drift from the
+  running pipeline. The ceiling is the same in both; a local reload just
+  reaches a verdict long before it.
 
 ## Plugin dependencies
 
@@ -788,8 +800,9 @@ abctl surfaces these in three places:
 - **Plugin detail pane**: per-dependency rows with ✓/✗ and the
   satisfying upstream's position when applicable.
 - **Pre-apply validation in the editor**: catches missing/misordered
-  Requires before kubectl apply (~50ms vs ~60s framework roundtrip).
-  See the "Pre-apply validation" subsection above.
+  Requires before the write goes out (~50ms, against a framework roundtrip of
+  ~60s in a cluster or ~1s locally). See the "Pre-apply validation" subsection
+  above.
 
 The framework's own validateRelationships is the source of truth and
 runs at every reload. abctl's checks are the fast-feedback layer.
