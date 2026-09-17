@@ -602,11 +602,24 @@ edit you never made.
 
 Local editing is offered whenever the endpoint on screen is this machine's
 Cortex: a bare `abctl` that auto-connected to it, `[l]` from the picker, or an
-explicit `--endpoint` aimed at its session API. A local Cortex merely *running*
-is not enough — while you are looking at a pod, `e` edits the pod.
+explicit `--endpoint` aimed at its session API. Loopback spellings are
+interchangeable, so `--endpoint http://localhost:47601` and
+`http://127.0.0.1:47601` both match a config bound to either. A local Cortex
+merely *running* is not enough — while you are looking at a pod, `e` edits the
+pod.
 
 If neither target applies, `e` says so and names the remedy instead of starting
 an edit it cannot finish.
+
+Two cases it declines rather than guesses at:
+
+- **A symlinked `~/.cortex/config.yaml`.** Renaming over the link would replace
+  it with a regular file and detach a deliberate dotfiles setup; writing the
+  link's target instead would land outside the directory the proxy's reloader
+  watches, so the edit would apply and never reload. `e` refuses before
+  `$EDITOR` opens and tells you to point `--config` at the real path.
+- **A config with no top-level `pipeline:` key.** There is nothing to edit, and
+  inventing the block is not the editor's job.
 
 The single edit flow covers four operations:
 - **Edit a value** — change a config field of an existing plugin

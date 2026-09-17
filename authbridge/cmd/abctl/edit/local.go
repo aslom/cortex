@@ -31,7 +31,30 @@ type FileStore struct {
 // Original and InnerYAML are the same bytes here. That is not redundancy: it
 // is what makes Build a no-op, and it means the rollback path (re-Apply the
 // bytes Fetch returned) restores the file exactly.
+//
+// ctx is unused: this is local file I/O with no cancellable wait, unlike the
+// kubectl round-trips ConfigMapStore makes. Kept in the signature because Store
+// is one interface and a context-free method on it would be the odd one out.
 func (s FileStore) Fetch(ctx context.Context) (*FetchedPipeline, error) {
+	// Refuse a symlink rather than quietly doing the wrong thing with it.
+	//
+	// Apply is a rename over Path, which would replace the link with a regular
+	// file and permanently detach a config someone deliberately points at their
+	// dotfiles. Resolving the link instead is worse: the proxy's reloader
+	// watches filepath.Dir of the path it was GIVEN and matches on
+	// filepath.Base, so writing the link's target — in another directory —
+	// fires no event, and the edit would apply, never reload, time out at
+	// PollDeadline and roll back. Failing here, before $EDITOR opens, costs the
+	// operator nothing and names the fix.
+	if fi, err := os.Lstat(s.Path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		target, rerr := filepath.EvalSymlinks(s.Path)
+		if rerr != nil {
+			target = "its target"
+		}
+		return nil, fmt.Errorf(
+			"%s is a symlink to %s; edit that file directly, or start the proxy with --config %s so it watches the real path",
+			s.Path, target, target)
+	}
 	b, err := os.ReadFile(s.Path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", s.Path, err)
@@ -49,13 +72,16 @@ func (s FileStore) Fetch(ctx context.Context) (*FetchedPipeline, error) {
 }
 
 // Describe names the file, not "ConfigMap", and states the real latency: the
-// proxy's fsnotify watcher plus its reload debounce, not a kubelet sync.
+// proxy's fsnotify watcher plus its reload debounce, not a kubelet sync. The
+// unreachable hint drops the port-forward, which does not exist here — the
+// stats endpoint is the local proxy itself.
 func (s FileStore) Describe() Target {
 	return Target{
 		Noun: "config file",
 		// Kept short enough to render on one line in the overlay's 76-column
 		// box, like the ConfigMap hint it sits opposite.
-		WaitHint: "the proxy watches this file; reloads land in about a second",
+		WaitHint:        "the proxy watches this file; reloads land in about a second",
+		UnreachableHint: "is the local proxy still running?",
 	}
 }
 
@@ -81,6 +107,8 @@ func (s FileStore) Build(orig *FetchedPipeline, newInner []byte) ([]byte, error)
 //
 // The temp's name must not be the config's own, or the reloader (which
 // watches the directory and filters on the base name) would fire on it.
+//
+// ctx is unused, as in Fetch: a write has no cancellable wait.
 func (s FileStore) Apply(ctx context.Context, payload []byte) (time.Time, error) {
 	dir := filepath.Dir(s.Path)
 
@@ -133,5 +161,18 @@ func (s FileStore) Apply(ctx context.Context, payload []byte) (time.Time, error)
 		return time.Time{}, fmt.Errorf("replace %s: %w", s.Path, err)
 	}
 	tmpName = "" // renamed away; nothing left to clean up
+
+	// Sync the directory too. rename(2) orders the data against the entry, but
+	// the ENTRY itself is not durable until its directory is synced — a crash
+	// here would otherwise lose the edit outright, which is a worse outcome
+	// than the torn write the temp-and-rename dance exists to prevent.
+	//
+	// Best-effort on purpose: the rename has already succeeded, so the edit is
+	// live and the proxy will reload it. Returning an error now would report a
+	// failure for a change that did take effect.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return applyTime, nil
 }

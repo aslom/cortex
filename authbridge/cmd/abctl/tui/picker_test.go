@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -667,6 +668,68 @@ func TestEditUsesTheLocalFileStoreWhenConnectedLocally(t *testing.T) {
 	// local write would be confirmed against somebody else's reload status.
 	if mm.editState.statusURL != "http://127.0.0.1:47602" {
 		t.Errorf("statusURL = %q, want the local stats URL", mm.editState.statusURL)
+	}
+}
+
+// dialURL emits http://127.0.0.1:47601 for the built-in config, but an
+// operator types --endpoint http://localhost:47601. An exact string compare
+// refused that and told them to "point abctl at a Cortex running on this
+// machine" — which they had just done.
+func TestSameEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"http://127.0.0.1:47601", "http://127.0.0.1:47601", true},
+		{"http://localhost:47601", "http://127.0.0.1:47601", true},
+		{"http://127.0.0.1:47601", "http://localhost:47601", true},
+		{"http://[::1]:47601", "http://127.0.0.1:47601", true},
+		// Path is not part of the comparison, so a trailing slash still names
+		// the same server. apiclient.New trims it anyway; this holds even if it
+		// stops.
+		{"http://localhost:47601", "http://localhost:47601/", true},
+		// A different port is a different proxy, loopback or not.
+		{"http://localhost:9094", "http://127.0.0.1:47601", false},
+		// A non-loopback host must match outright: a config bound to a LAN
+		// address is not "this machine" for anyone else's purposes.
+		{"http://192.168.1.10:47601", "http://127.0.0.1:47601", false},
+		{"http://192.168.1.10:47601", "http://192.168.1.10:47601", true},
+		{"http://cortex.example:47601", "http://localhost:47601", false},
+		{"://nonsense", "http://localhost:47601", false},
+	} {
+		if got := sameEndpoint(tc.a, tc.b); got != tc.want {
+			t.Errorf("sameEndpoint(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// The end-to-end consequence of the above: connecting with the human spelling
+// still gets the local file store.
+func TestEditUsesLocalStoreAcrossLoopbackSpellings(t *testing.T) {
+	srv := sessionAPIStub(t)
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("mode: proxy-sidecar\npipeline:\n  outbound: []\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mm := localConnected(t, srv.URL)
+	// The connected endpoint is 127.0.0.1:<port> (httptest); the config-derived
+	// localEndpoint spells the same server as localhost.
+	u, err := url.Parse(mm.client.Endpoint())
+	if err != nil {
+		t.Fatalf("parse endpoint: %v", err)
+	}
+	mm.localEndpoint = "http://localhost:" + u.Port()
+	mm.localConfigPath = cfgPath
+	mm.localStatsURL = "http://127.0.0.1:47602"
+
+	updated, cmd := mm.Update(keyRune('e'))
+	mm = updated.(*model)
+	if cmd == nil {
+		t.Fatal("`e` should start an edit despite the differing loopback spelling")
+	}
+	if _, ok := mm.editState.store.(edit.FileStore); !ok {
+		t.Fatalf("store is %T, want edit.FileStore", mm.editState.store)
 	}
 }
 

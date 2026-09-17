@@ -30,13 +30,108 @@ session:
   enabled: true
 `
 
+// fixtureLocalConfigPipelineLast is the shape the REAL ~/.cortex/config.yaml
+// has: mode, listener, stats, tls_bridge, then pipeline: with nothing after it.
+// That makes FindPipelineRange take its nextKeyLine == 0 branch (end =
+// len(innerYAML)) — the branch production always takes, and the one
+// fixtureLocalConfig never reaches because it has a trailing session: key.
+const fixtureLocalConfigPipelineLast = `# Built-in config for: authbridge-proxy --local
+mode: proxy-sidecar
+stats:
+  address: 127.0.0.1:47602
+pipeline:
+  outbound:
+    - name: inference-parser
+    - name: tool-prune
+`
+
 func writeFixture(t *testing.T, mode os.FileMode) string {
 	t.Helper()
+	return writeFixtureContent(t, fixtureLocalConfig, mode)
+}
+
+func writeFixtureContent(t *testing.T, content string, mode os.FileMode) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(fixtureLocalConfig), mode); err != nil {
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
 	return path
+}
+
+// The real config ends at pipeline:, so the subtree runs to EOF. Exercised
+// separately because every other test here has a key after pipeline: and so
+// takes the other branch of FindPipelineRange.
+func TestFileStore_PipelineLastRunsToEndOfFile(t *testing.T) {
+	path := writeFixtureContent(t, fixtureLocalConfigPipelineLast, 0o600)
+	s := FileStore{Path: path}
+	ctx := context.Background()
+
+	fp, err := s.Fetch(ctx)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if fp.PipelineEnd != len(fp.InnerYAML) {
+		t.Errorf("PipelineEnd = %d, want %d (end of file)", fp.PipelineEnd, len(fp.InnerYAML))
+	}
+	subtree := string(fp.InnerYAML[fp.PipelineStart:fp.PipelineEnd])
+	if !strings.HasPrefix(subtree, "pipeline:\n") || !strings.Contains(subtree, "tool-prune") {
+		t.Errorf("subtree wrong:\n%s", subtree)
+	}
+
+	// And a round trip still keeps everything before it intact.
+	newInner := Splice(fp.InnerYAML, fp.PipelineStart, fp.PipelineEnd,
+		[]byte("pipeline:\n  outbound:\n    - name: mcp-parser\n"))
+	payload, err := s.Build(fp, newInner)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if _, err := s.Apply(ctx, payload); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	want := "# Built-in config for: authbridge-proxy --local\n" +
+		"mode: proxy-sidecar\n" +
+		"stats:\n  address: 127.0.0.1:47602\n" +
+		"pipeline:\n  outbound:\n    - name: mcp-parser\n"
+	if string(got) != want {
+		t.Errorf("round trip =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// A symlinked config is refused at Fetch, before $EDITOR opens.
+//
+// Neither alternative is acceptable: renaming over the link would replace it
+// with a regular file and detach a deliberate dotfiles setup, while writing the
+// resolved target would land outside the directory the proxy's reloader
+// watches, so the edit would never reload.
+func TestFileStore_RefusesASymlinkedConfig(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-config.yaml")
+	if err := os.WriteFile(real, []byte(fixtureLocalConfigPipelineLast), 0o600); err != nil {
+		t.Fatalf("write real: %v", err)
+	}
+	link := filepath.Join(dir, "config.yaml")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err := FileStore{Path: link}.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("want a refusal for a symlinked config")
+	}
+	for _, want := range []string{"symlink", real, "--config"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	// The link must survive being refused.
+	if fi, lerr := os.Lstat(link); lerr != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("Fetch disturbed the symlink")
+	}
 }
 
 // The file IS the runtime YAML, with no ConfigMap wrapper to unpick — so

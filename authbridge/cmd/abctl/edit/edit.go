@@ -158,20 +158,27 @@ type PolledMsg struct {
 	Result PollResult
 }
 
-// pollDeadline bounds how long PollCmd waits for an in-pod reload to
-// reach a terminal state. Picked to outlast the worst-case kubelet
-// ConfigMap sync (~60s) plus the framework's drain window (30s) plus
-// jitter, while still surfacing a stuck reload in a reasonable time.
-const pollDeadline = 120 * time.Second
+// PollDeadline bounds how long PollCmd waits for a reload to reach a terminal
+// state. Picked to outlast the worst-case kubelet ConfigMap sync (~60s) plus
+// the framework's drain window (30s) plus jitter, while still surfacing a stuck
+// reload in a reasonable time. A local file reload lands far sooner, but the
+// deadline is a ceiling, not a wait.
+//
+// Exported so the "reload not observed in …" message can name the real value.
+// It was a hardcoded "120s" in the TUI, which would have quietly started lying
+// the moment this constant moved.
+const PollDeadline = 120 * time.Second
 
 // PollCmd returns a tea.Cmd that polls /reload/status until the framework
-// reload completes (success or failure) or pollDeadline elapses. Emits
+// reload completes (success or failure) or PollDeadline elapses. Emits
 // PolledMsg. The deadline is enforced internally; the caller's ctx is
 // only used for parent-cancellation (e.g. process shutdown).
-func PollCmd(ctx context.Context, statusURL string, applyTime time.Time) tea.Cmd {
+//
+// unreachableHint comes from the Store's Target — see PollUntilReloaded.
+func PollCmd(ctx context.Context, statusURL string, applyTime time.Time, unreachableHint string) tea.Cmd {
 	return func() tea.Msg {
-		c, cancel := context.WithTimeout(ctx, pollDeadline)
+		c, cancel := context.WithTimeout(ctx, PollDeadline)
 		defer cancel()
-		return PolledMsg{Result: PollUntilReloaded(c, statusURL, applyTime)}
+		return PolledMsg{Result: PollUntilReloaded(c, statusURL, applyTime, unreachableHint)}
 	}
 }

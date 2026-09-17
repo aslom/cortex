@@ -5,6 +5,28 @@ import (
 	"time"
 )
 
+// Target is how a Store describes itself to the operator watching the edit.
+//
+// Every field exists because the other backend's words were wrong for it. A
+// local edit that reported "Fetching ConfigMap…" named a thing that does not
+// exist; the cluster path's "up to 120s while kubelet syncs" is off by two
+// orders of magnitude against a file the proxy is already watching; and
+// blaming a dropped port-forward makes no sense where there is no
+// port-forward. None of it is inferable from the overlay, and having the store
+// say it keeps the renderer from type-switching on the backend.
+type Target struct {
+	// Noun completes "Fetching %s…", "Applying to %s…" and "Restoring
+	// previous %s…", so it reads as a thing, not a sentence.
+	Noun string
+	// WaitHint explains why the reload takes as long as it does. Rendered
+	// parenthesized under "Waiting for hot-reload…".
+	WaitHint string
+	// UnreachableHint completes "reload status endpoint unreachable (%s)" when
+	// the poll gives up after consecutive transport failures. Phrased as the
+	// question the operator should chase.
+	UnreachableHint string
+}
+
 // Store is where a pipeline lives: the editor fetches the runtime YAML from
 // one, splices the user's edit into it, and applies it back.
 //
@@ -17,23 +39,6 @@ import (
 // The seam is here rather than at Runner because Runner is "a thing that
 // invokes kubectl" — a file backend cannot implement it. What the flow
 // actually needs is fetch / rewrap / apply, which is what this is.
-// Target is how a Store describes itself to the operator watching the edit.
-//
-// Both fields exist because both were wrong in the other backend's words. A
-// local edit that reported "Fetching ConfigMap…" named a thing that does not
-// exist, and the cluster path's "up to 120s while kubelet syncs" is off by two
-// orders of magnitude against a file the proxy is already watching. Neither is
-// a detail the overlay can infer, and having the store say it keeps the
-// renderer from type-switching on the backend.
-type Target struct {
-	// Noun completes "Fetching %s…", "Applying to %s…" and "Restoring
-	// previous %s…", so it reads as a thing, not a sentence.
-	Noun string
-	// WaitHint explains why the reload takes as long as it does. Rendered
-	// parenthesized under "Waiting for hot-reload…".
-	WaitHint string
-}
-
 type Store interface {
 	// Fetch reads the runtime YAML and locates the pipeline subtree in it.
 	Fetch(ctx context.Context) (*FetchedPipeline, error)
@@ -77,8 +82,9 @@ func (s ConfigMapStore) Fetch(ctx context.Context) (*FetchedPipeline, error) {
 
 func (s ConfigMapStore) Describe() Target {
 	return Target{
-		Noun:     "ConfigMap",
-		WaitHint: "this can take up to 120s while kubelet syncs the ConfigMap",
+		Noun:            "ConfigMap",
+		WaitHint:        "this can take up to 120s while kubelet syncs the ConfigMap",
+		UnreachableHint: "port-forward dropped or framework down?",
 	}
 }
 

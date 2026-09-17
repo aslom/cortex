@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,7 +115,7 @@ func (m *model) localEndpointOr() string {
 // is the in-cluster 9094, and matching that would claim a hand-run
 // port-forward to a POD is this machine's config file.
 func (m *model) pipelineStore() (edit.Store, string) {
-	if m.client != nil && m.localEndpoint != "" && m.client.Endpoint() == m.localEndpoint &&
+	if m.client != nil && m.localEndpoint != "" && sameEndpoint(m.client.Endpoint(), m.localEndpoint) &&
 		m.localConfigPath != "" && m.localStatsURL != "" {
 		return edit.FileStore{Path: m.localConfigPath}, m.localStatsURL
 	}
@@ -125,6 +127,48 @@ func (m *model) pipelineStore() (edit.Store, string) {
 		}, m.statusURL
 	}
 	return nil, ""
+}
+
+// sameEndpoint reports whether two session-API URLs name the same server.
+//
+// Not a string compare. localEndpoint is built by dialURL, which emits
+// "http://127.0.0.1:47601" for the built-in config, while `--endpoint
+// http://localhost:47601` is the same proxy spelled the way a human types it.
+// An exact compare rejected that and flashed "…or point abctl at a Cortex
+// running on this machine" at an operator who had just done exactly that —
+// the same misleading refusal this whole change exists to remove.
+//
+// Loopback names are folded together; every other host must match outright, so
+// a config bound to a specific LAN address is not confused with anything else.
+// Ports are compared as written: two proxies on one host differ only by port.
+func sameEndpoint(a, b string) bool {
+	ua, err := url.Parse(a)
+	if err != nil {
+		return false
+	}
+	ub, err := url.Parse(b)
+	if err != nil {
+		return false
+	}
+	if ua.Scheme != ub.Scheme || ua.Port() != ub.Port() {
+		return false
+	}
+	ha, hb := ua.Hostname(), ub.Hostname()
+	if isLoopbackHost(ha) && isLoopbackHost(hb) {
+		return true
+	}
+	return ha == hb
+}
+
+// isLoopbackHost covers the spellings of "this machine" that appear in a
+// config, on a command line, and in Go's own URL output. net.IP.IsLoopback
+// handles 127.0.0.0/8 and ::1; "localhost" is not an IP, so it is named.
+func isLoopbackHost(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 // localProbeTimeout bounds the pre-connect reachability check for `[l]`.
@@ -1148,7 +1192,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.editState.applyTime = msg.ApplyTime
 		m.editState.phase = editPhaseWaiting
-		return m, withGen(m.editState.generation, edit.PollCmd(m.ctx, m.editState.statusURL, msg.ApplyTime))
+		return m, withGen(m.editState.generation, edit.PollCmd(
+			m.ctx, m.editState.statusURL, msg.ApplyTime,
+			describeTarget(m.editState.store).UnreachableHint))
 
 	case genPolledMsg:
 		// Drop stale (different gen), fully-aborted (phase=Done), or
@@ -1186,7 +1232,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// change detected" path is a future option.
 			reason := msg.Result.LastError
 			if msg.Result.Status == edit.PollTimeout {
-				reason = "reload not observed in 120s"
+				// The real constant, not a literal: a hardcoded "120s" would
+				// start lying the moment edit.PollDeadline moved.
+				reason = "reload not observed in " + edit.PollDeadline.String()
 			}
 			origManifest, mErr := m.editState.store.Build(
 				m.editState.fetched,
