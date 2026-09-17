@@ -72,6 +72,11 @@ func (s *frameSpy) OnResponseFrame(ctx context.Context, _ *pipeline.Context, fra
 type phaseSpy struct {
 	mu    sync.Mutex
 	calls int
+	// body is what pctx.ResponseBody held when the phase ran. Counting calls cannot see it, so the
+	// two body arms could disagree about what "the response body" means without failing anything —
+	// and they do disagree, deliberately: whole document on the non-SSE arm, trailing chunk on SSE.
+	// This is the field that makes each of those a claim rather than an accident.
+	body string
 }
 
 func (s *phaseSpy) Name() string { return "phase-spy" }
@@ -84,6 +89,7 @@ func (s *phaseSpy) OnRequest(_ context.Context, _ *pipeline.Context) pipeline.Ac
 func (s *phaseSpy) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	s.mu.Lock()
 	s.calls++
+	s.body = string(pctx.ResponseBody)
 	s.mu.Unlock()
 	pctx.Observe("response phase")
 	return pipeline.Action{Type: pipeline.Continue}
@@ -102,6 +108,13 @@ func (s *lifecycleSpy) terminalFrame() string {
 	s.frames.mu.Lock()
 	defer s.frames.mu.Unlock()
 	return s.frames.lastFrame
+}
+
+// phaseBody returns what pctx.ResponseBody held when the response phase ran.
+func (s *lifecycleSpy) phaseBody() string {
+	s.phases.mu.Lock()
+	defer s.phases.mu.Unlock()
+	return s.phases.body
 }
 
 func lifecycleServer(t *testing.T) (*Server, *lifecycleSpy, *session.Store) {
@@ -217,6 +230,58 @@ func TestExtProc_NonSSEBodyIsDispatchedWhole(t *testing.T) {
 	// split across two messages produced TotalTokens 0 and no cost record at all.
 	if got, want := spy.terminalFrame(), `{"a":1,"b":2}`; got != want {
 		t.Errorf("terminal frame = %q, want %q: the body arrived in two messages and the parser was handed a fragment", got, want)
+	}
+}
+
+// TestExtProc_WhatTheResponsePhaseSees pins the one thing the two body arms disagree about, in both
+// directions.
+//
+// RunResponse skips only StreamingResponder plugins, so a shipped pipeline's opa, cpex, lineage and
+// sparc DO run in the response phase and read pctx.ResponseBody there. On the non-SSE arm that is
+// now the whole document — the point of accumulating. On SSE it is the carry plus the final message:
+// the tail of the stream, not the turn, because a whole streamed turn is exactly the body that runs
+// into the truncation cap, and its events reach a plugin as frames instead. Both shapes are
+// deliberate and neither was observable while phaseSpy only counted its calls, so a change in
+// either direction passed silently.
+func TestExtProc_WhatTheResponsePhaseSees(t *testing.T) {
+	cut := strings.Index(sseTurn, "\"tail\"") + 3 // mid-field, inside the second event
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		bodies      []string
+		want        string
+	}{
+		{
+			name:        "a JSON body reaches the phase whole",
+			contentType: "application/json",
+			bodies:      []string{`{"a":1,`, `"b":2}`},
+			want:        `{"a":1,"b":2}`,
+		},
+		{
+			// The turn's first event completes inside the first message, so it is dispatched as a
+			// frame and gone from the buffer; what reaches the phase is the event that straddled the
+			// boundary plus the one after it.
+			name:        "an SSE body reaches the phase as its trailing chunk",
+			contentType: "text/event-stream",
+			bodies:      []string{sseTurn[:cut], sseTurn[cut:]},
+			want:        "data: {\"seq\":2,\"tail\":\"x\"}\n\ndata: {\"seq\":3}\n\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, spy, _ := lifecycleServer(t)
+			reqs := responseScript(tc.contentType, tc.bodies, false)
+
+			stream := &mockStream{ctx: context.Background(), requests: reqs}
+			_ = srv.Process(stream)
+
+			phases, _, _, _ := spy.snapshot()
+			if phases != 1 {
+				t.Fatalf("response phases = %d, want 1: this row asserts what the ONE phase was handed", phases)
+			}
+			if got := spy.phaseBody(); got != tc.want {
+				t.Errorf("the phase saw %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

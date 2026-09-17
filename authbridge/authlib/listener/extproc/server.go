@@ -916,6 +916,18 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 		// below is carry + THIS MESSAGE, and nothing else caps the message: the maxBodySize check in
 		// Process covers the REQUEST body only. appendBoundedBody puts both under the same ceiling
 		// the non-SSE arm has, warning and truncating rather than growing without limit.
+		//
+		// SO THE PHASE BELOW SEES ONLY THE TRAILING CHUNK HERE, and that is deliberate rather than
+		// an oversight in the once-per-response change: this field holds carry + this message, never
+		// the whole turn, so a non-streaming plugin reading it gets the end of the stream and not a
+		// document. A whole streamed turn is precisely the body that runs into the truncation cap, and
+		// the SSE interface is the FRAME dispatch — a plugin that needs every event implements
+		// OnResponseFrame, which is how both cost owners read one. Pinned from the plugin's side in
+		// server_lifecycle_test.go so a change in either direction is a decision, not a drift.
+		//
+		// AND IT IS NOT A ONE-WORD CHANGE, if anyone wants the whole turn here: appending to this
+		// field instead of replacing it duplicates the straddling bytes, because the joined value
+		// already carries them (measured: data: {"seq":2,"ta then data: {"seq":2,"tail":"x"}).
 		pctx.ResponseBody = appendBoundedBody(nil, withCarriedSSETail(pctx, body))
 	} else {
 		pctx.ResponseBody = appendBoundedBody(pctx.ResponseBody, body)
@@ -933,8 +945,9 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 	// would decide N times on N prefixes of a document, and their Invocation rows would all land
 	// in the recorded snapshot. It is also the same "wait for the whole body" rule the frame
 	// dispatch and the session record already follow. No double CHARGE was possible — both cost owners are StreamingResponders,
-	// which RunResponse skips — so what this protects is the audit trail and any plugin that
-	// reads pctx.ResponseBody expecting a document.
+	// which RunResponse skips — so what this protects is the audit trail and, on the non-SSE arm
+	// above, any plugin that reads pctx.ResponseBody expecting a document. On the SSE arm that field
+	// is the trailing chunk by design; the arm says why.
 	//
 	// AND THE FLUSH CANNOT DOUBLE IT. A stream that never says end-of-stream never reaches this
 	// branch, so the flush runs the phase once itself; a stream that does reach it is RECORDED
@@ -1282,17 +1295,19 @@ func immediateResponse(httpStatus int, reason string) *extprocv3.ProcessingRespo
 
 // appendBoundedBody appends src to dst, stopping at maxBodySize.
 //
-// The per-message check in Process bounds one message; this bounds the SUM, which is what a
-// STREAMED response mode can make arbitrarily large. Truncating rather than refusing keeps the
-// prefix a parser may still be able to read — and says so, because a JSON body cut short parses
-// as nothing and the silence would otherwise look like a response that carried no usage.
+// This is the ONLY ceiling a response body has: Process's per-message maxBodySize check is in the
+// request-body case, and both callers here are on the response path. So this bounds a single
+// message AND the sum, the latter being what a STREAMED response mode can make arbitrarily large.
+// Truncating rather than refusing keeps the prefix a parser may still be able to read — and says
+// so, because a JSON body cut short parses as nothing and the silence would otherwise look like a
+// response that carried no usage.
 func appendBoundedBody(dst, src []byte) []byte {
 	// COPIED, NOT ALIASED, even for the first message. Returning src hands back the protobuf
 	// message's own slice, so a later append into its spare capacity would write into memory
 	// Envoy's decoder owns — harmless today, because that message is discarded after this
 	// call, and not a property worth resting on. An oversized first message falls through to
-	// the warning path below rather than being truncated silently; Process rejects a single
-	// message past maxBodySize before this is reached, so that path is defence in depth.
+	// the room logic below, which truncates it to the cap and warns; that path is reachable
+	// rather than defence in depth, because nothing upstream of it bounds a response message.
 	if len(dst) == 0 && len(src) <= maxBodySize {
 		return append([]byte(nil), src...)
 	}
