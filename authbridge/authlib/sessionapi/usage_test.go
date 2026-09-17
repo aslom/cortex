@@ -1096,6 +1096,51 @@ func TestHandleUsage_ASymbolicWindowExplainsAResolutionRefusal(t *testing.T) {
 	}
 }
 
+// TestHandleUsage_ALedgerWindowDoesNotJudgeResolutionAgainstTheRing is the fourth rejection, and the
+// one that refused a legitimate request.
+//
+// There are FOUR resolution rejections and two of them depend on the window. The first version of this
+// classified one — "exceeds the window" — so the other window-dependent one still fired against a span
+// the caller never named: window=7d&resolution=7m was refused because 6h does not divide by 7m, while
+// 7m divides seven days exactly (1440 buckets) AND the ledger answers a symbolic window as one bucket
+// without reading the resolution at all. A bound from a window nobody asked for, enforced on a code
+// path that was not going to run.
+//
+// Both halves are asserted, because the refusal is correct in the other deployment: with no ledger the
+// ring really does slice its 6h maximum, and 7m really cannot label those buckets honestly.
+func TestHandleUsage_ALedgerWindowDoesNotJudgeResolutionAgainstTheRing(t *testing.T) {
+	at := insideToday(t, 3*time.Hour)
+
+	t.Run("with a ledger, the resolution is not read and must not be judged", func(t *testing.T) {
+		led := ledgerWithOneCostedMinute(t, at, "gw.example", "m", 1.0)
+		ts, _ := newTestServer(t, WithUsage(usage.New()), WithCostLedger(led))
+
+		status, body := fetchUsage(t, ts.URL, "?window=7d&resolution=7m")
+
+		if status != http.StatusOK {
+			t.Errorf("status = %d, want 200: %s\n7m divides 7d exactly, and this window is answered as one bucket that never reads it",
+				status, body)
+		}
+	})
+
+	t.Run("without a ledger, the ring's span is what gets sliced", func(t *testing.T) {
+		ts, _ := newTestServer(t, WithUsage(usage.New()))
+
+		status, body := fetchUsage(t, ts.URL, "?window=7d&resolution=7m")
+
+		if status != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: the ring serves its maximum here and 7m cannot label those buckets honestly", status)
+		}
+		// Restated, because the span it could not divide is not the one the caller named.
+		if !strings.Contains(body, "window=7d") {
+			t.Errorf("body %q does not name the window the caller asked for", body)
+		}
+		if strings.Contains(body, "7m") {
+			t.Errorf("body %q echoes the caller's resolution parameter", body)
+		}
+	})
+}
+
 // TestHandleUsage_OnlyTheWindowBoundRejectionIsRestated is the other half of that message.
 //
 // Conditioning the restatement on Symbolic() ALONE overwrote the reason for every other resolution
@@ -1135,8 +1180,9 @@ func TestHandleUsage_OnlyTheWindowBoundRejectionIsRestated(t *testing.T) {
 // polling client.
 //
 // A ledger window returns one bucket whose length is the window's own, and int truncation makes that
-// zero at the start of the day. BucketSeconds is omitempty, so zero vanishes from the wire rather than
-// reading as wrong, and a client dividing by it for a burn rate divides by zero.
+// zero at the start of the day. The field carries no omitempty — the comment that said otherwise was
+// wrong — so the zero is serialised as `"bucketSeconds":0` and a client deriving a burn rate divides by
+// it. This floor is the only thing stopping that.
 func TestBucketSecondsFor_IsNeverZero(t *testing.T) {
 	start := time.Date(2026, 9, 17, 0, 0, 0, 0, time.Local)
 	for _, tc := range []struct {

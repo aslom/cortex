@@ -761,11 +761,79 @@ func ParseWindowSpec(s string, now time.Time) (Spec, error) {
 	return Spec{Label: label, Dur: d}, nil
 }
 
-// ErrResolutionExceedsWindow reports the one resolution rejection whose REASON depends on which
-// window is being served: for a symbolic window the span is the ring's maximum, not the span the
-// caller named, so sessionapi restates it. The other three rejections are self-explanatory and must
-// keep their own wording.
-var ErrResolutionExceedsWindow = errors.New("resolution exceeds the window")
+// resolutionError is a resolution rejection that knows whether its reason came from the WINDOW.
+//
+// A TYPE RATHER THAN A SENTINEL PER CASE, because the caller's question is "did this bound come from
+// a window the requester actually named?" and there are two rejections for which the answer is no —
+// the span being too short, and the span not dividing evenly. The first version of this exported one
+// sentinel for the first of them, so the second still reached a caller as an unclassifiable
+// errors.New: window=7d&resolution=7m was refused because 6h does not divide by 7m, even though 7m
+// divides seven days exactly and the ledger path never reads the resolution at all.
+//
+// Keeping the flag on the error means a FIFTH check has to choose a side here, in the constructor,
+// instead of being classified by a switch somewhere else that nobody updates.
+type resolutionError struct {
+	msg string
+	// fromWindow is true when the rejection depends on the span being served rather than on the
+	// resolution alone. IsResolutionWindowError is how callers ask.
+	fromWindow bool
+}
+
+func (e *resolutionError) Error() string { return e.msg }
+
+// IsResolutionWindowError reports whether a ParseResolution error's reason depends on the window it
+// was validated against, rather than on the resolution alone.
+//
+// sessionapi asks because a symbolic window is validated against a span the caller never named — the
+// ring's maximum — so those two rejections need restating and the other two must keep their own
+// wording.
+func IsResolutionWindowError(err error) bool {
+	var re *resolutionError
+	return errors.As(err, &re) && re.fromWindow
+}
+
+// parseResolutionAgainstStorage runs the checks that hold for ANY window: the value parses, and it is
+// a whole number of storage buckets. Both callers start here, so the split is where the two kinds of
+// rejection are separated rather than a fact restated in two places.
+func parseResolutionAgainstStorage(s string) (time.Duration, error) {
+	if s == "" {
+		return BucketWidth, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		// Does not echo the caller's value — see ParseGroup.
+		return 0, &resolutionError{msg: "bad resolution (want a duration such as 1m, 5m or 30m)"}
+	}
+	if d < BucketWidth {
+		return 0, &resolutionError{msg: fmt.Sprintf("resolution %s is finer than the %s storage bucket", d, BucketWidth)}
+	}
+	if d%BucketWidth != 0 {
+		return 0, &resolutionError{msg: fmt.Sprintf("resolution %s is not a multiple of %s", d, BucketWidth)}
+	}
+	return d, nil
+}
+
+// ParseResolutionUnbounded validates a resolution that will not be used to slice anything, so only
+// the checks that do not depend on a window apply.
+//
+// FOR THE WINDOW THAT IS ANSWERED AS ONE BUCKET. A symbolic window served from the cost ledger
+// returns a single bucket spanning the whole window and never reads the resolution — so validating it
+// against the RING's maximum refused requests that were fine: window=7d&resolution=7m came back 400
+// because 6h does not divide by 7m, while 7m divides seven days exactly (1440 buckets). The bound was
+// a property of a window the caller had not named and of a code path that was not going to run.
+//
+// The two remaining checks are still meaningful, because they are about the STORAGE bucket rather
+// than the window: a resolution finer than BucketWidth or not a multiple of it cannot be honoured by
+// any window. And a malformed value is still refused rather than ignored, so a typo in a parameter
+// this path does not read is not silently accepted.
+//
+// NOT ParseResolution(s, MaxWindow), which is the shape I first wrote and which reproduces the very
+// defect: MaxWindow is 360 minutes, so a 7m resolution fails the divisibility check against it just
+// as it did against the 6h window. "Unbounded" has to mean the checks are skipped, not that a wide
+// window is passed.
+func ParseResolutionUnbounded(s string) (time.Duration, error) {
+	return parseResolutionAgainstStorage(s)
+}
 
 // ParseResolution validates a resolution parameter — the width of the buckets
 // the caller wants back, as opposed to the window's total span.
@@ -779,19 +847,9 @@ var ErrResolutionExceedsWindow = errors.New("resolution exceeds the window")
 // than BucketWidth is an error rather than a silent upgrade: returning coarser
 // data than asked for would make a client's axis labels wrong.
 func ParseResolution(s string, window time.Duration) (time.Duration, error) {
-	if s == "" {
-		return BucketWidth, nil
-	}
-	d, err := time.ParseDuration(s)
+	d, err := parseResolutionAgainstStorage(s)
 	if err != nil {
-		// Does not echo the caller's value — see ParseGroup.
-		return 0, errors.New("bad resolution (want a duration such as 1m, 5m or 30m)")
-	}
-	if d < BucketWidth {
-		return 0, fmt.Errorf("resolution %s is finer than the %s storage bucket", d, BucketWidth)
-	}
-	if d%BucketWidth != 0 {
-		return 0, fmt.Errorf("resolution %s is not a multiple of %s", d, BucketWidth)
+		return 0, err
 	}
 	if d > window {
 		// WRAPPED IN A SENTINEL, because one caller has to tell this rejection apart from the other
@@ -800,7 +858,10 @@ func ParseResolution(s string, window time.Duration) (time.Duration, error) {
 		// than on the window kind, or the restatement overwrites the reason for "finer than the
 		// bucket", "not a multiple" and "unparseable" as well — which is the same defect it exists
 		// to fix, pointing the caller at a bound they did not hit.
-		return 0, fmt.Errorf("%w: resolution %s exceeds the %s window", ErrResolutionExceedsWindow, d, window)
+		return 0, &resolutionError{
+			msg:        fmt.Sprintf("resolution %s exceeds the %s window", d, window),
+			fromWindow: true,
+		}
 	}
 	// The window must divide by the resolution, or the NEWEST bucket is a lie.
 	//
@@ -820,7 +881,11 @@ func ParseResolution(s string, window time.Duration) (time.Duration, error) {
 	// above interpolate only a re-stringified time.Duration, which cannot carry
 	// arbitrary bytes; this one needs neither operand to be actionable.
 	if window%d != 0 {
-		return 0, errors.New("resolution does not divide the window evenly (the newest bucket would be shorter than the width reported for it)")
+		return 0, &resolutionError{
+			msg: "resolution does not divide the window evenly (the newest bucket would be " +
+				"shorter than the width reported for it)",
+			fromWindow: true,
+		}
 	}
 	return d, nil
 }

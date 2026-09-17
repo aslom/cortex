@@ -92,11 +92,27 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	// ledger-backed bucket, where the requested resolution is not read at all, or as
 	// the ring's maximum; validating "7d" against seven days would accept a 24-hour
 	// bucket and then return a response whose own BucketSeconds contradicted it.
+	// WHICH SPAN A RESOLUTION IS JUDGED AGAINST DEPENDS ON WHO WILL SERVE IT.
+	//
+	//   - a duration window: the ring slices it, so the caller's own span is the bound.
+	//   - a symbolic window WITH a ledger: one bucket spanning the whole window, and the resolution
+	//     is never read — so only the storage-bucket checks can mean anything. Judging it against the
+	//     ring's maximum refused requests that were fine: window=7d&resolution=7m came back 400
+	//     because 6h does not divide by 7m, while 7m divides seven days exactly and the code path
+	//     that cared was not going to run.
+	//   - a symbolic window with NO ledger: the ring's maximum really is what gets sliced, so that is
+	//     the bound, and the rejection is restated below because the caller never named that span.
 	resSpan := spec.Dur
+	oneBucket := spec.Symbolic() && s.ledger != nil
 	if spec.Symbolic() {
 		resSpan = usage.MaxWindow
 	}
-	resolution, err := usage.ParseResolution(r.URL.Query().Get("resolution"), resSpan)
+	var resolution time.Duration
+	if oneBucket {
+		resolution, err = usage.ParseResolutionUnbounded(r.URL.Query().Get("resolution"))
+	} else {
+		resolution, err = usage.ParseResolution(r.URL.Query().Get("resolution"), resSpan)
+	}
 	if err != nil {
 		// RESTATED FOR A SYMBOLIC WINDOW, because ParseResolution can only name the span it was
 		// GIVEN: asking for window=7d&resolution=24h came back "resolution 24h exceeds the 6h0m0s
@@ -108,13 +124,18 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		// does not parse — and told all three of them about a 6h ceiling they never reached. That is
 		// the same defect this restatement exists to fix.
 		//
+		// AND THERE ARE TWO WINDOW-DEPENDENT REJECTIONS, NOT ONE, which the first version of this
+		// missed: the span being too short, and the span not dividing evenly. Asking
+		// usage.IsResolutionWindowError rather than naming a sentinel means a third one is classified
+		// where it is constructed instead of here.
+		//
 		// AND IT INTERPOLATES NOTHING FROM THE QUERY. The first version of this message put the raw
 		// resolution parameter in the body, which is a reflection primitive on an unauthenticated
 		// endpoint — see writeUsageError, whose whole doc is that requirement, and note that the
 		// branch runs precisely BECAUSE those bytes failed validation. spec.Label is safe here and
 		// only here: it is one of two constants on the symbolic path, while for a duration window
 		// ParseWindowSpec echoes the caller's own spelling into it.
-		if spec.Symbolic() && errors.Is(err, usage.ErrResolutionExceedsWindow) {
+		if spec.Symbolic() && usage.IsResolutionWindowError(err) {
 			err = fmt.Errorf("resolution too coarse for window=%s: a symbolic window is answered as "+
 				"one bucket from the cost ledger, or from the ring's %s maximum where there is no "+
 				"ledger, so %s is the coarsest resolution available",
@@ -364,8 +385,10 @@ func degradedFrom(c costledger.Caveats) *usage.Degraded {
 //
 // A ledger window returns ONE bucket spanning the whole window, so this is the window's own length —
 // and truncating that to an int makes it ZERO in the first second of the local day, once a day, for
-// every polling client. BucketSeconds is omitempty, so the zero also disappears from the wire rather
-// than looking wrong, and anything dividing by it for a burn rate divides by zero.
+// every polling client. And `bucketSeconds` has NO omitempty — I claimed it did, twice, in the commit
+// that added this floor — so a zero is serialised as `"bucketSeconds":0` for every client to divide
+// by. That makes this floor the only defence rather than the second one, which is a reason to keep it
+// rather than a reason to relax it.
 //
 // A separate function so the boundary is testable: the handler reads time.Now() directly, so there is
 // no seam through which a test could stand at midnight.
