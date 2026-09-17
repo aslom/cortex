@@ -487,3 +487,62 @@ func TestSettle_AHeaderKeepsItsFigureAndTheCountsAreStillRefused(t *testing.T) {
 		t.Errorf("avoided = %+v on a response whose counters were refused: the saving is a slice of those same counters", avoided)
 	}
 }
+
+// TestSettle_ARefusedWholeLeavesNoHalfStanding is the hole the pair guard left.
+//
+// That guard requires BOTH halves, so it closed only the case where each is individually under the
+// ceiling and their sum is over. When one half ITSELF breaks the ceiling, pricing.Cost refuses that
+// half, the pair test cannot fire, and the sibling is published on a record that reads unpriced —
+// where abctl's renderer, which tests OutputUSD > 0 rather than Priced(), displays it as money.
+//
+// Driven at $1 per token, the same six-order-of-magnitude rate typo as the fixture above, in both
+// directions: whichever half is the larger one is the one Cost refuses, and the survivor is drawn
+// from the same condemned table at the same prompt total.
+func TestSettle_ARefusedWholeLeavesNoHalfStanding(t *testing.T) {
+	var r pricing.Rates
+	r.Base[pricing.TierInput], r.Set[pricing.TierInput] = 1.0, true
+	r.Base[pricing.TierOutput], r.Set[pricing.TierOutput] = 1.0, true
+	tab, err := pricing.NewTable([]pricing.Entry{{Host: "*", Model: "*", Rates: r, Prov: pricing.ProvConfigured}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := pricing.NewRegistry(tab)
+
+	for _, tc := range []struct {
+		name          string
+		input, output int
+	}{
+		// $15,000 prompt half refused, $5,000 output half was published.
+		{"the prompt half is the one over the ceiling", 15000, 5000},
+		// The mirror image, which the same guard has to cover.
+		{"the output half is the one over the ceiling", 5000, 15000},
+		// Neither half over, sum over: the case the original pair test was written for, kept
+		// here so one test states the whole rule.
+		{"neither half over, the pair is", 8000, 8000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pctx := ctx(map[string]string{"Content-Type": "application/json"}, tc.input, tc.output)
+
+			got := Settle(pctx, reg)
+
+			// Precondition: the whole really was refused for magnitude, which is what makes the
+			// halves suspect. Without this the row could pass on a table that priced nothing.
+			if got.RejectedReason != costevent.RejectedImplausible {
+				t.Fatalf("RejectedReason = %q, want %q: this row is not exercising a refused whole",
+					got.RejectedReason, costevent.RejectedImplausible)
+			}
+			if got.HasPrompt || got.PromptUSD != 0 {
+				t.Errorf("HasPrompt = %v PromptUSD = %v, want false/0: a half drawn from the rate table that produced an impossible whole is not attributable",
+					got.HasPrompt, got.PromptUSD)
+			}
+			if got.HasOutput || got.OutputUSD != 0 {
+				t.Errorf("HasOutput = %v OutputUSD = %v, want false/0", got.HasOutput, got.OutputUSD)
+			}
+			// The record is what a renderer reads, and it does no Priced() gating of the halves.
+			if rec := NewRecord(got, nil); rec.PromptUSD != 0 || rec.OutputUSD != 0 {
+				t.Errorf("record PromptUSD = %v OutputUSD = %v, want 0/0: this is the figure abctl would display for a refused request",
+					rec.PromptUSD, rec.OutputUSD)
+			}
+		})
+	}
+}

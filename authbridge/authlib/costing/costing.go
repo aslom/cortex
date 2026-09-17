@@ -490,7 +490,27 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	// deliberate: where the output tier carried tokens with no rate, Cost refuses the whole and
 	// the prompt half is the only figure anyone can attribute. Only the pair can smuggle a figure
 	// past a bound neither half broke.
-	if out.HasPrompt && out.HasOutput && !pricing.PlausibleRequestCostUSD(out.PromptUSD+out.OutputUSD) {
+	//
+	// AND THE SUM TEST ALONE LEFT THE LONE SURVIVOR OF A REFUSED WHOLE STANDING. It requires BOTH
+	// halves, so it closed only the case where each is individually under the ceiling. When one half
+	// itself breaks the ceiling, Cost refuses that half, this test cannot fire, and the SIBLING is
+	// published on a record that reads unpriced. Measured at $1/token: input 15,000 / output 5,000
+	// refuses the whole ($20,000) and the prompt half ($15,000), while the output half comes back
+	// priced at $5,000 — so the record said cost $0, RejectedReason cost-implausible, output
+	// $5,000, and abctl's renderer, which tests OutputUSD > 0 rather than Priced(), displayed
+	// $5,000.00 for a request this package had refused. Symmetric with the tiers swapped.
+	//
+	// So a MAGNITUDE refusal of the whole refuses both halves. What the ceiling condemns is the RATE
+	// TABLE — no request costs $20,000, so the rate that says it did is wrong — and both halves are
+	// drawn from that same table at the same prompt total, which is exactly the reasoning already
+	// applied to an impossible COUNT above. It stays distinct from RefusalNoRate, where a lone
+	// survivor is the legitimate case (TestSettle_OnePricedHalfSurvivesAlone).
+	//
+	// RefusalUnrepresentable is deliberately NOT listed: Cost refuses any half past $10,000 as
+	// implausible long before micros stop being representable near $9x10^9, so an unrepresentable
+	// whole cannot leave a priced half. Adding it would be a clause no traffic can reach.
+	if refusal == pricing.RefusalImplausibleTotal ||
+		out.HasPrompt && out.HasOutput && !pricing.PlausibleRequestCostUSD(out.PromptUSD+out.OutputUSD) {
 		out.PromptUSD, out.HasPrompt = 0, false
 		out.OutputUSD, out.HasOutput = 0, false
 	}
