@@ -35,6 +35,21 @@ type pagingState struct {
 	// requests — each one costs a page of decode.
 	loading bool
 
+	// wantGen is the request generation this state will accept a response for, taken from
+	// the model's monotonic counter. A response from any other generation is stale and
+	// dropped — see applyOlderPage.
+	wantGen uint64
+
+	// fetched counts pages successfully stitched in. Zero means this state is TENTATIVE:
+	// [o] created it but no older page ever arrived, so it must be torn down rather than
+	// left suppressing live appends for a timeline that never moved.
+	fetched int
+
+	// returning is set while [t]'s tail snapshot is in flight. The state deliberately
+	// survives until that snapshot LANDS, so a failed fetch leaves the window described
+	// honestly rather than silently resuming appends onto a middle page.
+	returning bool
+
 	// droppedNewer records that the cap has evicted at least one page from the newer end,
 	// so the footer can say the timeline no longer reaches the present. Without it the
 	// operator would see a timeline that simply stops, which is the failure this whole
@@ -65,20 +80,14 @@ func (m *model) loadOlderPage() tea.Cmd {
 		return nil
 	}
 
-	st := m.paging[id]
-	if st == nil {
-		// First [o] for this session: the events already held are page one, whatever
-		// mixture of snapshot and streamed events they are.
-		st = &pagingState{pageSizes: []int{len(held)}}
-		if m.paging == nil {
-			m.paging = map[string]*pagingState{}
-		}
-		m.paging[id] = st
-	}
-	if st.loading {
+	st := m.paging[id] // nil until the first page actually lands
+	if st != nil && (st.loading || st.returning) {
 		return nil
 	}
 
+	// EVERY reason to refuse is checked before any state is created. Creating it first and
+	// validating after left a session paged-back — live appends suppressed, timeline
+	// silently frozen — after a single [o] that could never have fetched anything.
 	oldest := held[0].Seq
 	if oldest == 0 {
 		// A proxy that predates Seq. Paging cannot work against it, and saying so beats
@@ -86,23 +95,65 @@ func (m *model) loadOlderPage() tea.Cmd {
 		m.setFlash("this proxy is too old to page back")
 		return nil
 	}
-	if st.serverOldest != 0 && oldest <= st.serverOldest {
+	if st != nil && st.serverOldest != 0 && oldest <= st.serverOldest {
 		m.setFlash("at the beginning of the session")
 		return nil
 	}
 
+	if st == nil {
+		// The events already held are page one, whatever mixture of snapshot and streamed
+		// events they are. Tentative until a page arrives: fetched stays 0, and
+		// applyOlderPage tears this down if nothing comes back.
+		st = &pagingState{pageSizes: []int{len(held)}}
+		if m.paging == nil {
+			m.paging = map[string]*pagingState{}
+		}
+		m.paging[id] = st
+	}
+
+	// One counter for the whole model, not per state: a fresh state after [t] would start
+	// its own generation at the same number an in-flight request already carries, and the
+	// stale response would be accepted as current.
+	m.pageGen++
+	st.wantGen = m.pageGen
 	st.loading = true
 	m.setFlash("loading older…")
-	return m.olderPageCmd(id, oldest)
+	return m.olderPageCmd(id, oldest, st.wantGen)
 }
 
-func (m *model) olderPageCmd(id string, before uint64) tea.Cmd {
+func (m *model) olderPageCmd(id string, before, gen uint64) tea.Cmd {
 	return func() tea.Msg {
 		view, err := m.client.GetSessionPage(m.ctx, id, before, apiclient.SnapshotEventLimit)
 		if err != nil {
-			return errMsg{where: "older page " + id, err: err}
+			// Its OWN message type, not errMsg. errMsg's handler decides severity by
+			// string-prefixing `where`, and anything it does not recognise flips the whole
+			// view into a terminal connection failure — so one failed page reported a dead
+			// stream that was in fact healthy, and left loading set, refusing every retry.
+			return olderPageFailedMsg{id: id, gen: gen, err: err}
 		}
-		return olderPageLoadedMsg{id: id, events: view.Events, serverOldest: view.OldestSeq}
+		return olderPageLoadedMsg{
+			id: id, gen: gen, events: view.Events, serverOldest: view.OldestSeq,
+		}
+	}
+}
+
+// failOlderPage clears the in-flight marker so [o] can be retried, and tears the state down
+// if this was the request that created it.
+func (m *model) failOlderPage(msg olderPageFailedMsg) {
+	st := m.paging[msg.id]
+	if st == nil || st.wantGen != msg.gen {
+		return
+	}
+	st.loading = false
+	m.setFlash("older page failed: " + msg.err.Error())
+	m.abandonIfTentative(msg.id, st)
+}
+
+// abandonIfTentative removes paging state that never managed to load a page, so live
+// appends resume for a timeline that never actually moved off its tail.
+func (m *model) abandonIfTentative(id string, st *pagingState) {
+	if st.fetched == 0 {
+		delete(m.paging, id)
 	}
 }
 
@@ -114,11 +165,20 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 		// flight. Dropping it is correct: the state it would extend is gone.
 		return
 	}
+	// A response from a superseded request. Reachable: [t] tears the state down while a
+	// page is still in flight, the tail snapshot lands, and a fresh [o] builds new state —
+	// at which point the old response would be stitched in as if it were current. On a
+	// single-event page the timestamp guard below cannot catch that (one event's first and
+	// last timestamps are equal), so the generation is what makes it impossible.
+	if msg.gen != st.wantGen {
+		return
+	}
 	st.loading = false
 	st.serverOldest = msg.serverOldest
 
 	if len(msg.events) == 0 {
 		m.setFlash("at the beginning of the session")
+		m.abandonIfTentative(msg.id, st)
 		return
 	}
 
@@ -139,6 +199,7 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 	// cannot tell a re-created session from a trimmed one, and this check does not need to.
 	if len(held) > 0 && msg.events[len(msg.events)-1].At.After(held[0].At) {
 		m.setFlash("session restarted — [t] for the tail")
+		m.abandonIfTentative(msg.id, st)
 		return
 	}
 
@@ -161,6 +222,7 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 		st.droppedNewer = true
 	}
 	m.events[msg.id] = merged
+	st.fetched++
 
 	// The count is decremented rather than recomputed from the server's total, because
 	// the total counts events at BOTH ends: once the cap has dropped a newer page,
@@ -176,17 +238,32 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 	m.setFlash("")
 }
 
-// returnToTail is [t]: discard the paged window and refetch the newest page, which also
-// resumes live appends for this session.
+// returnToTail is [t]: refetch the newest page, which replaces the paged window and resumes
+// live appends for this session.
+//
+// The paging state is kept until that snapshot LANDS — the snapshotLoadedMsg handler is what
+// clears it. Clearing it here instead looked better and was not: appends resumed onto the
+// paged window, the snapshot then replaced that window wholesale, so events arriving in
+// between were appended and immediately discarded — and if the snapshot FAILED, the state
+// was already gone, leaving live events splicing onto a page from the middle of the session
+// with nothing in the footer saying so. Holding the state costs the same events (the
+// snapshot carries everything the server had when it built the response, and anything later
+// is lost either way) and keeps a failure honest and retryable.
 func (m *model) returnToTail() tea.Cmd {
 	id := m.selectedSess
-	if id == "" || !m.pagedBack(id) {
+	st := m.paging[id]
+	if id == "" || st == nil || st.returning {
 		return nil
 	}
-	// Cleared before the fetch, not on its return: live appends resume immediately, and
-	// the snapshot that lands will replace the window anyway. Leaving it set would drop
-	// every event that arrives while the request is in flight.
-	delete(m.paging, id)
+	st.returning = true
 	m.setFlash("returning to the live tail…")
 	return m.snapshotCmd(id)
+}
+
+// tailReturnFailed re-arms [t] after its snapshot failed, leaving the paged window and its
+// footer notice exactly as they were.
+func (m *model) tailReturnFailed(id string) {
+	if st := m.paging[id]; st != nil {
+		st.returning = false
+	}
 }

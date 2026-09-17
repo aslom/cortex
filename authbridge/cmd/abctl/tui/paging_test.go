@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -137,19 +138,159 @@ func TestHandleStreamEvent_DoesNotAppendWhilePagedBack(t *testing.T) {
 	}
 }
 
-// Returning to the tail resumes appends immediately, without waiting for the refetch: any
-// event arriving in that window would otherwise be dropped for good.
-func TestReturnToTail_ResumesAppendsBeforeTheRefetchLands(t *testing.T) {
+// [t] keeps the paged window until its snapshot LANDS, and the snapshot is what clears it.
+//
+// Resuming appends at keypress instead looked friendlier and lost data: they landed on the
+// paged window, which the snapshot then replaced wholesale. Holding the state costs the same
+// events — the snapshot carries whatever the server had when it built the response — and
+// keeps the failure case honest, which the test below covers.
+func TestReturnToTail_KeepsTheWindowUntilTheSnapshotLands(t *testing.T) {
 	m := pagedModel(t, pagedEvents(11, 10))
 	m.returnToTail()
 
-	if m.pagedBack("sess-1") {
-		t.Fatal("still paged back after returnToTail")
+	if !m.pagedBack("sess-1") {
+		t.Fatal("paging state dropped before the snapshot landed")
 	}
 	live := pagedEvents(21, 1)[0]
 	m.handleStreamEvent(apiclient.StreamEvent{Event: &live})
-	if got := len(m.events["sess-1"]); got != 11 {
-		t.Errorf("held %d events, want 11 — the streamed event was not appended", got)
+	if got := len(m.events["sess-1"]); got != 10 {
+		t.Errorf("held %d events, want 10 — an event was appended to a window about to be replaced", got)
+	}
+
+	// The snapshot completes the return: window replaced, appends resumed.
+	m.Update(snapshotLoadedMsg{id: "sess-1", events: pagedEvents(50, 3), olderNotFetched: 47})
+	if m.pagedBack("sess-1") {
+		t.Fatal("still paged back after the snapshot landed")
+	}
+	m.handleStreamEvent(apiclient.StreamEvent{Event: &live})
+	if got := len(m.events["sess-1"]); got != 4 {
+		t.Errorf("held %d events, want 4 — appends did not resume", got)
+	}
+}
+
+// A FAILED tail snapshot must leave the window exactly as it was, and re-arm [t].
+//
+// The alternative is the failure this whole branch keeps arguing against: state cleared,
+// live events splicing onto a page from the middle of the session, and nothing saying so.
+func TestReturnToTail_FailedSnapshotLeavesTheWindowDescribed(t *testing.T) {
+	m := pagedModel(t, pagedEvents(11, 10))
+	m.returnToTail()
+
+	m.Update(errMsg{where: "snapshot sess-1", err: errors.New("connection refused")})
+
+	if !m.pagedBack("sess-1") {
+		t.Fatal("paging state dropped by a FAILED snapshot; the timeline would silently resume mid-session")
+	}
+	if m.paging["sess-1"].returning {
+		t.Error("still marked as returning, so [t] would refuse to retry")
+	}
+	if got := m.helpView(); !strings.Contains(got, "paged back") {
+		t.Errorf("footer stopped reporting the paged-back window: %q", got)
+	}
+	// And [t] works on the second attempt.
+	if cmd := m.returnToTail(); cmd == nil {
+		t.Error("[t] did not retry after the failure")
+	}
+}
+
+// [o] against a proxy that stamps no Seq must not enter paging mode at all.
+//
+// It used to create the state before validating the cursor, so one keypress suspended live
+// appends for a session that could never page — the flash explained the refusal while the
+// timeline quietly stopped moving.
+func TestLoadOlderPage_WithoutSeqDoesNotEnterPagingMode(t *testing.T) {
+	m := pagedModel(t, cursorRowsFixture(3)) // Seq zero throughout
+	delete(m.paging, "sess-1")               // start from the live tail
+
+	if cmd := m.loadOlderPage(); cmd != nil {
+		t.Error("issued a page request against events carrying no Seq")
+	}
+	if m.pagedBack("sess-1") {
+		t.Fatal("entered paging mode anyway, which suppresses live appends for good")
+	}
+	if !strings.Contains(m.flash, "too old") {
+		t.Errorf("flash = %q, want it to name the reason", m.flash)
+	}
+	// Appends still work, which is the consequence that matters.
+	live := pagedEvents(21, 1)[0]
+	m.handleStreamEvent(apiclient.StreamEvent{Event: &live})
+	if got := len(m.events["sess-1"]); got != 4 {
+		t.Errorf("held %d events, want 4 — live appends were suppressed", got)
+	}
+}
+
+// A first page that comes back empty tears the tentative state down, for the same reason.
+func TestApplyOlderPage_EmptyFirstPageAbandonsPaging(t *testing.T) {
+	m := pagedModel(t, pagedEvents(11, 10))
+	m.paging["sess-1"].wantGen = 7
+
+	m.applyOlderPage(olderPageLoadedMsg{id: "sess-1", gen: 7, serverOldest: 11})
+
+	if m.pagedBack("sess-1") {
+		t.Error("state survived a page that loaded nothing, suppressing live appends")
+	}
+}
+
+// A failed fetch clears the in-flight marker so [o] can be retried, and must not touch the
+// SSE connection state — a page request and the event stream are different connections.
+func TestFailOlderPage_ClearsLoadingAndSparesTheConnection(t *testing.T) {
+	m := pagedModel(t, pagedEvents(11, 10))
+	m.paging["sess-1"].fetched = 1 // an earlier page succeeded, so the state is not tentative
+	m.connState.phase = connOpen
+
+	cmd := m.loadOlderPage()
+	if cmd == nil {
+		t.Fatal("no request issued")
+	}
+	gen := m.paging["sess-1"].wantGen
+	m.Update(olderPageFailedMsg{id: "sess-1", gen: gen, err: errors.New("i/o timeout")})
+
+	if m.paging["sess-1"].loading {
+		t.Error("loading still set, so [o] would refuse every retry")
+	}
+	if m.connState.phase != connOpen {
+		t.Errorf("connection phase = %v, want it untouched: one failed page is not a dead stream",
+			m.connState.phase)
+	}
+	if !strings.Contains(m.flash, "older page failed") {
+		t.Errorf("flash = %q, want it to name the failure", m.flash)
+	}
+	if cmd := m.loadOlderPage(); cmd == nil {
+		t.Error("[o] did not retry after the failure")
+	}
+}
+
+// A response from a superseded request is dropped.
+//
+// The path: [o] is in flight, [t] tears the state down, the tail lands, a fresh [o] builds
+// new state — and only then does the first response arrive. A SINGLE-event page is used
+// deliberately, because that is the case the timestamp ordering guard cannot catch: one
+// event's first and last timestamps are equal, so nothing about it looks out of order.
+func TestApplyOlderPage_DropsAStaleGeneration(t *testing.T) {
+	m := pagedModel(t, pagedEvents(11, 10))
+	m.paging["sess-1"].fetched = 1
+
+	if cmd := m.loadOlderPage(); cmd == nil {
+		t.Fatal("no first request issued")
+	}
+	stale := m.paging["sess-1"].wantGen
+
+	// [t], its snapshot, then a fresh [o] — the new state expects a later generation.
+	m.returnToTail()
+	m.Update(snapshotLoadedMsg{id: "sess-1", events: pagedEvents(11, 10), olderNotFetched: 10})
+	if cmd := m.loadOlderPage(); cmd == nil {
+		t.Fatal("no second request issued")
+	}
+	if m.paging["sess-1"].wantGen == stale {
+		t.Fatal("the new request reused the stale generation; it could not be told apart")
+	}
+
+	before := len(m.events["sess-1"])
+	m.applyOlderPage(olderPageLoadedMsg{
+		id: "sess-1", gen: stale, events: pagedEventsAt(10, 1, pagedEvents(11, 1)[0].At),
+	})
+	if got := len(m.events["sess-1"]); got != before {
+		t.Errorf("held %d events, want %d — a stale response was stitched in", got, before)
 	}
 }
 
@@ -231,21 +372,6 @@ func TestApplyOlderPage_ClearsTheDroppedPage(t *testing.T) {
 			t.Fatalf("dropped event at %d is still live (Seq %d): the cap holds more than it says",
 				i, spare[i].Seq)
 		}
-	}
-}
-
-// Paging cannot work against a proxy that does not stamp Seq, and it should say so rather
-// than send before=0 — which the server reads as "from the newest" and would refetch the
-// same tail forever.
-func TestLoadOlderPage_SaysSoWhenTheProxyHasNoSeq(t *testing.T) {
-	m := fitModel(t, paneEvents, 200, 40, cursorRowsFixture(3)) // Seq zero throughout
-	m.client = &apiclient.Client{}
-
-	if cmd := m.loadOlderPage(); cmd != nil {
-		t.Error("issued a page request against events carrying no Seq")
-	}
-	if !strings.Contains(m.flash, "too old") {
-		t.Errorf("flash = %q, want it to name the reason", m.flash)
 	}
 }
 
