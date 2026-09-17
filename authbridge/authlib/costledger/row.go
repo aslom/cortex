@@ -139,6 +139,8 @@ func (r Row) key() key {
 // which is what turns readDay's over-long-line guard from a live failure mode into
 // the last-resort guard for a file some other process corrupted.
 // TestRecord_LabelsAreCappedSoALineCanNeverExceedTheReadLimit pins the arithmetic.
+// Pinned to usage.MaxLabelLen by TestMaxLabelLen_MatchesTheRingItMirrors — which is a real
+// comparison now that the other side is exported, rather than a third copy of the literal.
 const maxLabelLen = 96
 
 // truncateLabel caps one label at maxLabelLen BYTES, cut on a RUNE boundary.

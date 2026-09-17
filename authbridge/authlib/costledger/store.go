@@ -670,6 +670,42 @@ func (s *store) prune(now time.Time) error {
 	horizon := s.dayOf(now).AddDate(0, 0, s.retainDays)
 
 	var firstErr error
+
+	// RE-JUDGING RUNS FIRST, and the order is load-bearing rather than stylistic.
+	//
+	// Both passes address the same file NAME, and a live day file can coexist with an .expired of
+	// the same name — reachable exactly the way the doc above describes: a clock steps back past
+	// retention, everything is condemned, the clock is corrected, and the writer records a fresh
+	// file for that same day. Condemning first then renamed the live file ONTO the stale .expired,
+	// destroying its rows, and left the newest rows under a name this pass was already about to
+	// unlink: both copies gone in one prune, with no second independent judgement — the one property
+	// expiredSuffix exists to provide. Measured: a directory holding both copies came out empty.
+	//
+	// Clearing the condemned names first removes the collision instead of handling it, and the two
+	// passes cannot fight: this one only restores days INSIDE the window, the one below only condemns
+	// days outside it, and both read bounds computed before either ran.
+	for _, d := range expired {
+		live := filepath.Join(s.dir, strings.TrimSuffix(d.name, expiredSuffix))
+		if d.day.Before(cutoff) || d.day.After(horizon) {
+			if rerr := os.Remove(filepath.Join(s.dir, d.name)); rerr != nil && firstErr == nil {
+				firstErr = rerr
+			}
+			continue
+		}
+		// Back inside the window: the cutoff that condemned this file was wrong, or the clock
+		// that produced it has been corrected. Warn, because a restore means an earlier prune
+		// was working from a bad reading and an operator should know the host clock moved.
+		slog.Warn("costledger: restoring a day file an earlier prune condemned; it is inside the "+
+			"retention window again",
+			"file", d.name, "day", d.day.Format(dayLayout),
+			"cutoff", cutoff.Format(dayLayout), "retainDays", s.retainDays,
+			"cause", "the host clock was ahead when the earlier prune ran and has since been corrected",
+			"effect", "the rows in this file are readable again rather than lost")
+		if rerr := restoreDayFile(filepath.Join(s.dir, d.name), live); rerr != nil && firstErr == nil {
+			firstErr = rerr
+		}
+	}
+
 	for _, d := range days {
 		future := d.day.After(horizon)
 		if !d.day.Before(cutoff) && !future {
@@ -688,35 +724,92 @@ func (s *store) prune(now time.Time) error {
 					"the file is renamed with the .expired suffix and a later prune deletes it, or restores it if the clock is corrected")
 		}
 		// CONDEMNED, NOT DELETED. The rename is the whole mitigation: see expiredSuffix.
+		//
+		// Through mergeDayFiles because the destination can already exist even after the pass above
+		// cleared the ones it saw — a remove or a restore up there can fail, and os.Rename would then
+		// silently replace a condemned file's rows with these. Nothing is worth losing to save a
+		// syscall on a path that only runs when the host clock has already misbehaved.
 		from := filepath.Join(s.dir, d.name)
-		if rerr := os.Rename(from, from+expiredSuffix); rerr != nil && firstErr == nil {
-			firstErr = rerr
-		}
-	}
-
-	// Second pass: what an EARLIER prune condemned. A file still outside the window has now
-	// been judged twice and is unlinked; one that is back inside it is restored, which is what
-	// makes a prune driven by a skewed clock a delay rather than a loss.
-	for _, d := range expired {
-		live := filepath.Join(s.dir, strings.TrimSuffix(d.name, expiredSuffix))
-		if d.day.Before(cutoff) || d.day.After(horizon) {
-			if rerr := os.Remove(filepath.Join(s.dir, d.name)); rerr != nil && firstErr == nil {
-				firstErr = rerr
-			}
-			continue
-		}
-		// Back inside the window: the cutoff that condemned this file was wrong, or the clock
-		// that produced it has been corrected. Warn, because a restore means an earlier prune
-		// was working from a bad reading and an operator should know the host clock moved.
-		slog.Warn("costledger: restoring a day file an earlier prune condemned; it is inside the "+
-			"retention window again",
-			"file", d.name, "day", d.day.Format(dayLayout),
-			"cutoff", cutoff.Format(dayLayout), "retainDays", s.retainDays,
-			"cause", "the host clock was ahead when the earlier prune ran and has since been corrected",
-			"effect", "the rows in this file are readable again rather than lost")
-		if rerr := os.Rename(filepath.Join(s.dir, d.name), live); rerr != nil && firstErr == nil {
+		if rerr := condemnDayFile(from, from+expiredSuffix); rerr != nil && firstErr == nil {
 			firstErr = rerr
 		}
 	}
 	return firstErr
+}
+
+// restoreDayFile puts a condemned day file back, without discarding a live one of the same name.
+//
+// A PLAIN RENAME LOST DATA HERE. os.Rename replaces its destination, and the destination exists
+// whenever the writer recorded that day again after the condemnation — the ordinary end of the
+// scenario this file's retention doc describes. Measured: a day holding a condemned $1.00 and a live
+// $2.00 came out of prune holding $1.00, under a Warn that said "the rows in this file are readable
+// again rather than lost".
+//
+// MERGED RATHER THAN REFUSED, because both files hold real rows for that day and either one alone is
+// a wrong answer. The format is append-only JSON lines and readDay already sums several rows per
+// minute, so concatenation is lossless — and it cannot double-count, because these two files were
+// written on opposite sides of the condemnation and a row is a per-minute aggregate of the events
+// that actually happened in it.
+func restoreDayFile(condemned, live string) error {
+	return mergeDayFiles(condemned, live)
+}
+
+// condemnDayFile is the same protection in the other direction: the live file's rows join whatever
+// an earlier prune already condemned under that name, instead of replacing them.
+func condemnDayFile(from, expired string) error {
+	return mergeDayFiles(from, expired)
+}
+
+// mergeDayFiles moves src to dst, appending rather than replacing when dst already exists.
+//
+// The rename is kept for the ordinary case — one syscall, atomic, and the only case that happens on a
+// healthy host. The append path exists only where a host clock fault has left two files for one day.
+func mergeDayFiles(src, dst string) error {
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		return os.Rename(src, dst)
+	} else if err != nil {
+		return err
+	}
+
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	// O_RDWR, not O_WRONLY: the tail check below reads the last byte through this same handle.
+	out, err := os.OpenFile(dst, os.O_RDWR|os.O_APPEND, fileMode)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+
+	// A TERMINATOR FIRST IF THE TAIL IS MISSING ONE. appendBytes never shortens a file but a torn
+	// write can leave it without its final newline, and appending onto that would glue two rows into
+	// one unparseable line — turning a recoverable fault into a lost row at each join.
+	fi, err := out.Stat()
+	if err != nil {
+		return err
+	}
+	if fi.Size() > 0 {
+		tail := make([]byte, 1)
+		if _, rerr := out.ReadAt(tail, fi.Size()-1); rerr == nil && tail[0] != '\n' {
+			if _, werr := out.Write([]byte("\n")); werr != nil {
+				return werr
+			}
+		}
+	}
+	if _, cerr := io.Copy(out, in); cerr != nil {
+		return cerr
+	}
+	// Synced before the source is unlinked: without it a crash in between loses the rows that were
+	// in the file this call is about to delete.
+	if serr := out.Sync(); serr != nil {
+		return serr
+	}
+	slog.Warn("costledger: two day files existed for one day; their rows were merged rather than one "+
+		"set being discarded",
+		"kept", filepath.Base(dst), "mergedFrom", filepath.Base(src),
+		"cause", "the host clock moved far enough for a day to be condemned and then written again",
+		"effect", "both sets of rows are in the surviving file; a per-minute total is the sum of what each held")
+	return os.Remove(src)
 }

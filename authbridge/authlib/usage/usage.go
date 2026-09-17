@@ -1253,11 +1253,19 @@ const overflowLabel = "(other)"
 // question "where did the money go" is the one the top of the list has to answer.
 const MaxSeriesInResponse = 16
 
-// maxLabelLen bounds one retained label. The model name is request-controlled, so
+// MaxLabelLen bounds one retained label. The model name is request-controlled, so
 // without this a caller could park a megabyte of string in a bucket that lives
 // for a full ring lap. Long enough for any real model id, including provider
 // prefixes and dated suffixes.
-const maxLabelLen = 96
+//
+// EXPORTED SO THE DURABLE COPY CAN BE PINNED TO IT. costledger caps its own labels at the same
+// number and said so in a comment — "matched deliberately rather than chosen again" — while both
+// copies were unexported, so no test could compare them and raising one to 4096 left both suites
+// green. Same defect and same fix as MaxRetentionDays.
+const MaxLabelLen = 96
+
+// maxLabelLen is the internal spelling, so this package's call sites read unchanged.
+const maxLabelLen = MaxLabelLen
 
 // hostLabel reduces an :authority to the host alone, so "api.anthropic.com:443"
 // and "api.anthropic.com" are one series rather than two.

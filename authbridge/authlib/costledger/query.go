@@ -2,6 +2,7 @@ package costledger
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
@@ -102,6 +103,15 @@ type Caveats struct {
 	// missing and the file gives no way to say how much. Tracked separately from a skip
 	// rather than added to it for exactly that reason.
 	TruncatedDays int64
+	// UnreadableDays is how many day files this read could not open or scan AT ALL — a
+	// permission change, a vanished mount, an IO error on the first read.
+	//
+	// A CAVEAT RATHER THAN AN ERROR, which is the whole reason it exists. Query used to return
+	// the error and no rows, so one unreadable file inside a seven-day window discarded the six
+	// readable ones and answered "no cost data" for a week that had plenty. A short answer that
+	// says it is short is strictly better than no answer that says nothing. Counted separately
+	// from TruncatedDays because nothing at all was read from these, not merely a prefix.
+	UnreadableDays int64
 }
 
 // Clean reports that the read lost nothing, so a caller can disclose the caveats only
@@ -171,7 +181,14 @@ func (w *Writer) Query(ctx context.Context, from, to time.Time) ([]Row, Caveats,
 		}
 		rows, issues, err := w.store.readDay(d)
 		if err != nil {
-			return nil, Caveats{}, err
+			// Reported and skipped, not fatal: see Caveats.UnreadableDays. Warn per day, because
+			// there can only be as many as the window has days and an operator whose ledger has
+			// become unreadable needs the filename.
+			slog.Warn("costledger: a day file could not be read; the total is short by whatever it held",
+				"day", d.Format(dayLayout), "error", err,
+				"effect", "the rest of the window is still answered, with Caveats.UnreadableDays set")
+			caveats.UnreadableDays++
+			continue
 		}
 		caveats.SkippedLines += int64(issues.skippedLines)
 		if issues.truncated {
@@ -187,12 +204,6 @@ func (w *Writer) Query(ctx context.Context, from, to time.Time) ([]Row, Caveats,
 	return out, caveats, nil
 }
 
-// span normalises a caller's range to inclusive minute bounds.
-//
-// A reversed range is a caller mistake, not a reason to return nothing: swapping
-// answers the question that was meant instead of an empty result a client would
-// render as "no spend". Shared by Query and Window so one answer cannot be
-// assembled from two different readings of the same range.
 // dayWalk is the range of day files Query will open: the requested span, intersected with the days a
 // file could exist for.
 //
@@ -215,6 +226,12 @@ func (w *Writer) dayWalk(fromMin, toMin time.Time) (first, last time.Time) {
 	return first, last
 }
 
+// span normalises a caller's range to inclusive minute bounds.
+//
+// A reversed range is a caller mistake, not a reason to return nothing: swapping
+// answers the question that was meant instead of an empty result a client would
+// render as "no spend". Shared by Query and Window so one answer cannot be
+// assembled from two different readings of the same range.
 func span(from, to time.Time) (time.Time, time.Time) {
 	if to.Before(from) {
 		from, to = to, from

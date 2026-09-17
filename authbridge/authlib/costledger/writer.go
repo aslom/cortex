@@ -910,7 +910,18 @@ func (w *Writer) settleClosedMinute() {
 	now := w.now()
 	w.mu.Lock()
 	if len(w.rows) == 0 || w.open.IsZero() || !w.open.Before(now.Truncate(time.Minute)) {
+		// NOTHING TO SETTLE IS NOT NOTHING TO DO, which is what this early return used to say.
+		// The pruneAt below is reached only while a minute is still held — roughly the 30s after
+		// traffic stops — so a proxy quiet since 14:23 crossed midnight with an empty accumulator
+		// and never pruned at all: retention waited for traffic to resume or for a restart, and
+		// the claim just below (and pruneDueLocked's own doc) was false for the idle case it names.
+		// It also left a condemned .expired un-re-judged for as long as the quiet lasted, which is
+		// the mechanism the restore depends on.
+		due := w.pruneDueLocked(now)
 		w.mu.Unlock()
+		if !due.IsZero() {
+			w.write(batch{pruneAt: due})
+		}
 		return
 	}
 	b := w.takeLocked()

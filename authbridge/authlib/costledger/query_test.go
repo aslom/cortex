@@ -935,6 +935,11 @@ func TestFold_MethodIsAnAliasForModel(t *testing.T) {
 	_, byModel, _ := Fold(rows, usage.GroupModel)
 	_, byMethod, _ := Fold(rows, usage.GroupMethod)
 
+	// THE EQUALITY IS VACUOUS ON TWO EMPTY MAPS, and Fold returning nothing for both spellings is
+	// exactly what a broken alias would look like — so what the series CONTAINS is asserted first.
+	if got := byModel["opus"]; got.Requests != 1 || got.CostMicros != 10 {
+		t.Fatalf("byModel[\"opus\"] = %+v, want 1 request at 10 micros: with an empty series the comparison below holds for the wrong reason", got)
+	}
 	if len(byModel) != len(byMethod) || byModel["opus"] != byMethod["opus"] {
 		t.Errorf("model series %+v and method series %+v differ", byModel, byMethod)
 	}

@@ -2,6 +2,10 @@ package costledger
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"testing"
@@ -193,4 +197,46 @@ func readRowsFrom(t *testing.T, path string) ([]Row, dayIssues, error) {
 		t.Fatalf("dayFromName(%q) refused a name this test wrote", base)
 	}
 	return s.readDay(day)
+}
+
+// TestNoTestInThisPackageRunsInParallel enforces what the fixtures above depend on.
+//
+// Two package-level function variables are swapped by tests here — syncNewDayFileName and its
+// siblings — restored by t.Cleanup, which is correct only while no test in this package runs
+// concurrently with another. That requirement was recorded in a comment ("there is no t.Parallel in
+// this file"), which is exactly the kind of guarantee this review has repeatedly found stated and
+// unchecked: adding t.Parallel to any test here would make an unrelated one fail, intermittently,
+// with a mocked hook it never asked for.
+//
+// Scanned across the package's ASTs rather than grepped, so a call spelled t.Parallel() inside a
+// subtest closure is found too.
+func TestNoTestInThisPackageRunsInParallel(t *testing.T) {
+	files, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(files) < 2 {
+		t.Fatalf("found %d test files; the scan is not working, so this guard proves nothing", len(files))
+	}
+
+	fset := token.NewFileSet()
+	for _, path := range files {
+		f, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", path, perr)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Parallel" {
+				return true
+			}
+			t.Errorf("%s calls %s.Parallel(): tests here swap package-level hooks and restore them with t.Cleanup, which only holds while they run one at a time",
+				fset.Position(call.Pos()), types.ExprString(sel.X))
+			return true
+		})
+	}
 }

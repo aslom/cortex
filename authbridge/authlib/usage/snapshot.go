@@ -255,7 +255,7 @@ type Snapshot struct {
 	//   - a LEDGER window, because such a response is stored as a row with Model "" and
 	//     costledger.labelFor then returns ok=false for group=model. Pinned by
 	//     TestFold_GatewayPricedRowWithNoModelIsDisclosedAsUngrouped, which lives with the ledger
-	//     reader and so arrives after this file does.
+	//     reader.
 	//   - a RING window, because Aggregator.costOf prices any SETTLED cost record whether or
 	//     not the event carries an Inference extension, while foldInto guards byMethod on a
 	//     non-empty model — so the same spend lands in the bucket total and in no series

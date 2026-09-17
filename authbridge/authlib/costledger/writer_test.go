@@ -402,43 +402,48 @@ func TestWriter_ExactFigureCarriesNoIncompleteCount(t *testing.T) {
 	}
 }
 
-func TestWriter_NonInferenceTrafficIsIgnored(t *testing.T) {
-	// MCP calls, health checks, tunnel opens. Recording them would put every
-	// proxied response in the ledger and in the cost denominator.
-	dir := t.TempDir()
-	now := at
-	w := newTestWriter(t, dir, func() time.Time { return now })
+// TestWriter_IgnoredTrafficWritesNothing covers the events that must reach the ledger and leave no
+// row, which were two tests with the same body and a different event in the middle.
+func TestWriter_IgnoredTrafficWritesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event func(t *testing.T) *pipeline.SessionEvent
+	}{
+		{
+			// MCP calls, health checks, tunnel opens. Recording them would put every
+			// proxied response in the ledger and in the cost denominator.
+			name: "non-inference traffic",
+			event: func(*testing.T) *pipeline.SessionEvent {
+				return &pipeline.SessionEvent{At: at, Phase: pipeline.SessionResponse, StatusCode: 200, Host: "gw"}
+			},
+		},
+		{
+			// A request event has no token counts and no cost. Folding it would double the
+			// request count for every turn, halving every coverage ratio the ledger reports.
+			name: "the request half of an exchange",
+			event: func(t *testing.T) *pipeline.SessionEvent {
+				e := costedEvent(t, "gw", "m", 0.25, 100, 50)
+				e.Phase = pipeline.SessionRequest
+				return e
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			now := at
+			w := newTestWriter(t, dir, func() time.Time { return now })
 
-	w.Record("s1", &pipeline.SessionEvent{At: at, Phase: pipeline.SessionResponse, StatusCode: 200, Host: "gw"})
+			w.Record("s1", tc.event(t))
 
-	now = at.Add(time.Minute)
-	if err := w.Flush(); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
+			now = at.Add(time.Minute)
+			if err := w.Flush(); err != nil {
+				t.Fatalf("Flush: %v", err)
+			}
 
-	if rows := readAllRows(t, dir); len(rows) != 0 {
-		t.Errorf("got %d rows for non-inference traffic, want 0", len(rows))
-	}
-}
-
-// A request event has no token counts and no cost. Folding it would double the
-// request count for every turn, halving every coverage ratio the ledger reports.
-func TestWriter_RequestPhaseIsIgnored(t *testing.T) {
-	dir := t.TempDir()
-	now := at
-	w := newTestWriter(t, dir, func() time.Time { return now })
-
-	e := costedEvent(t, "gw", "m", 0.25, 100, 50)
-	e.Phase = pipeline.SessionRequest
-	w.Record("s1", e)
-
-	now = at.Add(time.Minute)
-	if err := w.Flush(); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-
-	if rows := readAllRows(t, dir); len(rows) != 0 {
-		t.Errorf("got %d rows for a request event, want 0", len(rows))
+			if rows := readAllRows(t, dir); len(rows) != 0 {
+				t.Errorf("got %d rows, want 0: %s must not reach the ledger", len(rows), tc.name)
+			}
+		})
 	}
 }
 
@@ -1254,7 +1259,7 @@ func TestPrune_StaysArmedUntilAPruneActuallyRuns(t *testing.T) {
 func TestPrune_KeepsExactlyRetainDaysFiles(t *testing.T) {
 	dir := t.TempDir()
 	const retain = 3
-	s, err := newStore(dir, retain, time.Local)
+	s, err := newStore(dir, retain, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -1345,7 +1350,7 @@ func liveDayFiles(t *testing.T, dir string) []string {
 func TestPrune_RestoresWhatASkewedClockCondemned(t *testing.T) {
 	dir := t.TempDir()
 	const retain = 3
-	s, err := newStore(dir, retain, time.Local)
+	s, err := newStore(dir, retain, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -1409,7 +1414,7 @@ func TestPrune_RestoresWhatASkewedClockCondemned(t *testing.T) {
 func TestPrune_AForwardClockStepDoesNotDeleteTheLedger(t *testing.T) {
 	dir := t.TempDir()
 	const retain = 30
-	s, err := newStore(dir, retain, time.Local)
+	s, err := newStore(dir, retain, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -1456,7 +1461,7 @@ func TestPrune_AForwardClockStepDoesNotDeleteTheLedger(t *testing.T) {
 func TestPrune_AFutureDatedDayFileIsNotKeptForever(t *testing.T) {
 	dir := t.TempDir()
 	const retain = 30
-	s, err := newStore(dir, retain, time.Local)
+	s, err := newStore(dir, retain, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -1503,7 +1508,7 @@ func TestPrune_AFutureDatedDayFileIsNotKeptForever(t *testing.T) {
 func TestPrune_ADayFileWithinTheWindowAheadOfTheClockIsKept(t *testing.T) {
 	dir := t.TempDir()
 	const retain = 7
-	s, err := newStore(dir, retain, time.Local)
+	s, err := newStore(dir, retain, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -1824,7 +1829,7 @@ func modelsOnDisk(t *testing.T, s *store) (map[string]bool, dayIssues) {
 // window the old code left open.
 func TestWriteLines_ATornAppendDoesNotRollBackAnotherWritersRows(t *testing.T) {
 	dir := t.TempDir()
-	s, err := newStore(dir, 30, time.Local)
+	s, err := newStore(dir, 30, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -1870,7 +1875,7 @@ func TestWriteLines_ATornAppendDoesNotRollBackAnotherWritersRows(t *testing.T) {
 // the damage to the fragment.
 func TestWriteLines_ATornAppendDoesNotSwallowTheNextRowAppended(t *testing.T) {
 	dir := t.TempDir()
-	s, err := newStore(dir, 30, time.Local)
+	s, err := newStore(dir, 30, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -1914,7 +1919,7 @@ func TestWriteLines_ATornAppendDoesNotSwallowTheNextRowAppended(t *testing.T) {
 // when it is right.
 func TestWriteLines_ATornAppendCountsOnlyTheRowsItLost(t *testing.T) {
 	dir := t.TempDir()
-	s, err := newStore(dir, 30, time.Local)
+	s, err := newStore(dir, 30, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -1965,7 +1970,7 @@ func TestWriteLines_ATornAppendCountsOnlyTheRowsItLost(t *testing.T) {
 // crash-durability unsynced defeats the purpose of writing it.
 func TestWriteLines_ATornAppendStillSyncsWhatLanded(t *testing.T) {
 	dir := t.TempDir()
-	s, err := newStore(dir, 30, time.Local)
+	s, err := newStore(dir, 30, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -2004,7 +2009,7 @@ func TestWriteLines_ATornAppendStillSyncsWhatLanded(t *testing.T) {
 // encoding into the file, a handle without O_APPEND, or a new rollback.
 func TestWriteLines_ConcurrentWritersDoNotLoseEachOthersRows(t *testing.T) {
 	dir := t.TempDir()
-	s, err := newStore(dir, 30, time.Local)
+	s, err := newStore(dir, 30, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -2246,9 +2251,11 @@ func TestWriter_TwoAgentsInOneMinuteAreTwoRows(t *testing.T) {
 	}
 }
 
-func TestWriter_NoClientStillWritesTheRow(t *testing.T) {
-	// Dropping unattributed traffic would make the ledger's totals disagree with
-	// /v1/usage's, which is worse than an empty column.
+// recordClientlessRow writes one costed row whose event carries no client, flushes, and returns what
+// reached the file. The two tests below assert different things about that one scenario — the cost
+// survives, and absence is stored losslessly — so the setup lives here rather than twice.
+func recordClientlessRow(t *testing.T) ([]Row, string) {
+	t.Helper()
 	dir := t.TempDir()
 	now := at
 	w := newTestWriter(t, dir, func() time.Time { return now })
@@ -2261,11 +2268,18 @@ func TestWriter_NoClientStillWritesTheRow(t *testing.T) {
 	if err := w.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
 	}
-
 	rows := readAllRows(t, dir)
 	if len(rows) != 1 {
-		t.Fatalf("got %d rows, want 1", len(rows))
+		t.Fatalf("read %d rows, want 1: indexing without this turns a lost row into a panic instead of a message", len(rows))
 	}
+	// dir too, because one of the callers asserts on the FILE's bytes rather than the decoded row.
+	return rows, dir
+}
+
+func TestWriter_NoClientStillWritesTheRow(t *testing.T) {
+	// Dropping unattributed traffic would make the ledger's totals disagree with
+	// /v1/usage's, which is worse than an empty column.
+	rows, _ := recordClientlessRow(t)
 	if rows[0].CostMicros != 250_000 {
 		t.Errorf("CostMicros = %d, want the cost still recorded", rows[0].CostMicros)
 	}
@@ -2281,20 +2295,8 @@ func TestWriter_NoClientStillWritesTheRow(t *testing.T) {
 // mapped to the display bucket, so the two sources still AGREE about what a client
 // sees — see labelFor.
 func TestWriter_AbsentClientStoresTheEmptyString(t *testing.T) {
-	dir := t.TempDir()
-	now := at
-	w := newTestWriter(t, dir, func() time.Time { return now })
-
-	e := costedEvent(t, "gw", "m", 0.25, 100, 50)
-	e.Client = nil
-	w.Record("s1", e)
-
-	now = at.Add(time.Minute)
-	if err := w.Flush(); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-
-	if rows := readAllRows(t, dir); rows[0].Agent != "" {
+	rows, dir := recordClientlessRow(t)
+	if rows[0].Agent != "" {
 		t.Errorf("Agent = %q, want the empty string: the ledger stores absence losslessly", rows[0].Agent)
 	}
 	// omitempty: the key must not appear at all, so an absent agent costs no bytes.
@@ -2320,7 +2322,11 @@ func TestWriter_UnrecognisedAgentStoresItsRawLabel(t *testing.T) {
 		t.Fatalf("Flush: %v", err)
 	}
 
-	if rows := readAllRows(t, dir); rows[0].Agent != "SomeNewAgent/9.9" {
+	rows := readAllRows(t, dir)
+	if len(rows) != 1 {
+		t.Fatalf("read %d rows, want 1", len(rows))
+	}
+	if rows[0].Agent != "SomeNewAgent/9.9" {
 		t.Errorf("Agent = %q, want the raw UA", rows[0].Agent)
 	}
 }
@@ -2472,7 +2478,7 @@ func TestRecord_AnUnpricedNonInferenceResponseIsStillIgnored(t *testing.T) {
 func TestPrune_RestoresWhatABackwardClockStepCondemned(t *testing.T) {
 	dir := t.TempDir()
 	const retain = 3
-	s, err := newStore(dir, retain, time.Local)
+	s, err := newStore(dir, retain, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -2519,7 +2525,7 @@ func TestPrune_RestoresWhatABackwardClockStepCondemned(t *testing.T) {
 func TestPrune_AnEmptyDirectoryStillUnlinksWhatIsTrulyExpired(t *testing.T) {
 	dir := t.TempDir()
 	const retain = 3
-	s, err := newStore(dir, retain, time.Local)
+	s, err := newStore(dir, retain, testZone)
 	if err != nil {
 		t.Fatalf("newStore: %v", err)
 	}
@@ -2539,5 +2545,145 @@ func TestPrune_AnEmptyDirectoryStillUnlinksWhatIsTrulyExpired(t *testing.T) {
 	}
 	if live := liveDayFiles(t, dir); len(live) != 0 {
 		t.Errorf("live day files = %v, want none: a file 30 days past retention must not be restored", live)
+	}
+}
+
+// seedBothCopies puts a condemned and a live day file on disk for the SAME day, which is the state
+// both tests below are about: reachable whenever a clock steps back past retention, everything is
+// condemned, the clock is corrected, and the writer records that day again.
+func seedBothCopies(t *testing.T, s *store, day time.Time, condemnedMicros, liveMicros int64) {
+	t.Helper()
+	if werr := os.WriteFile(s.path(day)+expiredSuffix,
+		[]byte(line(day, "gw", "m", 1, 10, 5, condemnedMicros)+"\n"), 0o600); werr != nil {
+		t.Fatalf("seed the condemned copy: %v", werr)
+	}
+	if werr := os.WriteFile(s.path(day),
+		[]byte(line(day, "gw", "m", 1, 10, 5, liveMicros)+"\n"), 0o600); werr != nil {
+		t.Fatalf("seed the live copy: %v", werr)
+	}
+}
+
+// TestPrune_RestoringDoesNotDiscardALiveDayFile is the loss a plain rename caused.
+//
+// os.Rename REPLACES its destination, and the destination exists exactly when the recovery matters:
+// the clock was wrong, the day was condemned, the clock was corrected, and the writer has since
+// recorded that same day again. Restoring then deleted the newer rows — measured as $1.00 surviving
+// and $2.00 gone — while the Warn beside it said "the rows in this file are readable again rather
+// than lost".
+//
+// Both files hold real rows, so the answer is neither one alone: they are merged. The format is
+// append-only JSON lines and readDay already sums several rows per minute, and the two sets cannot
+// overlap into a double count because they were written on opposite sides of the condemnation.
+func TestPrune_RestoringDoesNotDiscardALiveDayFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := newStore(dir, 30, testZone)
+	if err != nil {
+		t.Fatalf("newStore: %v", err)
+	}
+	seedBothCopies(t, s, at, 1_000_000, 2_000_000)
+
+	if perr := s.prune(at); perr != nil {
+		t.Fatalf("prune: %v", perr)
+	}
+
+	var total int64
+	rows := readDaysBack(t, s, at, 1)
+	for _, r := range rows {
+		total += r.CostMicros
+	}
+	if len(rows) != 2 || total != 3_000_000 {
+		t.Errorf("read %d rows totalling %d micros, want 2 rows totalling 3000000: the restore replaced the live file instead of joining it",
+			len(rows), total)
+	}
+	if _, serr := os.Stat(s.path(at) + expiredSuffix); !os.IsNotExist(serr) {
+		t.Errorf("the condemned copy is still there (stat err %v): its rows were merged, so it must not be left to be re-judged forever", serr)
+	}
+}
+
+// TestPrune_CondemningDoesNotDiscardAnAlreadyCondemnedFile is the same collision in the other
+// direction, and it cost the two-judgement property outright.
+//
+// Condemning ran BEFORE re-judging and renamed the live file onto the stale .expired — so the newest
+// rows landed under a name the same pass was already about to unlink. Measured: a directory holding
+// both copies came out EMPTY, with no second independent judgement of the rows that had only just
+// been condemned.
+//
+// Re-judging now runs first, which clears the name rather than handling the collision. The rows this
+// prune condemns must therefore still be on disk, recoverable by the next prune.
+func TestPrune_CondemningDoesNotDiscardAnAlreadyCondemnedFile(t *testing.T) {
+	dir := t.TempDir()
+	const retain = 3
+	s, err := newStore(dir, retain, testZone)
+	if err != nil {
+		t.Fatalf("newStore: %v", err)
+	}
+	seedBothCopies(t, s, at, 1_000_000, 2_000_000)
+
+	// A clock far enough back that both copies are dated past the horizon.
+	if perr := s.prune(at.AddDate(0, 0, -160)); perr != nil {
+		t.Fatalf("prune under a backward-stepped clock: %v", perr)
+	}
+
+	// The live rows are condemned, not gone: one judgement, and the file is still there.
+	if _, serr := os.Stat(s.path(at) + expiredSuffix); serr != nil {
+		t.Fatalf("nothing is left under the condemned name (%v): the newest rows were unlinked in the same pass that condemned them", serr)
+	}
+	if live := liveDayFiles(t, dir); len(live) != 0 {
+		t.Errorf("live day files = %v, want none: both copies were outside the window", live)
+	}
+
+	// And the correction gives them back, which is what the judgement was being kept for.
+	if perr := s.prune(at); perr != nil {
+		t.Fatalf("prune after the clock was corrected: %v", perr)
+	}
+	rows := readDaysBack(t, s, at, 1)
+	if len(rows) != 1 || rows[0].CostMicros != 2_000_000 {
+		t.Errorf("read %+v after the correction, want one row of 2000000 micros: the rows condemned above were meant to survive one prune", rows)
+	}
+}
+
+// TestSettleClosedMinute_PrunesOnAnIdleDayRoll covers the claim the early return contradicted.
+//
+// settleClosedMinute set the batch's pruneAt, so retention was enforced on a day roll only while a
+// minute was still HELD — roughly the 30s after traffic stops. A proxy quiet since 14:23 therefore
+// crossed midnight with an empty accumulator and never pruned: retention waited for traffic to resume
+// or for a restart, while the comment there (and pruneDueLocked's doc) said the idle case was covered.
+// It also left anything an earlier prune condemned un-re-judged for the length of the quiet, which is
+// the mechanism the restore depends on.
+func TestSettleClosedMinute_PrunesOnAnIdleDayRoll(t *testing.T) {
+	dir := t.TempDir()
+	now := at
+	w := newTestWriter(t, dir, func() time.Time { return now })
+
+	// A day file far outside any retention window, and nothing in the accumulator.
+	//
+	// TODAY IS SEEDED TOO, and it is the fixture's premise rather than decoration: retention is
+	// counted back from the OLDER of the clock's day and the newest day file, so with only the stale
+	// file on disk it IS the newest and prune keeps it by design. Without a recent file this test
+	// passes whether or not the idle tick prunes at all.
+	stale := at.AddDate(0, 0, -400)
+	for _, d := range []time.Time{stale, at} {
+		if werr := os.WriteFile(w.store.path(d),
+			[]byte(line(d, "gw", "m", 1, 10, 5, 100)+"\n"), 0o600); werr != nil {
+			t.Fatalf("seed: %v", werr)
+		}
+	}
+	w.mu.Lock()
+	idle := len(w.rows) == 0
+	w.mu.Unlock()
+	if !idle {
+		t.Fatal("the accumulator is not empty, so this test is not exercising the idle path")
+	}
+
+	// The clock rolls into the next day. This is the tick that used to do nothing.
+	now = at.AddDate(0, 0, 1)
+	w.settleClosedMinute()
+	if serr := w.sync(); serr != nil {
+		t.Fatalf("sync: %v", serr)
+	}
+
+	if slices.Contains(liveDayFiles(t, dir), filepath.Base(w.store.path(stale))) {
+		t.Errorf("the 400-day-old file is still readable after an idle day roll (%v): retention waited for traffic",
+			liveDayFiles(t, dir))
 	}
 }
