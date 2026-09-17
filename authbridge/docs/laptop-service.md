@@ -173,8 +173,10 @@ no longer depends on the file. `grep -A1 cost_ledger ~/.cortex/config.yaml` show
 have.
 
 It exists because the in-memory counters are a 6-hour ring, and the proxy restarts several
-times a day. Without the ledger, "what did today cost" answers over whatever is left in
-that ring, and `window=7d` cannot be answered at all.
+times a day. Without the ledger, both `today` and `7d` are still answered — from the ring's
+maximum window, with the response's own `window` field naming the span that was actually
+covered rather than the one you asked for. So the figures stay honest and get much smaller:
+six hours of a day, and six hours of a week.
 
 **What is in the files.** One JSON line per minute per (endpoint, model, agent,
 provenance): the host, the model name, the calling agent's User-Agent, token counts,

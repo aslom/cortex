@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -200,18 +202,34 @@ func TestWarnCostLedgerNeedsSessions_SilentWhenLedgerIsOff(t *testing.T) {
 // so the ledger would pay its whole cost and keep nothing — and at a measured 36 MB to 1.2 GB
 // per 30 days it would do that against an ephemeral-storage limit, where exceeding it evicts
 // the pod rather than losing a figure.
-func TestLedgerDefaultOn_KeyedOnDurabilityNotOnAFlag(t *testing.T) {
+func TestLedgerDefaultOn_NeedsEvidenceOfSomewhereDurable(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		dir     string
-		home    string
-		want    bool
-		wantWhy string
+		name string
+		dir  string
+		home string
+		// installed creates <home>/.cortex, which is what a local install leaves behind and the
+		// only thing separating a laptop from a container that merely has a HOME.
+		installed bool
+		local     bool
+		want      bool
+		wantWhy   string
 	}{
 		{
-			// The case that regressed: a service install, no dir named, real home.
-			name: "installed service with a home directory", home: t.TempDir(),
-			want: true, wantWhy: "home directory",
+			// The case that regressed: a service install, no dir named, real home. It runs with
+			// --config, so localMode is false and only the state directory identifies it.
+			name: "installed service with a home directory", home: t.TempDir(), installed: true,
+			want: true, wantWhy: "exists",
+		},
+		{
+			// The case the HOME-only rule got wrong: os.UserHomeDir succeeds in almost every
+			// container, so this row was ON and writing day files to ephemeral storage.
+			name: "container with a home but no install", home: t.TempDir(),
+			want: false, wantWhy: "discarded on restart",
+		},
+		{
+			// --local names it outright, and needs no directory to exist yet.
+			name: "--local on a fresh machine", home: t.TempDir(), local: true,
+			want: true, wantWhy: "--local",
 		},
 		{
 			// Kubernetes done properly: the operator mounted a volume and named it.
@@ -231,12 +249,17 @@ func TestLedgerDefaultOn_KeyedOnDurabilityNotOnAFlag(t *testing.T) {
 			// HOME drives os.UserHomeDir on the platforms this runs on; empty makes it
 			// fail, which is the container-with-no-home case.
 			t.Setenv("HOME", tc.home)
+			if tc.installed {
+				if merr := os.MkdirAll(filepath.Join(tc.home, cortexDirName), 0o700); merr != nil {
+					t.Fatalf("seed the install marker: %v", merr)
+				}
+			}
 			cfg := &config.Config{Mode: config.ModeProxySidecar}
 			if tc.dir != "" {
 				cfg.CostLedger = &config.CostLedgerConfig{Dir: tc.dir}
 			}
 
-			got, why := ledgerDefaultOn(cfg)
+			got, why := ledgerDefaultOn(cfg, tc.local)
 			if got != tc.want {
 				t.Errorf("ledgerDefaultOn() = %v, want %v (reason given: %q)", got, tc.want, why)
 			}
@@ -256,13 +279,13 @@ func TestLedgerEnabled_ExplicitSettingOverridesTheDerivedDefault(t *testing.T) {
 	on, off := true, false
 	t.Setenv("HOME", "") // derived default would be OFF here
 	cfg := &config.Config{Mode: config.ModeProxySidecar, CostLedger: &config.CostLedgerConfig{Enabled: &on}}
-	if !cfg.CostLedger.LedgerEnabled(ledgerDefaultOnValue(cfg)) {
+	if !cfg.CostLedger.LedgerEnabled(ledgerDefaultOnValue(cfg, false)) {
 		t.Error("enabled: true did not override a derived default of off")
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home) // derived default would be ON here
 	cfg = &config.Config{Mode: config.ModeProxySidecar, CostLedger: &config.CostLedgerConfig{Enabled: &off}}
-	if cfg.CostLedger.LedgerEnabled(ledgerDefaultOnValue(cfg)) {
+	if cfg.CostLedger.LedgerEnabled(ledgerDefaultOnValue(cfg, false)) {
 		t.Error("enabled: false did not override a derived default of on")
 	}
 }

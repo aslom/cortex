@@ -152,7 +152,7 @@ func pluginUsesSPIFFEIdentity(p config.PluginEntry) bool {
 // named only one would send the reader to the wrong file.
 // ledgerDefaultOn decides whether an unset cost_ledger.enabled means ON, and says why.
 //
-// ON WHEREVER THE LEDGER CAN ACTUALLY DELIVER, which is the rule that replaces localMode. The
+// ON WHEREVER THE LEDGER CAN ACTUALLY DELIVER, rather than wherever a particular flag was passed. The
 // old default was true under --local and false otherwise, so it described which FLAG started
 // the process rather than whether durable cost history was achievable — and since every
 // service install runs --config, the documented default was false on every installed laptop.
@@ -162,33 +162,57 @@ func pluginUsesSPIFFEIdentity(p config.PluginEntry) bool {
 //	an explicit cost_ledger.dir   an operator named a path, which in Kubernetes means a
 //	                              volume is mounted there. Nothing else in this process can
 //	                              see a volume, so this is the signal.
-//	a resolvable home directory   the laptop case: ~/.cortex/cost persists across restarts,
-//	                              which is the entire point of the feature.
+//	--local                       the flag says so outright.
+//	an existing ~/.cortex         the laptop case: a local install creates that directory 0700
+//	                              for its config and CA (see writeBuiltinConfig), so its
+//	                              presence is evidence of an install whose state survives a
+//	                              restart — and ~/.cortex/cost then persists too.
 //
-// And one way to be neither: no dir, no $HOME. That is a container with no volume, where the
-// only writable place is the image layer — wiped on every restart, so the ledger would pay
-// its whole cost and keep nothing, and counted against ephemeral-storage, where exceeding the
-// limit EVICTS the pod. Measured growth is 36 MB to 1.2 GB per 30 days depending on label
-// cardinality, so that is not a hypothetical limit. Off, with the reason said out loud.
+// A RESOLVABLE $HOME IS NOT ONE OF THEM, though it used to be, and review was right that it is
+// the wrong test: os.UserHomeDir succeeds in almost every container (HOME=/root), so that rule
+// turned the ledger ON in precisely the place the paragraph below says it must be OFF. The
+// directory has to EXIST, which is the difference between "this process has a HOME" and "this
+// host has a local install".
+//
+// NOT KEYED ON --local ALONE either, which was review's suggested fix and would reintroduce the
+// regression this rule replaced: --local and --config are mutually exclusive (see the flag
+// parsing below) and every service install runs --config, so a laptop running as a service has
+// localMode false. It is both, because they are different populations.
+//
+// And the way to be neither: no dir, no --local, no ~/.cortex. That is a container with no
+// volume, where the only writable place is the image layer — wiped on every restart, so the
+// ledger would pay its whole cost and keep nothing, and counted against ephemeral-storage, where
+// exceeding the limit EVICTS the pod. Measured growth is 36 MB to 1.2 GB per 30 days depending on
+// label cardinality, so that is not a hypothetical limit. Off, with the reason said out loud.
 //
 // The reason is returned rather than logged here so the caller can log it once, next to the
 // other ledger lines, instead of this being a function with a side effect.
-func ledgerDefaultOn(cfg *config.Config) (bool, string) {
+func ledgerDefaultOn(cfg *config.Config, local bool) (bool, string) {
 	if cfg.CostLedger.DirSet() {
 		return true, "cost_ledger.dir names a durable location"
 	}
-	if _, err := defaultCortexDir(); err == nil {
-		return true, "a home directory resolves, so ~/.cortex/cost persists across restarts"
+	if local {
+		return true, "--local, so ~/" + cortexDirName + "/cost persists across restarts"
 	}
-	return false, "no cost_ledger.dir and no resolvable home directory, so the only writable " +
-		"location is a container layer that is discarded on restart"
+	dir, err := defaultCortexDir()
+	if err != nil {
+		return false, "no cost_ledger.dir and no resolvable home directory, so the only writable " +
+			"location is a container layer that is discarded on restart"
+	}
+	// Stat, not "does $HOME resolve": see the doc above for why the two are different questions.
+	if fi, serr := os.Stat(dir); serr == nil && fi.IsDir() {
+		return true, "a local install's " + dir + " exists, so ~/" + cortexDirName +
+			"/cost persists across restarts"
+	}
+	return false, "no cost_ledger.dir, not --local, and no " + dir + " to suggest a local " +
+		"install, so the only writable location may be a container layer that is discarded on restart"
 }
 
 // ledgerDefaultOnValue is ledgerDefaultOn without the reason, for call sites that only need
 // the decision. Kept separate rather than making the reason optional, so no caller can pass a
 // default that disagrees with the one the ledger was built from.
-func ledgerDefaultOnValue(cfg *config.Config) bool {
-	on, _ := ledgerDefaultOn(cfg)
+func ledgerDefaultOnValue(cfg *config.Config, local bool) bool {
+	on, _ := ledgerDefaultOn(cfg, local)
 	return on
 }
 
@@ -497,7 +521,7 @@ func main() {
 		// neither does not, because its only writable place is discarded on restart and
 		// counted against ephemeral-storage, where the limit evicts the pod rather than
 		// dropping a figure. cost_ledger.enabled still overrides in either direction.
-		defaultOn, whyDefault := ledgerDefaultOn(cfg)
+		defaultOn, whyDefault := ledgerDefaultOn(cfg, localMode)
 		if cfg.CostLedger.LedgerEnabled(defaultOn) {
 			dir, derr := costLedgerDir(cfg)
 			if derr != nil {
@@ -555,7 +579,7 @@ func main() {
 	// anything to say, so this call is unconditional rather than branch-local —
 	// a warning that only exists down one arm of an if is the shape that produced
 	// the silence in the first place.
-	warnCostLedgerNeedsSessions(cfg, ledgerDefaultOnValue(cfg), slog.Default())
+	warnCostLedgerNeedsSessions(cfg, ledgerDefaultOnValue(cfg, localMode), slog.Default())
 
 	var httpServers []*http.Server
 
