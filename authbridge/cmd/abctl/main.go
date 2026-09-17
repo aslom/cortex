@@ -186,7 +186,7 @@ func wantsInfoFlagOnly(args []string) bool {
 //
 // Precedence: an explicit --endpoint always wins — it names a specific proxy, and
 // second-guessing that would make the flag advisory. Otherwise a local Cortex is
-// taken only when it is ANSWERING and --kubernetes is off.
+// taken only when it is ANSWERING and --kubernetes was not passed.
 //
 // kubernetes defaults false: a live local Cortex is taken, which keeps a bare
 // `abctl observe` on a laptop working with no flag at all. Passing --kubernetes is
