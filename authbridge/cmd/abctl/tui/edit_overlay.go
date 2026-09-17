@@ -33,8 +33,16 @@ const (
 
 // editState lives on *model when an edit is in flight.
 type editState struct {
-	phase     editPhase
-	fetched   *edit.FetchedPipeline
+	phase   editPhase
+	fetched *edit.FetchedPipeline
+	// store is where this edit reads and writes; statusURL is the base whose
+	// /reload/status confirms it landed. Captured together when the cycle
+	// begins, and read from here rather than off the model for the rest of it,
+	// so one transaction always targets one proxy — an operator who switches
+	// pods or presses [l] mid-edit cannot have the apply land somewhere the
+	// fetch never came from.
+	store     edit.Store
+	statusURL string
 	tempPath  string
 	editedRaw []byte // bytes the user wrote in $EDITOR
 	diff      string // colorized output from edit.Diff
@@ -57,6 +65,21 @@ type editState struct {
 	generation int
 }
 
+// describeTarget is store.Describe() with a neutral fallback for a nil store.
+//
+// Nil happens: the overlay-render tests build an editState from a phase alone,
+// and a renderer that panicked on that would make every one of them a
+// constructor exercise. The fallback says nothing false about either backend.
+func describeTarget(s edit.Store) edit.Target {
+	if s == nil {
+		return edit.Target{
+			Noun:     "config",
+			WaitHint: "waiting for the framework to pick up the change",
+		}
+	}
+	return s.Describe()
+}
+
 // renderEditOverlay returns the overlay content (rendered into a
 // styled box) for the current edit phase. width/height are the
 // terminal's full dimensions; the overlay sizes itself to fit
@@ -67,12 +90,14 @@ func renderEditOverlay(s editState, width, height int) string {
 		Padding(1, 2).
 		Width(min(width-4, 100))
 
+	target := describeTarget(s.store)
+
 	var b strings.Builder
 	switch s.phase {
 	case editPhaseFetching:
 		b.WriteString(styleTitle.Render("Edit pipeline"))
 		b.WriteString("\n\n")
-		b.WriteString("Fetching ConfigMap…")
+		b.WriteString("Fetching " + target.Noun + "…")
 	case editPhaseEditing:
 		b.WriteString(styleTitle.Render("Edit pipeline"))
 		b.WriteString("\n\n")
@@ -108,17 +133,17 @@ func renderEditOverlay(s editState, width, height int) string {
 	case editPhaseApplying:
 		b.WriteString(styleTitle.Render("Edit pipeline"))
 		b.WriteString("\n\n")
-		b.WriteString("Applying to ConfigMap…")
+		b.WriteString("Applying to " + target.Noun + "…")
 	case editPhaseWaiting:
 		b.WriteString(styleTitle.Render("Edit pipeline"))
 		b.WriteString("\n\n")
 		b.WriteString("Waiting for hot-reload…")
 		b.WriteString("\n")
-		b.WriteString(styleHint.Render("(this can take up to 120s while kubelet syncs the ConfigMap)"))
+		b.WriteString(styleHint.Render("(" + target.WaitHint + ")"))
 	case editPhaseRollback:
 		b.WriteString(styleTitle.Render("Edit pipeline — rolling back"))
 		b.WriteString("\n\n")
-		b.WriteString("Reload failed. Restoring previous ConfigMap…")
+		b.WriteString("Reload failed. Restoring previous " + target.Noun + "…")
 	case editPhaseError:
 		b.WriteString(styleTitle.Render("Edit pipeline — error"))
 		b.WriteString("\n\n")

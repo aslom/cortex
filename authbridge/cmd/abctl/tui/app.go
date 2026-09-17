@@ -96,6 +96,37 @@ func (m *model) localEndpointOr() string {
 	return defaultLocalEndpoint
 }
 
+// pipelineStore resolves where `e` should read and write the pipeline, paired
+// with the base URL whose /reload/status confirms the edit landed. Returns a
+// nil store when neither target is available, which is the only case `e`
+// refuses.
+//
+// The two are returned together because they must describe the SAME proxy:
+// writing a local file and then polling a pod's reload status — or the
+// reverse — would report success for an edit that never took effect.
+//
+// Local wins when the endpoint on screen IS the local Cortex. Deliberately a
+// question about the connection rather than about how abctl was started, so
+// `--endpoint http://127.0.0.1:47601` aimed at your own proxy edits it just
+// like a bare `abctl` does, and `[l]` gains the same ability mid-session.
+// Compared against localEndpoint rather than localEndpointOr(): the fallback
+// is the in-cluster 9094, and matching that would claim a hand-run
+// port-forward to a POD is this machine's config file.
+func (m *model) pipelineStore() (edit.Store, string) {
+	if m.client != nil && m.localEndpoint != "" && m.client.Endpoint() == m.localEndpoint &&
+		m.localConfigPath != "" && m.localStatsURL != "" {
+		return edit.FileStore{Path: m.localConfigPath}, m.localStatsURL
+	}
+	if m.editRunner != nil && m.selectedNamespace != "" && m.selectedPod != "" && m.statusURL != "" {
+		return edit.ConfigMapStore{
+			Run:       m.editRunner,
+			Namespace: m.selectedNamespace,
+			Pod:       m.selectedPod,
+		}, m.statusURL
+	}
+	return nil, ""
+}
+
 // localProbeTimeout bounds the pre-connect reachability check for `[l]`.
 // Without it, a dead localEndpoint would leave the operator in an empty
 // session view wondering why nothing streams; with it they get a footer
@@ -443,6 +474,17 @@ type model struct {
 	// editRunner is the kubectl Runner the edit flow uses for fetch/apply.
 	// Set in newPickerModel to edit.DefaultRunner; tests inject a stub.
 	editRunner edit.Runner
+
+	// localConfigPath is the config file of the Cortex on this machine, and
+	// localStatsURL is where that Cortex serves /reload/status. Both set from
+	// RunOptions, and only when one answered — pipelineStore requires both, so
+	// either being empty means `e` has no local target.
+	//
+	// Passed in rather than resolved here, like save: this package does no
+	// home-directory or filesystem lookup, which is what keeps its tests off
+	// $HOME.
+	localConfigPath string
+	localStatsURL   string
 
 	// save persists Settings when a setting changes. A callback rather than a path
 	// so this package needs no home-directory or filesystem logic, and so its tests
@@ -1106,7 +1148,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.editState.applyTime = msg.ApplyTime
 		m.editState.phase = editPhaseWaiting
-		return m, withGen(m.editState.generation, edit.PollCmd(m.ctx, m.statusURL, msg.ApplyTime))
+		return m, withGen(m.editState.generation, edit.PollCmd(m.ctx, m.editState.statusURL, msg.ApplyTime))
 
 	case genPolledMsg:
 		// Drop stale (different gen), fully-aborted (phase=Done), or
@@ -1127,25 +1169,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editState = editState{phase: editPhaseDone}
 			return m, m.loadPipelineCmd()
 		case edit.PollFailure, edit.PollTimeout:
-			// In-pod reload didn't take. The running pipeline is still
-			// the previous one; reconcile the ConfigMap back to match.
+			// Reload didn't take. The running pipeline is still the previous
+			// one; reconcile the stored config back to match.
 			//
 			// Caveat: the rollback bytes come from m.editState.fetched —
-			// captured at this edit's Fetch time. With Apply's
-			// --force-conflicts=true and field-manager=abctl, if a third
-			// party (operator reconcile, kubectl edit, kustomize) modified
-			// the ConfigMap between our forward apply and this rollback,
-			// our rollback silently reverts their change too. This is not
-			// a true undo. The framework's running pipeline is unaffected
-			// (build failure → keeps the previous in-memory pipeline), but
-			// the on-disk ConfigMap can lose third-party state. Surfacing
-			// a "third-party change detected" path is a future option.
+			// captured at this edit's Fetch time — so a third party who
+			// changed the config between our forward apply and this rollback
+			// has their change silently reverted too. This is not a true undo.
+			// In a cluster that third party is an operator reconcile, a
+			// kubectl edit or a kustomize apply, and Apply's
+			// --force-conflicts=true and field-manager=abctl let us win; on a
+			// local file it is another editor holding the same path. Either
+			// way the framework's running pipeline is unaffected (build
+			// failure → keeps the previous in-memory pipeline), but the stored
+			// config can lose third-party state. Surfacing a "third-party
+			// change detected" path is a future option.
 			reason := msg.Result.LastError
 			if msg.Result.Status == edit.PollTimeout {
 				reason = "reload not observed in 120s"
 			}
-			origManifest, mErr := edit.BuildManifest(
-				m.editState.fetched.ConfigMapYAML,
+			origManifest, mErr := m.editState.store.Build(
+				m.editState.fetched,
 				m.editState.fetched.InnerYAML,
 			)
 			if mErr != nil {
@@ -1165,7 +1209,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.editState.phase = editPhaseRollback
 			}
-			return m, withGen(m.editState.generation, edit.RollbackCmd(m.ctx, m.editRunner, origManifest, reason))
+			return m, withGen(m.editState.generation, edit.RollbackCmd(m.ctx, m.editState.store, origManifest, reason))
 		}
 		return m, nil
 
@@ -1619,6 +1663,17 @@ type RunOptions struct {
 	// LocalEndpoint overrides where `[l]` connects. Empty means
 	// defaultLocalEndpoint.
 	LocalEndpoint string
+	// LocalConfigPath and LocalStatsURL describe the Cortex running on this
+	// machine: the config file it was started with, and where it serves
+	// /reload/status. Together they let `e` edit its pipeline directly —
+	// no kubectl, no ConfigMap, since the proxy already watches that file.
+	//
+	// Set only alongside LocalEndpoint, i.e. only when a local Cortex
+	// answered. Either left empty disables local editing rather than
+	// half-enabling it, because an apply we cannot confirm reloaded is
+	// worse than an edit we declined to start.
+	LocalConfigPath string
+	LocalStatsURL   string
 	// Save persists the user's settings when one changes — the column picker
 	// closing, a filter being committed or cleared. A callback rather than a path
 	// keeps $HOME and the YAML out of this package, so its tests need neither.
@@ -1641,6 +1696,8 @@ func Run(ctx context.Context, opts RunOptions) error {
 		m = newPickerModel(ctx, opts.Lister, opts.PortForwarder)
 	}
 	m.localEndpoint = opts.LocalEndpoint
+	m.localConfigPath = opts.LocalConfigPath
+	m.localStatsURL = opts.LocalStatsURL
 	// After the constructor branch, so the two paths cannot disagree about it:
 	// newPickerModel and New would otherwise each need their own copy.
 	m.save = opts.Save

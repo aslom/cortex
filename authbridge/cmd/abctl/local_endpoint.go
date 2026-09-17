@@ -28,15 +28,54 @@ const localProbeTimeout = 400 * time.Millisecond
 // changed. The in-cluster default is 9094 and a local install uses 47601, which
 // is exactly the kind of difference a constant gets wrong.
 func localSessionEndpoint() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	cfg, err := config.Load(filepath.Join(home, ".cortex", "config.yaml"))
+	cfg, _, err := localCortexConfig()
 	if err != nil {
 		return ""
 	}
-	addr := cfg.Listener.SessionAPIAddr
+	return dialURL(cfg.Listener.SessionAPIAddr)
+}
+
+// localCortexConfig loads ~/.cortex/config.yaml and returns it with the path it
+// came from. The path is what the editor needs: it is the file the local proxy
+// was started with and is watching, so writing it is how a local pipeline edit
+// takes effect.
+func localCortexConfig() (*config.Config, string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil, "", fmt.Errorf("no home directory")
+	}
+	path := filepath.Join(home, ".cortex", "config.yaml")
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return cfg, path, nil
+}
+
+// localEditTargets returns the config file a local pipeline edit writes and the
+// base URL whose /reload/status confirms the proxy picked it up. Both empty when
+// this machine has no usable local Cortex config.
+//
+// The stats address comes from the same file the edit rewrites, which is the
+// only bootstrap available — asking the running proxy where it serves
+// /reload/status would require already knowing that address. A stale value here
+// is not silently wrong: the poll's unreachable threshold fails it fast and
+// visibly, rather than reporting success for an edit nothing reloaded.
+func localEditTargets() (configPath, statsURL string) {
+	cfg, path, err := localCortexConfig()
+	if err != nil {
+		return "", ""
+	}
+	statsURL = dialURL(cfg.Stats.StatsAddress)
+	if statsURL == "" {
+		return "", ""
+	}
+	return path, statsURL
+}
+
+// dialURL turns a bind address from the config into a URL a client can connect
+// to, or "" if it names no port.
+func dialURL(addr string) string {
 	if addr == "" {
 		return ""
 	}

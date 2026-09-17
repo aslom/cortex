@@ -581,14 +581,32 @@ which saves it, or edit the YAML.
 
 ## Editing the pipeline
 
-Press `e` on the Pipeline pane to edit the agent's runtime `pipeline:`
-subtree in `$EDITOR` (or `vi` if unset). On save, abctl shows a diff
-and asks `apply this change? (y/N)`. Confirming runs
-`kubectl apply --server-side` against the per-agent ConfigMap with
-`--field-manager=abctl --force-conflicts=true` (taking ownership of
-`data.config.yaml` from the operator's webhook on first
-edit), then polls the framework's `/reload/status` until the reload
-completes (success or failure).
+Press `e` on the Pipeline pane to edit the runtime `pipeline:` subtree in
+`$EDITOR` (or `vi` if unset). On save, abctl shows a diff and asks
+`apply this change? (y/N)`. Confirming writes the change back, then polls the
+framework's `/reload/status` until the reload completes (success or failure).
+
+Where it writes depends on what you are connected to, not on how abctl was
+started:
+
+| Connected to | `e` writes | Reload confirmed via |
+|---|---|---|
+| a pod, via the picker | `kubectl apply --server-side` against the per-agent ConfigMap, `--field-manager=abctl --force-conflicts=true` (taking ownership of `data.config.yaml` from the operator's webhook on first edit) | the port-forward's `:9093/reload/status` |
+| the Cortex on this machine | `~/.cortex/config.yaml` directly — the file that proxy was started with and already watches | that proxy's own stats address, `stats.address` in the same file |
+
+The local path needs neither kubectl nor a ConfigMap: the proxy watches its
+config file with fsnotify, so writing the file *is* the apply. abctl writes a
+temporary sibling and renames it over the target, so the watcher only ever sees
+a complete file — a half-written one would book a reload failure against an
+edit you never made.
+
+Local editing is offered whenever the endpoint on screen is this machine's
+Cortex: a bare `abctl` that auto-connected to it, `[l]` from the picker, or an
+explicit `--endpoint` aimed at its session API. A local Cortex merely *running*
+is not enough — while you are looking at a pod, `e` edits the pod.
+
+If neither target applies, `e` says so and names the remedy instead of starting
+an edit it cannot finish.
 
 The single edit flow covers four operations:
 - **Edit a value** — change a config field of an existing plugin

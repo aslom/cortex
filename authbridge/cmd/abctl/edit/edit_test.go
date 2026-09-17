@@ -10,11 +10,17 @@ import (
 	"time"
 )
 
+// cmStore wraps a kubectl stub in the store the picker would build, so these
+// tests exercise FetchCmd through the same seam production uses.
+func cmStore(stub Runner) ConfigMapStore {
+	return ConfigMapStore{Run: stub, Namespace: "team1", Pod: "email-agent"}
+}
+
 func TestFetchCmd_Success(t *testing.T) {
 	stub := func(ctx context.Context, args ...string) ([]byte, error) {
 		return []byte(fixtureCMYAML), nil
 	}
-	cmd := FetchCmd(context.Background(), stub, nil, "team1", "email-agent", nil)
+	cmd := FetchCmd(context.Background(), cmStore(stub), nil, nil)
 	msg := cmd().(FetchedMsg)
 	if msg.Err != nil {
 		t.Fatalf("FetchedMsg.Err = %v", msg.Err)
@@ -31,7 +37,7 @@ func TestFetchCmd_Error(t *testing.T) {
 	stub := func(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("forbidden")
 	}
-	cmd := FetchCmd(context.Background(), stub, nil, "team1", "email-agent", nil)
+	cmd := FetchCmd(context.Background(), cmStore(stub), nil, nil)
 	msg := cmd().(FetchedMsg)
 	if msg.Err == nil {
 		t.Fatal("expected error")
@@ -45,7 +51,7 @@ func TestApplyCmd_Success(t *testing.T) {
 	stub := func(ctx context.Context, args ...string) ([]byte, error) {
 		return []byte("applied"), nil
 	}
-	cmd := ApplyCmd(context.Background(), stub, []byte("manifest"))
+	cmd := ApplyCmd(context.Background(), cmStore(stub), []byte("manifest"))
 	msg := cmd().(AppliedMsg)
 	if msg.Err != nil {
 		t.Fatalf("err = %v", msg.Err)

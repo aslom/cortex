@@ -55,12 +55,15 @@ type FetchedMsg struct {
 	Err      error
 }
 
-// FetchCmd returns a tea.Cmd that resolves the pod's agent name (via the
-// app.kubernetes.io/name label), fetches the agent's ConfigMap, locates
-// the pipeline subtree, writes the subtree to a tempfile (ready for
+// FetchCmd returns a tea.Cmd that fetches the runtime YAML from store,
+// locates the pipeline subtree, writes the subtree to a tempfile (ready for
 // $EDITOR), and emits FetchedMsg. The tempfile lives in $TMPDIR; abctl
 // leaves it in place on every exit path (success, error, abort) so users
 // can recover an in-progress edit.
+//
+// Where the YAML comes from is the store's business: a pod's ConfigMap via
+// kubectl, or the config file of a local Cortex. Everything after the fetch
+// is identical either way.
 //
 // cachedCatalog is the catalog the TUI has already fetched (e.g. via
 // the catalog pane). When non-nil it's used as-is to render templates.
@@ -70,17 +73,12 @@ type FetchedMsg struct {
 // (used by tests and degraded server paths).
 func FetchCmd(
 	ctx context.Context,
-	run Runner,
+	store Store,
 	client *apiclient.Client,
-	namespace, pod string,
 	cachedCatalog []apiclient.PluginCatalogEntry,
 ) tea.Cmd {
 	return func() tea.Msg {
-		agent, err := ResolveAgentName(ctx, run, namespace, pod)
-		if err != nil {
-			return FetchedMsg{Err: err}
-		}
-		fp, err := Fetch(ctx, run, namespace, agent)
+		fp, err := store.Fetch(ctx)
 		if err != nil {
 			return FetchedMsg{Err: err}
 		}
@@ -126,11 +124,11 @@ type AppliedMsg struct {
 	Err       error
 }
 
-// ApplyCmd returns a tea.Cmd that runs kubectl apply --server-side on
-// the supplied manifest and emits AppliedMsg with the apply timestamp.
-func ApplyCmd(ctx context.Context, run Runner, manifest []byte) tea.Cmd {
+// ApplyCmd returns a tea.Cmd that writes the supplied payload back through
+// store and emits AppliedMsg with the apply timestamp.
+func ApplyCmd(ctx context.Context, store Store, payload []byte) tea.Cmd {
 	return func() tea.Msg {
-		at, err := Apply(ctx, run, manifest)
+		at, err := store.Apply(ctx, payload)
 		return AppliedMsg{ApplyTime: at, Err: err}
 	}
 }
@@ -143,14 +141,14 @@ type RolledBackMsg struct {
 	Err       error
 }
 
-// RollbackCmd re-applies the supplied (original) manifest to undo a
-// successful API write whose subsequent in-pod reload failed. The
-// running pipeline never moved (the framework keeps the previous
-// pipeline on build failure), so this just reconciles the ConfigMap
-// on disk back to what's actually serving.
-func RollbackCmd(ctx context.Context, run Runner, manifest []byte, reloadErr string) tea.Cmd {
+// RollbackCmd re-applies the supplied (original) payload to undo a
+// successful write whose subsequent reload failed. The running pipeline
+// never moved (the framework keeps the previous pipeline on build
+// failure), so this just reconciles the stored config back to what's
+// actually serving.
+func RollbackCmd(ctx context.Context, store Store, payload []byte, reloadErr string) tea.Cmd {
 	return func() tea.Msg {
-		_, err := Apply(ctx, run, manifest)
+		_, err := store.Apply(ctx, payload)
 		return RolledBackMsg{ReloadErr: reloadErr, Err: err}
 	}
 }

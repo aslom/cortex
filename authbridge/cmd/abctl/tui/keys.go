@@ -598,20 +598,25 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		if m.pane != panePipeline {
 			return nil
 		}
-		// `e` requires the picker-mode cluster fields. In --endpoint
-		// mode none of these are set, so the keypath would crash later
-		// trying to kubectl-fetch with an empty pod/namespace. Surface
-		// the limitation in the footer instead of opening a broken edit.
-		if m.editRunner == nil || m.statusURL == "" || m.selectedNamespace == "" || m.selectedPod == "" {
-			m.setFlash("pipeline editing requires the picker (no --endpoint)")
+		// Two targets can back an edit — this machine's config file, or a
+		// pod's ConfigMap via the picker. pipelineStore says which, if either;
+		// a nil store is the only case there is nothing to edit.
+		store, statusURL := m.pipelineStore()
+		if store == nil {
+			// Name what is missing and how to get it. The old text said
+			// "requires the picker (no --endpoint)", which described neither:
+			// a bare `abctl` that auto-connected to a local Cortex passes no
+			// --endpoint at all, so it accused the operator of a flag they had
+			// not used and omitted the one that would have helped.
+			m.setFlash("no pipeline to edit here — run `abctl --kubernetes` to pick a pod, or point abctl at a Cortex running on this machine")
 			return nil
 		}
 		if m.editState.phase != editPhaseDone {
 			return nil // already editing
 		}
 		gen := m.editState.generation + 1
-		m.editState = editState{phase: editPhaseFetching, generation: gen}
-		return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.client, m.selectedNamespace, m.selectedPod, catalogPlugins(m.catalog)))
+		m.editState = editState{phase: editPhaseFetching, generation: gen, store: store, statusURL: statusURL}
+		return withGen(gen, edit.FetchCmd(m.ctx, store, m.client, catalogPlugins(m.catalog)))
 
 	case "g":
 		m.goTop()
@@ -1050,13 +1055,13 @@ func (m *model) handleEditKey(msg tea.KeyMsg) tea.Cmd {
 				m.editState.fetched.PipelineEnd,
 				newSubtree,
 			)
-			manifest, err := edit.BuildManifest(m.editState.fetched.ConfigMapYAML, newInner)
+			payload, err := m.editState.store.Build(m.editState.fetched, newInner)
 			if err != nil {
 				m.editState.phase = editPhaseError
-				m.editState.err = "build manifest: " + err.Error()
+				m.editState.err = "build payload: " + err.Error()
 				return nil
 			}
-			return withGen(m.editState.generation, edit.ApplyCmd(m.ctx, m.editRunner, manifest))
+			return withGen(m.editState.generation, edit.ApplyCmd(m.ctx, m.editState.store, payload))
 		case "n", "N", "esc":
 			m.editState = editState{phase: editPhaseDone}
 			return nil
@@ -1072,8 +1077,12 @@ func (m *model) handleEditKey(msg tea.KeyMsg) tea.Cmd {
 			// attempt are dropped.
 			if m.editState.tempPath == "" {
 				gen := m.editState.generation + 1
-				m.editState = editState{phase: editPhaseFetching, generation: gen}
-				return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.client, m.selectedNamespace, m.selectedPod, catalogPlugins(m.catalog)))
+				// The store the failed attempt used, not a fresh
+				// pipelineStore(): a retry is the same transaction, so
+				// re-resolving could silently retarget it.
+				store, statusURL := m.editState.store, m.editState.statusURL
+				m.editState = editState{phase: editPhaseFetching, generation: gen, store: store, statusURL: statusURL}
+				return withGen(gen, edit.FetchCmd(m.ctx, store, m.client, catalogPlugins(m.catalog)))
 			}
 			m.editState.phase = editPhaseEditing
 			return openEditorCmd(m.editState.generation, m.editState.tempPath)

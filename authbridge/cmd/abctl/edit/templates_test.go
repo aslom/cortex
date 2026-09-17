@@ -223,7 +223,7 @@ func TestFetchCmd_AppendsTemplatesWhenCatalogProvided(t *testing.T) {
 	cat := []apiclient.PluginCatalogEntry{
 		{Name: "ibac", Description: "test plugin"},
 	}
-	cmd := FetchCmd(context.Background(), r, nil, "team1", "email-agent", cat)
+	cmd := FetchCmd(context.Background(), cmStore(r), nil, cat)
 	msg := cmd().(FetchedMsg)
 	if msg.Err != nil {
 		t.Fatalf("FetchCmd err: %v", msg.Err)
@@ -375,7 +375,7 @@ func TestFetchCmd_FetchesCatalogInlineWhenCacheNil(t *testing.T) {
 	r := func(_ context.Context, _ ...string) ([]byte, error) {
 		return []byte(fixtureCMYAML), nil
 	}
-	cmd := FetchCmd(context.Background(), r, client, "team1", "email-agent", nil)
+	cmd := FetchCmd(context.Background(), cmStore(r), client, nil)
 	msg := cmd().(FetchedMsg)
 	if msg.Err != nil {
 		t.Fatalf("FetchCmd err: %v", msg.Err)
@@ -401,7 +401,7 @@ func TestFetchCmd_FetcherErrorIsNonFatal(t *testing.T) {
 	r := func(_ context.Context, _ ...string) ([]byte, error) {
 		return []byte(fixtureCMYAML), nil
 	}
-	cmd := FetchCmd(context.Background(), r, client, "team1", "email-agent", nil)
+	cmd := FetchCmd(context.Background(), cmStore(r), client, nil)
 	msg := cmd().(FetchedMsg)
 	if msg.Err != nil {
 		t.Fatalf("catalog-fetch failure should not break edit: %v", msg.Err)
@@ -419,7 +419,7 @@ func TestFetchCmd_NoTemplatesWhenCatalogNil(t *testing.T) {
 	r := func(_ context.Context, _ ...string) ([]byte, error) {
 		return []byte(fixtureCMYAML), nil
 	}
-	cmd := FetchCmd(context.Background(), r, nil, "team1", "email-agent", nil)
+	cmd := FetchCmd(context.Background(), cmStore(r), nil, nil)
 	msg := cmd().(FetchedMsg)
 	if msg.Err != nil {
 		t.Fatalf("FetchCmd err: %v", msg.Err)

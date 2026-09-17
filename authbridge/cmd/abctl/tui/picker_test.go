@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/cluster"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/edit"
 )
 
 // fakeLister returns a fixed []AgentNamespace and counts ListAgents calls.
@@ -591,28 +594,104 @@ func TestLocalhostKeybindScoping(t *testing.T) {
 	}
 }
 
-// A session entered via `[l]` has no pod/namespace, so pipeline editing
-// must report the limitation rather than opening a broken edit. This is
-// the same guard `--endpoint` mode relies on; asserted here because the
-// README documents the behavior for `[l]` specifically.
-func TestLocalhostEditIsUnavailable(t *testing.T) {
-	srv := sessionAPIStub(t)
+// localConnected drives a picker model through an `[l]` connect to srv and
+// leaves it on the pipeline pane, ready for an `e` press.
+func localConnected(t *testing.T, srvURL string) *model {
+	t.Helper()
 	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
 	updated, _ := m.Update(m.Init()())
 	mm := updated.(*model)
-	updated, _ = mm.Update(connectLocalCmd(context.Background(), srv.URL)())
+	updated, _ = mm.Update(connectLocalCmd(context.Background(), srvURL)())
 	mm = updated.(*model)
 	mm.pane = panePipeline
+	return mm
+}
+
+// A connection with no pod/namespace AND no known local config has nothing to
+// edit, so `e` must say so rather than open a broken edit. The message has to
+// name a remedy: the old one blamed `--endpoint`, which a bare `abctl` that
+// auto-connected to a local Cortex never passed.
+func TestEditUnavailableWithoutAStore(t *testing.T) {
+	srv := sessionAPIStub(t)
+	mm := localConnected(t, srv.URL)
 
 	updated, cmd := mm.Update(keyRune('e'))
 	mm = updated.(*model)
 	if cmd != nil {
-		t.Fatal("`e` after an `l` connect should not start an edit")
+		t.Fatal("`e` with no store should not start an edit")
 	}
 	if mm.editState.phase != editPhaseDone {
 		t.Fatalf("`e` should not enter an edit phase, got %v", mm.editState.phase)
 	}
-	if !strings.Contains(mm.flash, "picker") {
-		t.Fatalf("`e` should flash the picker-required hint, got %q", mm.flash)
+	if !strings.Contains(mm.flash, "--kubernetes") {
+		t.Errorf("flash should point at a remedy, got %q", mm.flash)
+	}
+	if strings.Contains(mm.flash, "--endpoint") {
+		t.Errorf("flash blames a flag the user did not pass, got %q", mm.flash)
+	}
+}
+
+// The point of the local store: when the endpoint on screen IS this machine's
+// Cortex, `e` edits its config file — no picker, no pod, no kubectl. Nothing
+// about how abctl was launched gates this, only what it is connected to.
+func TestEditUsesTheLocalFileStoreWhenConnectedLocally(t *testing.T) {
+	srv := sessionAPIStub(t)
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("mode: proxy-sidecar\npipeline:\n  outbound: []\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mm := localConnected(t, srv.URL)
+	// What main.go passes when a local Cortex answered. localEndpoint must equal
+	// the connected endpoint — that equality is the whole discriminator.
+	mm.localEndpoint = mm.client.Endpoint()
+	mm.localConfigPath = cfgPath
+	mm.localStatsURL = "http://127.0.0.1:47602"
+
+	updated, cmd := mm.Update(keyRune('e'))
+	mm = updated.(*model)
+	if cmd == nil {
+		t.Fatal("`e` should start an edit against the local config")
+	}
+	if mm.editState.phase != editPhaseFetching {
+		t.Fatalf("phase = %v, want fetching", mm.editState.phase)
+	}
+	fs, ok := mm.editState.store.(edit.FileStore)
+	if !ok {
+		t.Fatalf("store is %T, want edit.FileStore", mm.editState.store)
+	}
+	if fs.Path != cfgPath {
+		t.Errorf("FileStore.Path = %q, want %q", fs.Path, cfgPath)
+	}
+	// The store and the polled endpoint must describe the same proxy, or a
+	// local write would be confirmed against somebody else's reload status.
+	if mm.editState.statusURL != "http://127.0.0.1:47602" {
+		t.Errorf("statusURL = %q, want the local stats URL", mm.editState.statusURL)
+	}
+}
+
+// A local Cortex running on this machine must not make `e` edit its file while
+// the operator is looking at a POD. The endpoint decides, not mere presence of
+// a local install.
+func TestEditPrefersThePodWhenViewingAPod(t *testing.T) {
+	srv := sessionAPIStub(t)
+	mm := localConnected(t, srv.URL)
+	// A local install exists and answered, but at a different address than the
+	// one on screen — which is what viewing a pod through a port-forward looks
+	// like.
+	mm.localEndpoint = "http://127.0.0.1:47601"
+	mm.localConfigPath = "/Users/somebody/.cortex/config.yaml"
+	mm.localStatsURL = "http://127.0.0.1:47602"
+	mm.editRunner = func(context.Context, ...string) ([]byte, error) { return nil, nil }
+	mm.selectedNamespace, mm.selectedPod = "team1", "email-agent"
+	mm.statusURL = "http://127.0.0.1:19093"
+
+	updated, _ := mm.Update(keyRune('e'))
+	mm = updated.(*model)
+	if _, ok := mm.editState.store.(edit.ConfigMapStore); !ok {
+		t.Fatalf("store is %T, want edit.ConfigMapStore — a local install must not hijack a pod edit", mm.editState.store)
+	}
+	if mm.editState.statusURL != "http://127.0.0.1:19093" {
+		t.Errorf("statusURL = %q, want the port-forward's", mm.editState.statusURL)
 	}
 }

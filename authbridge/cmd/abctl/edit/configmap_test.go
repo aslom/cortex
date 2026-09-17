@@ -205,8 +205,8 @@ func TestFetch_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if len(fp.ConfigMapYAML) == 0 {
-		t.Fatal("ConfigMapYAML empty")
+	if len(fp.Original) == 0 {
+		t.Fatal("Original empty")
 	}
 	if len(fp.InnerYAML) == 0 {
 		t.Fatal("InnerYAML empty")

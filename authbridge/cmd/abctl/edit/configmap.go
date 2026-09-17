@@ -1,8 +1,13 @@
 // Package edit implements abctl's in-place pipeline editor. The flow is:
-// fetch the agent's ConfigMap via kubectl, locate the pipeline: subtree,
-// open just that subtree in the user's $EDITOR, splice the edit back into
-// the original ConfigMap manifest, kubectl apply --server-side, then poll
-// /reload/status until the framework reloads.
+// fetch the runtime YAML from a Store, locate the pipeline: subtree, open
+// just that subtree in the user's $EDITOR, splice the edit back in, apply it
+// through the same Store, then poll /reload/status until the framework
+// reloads.
+//
+// Two stores implement that: ConfigMapStore for a pod in a cluster (this
+// file) and FileStore for a Cortex running on this machine (local.go). Only
+// fetch / rewrap / apply differ between them — the templates, the diff
+// prompt, the validation and the reload poll are shared.
 //
 // All kubectl interaction goes through the Runner injection seam so tests
 // can stub it out.
@@ -218,12 +223,17 @@ func DefaultRunner(ctx context.Context, args ...string) ([]byte, error) {
 	return out, nil
 }
 
-// FetchedPipeline is what Fetch returns: the full ConfigMap manifest, the
-// inner runtime YAML extracted from data.config.yaml, and the byte range
-// of the pipeline subtree within the inner YAML.
+// FetchedPipeline is what a Store's Fetch returns: whatever the store needs
+// to rebuild its payload, the runtime YAML itself, and the byte range of the
+// pipeline subtree within that YAML.
 type FetchedPipeline struct {
-	ConfigMapYAML []byte // raw kubectl get cm -o yaml output
-	InnerYAML     []byte // value of data.config.yaml
+	// Original is the store's own view of what it read, and is only ever
+	// handed back to that same store's Build. For a ConfigMap it is the raw
+	// `kubectl get cm -o yaml` manifest, whose outer structure Build has to
+	// re-emit; for a file it is the file bytes, which equal InnerYAML and
+	// leave Build with nothing to do.
+	Original      []byte
+	InnerYAML     []byte // the runtime YAML (a ConfigMap's data.config.yaml, or the whole file)
 	PipelineStart int    // byte offset in InnerYAML where pipeline: begins
 	PipelineEnd   int    // byte offset where the subtree ends
 }
@@ -269,7 +279,7 @@ func Fetch(ctx context.Context, run Runner, namespace, agent string) (*FetchedPi
 		return nil, err
 	}
 	return &FetchedPipeline{
-		ConfigMapYAML: cmBytes,
+		Original:      cmBytes,
 		InnerYAML:     inner,
 		PipelineStart: start,
 		PipelineEnd:   end,
