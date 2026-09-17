@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -52,6 +53,69 @@ func defaultCortexDir() (string, error) {
 			"pass --ca-dir to choose where the CA is written: %w", err)
 	}
 	return filepath.Join(home, cortexDirName), nil
+}
+
+// stateRelPath is abctl's ownership record, relative to the cortex dir. Read here
+// only for the CA path it captured; abctl owns the file's shape and lifecycle.
+const stateRelPath = "claude-code-state.json"
+
+// priorCAFromState returns the NODE_EXTRA_CA_CERTS value abctl displaced when it
+// configured a client, or "" when there is no usable record.
+//
+// Every failure answers "": this feeds a diagnostic, and a state file that is
+// absent, truncated, hand-edited, or from a future abctl is not a reason to fail a
+// proxy boot. A nil JSON entry means the key was unset before abctl touched it,
+// which is also nothing to compare against.
+func priorCAFromState(statePath string) string {
+	b, err := os.ReadFile(statePath) //nolint:gosec // operator-supplied path
+	if err != nil {
+		return ""
+	}
+	var st struct {
+		Prior map[string]*string `json:"prior"`
+	}
+	if json.Unmarshal(b, &st) != nil {
+		return ""
+	}
+	if v, ok := st.Prior["NODE_EXTRA_CA_CERTS"]; ok && v != nil {
+		return *v
+	}
+	return ""
+}
+
+// staleClientCAWarning reports a client configured against a CA in a DIFFERENT
+// directory than the one now in force, returning slog args or nil when there is
+// nothing to say.
+//
+// This is the sandbox / redirected-$HOME failure from issue #1033. defaultCortexDir
+// resolves ca_dir from $HOME, so each $HOME gets its own generated CA — and since
+// they all live at ~/.cortex/ca and all carry CN=authbridge-tls-bridge-ca, neither
+// a log line nor a directory listing distinguishes them. A client still holding the
+// other one rejects every forged leaf, and because Node reads its CA file once at
+// process start, nothing recovers until that client restarts. The user sees only
+// their agent's generic "self-signed certificate" error, which points at a
+// corporate proxy rather than at this.
+//
+// Compared by resolved directory, not by string: `..` and trailing slashes are
+// spelling. A false positive would tell someone their working setup is broken,
+// which is worse than staying quiet.
+func staleClientCAWarning(currentCADir, priorCAPath string) []any {
+	if priorCAPath == "" {
+		return nil
+	}
+	priorDir, perr := filepath.Abs(filepath.Dir(priorCAPath))
+	currentDir, cerr := filepath.Abs(currentCADir)
+	if perr != nil || cerr != nil || priorDir == currentDir {
+		return nil
+	}
+	return []any{
+		"client_ca", priorCAPath,
+		"now_using", currentDir,
+		"why", "each $HOME gets its own generated CA and they share one name (CN=authbridge-tls-bridge-ca), " +
+			"so a client holding the other one rejects every forged leaf",
+		"fix", "restart the client so it re-reads the CA, or run the proxy with --ca-dir " +
+			filepath.Dir(priorCAPath) + " to keep using the CA that client already trusts",
+	}
 }
 
 // builtinConfigYAML returns the built-in --local config with caDir interpolated: a

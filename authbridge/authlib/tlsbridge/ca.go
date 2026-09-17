@@ -164,6 +164,18 @@ func NewGeneratedFileSource(certPath, keyPath, trustPath string) (CASource, erro
 	return &staticSource{cert: cert, key: key, certPEM: certPEM}, nil
 }
 
+// caRenewBefore is how long before expiry a generated CA is replaced. The CA is
+// minted for 365 days (genSelfSignedCA) and nothing else renews it, so without a
+// margin the first sign of trouble is clients rejecting leaves — and the advice
+// that rejection carries ("restart clients started before ca_not_before") cannot
+// fix an expired CA. Replacing it while it still works keeps the swap invisible:
+// a client restarted any time in the last month already trusts the new one.
+//
+// A month is chosen against how long a laptop's proxy actually runs. Renewal is
+// only evaluated at startup, so the margin has to exceed a realistic uptime or a
+// long-running proxy sails past it and expires anyway.
+const caRenewBefore = 30 * 24 * time.Hour
+
 // EnsureFileSource loads the signing CA (tls.crt/tls.key) from caDir. With
 // generate=false it is exactly NewFileSource — a missing or invalid CA fails
 // loud, so an operator-mounted cert-manager Secret is never silently replaced.
@@ -174,20 +186,51 @@ func NewGeneratedFileSource(certPath, keyPath, trustPath string) (CASource, erro
 // run killed or erroring between the three writes): an orphaned tls.key that
 // would otherwise wedge every subsequent boot (NewFileSource fails on the
 // missing cert → fatal), and a missing ca.crt trust anchor that loads fine yet
-// leaves clients unable to verify the forged leaves. A COMPLETE set is never
-// regenerated — it is loaded, and a complete-but-invalid cert/key still fails
-// loud via NewFileSource so a real Secret is not overwritten.
+// leaves clients unable to verify the forged leaves.
+//
+// It also replaces an EXPIRED or nearly-expired CA (within caRenewBefore), which
+// is otherwise a permanent wedge: reuse is keyed on file existence and
+// NewFileSource validates IsCA/KeyUsage/key-match but not validity dates, so an
+// expired CA would keep loading and keep forging leaves every client rejects.
+// Only on the generate=true path — in-cluster the CA is a cert-manager Secret
+// and renewal is cert-manager's job, where minting a self-signed replacement
+// would both substitute for the mounted CA and mask a real rotation failure.
+//
+// An otherwise-COMPLETE and still-valid set is never regenerated — it is loaded,
+// and a complete-but-invalid cert/key still fails loud via NewFileSource so a
+// real Secret is not overwritten.
 func EnsureFileSource(caDir string, generate bool) (src CASource, generated bool, err error) {
 	certPath := filepath.Join(caDir, "tls.crt")
 	keyPath := filepath.Join(caDir, "tls.key")
 	trustPath := filepath.Join(caDir, "ca.crt")
 	complete := fileExists(certPath) && fileExists(keyPath) && fileExists(trustPath)
-	if generate && !complete {
+	if generate && (!complete || caNeedsRenewal(certPath)) {
 		src, err = NewGeneratedFileSource(certPath, keyPath, trustPath)
 		return src, err == nil, err
 	}
 	src, err = NewFileSource(certPath, keyPath)
 	return src, false, err
+}
+
+// caNeedsRenewal reports whether the CA at certPath is expired or expires within
+// caRenewBefore. Unreadable or unparseable input answers false so this can only
+// ever ADD a regeneration for a cert we positively read as short-lived: garbage
+// on disk is NewFileSource's call to reject loudly, and silently minting over it
+// would defeat TestEnsureFileSource_PresentButInvalidNotOverwritten.
+func caNeedsRenewal(certPath string) bool {
+	pemBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		return false
+	}
+	blk, _ := pem.Decode(pemBytes)
+	if blk == nil {
+		return false
+	}
+	crt, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return false
+	}
+	return time.Now().Add(caRenewBefore).After(crt.NotAfter)
 }
 
 // fileExists reports whether path exists and is statable.

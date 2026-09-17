@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	cryptotls "crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -118,8 +119,11 @@ type Server struct {
 	// caNotBefore is parsed on first use and never changes for the process.
 	caNotBeforeOnce sync.Once
 	caNotBeforeStr  string
-	bridgeWarnOnce  sync.Once
-	bridgeWarned    atomic.Bool
+	// caFingerprint is likewise derived once; the CA is fixed for the process.
+	caFingerprintOnce sync.Once
+	caFingerprintStr  string
+	bridgeWarnOnce    sync.Once
+	bridgeWarned      atomic.Bool
 }
 
 // MTLSOptions configures outbound mTLS for the forward proxy. When
@@ -711,9 +715,16 @@ func (s *Server) bridgeServe(client net.Conn, authority, host string, rec tunnel
 			// Short enough to read unwrapped. The lsof recipe for mapping the client
 			// port to a process lives in docs/laptop-service.md rather than being
 			// repeated on every occurrence of this line.
+			//
+			// The fingerprint and the file are what make a MOVED CA diagnosable:
+			// ca_not_before alone reads as recent for a client holding a different
+			// ~/.cortex/ca, since every generated CA shares one CN. See caFingerprint.
 			args = append(args,
 				"ca_not_before", s.caNotBefore(),
-				"fix", "restart clients started before ca_not_before")
+				"ca_fingerprint", s.caFingerprint(),
+				"ca_file", s.caFileHint(),
+				"fix", "restart clients started before ca_not_before, or point the client at ca_file "+
+					"and compare its fingerprint (openssl x509 -noout -fingerprint -sha256)")
 		}
 		slog.Warn("tls-bridge passthrough", args...)
 		rec(reason)
@@ -1711,6 +1722,43 @@ func (s *Server) caNotBefore() string {
 		s.caNotBeforeStr = crt.NotBefore.Local().Format(time.RFC3339)
 	})
 	return s.caNotBeforeStr
+}
+
+// caFingerprint is the bridge CA's SHA-256, in the encoding
+//
+//	openssl x509 -in ca.crt -noout -fingerprint -sha256
+//
+// prints — uppercase hex, colon-separated — because the only use for this value is
+// someone comparing it by eye against that command's output on the file their
+// client actually loaded.
+//
+// It answers the question ca_not_before cannot. `--local` derives ca_dir from
+// $HOME, so a redirected $HOME (a sandbox, a per-project home) gets a CA of its
+// own; every one of them is spelled ~/.cortex/ca and every one carries
+// CN=authbridge-tls-bridge-ca. When a client rejects a leaf, a recent
+// ca_not_before is equally consistent with "this client predates the CA" and
+// "this client trusts a different CA that looks identical". The fingerprint is
+// what separates them. Parsed once — the value is fixed for the process.
+func (s *Server) caFingerprint() string {
+	s.caFingerprintOnce.Do(func() {
+		s.caFingerprintStr = "unknown"
+		if s.TLSBridge == nil || len(s.TLSBridge.CAPEM) == 0 {
+			return
+		}
+		blk, _ := pem.Decode(s.TLSBridge.CAPEM)
+		if blk == nil {
+			return
+		}
+		// Hash the DER, which is what openssl fingerprints — not the PEM bytes,
+		// whose whitespace and headers would give a different and uncomparable sum.
+		sum := sha256.Sum256(blk.Bytes)
+		hexPairs := make([]string, 0, len(sum))
+		for _, b := range sum {
+			hexPairs = append(hexPairs, fmt.Sprintf("%02X", b))
+		}
+		s.caFingerprintStr = strings.Join(hexPairs, ":")
+	})
+	return s.caFingerprintStr
 }
 
 // handshakeFailureReason narrows a failed forge to what we can actually claim.

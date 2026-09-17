@@ -252,17 +252,19 @@ direct TLS call it makes.
 ```
 
 The reason is in the PLUGIN column. `client-rejected-ca` means that client refused
-the bridge certificate, so nothing downstream can read the traffic. The usual cause
-is a process that **started before the CA existed**: CA files are read once at
-startup, so an agent already running when Cortex was first installed — or when
+the bridge certificate, so nothing downstream can read the traffic. There are two
+causes, and they need different fixes.
+
+**The usual one: the client started before the CA existed.** CA files are read once
+at startup, so an agent already running when Cortex was first installed — or when
 `~/.cortex` was deleted and recreated — is holding a different CA, or none.
 
-The proxy log names the offender and the cutoff:
+The proxy log names the offender, the cutoff, and which CA is actually in force:
 
 ```sh
 grep 'client-rejected-ca' ~/.cortex/proxy.log
 # ... client=127.0.0.1:58041 ca_not_before=2026-09-09T17:11:39-04:00
-#     fix=restart clients that started before ca_not_before ...
+#     ca_fingerprint=CD:19:CD:2C:... ca_file=/Users/you/.cortex/ca/ca.crt ...
 ```
 
 Map that client port to a process, then restart it:
@@ -274,6 +276,32 @@ ps -o lstart= -p <pid>        # started before ca_not_before? restart it
 
 The port has to come from the log rather than a later `lsof` sweep: the connection
 is gone by the time you look, so nothing after the fact can attribute it.
+
+**The other one: the client trusts a different CA of the same name.** If the process
+started *after* `ca_not_before` and still gets rejected, compare fingerprints —
+this is what `ca_fingerprint` is for:
+
+```sh
+openssl x509 -in "$NODE_EXTRA_CA_CERTS" -noout -fingerprint -sha256
+```
+
+A mismatch against the `ca_fingerprint` in the log means the client is pointed at a
+*different* CA file, not a stale one, and restarting it will not help. Every
+generated CA is named `CN=authbridge-tls-bridge-ca` and lives at `~/.cortex/ca`, so
+nothing but the fingerprint distinguishes them.
+
+This happens whenever `$HOME` differs between the proxy and the client, because
+`--local` derives the CA directory from `$HOME`: sandboxes, per-project homes, and
+wrappers that set `HOME=$PWD` each get their own CA. Point every environment at one
+CA instead:
+
+```sh
+authbridge-proxy --local --ca-dir /Users/you/.cortex/ca
+```
+
+`--ca-dir` moves only the CA; the config stays at its usual path. On startup the
+proxy also warns on its own when `abctl`'s record shows a client configured against
+a CA in some other directory.
 
 The other reasons you may see, and what each one asks of you:
 

@@ -193,6 +193,15 @@ func main() {
 		if cerr != nil {
 			log.Fatalf("--local: resolving %q: %v", cortexDir, cerr)
 		}
+		// A client configured against a CA in some OTHER .cortex — the redirected-$HOME
+		// case, where each sandbox silently gets its own CA under the same
+		// ~/.cortex/ca name. Warn before anything binds: the client is already holding
+		// the wrong anchor, and its only symptom will be a generic
+		// "self-signed certificate" error that names neither CA. Same shape as the
+		// stale-./cortex-ca warning above, from abctl's own record of what it displaced.
+		if args := staleClientCAWarning(absCA, priorCAFromState(filepath.Join(absCortex, stateRelPath))); args != nil {
+			slog.Warn("a client was configured against a CA in a different directory than the one now in force", args...)
+		}
 		// Drive the normal file-based load + hot-reload path, so editing the
 		// config reloads live.
 		p, werr := writeBuiltinConfig(absCortex, absCA)

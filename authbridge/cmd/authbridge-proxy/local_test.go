@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -133,5 +134,121 @@ func TestWriteDemoConfig_PreservesAnExistingFile(t *testing.T) {
 	}
 	if string(got) != edited {
 		t.Errorf("edits were overwritten:\n%s", got)
+	}
+}
+
+// The moved-CA-dir warning (issue #1033). `--local` derives ca_dir from $HOME via
+// defaultCortexDir, so a redirected $HOME — a sandbox, a per-project home, a
+// wrapper that sets HOME=$PWD — silently gives every environment a CA of its own.
+// All of them are spelled ~/.cortex/ca and all carry CN=authbridge-tls-bridge-ca,
+// so nothing in a log line or a directory listing says which one a client holds.
+//
+// abctl records the value it displaced in .cortex/claude-code-state.json's `prior`
+// map, so the two halves of the answer are already on disk. staleClientCAWarning
+// compares them and returns the warning args, or nil when there is nothing to say.
+
+// TestStaleClientCAWarning_FiresWhenPriorCAIsElsewhere is the real-world case from
+// the issue: prior points into $HOME/.cortex, the CA now in force is a sandbox's.
+func TestStaleClientCAWarning_FiresWhenPriorCAIsElsewhere(t *testing.T) {
+	prior := "/Users/dev/.cortex/ca/ca.crt"
+	current := "/Users/dev/sandbox/proj/.cortex/ca"
+
+	got := staleClientCAWarning(current, prior)
+
+	if got == nil {
+		t.Fatal("no warning for a prior CA in a different .cortex dir; this is the state " +
+			"that produces 'Self-signed certificate detected' with a healthy proxy")
+	}
+	joined := fmt.Sprint(got...)
+	for _, want := range []string{prior, current} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warning omitted %q, so the user cannot see which two CAs are in play: %v", want, got)
+		}
+	}
+}
+
+// TestStaleClientCAWarning_SilentWhenPriorMatches: the overwhelmingly common case
+// is one $HOME and a client already pointed at the right file. A warning there
+// would fire on every boot and train people to ignore it.
+func TestStaleClientCAWarning_SilentWhenPriorMatches(t *testing.T) {
+	current := "/Users/dev/.cortex/ca"
+	for _, prior := range []string{
+		"/Users/dev/.cortex/ca/ca.crt",     // the trust anchor in the active dir
+		"/Users/dev/.cortex/ca/bundle.crt", // the bundle in the same dir is equally fine
+	} {
+		if got := staleClientCAWarning(current, prior); got != nil {
+			t.Errorf("staleClientCAWarning(%q, %q) = %v, want nil", current, prior, got)
+		}
+	}
+}
+
+// TestStaleClientCAWarning_SilentWithoutAPriorRecord: no record means nothing to
+// compare. A first install and a hand-managed client both land here, and neither
+// is evidence of a problem.
+func TestStaleClientCAWarning_SilentWithoutAPriorRecord(t *testing.T) {
+	if got := staleClientCAWarning("/Users/dev/.cortex/ca", ""); got != nil {
+		t.Errorf("staleClientCAWarning with no prior = %v, want nil", got)
+	}
+}
+
+// TestStaleClientCAWarning_ComparesResolvedPaths: `..` and trailing slashes are
+// spelling, not meaning. A false positive here is worse than silence — it would
+// tell someone their correctly-configured client is broken.
+func TestStaleClientCAWarning_ComparesResolvedPaths(t *testing.T) {
+	current := "/Users/dev/.cortex/ca"
+	prior := "/Users/dev/sandbox/../.cortex/ca/ca.crt" // resolves into current
+	if got := staleClientCAWarning(current, prior); got != nil {
+		t.Errorf("staleClientCAWarning did not resolve %q against %q: %v", prior, current, got)
+	}
+}
+
+// TestPriorCAFromState reads the path out of the record abctl actually writes, so
+// a change to that file's shape breaks here rather than silently disabling the
+// warning.
+func TestPriorCAFromState(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "claude-code-state.json")
+	// The shape abctl writes: managed keys, with a null for a key that was absent.
+	const state = `{
+	  "settings": "/Users/dev/sandbox/proj/.claude/settings.json",
+	  "prior": {
+	    "NODE_EXTRA_CA_CERTS": "/Users/dev/.cortex/ca/ca.crt",
+	    "SSL_CERT_FILE": null,
+	    "HTTPS_PROXY": "http://127.0.0.1:47600"
+	  }
+	}`
+	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	if got := priorCAFromState(statePath); got != "/Users/dev/.cortex/ca/ca.crt" {
+		t.Errorf("priorCAFromState = %q, want the recorded NODE_EXTRA_CA_CERTS", got)
+	}
+}
+
+// TestPriorCAFromState_ToleratesMissingAndMalformed: this feeds a diagnostic, so
+// every failure mode must answer "" rather than error out or panic. A state file
+// that cannot be read is not a reason to fail a proxy boot.
+func TestPriorCAFromState_ToleratesMissingAndMalformed(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string]string{
+		"absent":            "", // no file written at all
+		"not json":          "{{{",
+		"no prior key":      `{"settings":"/x"}`,
+		"prior null entry":  `{"prior":{"NODE_EXTRA_CA_CERTS":null}}`,
+		"prior key missing": `{"prior":{"HTTPS_PROXY":"http://127.0.0.1:47600"}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(dir, name+".json")
+			if body != "" {
+				if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			}
+			if got := priorCAFromState(p); got != "" {
+				t.Errorf("priorCAFromState(%s) = %q, want \"\"", name, got)
+			}
+		})
 	}
 }
