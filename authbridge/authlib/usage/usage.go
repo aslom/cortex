@@ -14,7 +14,9 @@
 package usage
 
 import (
+	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -122,7 +124,7 @@ type Bucket struct {
 	Series map[string]Counts `json:"series,omitempty"`
 }
 
-// bucket is the internal accumulator. It keeps all three groupings at once so
+// bucket is the internal accumulator. It keeps all four groupings at once so
 // the group= parameter is a read-time choice: an operator cycling groupings in a
 // TUI sees the same history from each angle, instead of each grouping only
 // having data from the moment it was first selected.
@@ -138,6 +140,7 @@ type bucket struct {
 	byMethod map[string]Counts
 	byStatus map[string]Counts
 	byPlugin map[string]Counts
+	byHost   map[string]Counts
 	// byProvenance tallies priced requests by where their figure came from, so a
 	// total can disclose how much of it is a gateway's own number versus modelled
 	// from a rate table. Like byUnpriced, kept outside the Group machinery: it
@@ -576,6 +579,22 @@ func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEve
 	if model != "" {
 		addLabel(&b.byMethod, truncateLabel(model), one)
 	}
+	// Host is the :authority as the listener saw it, so it is request-controlled
+	// and goes through truncateLabel like the model name. Guarded on empty for the
+	// same reason: SessionEvent.Host is "" when the listener did not populate
+	// pctx.Host, and a "" key would draw a nameless band. Left out of the series
+	// entirely, that traffic shows up as the renderer's "(unlabelled)" remainder,
+	// which is what the other groupings already do for the events they skip.
+	//
+	// The port is stripped, or one host draws two bands. A CONNECT tunnel-open
+	// records the authority from the request line, ports and all
+	// ("api.anthropic.com:443"), while the parsed request inside that tunnel
+	// records the bare host — so the same upstream splits in two, which is the kind
+	// of split that makes a breakdown untrustworthy. Unlike byPlugin, one request
+	// records exactly one host, so these sub-totals do sum to Requests.
+	if h := hostLabel(e.Host); h != "" {
+		addLabel(&b.byHost, truncateLabel(h), one)
+	}
 	if e.StatusCode > 0 {
 		addLabel(&b.byStatus, strconv.Itoa(e.StatusCode), one)
 	} else if e.Phase == pipeline.SessionDenied {
@@ -638,6 +657,36 @@ const overflowLabel = "(other)"
 // for a full ring lap. Long enough for any real model id, including provider
 // prefixes and dated suffixes.
 const maxLabelLen = 96
+
+// hostLabel reduces an :authority to the host alone, so "api.anthropic.com:443"
+// and "api.anthropic.com" are one series rather than two.
+//
+// net.SplitHostPort, not a Cut on ":": an IPv6 literal is full of colons, and
+// splitting on the first turns "[::1]:9094" into "[". SplitHostPort errors on an
+// authority carrying no port at all, so that case falls through to the input.
+//
+// The brackets then have to come off separately, or IPv6 splits the very way this
+// function exists to prevent: SplitHostPort unwraps them when it succeeds
+// ("[::1]:9094" -> "::1"), leaving a port-less "[::1]" as its own band for the
+// same upstream.
+//
+// A port with no host (":443") reduces to "", which the caller treats as absent
+// and folds into the renderer's "(unlabelled)" remainder. That is the right
+// answer for an authority that names no host: there is nothing to label it with,
+// and inventing a band for it would be worse than counting it as unattributed.
+//
+// The same reduction exists in three listeners and in abctl's events pane, each
+// private to its package; this is a fourth rather than a shared helper because
+// authlib/usage must not import a listener, and hoisting one is a refactor this
+// change does not need.
+func hostLabel(authority string) string {
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		return h
+	}
+	// No port: still strip brackets, so a bare "[::1]" matches the "::1" that the
+	// ported form reduces to.
+	return strings.TrimSuffix(strings.TrimPrefix(authority, "["), "]")
+}
 
 func truncateLabel(s string) string {
 	if len(s) <= maxLabelLen {
