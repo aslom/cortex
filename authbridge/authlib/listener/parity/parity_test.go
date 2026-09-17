@@ -184,6 +184,66 @@ func TestParity_ReadsBodySSE(t *testing.T) {
 	assertParity(t, f, pipeline.SessionResponse, inboundListeners)
 }
 
+// TestParity_HeaderOnlyResponse is the shape this suite could not express
+// until the synthetic-body gate in runExtproc was fixed, and the one it
+// existed to catch.
+//
+// A response that ends on its headers — a 204, a 304, an error status with no
+// body — must still reach the terminal RunResponseFrame(nil, true) on every
+// listener, because that dispatch is where a streaming-aware plugin finalizes:
+// where inference-parser settles the cost off the gateway's response header and
+// records its no_response_body Skip. On extproc that dispatch hangs off a gate
+// that has to consider end_of_stream: keyed on NeedsBody() alone its header phase
+// defers to a body phase Envoy never opens, and a body-less response then settles
+// nothing and records no response row at all. The proxies got it right, which is exactly the divergence this suite is
+// for and exactly what it could not see: the old harness handed extproc a
+// zero-length ResponseBody message no Envoy would send, papering over the gap.
+//
+// The anchor is TerminalFrames: 1 with empty content — one finalization, on a
+// response that genuinely carried nothing. Exactly-once matters as much as
+// at-least-once: two terminal dispatches means two charges for one request.
+func TestParity_HeaderOnlyResponse(t *testing.T) {
+	f := fixture{
+		name:      "header-only-response",
+		direction: pipeline.Inbound,
+		entries: []config.PluginEntry{spyEntry(spyPluginAStreaming, spyConfig{
+			ReadsBody:            true,
+			RecordResponseFrames: true,
+		})},
+		method:         "GET",
+		path:           "/parity/no-content",
+		upstreamStatus: 204,
+		upstreamBody:   nil,
+		expectedPluginEvents: map[string]string{
+			spyPluginAStreaming + bodyRespStrippedSuffix: jsonOf(bodyObservation{TerminalFrames: 1}),
+		},
+	}
+	assertParity(t, f, pipeline.SessionResponse, inboundListeners)
+}
+
+// TestParity_OutboundHeaderOnlyResponse mirrors the above on the egress side,
+// which is where the dropped cost actually cost money: agents reach LiteLLM
+// through the outbound pipeline, and a rate-limited or errored turn that ends on
+// its headers still carries the gateway's own charge in a response header.
+func TestParity_OutboundHeaderOnlyResponse(t *testing.T) {
+	f := fixture{
+		name:      "outbound-header-only-response",
+		direction: pipeline.Outbound,
+		entries: []config.PluginEntry{spyEntry(spyPluginAStreaming, spyConfig{
+			ReadsBody:            true,
+			RecordResponseFrames: true,
+		})},
+		method:         "GET",
+		path:           "/parity/no-content",
+		upstreamStatus: 204,
+		upstreamBody:   nil,
+		expectedPluginEvents: map[string]string{
+			spyPluginAStreaming + bodyRespStrippedSuffix: jsonOf(bodyObservation{TerminalFrames: 1}),
+		},
+	}
+	assertParity(t, f, pipeline.SessionResponse, outboundListeners)
+}
+
 // TestParity_InboundRequestBodyOverflow: a body exceeding both
 // listeners' 1 MiB cap must be rejected before the pipeline runs, with
 // the same wire status.
@@ -259,15 +319,27 @@ func assertParity(t *testing.T, f fixture, wantPhase pipeline.SessionPhase, list
 		listener string
 		observed *observation
 	}
+	// COLLECTED OUTSIDE t.Run, WHICH IS NOT A STYLE CHOICE. Appending inside the subtest closure
+	// makes this whole suite FAIL OPEN the moment anyone adds t.Parallel to it: the parent
+	// continues past the loop before any subtest body has run, `got` is empty, the `len(got) < 2`
+	// return below fires, and every comparison below it is skipped — verified, exit 0 with zero
+	// drift errors and nothing compared. A suite whose entire purpose is catching per-listener
+	// divergence would then pass having compared nothing, silently.
+	//
+	// This is the hazard costing's TestNoTestInThisPackageRunsInParallel guards against in that
+	// package; the fix here is structural instead, so it holds however this file is run.
 	got := make([]namedObs, 0, len(listeners))
 	for _, l := range listeners {
+		var obs *observation
 		t.Run(f.name+"/"+l.name, func(t *testing.T) {
-			obs := l.run(t, f, wantPhase)
+			obs = l.run(t, f, wantPhase)
 			if obs == nil {
 				t.Fatalf("listener %q produced no matching event for fixture %q (phase=%v)", l.name, f.name, wantPhase)
 			}
-			got = append(got, namedObs{listener: l.name, observed: obs})
 		})
+		if obs != nil {
+			got = append(got, namedObs{listener: l.name, observed: obs})
+		}
 	}
 
 	// Partial-presence drift: some listeners produced an event, others
@@ -279,6 +351,12 @@ func assertParity(t *testing.T, f fixture, wantPhase pipeline.SessionPhase, list
 			present = append(present, g.listener)
 		}
 		t.Errorf("parity presence drift on fixture %q: only these listeners produced an event: %v", f.name, present)
+	}
+	// AND A FIXTURE THAT COMPARED NOTHING IS A BROKEN SUITE, not a pass. Without this, any future
+	// change that stops the loop from collecting — a t.Parallel, an early return, a driver that
+	// silently skips — turns every comparison below into a no-op that reports success.
+	if len(got) == 0 {
+		t.Fatalf("fixture %q collected no observations from %d listeners: nothing was compared", f.name, len(listeners))
 	}
 	if len(got) < 2 {
 		return // one or more legs failed in the subtest; presence drift already reported.
