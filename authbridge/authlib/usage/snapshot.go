@@ -669,8 +669,8 @@ const Window7dSpan = 7 * 24 * time.Hour
 // TestParseWindowSpec_SevenDaysTouchesAtMostWindow7dLocalDays pins the ordinary week and
 // TestParseWindowSpec_ASpringForwardWeekReachesTheNinthLocalDate pins the week that forced the
 // second +1. The agreement with config's retention floor is pinned on the CONFIG side, by
-// TestCostLedgerConfig_TheFloorCoversEveryDayTheWindowTouches — which arrives with the
-// cost_ledger settings themselves and cannot be cited from here until it does.
+// TestCostLedgerConfig_TheFloorCoversEveryDayTheWindowTouches, which this change adds along with the
+// cost_ledger settings it guards.
 const Window7dLocalDays = int(Window7dSpan/(24*time.Hour)) + 2
 
 // Spec is a parsed window request. Either Dur is set (a fixed length the ring can
