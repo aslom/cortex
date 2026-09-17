@@ -527,14 +527,50 @@ events:
 filter: github-tool
 ```
 
-**Columns not listed are visible.** The file records only what you changed, so a
-column added in a later abctl shows up rather than staying hidden because your file
-predates it. A column id this build does not recognise is ignored.
+### Schema
 
-Settings resolve **flags > this file > built-in defaults**. (No environment variable
-feeds any of these today; if one is ever added it sits between the two.) A missing
-file is normal and silent. An unreadable or malformed one is reported on stderr and
-ignored in full — never partially applied, and never fatal.
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `events.columns[].name` | string | required | column id, from the table below |
+| `events.columns[].visible` | bool | required | show that column — an entry without it reads as `false` |
+| `events.sortColumn` | string | unset | sort by this column; unset means arrival order. `#` is not sortable, being arrival order already |
+| `events.sortDesc` | bool | `false` | sort descending; ignored unless `sortColumn` names a sortable column |
+| `filter` | string | empty | the active filter |
+
+List a column only to change it — the twelve are all visible until you hide one, and
+an unrecognised name or sort column is ignored. Inside an entry, always write
+`visible:` explicitly: it is optional to the parser but reads as `false`, so
+`- name: COST` on its own hides COST rather than showing it.
+
+Column ids, in display order — the same headers the picker shows:
+
+| Id | Shows |
+|---|---|
+| `#` | exchange number; a request and its response share one — quote it as `"#"` in YAML, or it reads as a comment |
+| `TIME` | wall-clock time the message was recorded |
+| `DIR` | `in` = toward your agent, `out` = toward an upstream |
+| `PHASE` | `req`, `resp`, or `denied` |
+| `ACTION` | what took effect: `deny`, `modify`, `observe`, `allow`, or `tunnel` |
+| `PLUGIN` | which plugin acted; blank when none did |
+| `METHOD` | protocol operation: model name, MCP or A2A method |
+| `STATUS` | HTTP status of the response |
+| `DURATION` | how long the exchange took |
+| `TOKENS` | tokens used, and what `tool-prune` saved |
+| `COST` | estimated cost, and what `tool-prune` saved |
+| `HOST` | host the message was sent to |
+
+A narrow terminal also hides columns to fit, with a `→ N more columns` note in the
+footer; that is not saved, and widening the window brings them back.
+
+Each setting comes from **this file, or the built-in default** when the file does not
+set it. A missing file is normal and silent. An unreadable or malformed one is
+reported on stderr and ignored in full — never partially applied, and never fatal.
+
+Nothing else feeds a setting: there is no environment variable (no `ABCTL_*`, and
+`XDG_CONFIG_HOME` is not consulted) and no flag for an individual setting. `--prefs`
+chooses *which* file, never what is in it — so to try a layout without disturbing
+your own, point it at a throwaway file. Otherwise change the setting in the TUI,
+which saves it, or edit the YAML.
 
 ## Editing the pipeline
 
