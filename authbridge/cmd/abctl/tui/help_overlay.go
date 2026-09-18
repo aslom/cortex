@@ -35,6 +35,11 @@ var globalKeys = keyGroup{
 		{"p", "pause/resume stream"},
 		{"g / G", "jump to top / bottom"},
 		{"b / f", "page up / down"},
+		// The strip is global, so its expansion is too — and this overlay advertises itself as
+		// listing every binding, which is the only reason a reader would find `$` at all. The
+		// drawer's own hint line only helps someone who already pressed it.
+		{"$", "expand the spend strip into a breakdown"},
+		{"a · w", "while it is open: cycle the axis · the span"},
 		{"q · ctrl+c", "quit"},
 	},
 }

@@ -141,7 +141,9 @@ func TestRenderSpendDrawer_ShowsAPerSeriesSavingWithoutAddingItToCost(t *testing
 func TestRenderSpendDrawer_HintLineNamesTheKeysAndTheCurrentAxis(t *testing.T) {
 	lines := renderSpendDrawer(drawerSnap(), usage.GroupEndpoint, "6h", 200)
 	hint := lines[len(lines)-1]
-	for _, want := range []string{"[g]", "[w]", "6h", "esc"} {
+	// "[a]", not "[g]": g is globally "go to top" and the drawer stays open alongside the table,
+	// so it must not shadow that motion. See cycleSpendAxis.
+	for _, want := range []string{"[a]", "[w]", "6h", "esc"} {
 		if !strings.Contains(hint, want) {
 			t.Errorf("hint %q is missing %q", hint, want)
 		}
@@ -343,5 +345,98 @@ func TestSpendDrawerRows_AnAggregatorOtherMergesRatherThanDuplicating(t *testing
 		t.Errorf("the rows sum to %d micros against a snapshot holding %d (delta %+d): the drawer "+
 			"is reporting more spend than the strip's headline above it",
 			rowTotal, snapTotal, rowTotal-snapTotal)
+	}
+}
+
+// The refusal must name the REAL reason. A pane that cannot host the drawer has nothing to do
+// with height, and a height message there sends the reader to resize a terminal that was never
+// the problem — on the file's own standard, "a key that explains the height requirement is a key
+// the user stops pressing for a reason".
+func TestToggleSpendDrawer_RefusesPerPaneWithTheRightReason(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pane    paneID
+		wantSub string
+	}{
+		// Before a connection exists there is no spend at all, let alone a breakdown.
+		{name: "pods picker", pane: panePods, wantSub: "until a pod is connected"},
+		{name: "namespaces picker", pane: paneNamespaces, wantSub: "until a pod is connected"},
+		// That pane IS the breakdown, and it owns the keys the drawer's hint line would
+		// advertise.
+		{name: "usage pane", pane: paneUsage, wantSub: "usage pane is the breakdown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A terminal with ample room, so height cannot be the cause of any refusal.
+			m := &model{width: 200, height: 60}
+			m.pane = tc.pane
+			m.toggleSpendDrawer()
+
+			if m.spend.expanded {
+				t.Fatalf("the drawer opened on %v", tc.pane)
+			}
+			if !strings.Contains(m.flash, tc.wantSub) {
+				t.Errorf("flash = %q, want it to mention %q — a 60-row terminal is not short, and "+
+					"a height complaint here is a wrong reason rather than a missing one",
+					m.flash, tc.wantSub)
+			}
+			if strings.Contains(m.flash, "short") {
+				t.Errorf("flash = %q blames the terminal height on a pane that cannot host the "+
+					"drawer at any height", m.flash)
+			}
+		})
+	}
+
+	// And a pane that CAN host it still opens, or the refusals above would be indistinguishable
+	// from a drawer that never opens anywhere.
+	m := &model{width: 200, height: 60}
+	m.pane = paneSessions
+	m.toggleSpendDrawer()
+	if !m.spend.expanded {
+		t.Errorf("the drawer refused on the sessions pane too (flash %q)", m.flash)
+	}
+}
+
+// THE ROW MOST IN NEED OF A CAVEAT IS THE ONE THAT PRICED NOTHING, and it was the only row that
+// could not carry one: the money figure was gated on PricedRequests or CostMicros being
+// non-zero, so a 0-of-40-priced series rendered its request and token counts with nothing
+// anywhere on the line saying its cost was unknown.
+//
+// "Each row's caveats come from its own counters" held only for rows that managed to price
+// something — which is the inverse of what a caveat is for.
+func TestRenderSpendDrawer_AFullyUnpricedSeriesSaysItsCostIsUnknown(t *testing.T) {
+	snap := &usage.Snapshot{
+		Window: "1h", Group: usage.GroupModel, Priced: true,
+		Buckets: []usage.Bucket{{Series: map[string]usage.Counts{
+			"claude-opus-5": {Requests: 17, CostMicros: 11_121_400, Tokens: 7_980_000,
+				PricedRequests: 17, PriceableRequests: 17},
+			// Priceable and priced by nothing: a model with no rate in the table.
+			"mystery-model": {Requests: 40, Tokens: 900_000, PriceableRequests: 40},
+		}}},
+	}
+	var row string
+	for _, l := range renderSpendDrawer(snap, usage.GroupModel, "1h", 200) {
+		if strings.Contains(l, "mystery-model") {
+			row = l
+		}
+	}
+	if row == "" {
+		t.Fatal("no row for the unpriced series")
+	}
+	if !strings.Contains(row, "cost unavailable") {
+		t.Errorf("row %q shows volume with no word about its cost being unknown", row)
+	}
+	if !strings.Contains(row, "40 of 40 unpriced") {
+		t.Errorf("row %q does not name the size of the gap", row)
+	}
+	// Never a zero: a zero cost and an unknown cost are different answers, and this row is the
+	// second kind.
+	if strings.Contains(row, "$0.0000") {
+		t.Errorf("row %q renders $0.0000 for a cost nobody produced", row)
+	}
+	// And a priced row in the same drawer is NOT annotated, or the caveat means nothing.
+	for _, l := range renderSpendDrawer(snap, usage.GroupModel, "1h", 200) {
+		if strings.Contains(l, "claude-opus-5") && strings.Contains(l, "unavailable") {
+			t.Errorf("a fully priced row carries the unknown-cost caveat: %q", l)
+		}
 	}
 }

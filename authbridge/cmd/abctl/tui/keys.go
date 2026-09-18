@@ -151,16 +151,23 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	// every pane except the two pickers, and a breakdown of it that only opened on one
 	// pane would be a pane's feature wearing the strip's clothes.
 	//
-	// `g` and `w` are live ONLY while the drawer is open. They are ordinary letters, and
-	// claiming them permanently would take them from any future pane binding for the sake
-	// of a surface that is closed most of the time; scoped to the open drawer they are
-	// discoverable from its own hint line and inert otherwise.
+	// `a` and `w` are live ONLY while the drawer is open. They are ordinary letters, and
+	// claiming them permanently would take them from any future pane binding for the sake of a
+	// surface that is closed most of the time; scoped to the open drawer they are discoverable
+	// from its own hint line and inert otherwise.
+	//
+	// `a`, NOT `g`: `g` is globally "go to top", and the drawer stays open alongside the table,
+	// so it would shadow that motion for most of a session. See cycleSpendAxis.
+	//
+	// `w` IS TAKEN ON paneUsage, whose handler runs above this one and returns — so the drawer
+	// does not open on that pane at all (see spendDrawerHost) and its hint line never advertises
+	// a key that belongs to something else.
 	if !m.filtering && !m.colPicker && m.editState.phase == editPhaseDone {
 		switch msg.String() {
 		case "$":
 			m.toggleSpendDrawer()
 			return nil
-		case "g":
+		case "a":
 			if m.spendDrawerVisible() {
 				return m.cycleSpendAxis()
 			}

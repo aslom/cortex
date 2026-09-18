@@ -119,6 +119,29 @@ func (s *spendState) axis() usage.Group {
 	return spendDrawerAxes[s.groupIdx]
 }
 
+// spendDrawerHost reports whether the current pane can host the drawer, and says why not when
+// it cannot.
+//
+// THE REASON IS RETURNED, not inferred by the caller, because the refusal is shown to the user
+// and a wrong reason is worse than none: `$` on a 60-row pod picker used to flash "no room for
+// the strip on a terminal this short", which is a height complaint about a pane condition. A
+// reader resizes, nothing changes, and the key looks broken.
+func (m *model) spendDrawerHost() (bool, string) {
+	switch m.pane {
+	case paneNamespaces, panePods:
+		// The strip itself does not draw here: these run before a connection exists, so there
+		// is no spend to summarise, let alone break down.
+		return false, "spend: nothing to break down until a pod is connected"
+	case paneUsage:
+		// THAT PANE IS ALREADY THE BREAKDOWN, with its own axis, window and metric cycles — and
+		// its key handler runs before this one and returns, so the drawer's own keys could never
+		// reach it. A drawer whose hint line advertises [w] on the one pane where `w` belongs to
+		// something else is a lie printed on screen.
+		return false, "spend: the usage pane is the breakdown — use its own [b] and [w]"
+	}
+	return true, ""
+}
+
 // spendDrawerVisible reports whether the drawer draws its rows.
 //
 // Requires the strip: the drawer is an expansion OF it, and a breakdown floating under a
@@ -126,6 +149,9 @@ func (s *spendState) axis() usage.Group {
 // strip is too short for this, and `$` on a 19-row terminal does nothing rather than
 // producing a headless breakdown.
 func (m *model) spendDrawerVisible() bool {
+	if ok, _ := m.spendDrawerHost(); !ok {
+		return false
+	}
 	return m.spend.expanded && m.spendStripVisible() && m.height >= spendDrawerMinHeight
 }
 
@@ -142,6 +168,12 @@ func (m *model) toggleSpendDrawer() {
 		m.spend.expanded = false
 		return
 	}
+	// The PANE first, because its refusal has nothing to do with height and a height message
+	// there sends the reader to resize a terminal that was never the problem.
+	if ok, why := m.spendDrawerHost(); !ok {
+		m.setFlash(why)
+		return
+	}
 	if !m.spendStripVisible() {
 		m.setFlash("spend: no room for the strip on a terminal this short")
 		return
@@ -154,7 +186,16 @@ func (m *model) toggleSpendDrawer() {
 	m.spend.expanded = true
 }
 
-// cycleSpendAxis handles `g` while the drawer is open, and refetches.
+// cycleSpendAxis handles `a` while the drawer is open, and refetches.
+//
+// `a` FOR AXIS, and emphatically not `g` for group. `g` is globally "go to top" (see goTop), and
+// the Usage pane already rejected `g` for its own breakdown on exactly that reasoning —
+// "shadowing a vim-style motion inside one pane is worse than picking a second-choice mnemonic".
+// This drawer is designed to stay OPEN alongside the table, so it would shadow the motion for
+// most of a session rather than inside one pane.
+//
+// Nor `b`, which that pane chose: `b` is global page-up here (see the pgup case), so it would
+// shadow a worse motion than `g` did. `a` is unbound.
 //
 // A refetch rather than a client-side regroup: the server folds, and doing it here would be
 // a second implementation of the aggregator's arithmetic that could disagree with the
@@ -285,7 +326,7 @@ func renderSpendDrawer(snap *usage.Snapshot, axis usage.Group, windowLabel strin
 	// current axis are written down, and a drawer whose controls are undiscoverable is a
 	// drawer nobody changes the axis of.
 	out = append(out, fitStripFigures(" ", plainFigures(
-		"[g] "+axisHint(axis),
+		"[a] "+axisHint(axis),
 		"[w] "+windowLabel,
 		"esc closes",
 	), width))
@@ -305,10 +346,23 @@ func renderSpendDrawer(snap *usage.Snapshot, axis usage.Group, windowLabel strin
 // coverage would attach a caveat measured over other traffic.
 func drawerFigures(r drawerRow) []stripFigure {
 	figs := []stripFigure{{full: r.label, compact: r.label}}
-	if r.counts.PricedRequests > 0 || r.counts.CostMicros > 0 {
+	switch {
+	case r.counts.PricedRequests > 0 || r.counts.CostMicros > 0:
 		figs = append(figs, moneyFigure(float64(r.counts.CostMicros)/1e6, "",
 			gapOf(r.counts), r.counts.PriceableRequests, r.counts.IncompleteRequests, nil,
 			r.counts.Saturated))
+	case r.counts.PriceableRequests > 0:
+		// A SERIES THAT PRICED NOTHING still has to say so, and this branch is the row most in
+		// need of a caveat: the gate above skipped moneyFigure entirely, so a 0-of-40-priced
+		// model rendered "mystery-model  40 req  900k tokens" with nothing anywhere on the line
+		// saying its cost is unknown. "Each row's caveats come from its own counters" held only
+		// for rows that managed to price something.
+		//
+		// The strip's own spelling for a figure nobody can produce, plus the gap, in the slot the
+		// money figure would have taken — so the row reads left to right the same way a priced
+		// one does.
+		figs = append(figs, plainFigure("cost unavailable"),
+			plainFigure(coverageNote(gapOf(r.counts), r.counts.PriceableRequests)))
 	}
 	if r.counts.Requests > 0 {
 		figs = append(figs, stripFigure{

@@ -231,14 +231,15 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   ```
   abctl · http://localhost:9094 · [Sessions] Pipeline
+  SPEND  $30.9350 today   saved ~$0.1804   $2.9100 /1h   cache 81%   9.9M tokens
 
-   ID                                        UPDATED         EVENTS    TOKENS      ACTIVE
-   ctx-abc-1234…                             3s ago          42        48.2k       ●
-   ctx-def-5678…                             18m ago         15        1.2k
-   default                                   1h ago          8
+   ID                                        UPDATED    EVENTS   TOKENS      COST     SAVED  ACTIVE
+   ctx-abc-1234…                             3s ago     42       48.2k    $0.1214  ~$0.0038  ●
+   ctx-def-5678…                             18m ago    15       1.2k     $0.0031         —
+   default                                   1h ago     8            —          —         —
 
   ● connected   2.1 ev/s   drops: 0
-  [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [/] filter  [p] pause  [?] keys  [q] quit
+  [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
   ```
 
   The selected row is reverse-video rather than marked with a glyph, so it is
@@ -489,6 +490,9 @@ Layered on top of all of them:
 | `y` | detail | yank event JSON to `~/.cortex/abctl-events` (path stays until the next keypress) |
 | `g` / `G` | lists | jump to top / bottom. In the events timeline this also sets where the *next* session opens — see [Where a session opens](#where-a-session-opens) |
 | `u` | sessions, events, detail | open the usage charts (sessions: all sessions; events/detail: the selected session) |
+| `$` | any session view | expand the spend strip into a per-model breakdown, in place — the table stays on screen. Needs 26 rows; refuses on the pickers and on the usage pane, which is already a breakdown |
+| `a` | while the breakdown is open | cycle the axis: model / endpoint / agent. Not `g`, which is the global "jump to top" |
+| `w` | while the breakdown is open | cycle the span: 15m / 1h / 6h |
 | `m` | usage | cycle metric: tokens / requests / errors / latency |
 | `w` | usage | cycle window: 10m / 1h / 6h |
 | `b` | usage | cycle breakdown: none / status / method / plugin (not offered for latency — there is no per-label latency) |
