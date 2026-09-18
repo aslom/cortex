@@ -158,7 +158,19 @@ func (r *Reloader) Start(ctx context.Context) error {
 	// ConfigMap mount resolves to a TIMESTAMPED directory (..2026_05_08_xx)
 	// that is deleted on every update, so making the resolved path primary
 	// would break cluster reloads; that case keeps working through the ..data
-	// alias exactly as before, and the extra watch here is at worst inert.
+	// alias exactly as before.
+	//
+	// What the extra watch actually does under a ConfigMap, stated plainly
+	// rather than as "harmless": it lands on the current generation directory,
+	// and dies with it at the first update — Start runs once, so it is never
+	// re-added. Before that it admits events for config.yaml INSIDE the
+	// generation dir, which previously never arrived; those are redundant
+	// rather than wrong, since reloadOnce hashes the content and dedups an
+	// unchanged file. So the mechanism is "the watch dies on the first update",
+	// and it costs nothing only because the cluster path never depended on it.
+	// Re-arming it per generation would be real work for no benefit; if a
+	// future change ever makes the cluster path rely on the resolved watch,
+	// that has to be revisited, not assumed.
 	if real, err := filepath.EvalSymlinks(r.configPath); err == nil {
 		if rdir := filepath.Dir(real); rdir != dir {
 			if aerr := watcher.Add(rdir); aerr != nil {
