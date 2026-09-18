@@ -381,6 +381,37 @@ func TestDrawerLabels_DescribeTheSnapshotNotTheNextRequest(t *testing.T) {
 	}
 }
 
+// AND THROUGH THE VIEW, because the unit above cannot see the call site. Asserting drawerLabels in
+// isolation leaves paneView free to go on reading m.spend.axis() directly — verified: that mutation
+// passed the unit test. The rendered hint line is what a user reads, so that is what has to be
+// pinned.
+func TestPaneView_TheHintLineLabelsTheSnapshotNotTheNextRequest(t *testing.T) {
+	m := &model{width: 200, height: 60, endpoint: "http://x"}
+	m.pane = paneSessions
+	m.sessionsTbl = newSessionsTable()
+	m.spend.snap = drawerSnap()
+	m.spend.snap.Window = "1h0m0s"
+	m.spend.snap.Group = usage.GroupModel
+	m.spend.expanded = true
+	// `a` and `w` pressed: the next poll will ask for endpoint over 6h, the rows on screen are
+	// still model over an hour.
+	m.spend.groupIdx, m.spend.windowStep = 1, 1
+	m.layout()
+
+	out := m.paneView()
+	if !strings.Contains(out, "["+string(usage.GroupModel)+"]") {
+		t.Errorf("the hint line does not bracket %q, the axis the rows on screen are grouped by:\n%s",
+			usage.GroupModel, out)
+	}
+	if !strings.Contains(out, "[w] 1h") {
+		t.Errorf("the hint line does not report 1h, the span the answer covers:\n%s", out)
+	}
+	// The queued values must not be on screen as though they described the data.
+	if strings.Contains(out, "["+string(usage.GroupEndpoint)+"]") || strings.Contains(out, "[w] 6h") {
+		t.Errorf("the hint line reports the axis or span the NEXT poll will ask for:\n%s", out)
+	}
+}
+
 // And the reservation has to be the size the renderer actually emits, or the fit above holds by
 // luck. Asserted against renderSpendDrawer's own output rather than against the number 5.
 func TestSpendDrawerLines_MatchesWhatTheRendererEmits(t *testing.T) {
