@@ -695,3 +695,41 @@ func TestGetBody_ASlowBodyInsideTheCallersBudgetSurvives(t *testing.T) {
 		t.Errorf("ID = %q, want s1", view.ID)
 	}
 }
+
+// A 400 MESSAGE IS PRINTED TO A TERMINAL, so it cannot carry control bytes.
+//
+// The endpoint is unauthenticated and this client cannot verify what answered, which is why the
+// read is already capped at 512 bytes — that bound stops a flood, and this one stops a payload
+// that fits inside it. An escape sequence in the message can reposition the cursor, recolour the
+// rest of the session or hide what follows it, and `abctl cost` prints this straight to stderr
+// while the TUI puts it in a flash line.
+//
+// pipeline.IsControlRune is the predicate the ledger and the aggregate already sanitise labels
+// with, so the same byte is refused on every surface.
+func TestGetUsageWindow_BadRequestDetailCarriesNoControlBytes(t *testing.T) {
+	// A plausible server message with an escape sequence, a carriage return and a NUL spliced in.
+	hostile := "unsupported window\x1b[2J\x1b[H\rwiped\x00"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": hostile})
+	}))
+	defer ts.Close()
+
+	_, err := New(ts.URL).GetUsageWindow(context.Background(), "yesterday", 0, "", "")
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("error = %v, want ErrBadRequest", err)
+	}
+	msg := err.Error()
+	for _, bad := range []string{"\x1b", "\r", "\x00"} {
+		if strings.Contains(msg, bad) {
+			t.Errorf("message %q carries %q — it is printed to a terminal", msg, bad)
+		}
+	}
+	// The READABLE part survives, or sanitising would have cost the diagnostic it exists to carry.
+	for _, want := range []string{"unsupported window", "wiped"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q lost %q: stripping control bytes must not drop the text", msg, want)
+		}
+	}
+}

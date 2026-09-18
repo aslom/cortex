@@ -664,6 +664,40 @@ func TestCostDegradedText_NamesWhatEachKindOfDamageLost(t *testing.T) {
 			[]string{"3 unreadable lines", "1 day file"}, nil},
 		{"neither", usage.Degraded{},
 			[]string{"SHORT", "without saying how much"}, []string{"unreadable line", "day file"}},
+
+		// THE TWO COUNTERS THAT WENT UNRENDERED. Each fell through to the "without saying how
+		// much" branch while the response said precisely how much — the defect UnreadableDays
+		// was added to the struct to end, arriving again at the rendering step.
+		{"unreadable days only", usage.Degraded{UnreadableDays: 2},
+			[]string{"SHORT", "could not read 2 day files at all", "unbounded"},
+			// It must NOT claim the read merely did not say, and must not invent other damage.
+			[]string{"without saying how much", "unreadable line", "part-way"}},
+		{"one unreadable day", usage.Degraded{UnreadableDays: 1},
+			[]string{"could not read 1 day file at all"}, []string{"day files"}},
+		{"dropped rows only", usage.Degraded{DroppedRowsTotal: 7},
+			// And it says the count is the PROXY's running total, not this window's loss — a
+			// reader who subtracted it from this window would be wrong.
+			[]string{"SHORT", "dropped 7 rows before they reached disk", "running total for this proxy"},
+			[]string{"without saying how much", "unbounded"}},
+		{"one dropped row", usage.Degraded{DroppedRowsTotal: 1},
+			[]string{"dropped 1 row before"}, []string{"1 rows"}},
+
+		// COMBINED, because the clause list is what replaced a switch that could only describe
+		// the pairs someone thought of.
+		{"an unreadable day beside skipped lines", usage.Degraded{UnreadableDays: 1, SkippedLines: 4},
+			[]string{"could not read 1 day file at all", "skipped 4 unreadable lines", "unbounded"},
+			[]string{"without saying how much"}},
+		{"all four", usage.Degraded{
+			UnreadableDays: 1, TruncatedDays: 2, SkippedLines: 3, DroppedRowsTotal: 4},
+			[]string{
+				"could not read 1 day file at all",
+				"abandoned 2 day files part-way",
+				"skipped 3 unreadable lines",
+				"dropped 4 rows before they reached disk",
+				"unbounded",
+				"running total for this proxy",
+			},
+			[]string{"without saying how much"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := costDegradedText(&tc.in)
