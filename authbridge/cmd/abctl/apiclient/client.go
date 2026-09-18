@@ -77,6 +77,33 @@ const HeaderTimeout = 2 * time.Minute
 // Nothing in production writes it.
 var responseHeaderTimeout = HeaderTimeout
 
+// streamDefaultTimeout bounds a STREAMED call whose caller supplied no deadline — the whole
+// call, body read included, which is exactly what HeaderTimeout does not do.
+//
+// IT CLOSES A REGRESSION THIS CLIENT INTRODUCED. Removing http.Client.Timeout removed the only
+// bound the streaming path had on the body, and the header bound that replaced it stops at the
+// first response header by definition. So a proxy that sent headers and then stalled mid-body
+// hung the caller FOREVER, where the deleted 10s Timeout had bounded it — and the TUI is
+// exactly that caller: tui/paging.go fetches each older page with the app's root context,
+// which carries no deadline. The pre-header stall regressed from 10s to two minutes; this one
+// had regressed from 10s to unbounded, which is the worse of the two.
+//
+// A GENEROUS 60s, not the old 10s, because 10s is what emptied the timeline: a full-body
+// snapshot was ~209KB an event and 17 seconds of transfer. The page is ~1KB an event and
+// SnapshotEventLimit events, so ~2MB — 60s is a floor of 34KB/s, which no working link is
+// under and no bounded page needs.
+//
+// HERE AND NOT AT THE CALL SITE. One call site is one fix; the property that failed is "a
+// deadline-less streaming caller is unbounded", and a per-caller budget leaves the next caller
+// to rediscover it. This is the same rule getJSON already applies with restDefaultTimeout —
+// supply a default only where the caller set none, never override one that exists — so a
+// caller with its own budget is unaffected in either direction.
+//
+// SSE IS NOT AFFECTED, which is what makes a default here safe at all: Stream goes through
+// c.httpStream.Do directly and never reaches getBody, so no long-lived stream inherits this.
+// A var so a test can shorten it.
+var streamDefaultTimeout = 60 * time.Second
+
 // New returns a Client pointed at endpoint (e.g. "http://localhost:9094").
 // Trailing slash is tolerated.
 func New(endpoint string) *Client {
@@ -89,10 +116,16 @@ func New(endpoint string) *Client {
 	//
 	// GetSessionPage streams through getBody and returns an unread body, so it has no
 	// buffered-call deadline to inherit; without this, a proxy that accepted the connection
-	// and then stalled would hang the TUI until the operator quit it. The deleted Timeout was
-	// the only bound that path had. And it fixes what that Timeout broke: that one covered the
-	// body read too, which is why a large snapshot failed at 10s and came up empty. A header
-	// bound cannot do that however big the response is.
+	// and then stalled BEFORE ANY HEADER would hang the TUI until the operator quit it. And it
+	// fixes what the deleted Timeout broke: that one covered the body read too, which is why a
+	// large snapshot failed at 10s and came up empty. A header bound cannot do that however
+	// big the response is.
+	//
+	// WHICH IS ALSO ITS LIMIT, and stating only the pre-header stall here is how the other half
+	// went missing: this bound ends at the first response header, so a peer that sends headers
+	// and then stalls MID-BODY is not covered by it at all. The deleted Timeout did cover that.
+	// streamDefaultTimeout is what covers it now, and it is not on the transport because it
+	// must not apply to a caller that set its own budget.
 	//
 	// IT IS NOT A "REACH THE SERVER" BOUND, which is how it was first described and is the
 	// mistake worth stating here: the server's own work happens inside this window, because
@@ -276,14 +309,30 @@ func (c *Client) GetPluginCatalog(ctx context.Context) (*PluginCatalog, error) {
 // Split out of getJSON so a caller that must NOT buffer the whole response — the session
 // snapshot, which reaches hundreds of megabytes — can stream the body while still sharing
 // this one place that knows how the API reports 404 and other statuses. See snapshot.go.
-func (c *Client) getBody(ctx context.Context, path string) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.endpoint+path, nil)
-	if err != nil {
-		return nil, err
+//
+// A DEADLINE-LESS CALLER GETS streamDefaultTimeout, and it has to outlive this function: the
+// body is returned unread, so a deferred cancel would abort the caller's first Read. It
+// travels with the body instead and fires on Close — see bodyWithCancel. Every FAILURE path
+// releases it here, through one deferred check on the named error rather than a call before
+// each return, because that is the version that cannot be forgotten when a status branch is
+// added.
+func (c *Client) getBody(ctx context.Context, path string) (body io.ReadCloser, err error) {
+	cancel := context.CancelFunc(func() {})
+	if _, ok := ctx.Deadline(); !ok {
+		ctx, cancel = context.WithTimeout(ctx, streamDefaultTimeout)
 	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
+	defer func() {
+		if err != nil {
+			cancel()
+		}
+	}()
+	req, rerr := http.NewRequestWithContext(ctx, "GET", c.endpoint+path, nil)
+	if rerr != nil {
+		return nil, rerr
+	}
+	resp, derr := c.http.Do(req)
+	if derr != nil {
+		return nil, derr
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		// Drained before closing so the connection returns to the pool rather than
@@ -309,7 +358,30 @@ func (c *Client) getBody(ctx context.Context, path string) (io.ReadCloser, error
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("%s: unexpected status %d", path, resp.StatusCode)
 	}
-	return resp.Body, nil
+	return bodyWithCancel{ReadCloser: resp.Body, cancel: cancel}, nil
+}
+
+// bodyWithCancel releases a request's deadline when the body is closed.
+//
+// The deadline getBody may add covers the body read, so it cannot be released when getBody
+// returns — that is the whole point of it — and Go has nowhere else to hang the lifetime. The
+// caller already closes the body (snapshot.go defers it), so Close is the honest hook.
+//
+// CLOSE FIRST, THEN CANCEL. Cancelling a live request tears the connection down; closing a
+// fully-read body returns it to the pool, and abctl polls this API. Reversing the two costs a
+// connection per page.
+//
+// A caller that never closes leaks nothing but the timer, until the deadline fires. That is
+// bounded by construction, which is more than the unbounded read this replaced.
+type bodyWithCancel struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b bodyWithCancel) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
 }
 
 // badRequestDetail pulls the "error" field out of a 400 body.

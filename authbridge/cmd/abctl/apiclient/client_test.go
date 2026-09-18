@@ -609,3 +609,78 @@ func TestGetJSON_ServerThinkTimeInsideTheCallersBudgetSucceeds(t *testing.T) {
 		t.Errorf("Window = %q, want today", snap.Window)
 	}
 }
+
+// A peer that sends headers and then STALLS MID-BODY must not hang a caller that set no
+// deadline of its own. The TUI is exactly that caller: tui/paging.go fetches each older page
+// with the app's root context.
+//
+// THE HEADER BOUND CANNOT COVER THIS, by definition — it ends at the first response header —
+// and removing http.Client.Timeout removed the only thing that did, so this path went from
+// bounded at 10s to unbounded. Every other test in this file watches the pre-header window,
+// which is why the regression had no coverage: the two stalls are different failures and only
+// one of them was ever asserted.
+//
+// The body is deliberately left OPEN by the server and the client's read blocks; a bound has to
+// come from somewhere other than the reader.
+func TestGetBody_ADeadlinelessCallerIsBoundedMidBody(t *testing.T) {
+	prev := streamDefaultTimeout
+	streamDefaultTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { streamDefaultTimeout = prev })
+
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Headers are out, so the header bound is satisfied and no longer applies.
+		w.(http.Flusher).Flush()
+		_, _ = w.Write([]byte(`{"id":"s1","events":[`))
+		w.(http.Flusher).Flush()
+		<-release // and then nothing, forever
+	}))
+	defer func() { close(release); ts.Close() }()
+
+	start := time.Now()
+	// No deadline, exactly as the TUI's root context has none.
+	_, err := New(ts.URL).GetSessionPage(context.Background(), "s1", 0, 10)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("GetSessionPage returned no error against a server that stalled mid-body: with " +
+			"no client-wide Timeout and no caller deadline, this read never ends and the TUI " +
+			"hangs until the operator quits it")
+	}
+	// Generous against the 150ms bound and far under any test timeout, so a loaded runner
+	// cannot flake it while an unbounded read still fails outright.
+	if elapsed > 5*time.Second {
+		t.Errorf("failed only after %v: that is not streamDefaultTimeout doing the bounding", elapsed)
+	}
+}
+
+// And the other direction: the default must not cut off a caller that DID set a budget, nor a
+// body that is merely slow within it. streamDefaultTimeout is a floor for the deadline-less,
+// never a ceiling on anyone.
+func TestGetBody_ASlowBodyInsideTheCallersBudgetSurvives(t *testing.T) {
+	prev := streamDefaultTimeout
+	streamDefaultTimeout = 10 * time.Millisecond // absurdly short, and must be ignored
+	t.Cleanup(func() { streamDefaultTimeout = prev })
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(200 * time.Millisecond) // 20x the default, well inside the caller's budget
+		_ = json.NewEncoder(w).Encode(pipeline.SessionView{ID: "s1"})
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	view, err := New(ts.URL).GetSessionPage(ctx, "s1", 0, 10)
+	if err != nil {
+		t.Fatalf("GetSessionPage: %v — the caller budgeted 5s and the body took 200ms, so the "+
+			"client's own default pre-empted a budget it is supposed to defer to", err)
+	}
+	if view.ID != "s1" {
+		t.Errorf("ID = %q, want s1", view.ID)
+	}
+}
