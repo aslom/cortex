@@ -31,7 +31,7 @@ func TestSpendSummary_DerivesEveryWindowFigure(t *testing.T) {
 			CacheWriteTokens:  1_000_000,
 			PricedRequests:    10,
 			PriceableRequests: 10,
-			PresentKinds:      kindInput | kindCacheRead | kindCacheWrite,
+			PresentKinds:      usage.KindInput | usage.KindCacheRead | usage.KindCacheWrite,
 		},
 		Priced: true,
 	}
@@ -1001,14 +1001,14 @@ func TestCacheHitPct_AnUnreportedBreakdownIsNotAZeroHitRate(t *testing.T) {
 		ok    bool
 	}{
 		// The realistic gateway: input counted, caching not reported at all.
-		{name: "input only", kinds: kindInput},
+		{name: "input only", kinds: usage.KindInput},
 		// The mirror: cache reads reported with no input, so the denominator is short by
 		// an unreported term and the ratio would read HIGH rather than low.
-		{name: "cache-read only", kinds: kindCacheRead},
+		{name: "cache-read only", kinds: usage.KindCacheRead},
 		// Nothing reported — a gateway that sends only total_tokens.
 		{name: "no kinds", kinds: 0},
 		// Both present is the only case with a denominator worth dividing by.
-		{name: "input and cache-read", kinds: kindInput | kindCacheRead, ok: true},
+		{name: "input and cache-read", kinds: usage.KindInput | usage.KindCacheRead, ok: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Counters deliberately populated in every case, so the ONLY thing that varies

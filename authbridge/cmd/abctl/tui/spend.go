@@ -453,24 +453,6 @@ func (m *model) spendSummary() spendSummary {
 	return out
 }
 
-// The PresentKinds bit layout, pinned to what usage.Counts.PresentKinds documents:
-// Input=1, CacheRead=2, CacheWrite=4, Output=8, Reasoning=16.
-//
-// RE-DECLARED rather than imported, because the authority is
-// authlib/plugins/internal/parsercommon.Kind and an internal package under
-// authlib/plugins is not importable from here. abctl's own `cost` command carries the
-// same five constants in package main for the same reason, so there are two copies in
-// this module and no way to have one. Both are checked against the layout above, which
-// is the shared contract; the bits are wire format, so they cannot be renumbered without
-// breaking every stored snapshot regardless.
-const (
-	kindInput uint8 = 1 << iota
-	kindCacheRead
-	kindCacheWrite
-	kindOutput
-	kindReasoning
-)
-
 // cacheHitPct is cache-read tokens over PROMPT tokens, as a percentage.
 //
 // ok is false when the provider reported no prompt breakdown at all, which is why this
@@ -478,11 +460,11 @@ const (
 // — "no prompt tokens" and "nothing reported them" — and only the flags can tell them
 // apart. See usage.Counts.PresentKinds, whose own doc is about exactly this ambiguity.
 //
-// Both bits are required. kindCacheRead alone would divide by a denominator nobody
-// reported; kindInput alone would report 0% for a gateway that reports input and not cache
-// reads, which is a claim about caching made from an absence of evidence.
+// Both bits are required. KindCacheRead alone would divide by a denominator nobody reported;
+// KindInput alone would report 0% for a gateway that reports input and not cache reads, which
+// is a claim about caching made from an absence of evidence.
 func cacheHitPct(t usage.Counts) (float64, bool) {
-	if t.PresentKinds&kindCacheRead == 0 || t.PresentKinds&kindInput == 0 {
+	if t.PresentKinds&usage.KindCacheRead == 0 || t.PresentKinds&usage.KindInput == 0 {
 		return 0, false
 	}
 	prompt := t.InputTokens + t.CacheReadTokens + t.CacheWriteTokens
