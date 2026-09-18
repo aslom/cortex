@@ -1027,8 +1027,9 @@ func TestCacheHitPct_AnUnreportedBreakdownIsNotAZeroHitRate(t *testing.T) {
 				PresentKinds:    tc.kinds,
 			})
 			if ok != tc.ok {
-				t.Fatalf("ok = %v, want %v (kinds = %05b): a ratio is only meaningful when the "+
-					"provider reported both terms", ok, tc.ok, tc.kinds)
+				t.Fatalf("ok = %v, want %v (kinds = %05b): the denominator is the SUM of all three "+
+					"prompt tiers, so a ratio is only meaningful when the provider reported every "+
+					"one of them", ok, tc.ok, tc.kinds)
 			}
 			if !ok && got != 0 {
 				t.Errorf("pct = %v alongside ok=false; a suppressed figure must carry no value "+
