@@ -395,19 +395,43 @@ func TestGetJSON_DeadlinelessCallerIsStillBounded(t *testing.T) {
 // A server that accepts the connection and then never answers is the realistic failure —
 // a wedged proxy, not a refused dial — and before the header timeout it hung the TUI
 // until the operator quit.
+//
+// THE CALLER'S CONTEXT IS BOUNDED HERE, AND THE ELAPSED TIME IS THE ASSERTION. A bare
+// context.Background() would hang until the 10-minute test panic when the header timeout is
+// missing — a control that reports nothing and costs ten minutes of CI. A 3s caller deadline
+// against a 50ms header timeout puts the two bounds 60x apart, so returning quickly means
+// the header timeout fired and returning at ~3s means the caller's deadline did.
+//
+// NOT DISTINGUISHED BY THE ERROR, which was the first attempt and does not work: net/http's
+// "timeout awaiting response headers" ALSO satisfies errors.Is(err, context.DeadlineExceeded),
+// so both bounds produce an error that matches. Measured, not assumed — the error-based
+// version passed a mutation it was written to catch. Elapsed time is mechanism-independent
+// and cannot be confused.
 func TestGetBody_StreamingCallerIsBoundedBeforeTheHeaders(t *testing.T) {
-	shortenHeaderTimeout(t, 50*time.Millisecond)
+	const headerBound = 50 * time.Millisecond
+	const callerBound = 3 * time.Second
+	shortenHeaderTimeout(t, headerBound)
 	release := make(chan struct{})
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-release // wedged: connected, no headers
 	}))
 	defer func() { close(release); ts.Close() }()
 
-	_, err := New(ts.URL).GetSessionPage(context.Background(), "s1", 0, 10)
+	ctx, cancel := context.WithTimeout(context.Background(), callerBound)
+	defer cancel()
+	start := time.Now()
+	_, err := New(ts.URL).GetSessionPage(ctx, "s1", 0, 10)
+	elapsed := time.Since(start)
 	if err == nil {
-		t.Fatal("GetSessionPage returned nil error against a server that never sent headers: " +
-			"the streaming path has no deadline of its own, so without the transport's header " +
-			"timeout this call hangs forever")
+		t.Fatal("GetSessionPage returned nil error against a server that never sent headers")
+	}
+	// Generous against the 50ms bound and far below the caller's 3s, so a loaded CI machine
+	// cannot flake it while the mutation still lands unambiguously.
+	if elapsed > callerBound/4 {
+		t.Errorf("failed after %v with %v: that is the CALLER's %v deadline, not the %v header "+
+			"timeout — so the streaming path has no bound of its own, and a caller passing a "+
+			"root context (the TUI does) hangs on a wedged proxy forever",
+			elapsed, err, callerBound, headerBound)
 	}
 }
 
