@@ -987,6 +987,39 @@ func TestFold_CarriesTheIncompleteCount(t *testing.T) {
 	}
 }
 
+// Avoided cost must survive the fold in its own column, on the same footing as the caveat
+// above and for the same mechanical reason — Row embeds usage.Counts, so Counts.Add carries
+// it — and it must not join the spend total on the way.
+//
+// The two are asserted TOGETHER because that is the only pairing that can fail informatively:
+// a fold that added savings to spend reports 300 avoided and 900 spent, and a fold that
+// dropped them reports 0 avoided and 600 spent. Either alone leaves one of those undetected.
+//
+// Also the mixed case on purpose — one row with a saving, one without — because a window is
+// aggregated from minutes and most minutes have no saving in them at all.
+func TestFold_CarriesAvoidedCostWithoutAddingItToSpend(t *testing.T) {
+	base := time.Date(2026, 9, 13, 9, 0, 0, 0, time.Local)
+	rows := []Row{
+		{At: base, Model: "m", Counts: usage.Counts{
+			Requests: 1, CostMicros: 400, PricedRequests: 1, PriceableRequests: 1, AvoidedMicros: 300}},
+		{At: base, Model: "m", Counts: usage.Counts{
+			Requests: 1, CostMicros: 200, PricedRequests: 1, PriceableRequests: 1}},
+	}
+
+	totals, series, _ := Fold(rows, usage.GroupModel)
+
+	if totals.AvoidedMicros != 300 {
+		t.Errorf("totals.AvoidedMicros = %d, want 300", totals.AvoidedMicros)
+	}
+	if series["m"].AvoidedMicros != 300 {
+		t.Errorf("series AvoidedMicros = %d, want 300", series["m"].AvoidedMicros)
+	}
+	if totals.CostMicros != 600 {
+		t.Errorf("CostMicros = %d, want 600 — the two priced figures and nothing else; 900 "+
+			"means the saving was added to spend", totals.CostMicros)
+	}
+}
+
 func TestFold_EmptyLabelIsNeverASeriesKey(t *testing.T) {
 	// A blank row in a breakdown table reads as a bug rather than as missing
 	// attribution — the same guard the live foldInto applies.

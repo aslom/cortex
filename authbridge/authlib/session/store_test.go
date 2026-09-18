@@ -1,10 +1,13 @@
 package session
 
 import (
+	"encoding/json"
+	"math"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
@@ -631,6 +634,105 @@ func TestSumTokens(t *testing.T) {
 	}
 	if sumTokens([]pipeline.SessionEvent{}) != 0 {
 		t.Error("sumTokens([]) should be 0")
+	}
+}
+
+// costRecord builds the plugin map one session event carries its cost record in.
+func costRecord(t *testing.T, ev costevent.Event) map[string]json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]json.RawMessage{costevent.Key: raw}
+}
+
+// TestSumCost covers the four rules sumCost applies, which sumTokens beside it does not have
+// to: pricedness gates the money and not the saving, and a denial can carry either.
+//
+// One event list rather than four, because the rules interact — the point is what a session
+// holding a realistic mixture reports, and a per-rule fixture would pass while the sum over
+// all of them was wrong.
+func TestSumCost(t *testing.T) {
+	evs := []pipeline.SessionEvent{
+		// An ordinary priced response with a saving on it. Both figures counted.
+		{
+			Phase:   pipeline.SessionResponse,
+			Plugins: costRecord(t, costevent.Event{CostUSD: 0.25, Settled: true, Provenance: "configured",
+				Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 100, USD: 0.01, Tier: "input"}}}),
+		},
+		// UNPRICED, and carrying a saving. No dollars, and the saving still counts: the
+		// prompt was pruned whether or not anything managed to price the response.
+		{
+			Phase:   pipeline.SessionResponse,
+			Plugins: costRecord(t, costevent.Event{Source: costevent.SourceUsageFallback,
+				Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 200, USD: 0.02, Tier: "input"}}}),
+		},
+		// A DENIAL carrying a settled figure — the proxy charges for a response whose body
+		// never arrived. Counted, which is why this is not restricted to SessionResponse.
+		{
+			Phase:   pipeline.SessionDenied,
+			Plugins: costRecord(t, costevent.Event{CostUSD: 0.05, Settled: true, Provenance: "authoritative"}),
+		},
+		// A REQUEST-phase record. Skipped: the cost is settled on the response pass, and
+		// counting both halves would double-charge every request that has one.
+		{
+			Phase:   pipeline.SessionRequest,
+			Plugins: costRecord(t, costevent.Event{CostUSD: 99, Settled: true, Provenance: "configured"}),
+		},
+		// A PROJECTED saving: observe mode left every byte on the wire, so this is money
+		// that WAS spent and must not be reported as avoided.
+		{
+			Phase:   pipeline.SessionResponse,
+			Plugins: costRecord(t, costevent.Event{Source: costevent.SourceUsageFallback,
+				Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 5000, USD: 5, Tier: "input", Projected: true}}}),
+		},
+		// A response with no cost record at all — the common case for non-inference traffic.
+		{Phase: pipeline.SessionResponse, MCP: &pipeline.MCPExtension{Method: "tools/call"}},
+	}
+
+	cost, avoided := sumCost(evs)
+	// 0.25 + 0.05. The request event's $99 is the discriminator: 99_300_000 means the
+	// request half was counted too.
+	if want := int64(300_000); cost != want {
+		t.Errorf("cost = %d, want %d", cost, want)
+	}
+	// 0.01 + 0.02, the priced and the unpriced request alike. 30_000 with the $5 projected
+	// entry excluded — 5_030_000 would mean observe-mode figures are being reported as
+	// savings.
+	if want := int64(30_000); avoided != want {
+		t.Errorf("avoided = %d, want %d", avoided, want)
+	}
+
+	if c, a := sumCost(nil); c != 0 || a != 0 {
+		t.Errorf("sumCost(nil) = %d, %d; want 0, 0", c, a)
+	}
+}
+
+// A lifetime total must not WRAP, which is the one failure mode that turns a cost column into
+// a negative number an operator cannot explain. A gateway's own figure is bounded per request
+// and nothing bounds how many requests a session holds, so the ceiling is reachable in
+// principle and the clamp is what makes the column safe.
+//
+// Two maximal figures, which is the smallest case that overflows.
+func TestSumCost_SaturatesRatherThanWrapping(t *testing.T) {
+	// Just under pricing.MaxCostMicros in dollars, so each record prices at close to the
+	// largest figure costevent will represent. Two of them exceed int64 nowhere near, so the
+	// list is padded to reach the ceiling.
+	big := costevent.Event{CostUSD: 9e9, Settled: true, Provenance: "authoritative"}
+	one := costRecord(t, big)
+	evs := make([]pipeline.SessionEvent, 4096)
+	for i := range evs {
+		evs[i] = pipeline.SessionEvent{Phase: pipeline.SessionResponse, Plugins: one}
+	}
+
+	cost, _ := sumCost(evs)
+	if cost < 0 {
+		t.Errorf("cost = %d: a lifetime total wrapped negative, which is the one answer a "+
+			"cost column must never print", cost)
+	}
+	if cost != math.MaxInt64 {
+		t.Errorf("cost = %d, want the int64 ceiling: the sum should clamp there", cost)
 	}
 }
 

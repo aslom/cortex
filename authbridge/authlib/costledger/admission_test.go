@@ -120,26 +120,33 @@ func TestRecord_AnUnpricedRecordWithNoRefusalIsStillNotARow(t *testing.T) {
 // what a per-minute row can and cannot say, because it was reported as a defect and is
 // not one.
 //
-// Both records DO get a row — through the extension, not through the cost — and neither
-// figure is persisted, because Row has no column for either:
+// Both records DO get a row — through the extension, not through the cost — and NEITHER
+// PUTS A DOLLAR IN CostMicros. Where they now differ is whether the figure is persisted
+// at all:
 //
-//   - PromptUSD is the modelled PROMPT half of one call's cost. It is a component of a
-//     figure, published so a REQUEST row can show what that row cost; the response row
-//     carries the call's total in CostMicros, which is what this file accumulates. There
-//     is nothing missing from the ledger's total.
-//   - Avoided is money NOT spent, and costevent is explicit that no consumer may add it
-//     to spend. usage.Counts has no field for it either, so the ring does not carry it
-//     across a window and the two surfaces AGREE. Persisting it is a Counts change (the
-//     schema rule here is add-never-rename, and Row embeds Counts so the vocabulary is
-//     shared) plus a decision about how a saving is presented beside a spend total —
-//     which is #972's, not this file's.
+//   - PromptUSD is the modelled PROMPT half of one call's cost, and still has no column.
+//     It is a component of a figure, published so a REQUEST row can show what that row
+//     cost; the response row carries the call's total in CostMicros, which is what this
+//     file accumulates. There is nothing missing from the ledger's total.
+//   - Avoided IS persisted now, in AvoidedMicros, which is #972's decision and arrived
+//     after this test did. It is a column of its own, never a contribution to CostMicros:
+//     costevent is explicit that no consumer may add money-not-spent to spend. Row embeds
+//     usage.Counts, so the ring carries the same field under the same name across a
+//     window and the two surfaces still AGREE — which is what that requirement was
+//     really about, not the absence of the column.
 //
-// So the honest statement is: a ledger row is a spend row. This test is what makes that
-// a pinned claim rather than an omission a reader has to infer.
+// So the honest statement is: a ledger row's DOLLARS are spend, and a saving rides beside
+// them under a name that cannot be mistaken for one. This test is what makes that a pinned
+// claim rather than an omission a reader has to infer — and the avoided case asserts the
+// figure LANDS as well as staying out of spend, because a column silently dropped on the
+// write path would satisfy every other assertion here.
 func TestRecord_APromptOnlyOrAvoidedOnlyRecordIsARowWithNoDollars(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		rec  costevent.Event
+		// wantAvoided is the row's AvoidedMicros. Stated per case rather than derived, so
+		// the prompt-only case pins that a prompt component reaches NEITHER dollar column.
+		wantAvoided int64
 	}{
 		{name: "prompt-only", rec: costevent.Event{
 			Source: costevent.SourceUsageFallback, Provenance: "bundled",
@@ -148,7 +155,7 @@ func TestRecord_APromptOnlyOrAvoidedOnlyRecordIsARowWithNoDollars(t *testing.T) 
 		{name: "avoided-only", rec: costevent.Event{
 			Source: costevent.SourceUsageFallback, Provenance: "bundled",
 			Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 1000, USD: 0.10, Provenance: "bundled", Tier: "input"}},
-		}},
+		}, wantAvoided: 100_000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -171,6 +178,12 @@ func TestRecord_APromptOnlyOrAvoidedOnlyRecordIsARowWithNoDollars(t *testing.T) 
 			if rows[0].CostMicros != 0 || rows[0].PricedRequests != 0 {
 				t.Errorf("CostMicros = %d, PricedRequests = %d, want both zero: neither a prompt "+
 					"component nor a saving is spend", rows[0].CostMicros, rows[0].PricedRequests)
+			}
+			// The saving's own column: persisted for the avoided case, untouched by the
+			// prompt-only one. Both directions matter — the first is the feature, the second
+			// is the guarantee that a component of a real cost is not filed as a saving.
+			if rows[0].AvoidedMicros != tc.wantAvoided {
+				t.Errorf("AvoidedMicros = %d, want %d", rows[0].AvoidedMicros, tc.wantAvoided)
 			}
 			// Priceable through the ordinary model-and-tokens test, so the coverage gap is
 			// already visible without either figure.
