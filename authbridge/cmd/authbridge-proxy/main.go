@@ -444,6 +444,9 @@ func main() {
 	// early gives operators a clear boot-time error instead of silently
 	// misbehaving (e.g., YAML says envoy-sidecar but binary can't
 	// serve ext_proc).
+	// pendingPricing carries a rate table from a build to the commit that accepts it. See
+	// buildPipelines and applyPricing.
+	var pendingPricing *pricing.Table
 	buildPipelines := func() (*pipeline.Pipeline, *pipeline.Pipeline, *config.Config, error) {
 		c, err := config.Load(*configPath)
 		if err != nil {
@@ -485,15 +488,35 @@ func main() {
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("outbound: %w", err)
 		}
-		pricingRegistry.Swap(tab)
-		c.Pricing.WarnIfUnpinned(slog.Default())
+		// PREPARED, NOT APPLIED. Swapping here applied a rate table that the reload might still
+		// REFUSE: build runs before the reloader's unreloadable-field check, so a save touching both
+		// pricing.* and cost_ledger.* was rejected — pipelines untouched, /config still serving the old
+		// rates — while live traffic was already priced from the rejected file. A failed pipeline Start
+		// had the same shape. applyPricing below is called from the reloader's commit hook, and from
+		// the initial build, so the table only ever takes effect on a config that was accepted.
+		pendingPricing = tab
 		return in, out, c, nil
+	}
+
+	// applyPricing puts a prepared table into effect. Called on the reload goroutine, which is
+	// serialised, so the single pending slot needs no lock.
+	applyPricing := func(c *config.Config) {
+		if pendingPricing != nil {
+			pricingRegistry.Swap(pendingPricing)
+			pendingPricing = nil
+		}
+		if c != nil {
+			c.Pricing.WarnIfUnpinned(slog.Default())
+		}
 	}
 
 	inboundPipeline, outboundPipeline, cfg, err := buildPipelines()
 	if err != nil {
 		log.Fatalf("initial pipeline build: %v", err)
 	}
+	// The startup build has no reload to accept it, so it applies its own table. Without this the
+	// process would run with an empty registry until the first successful reload.
+	applyPricing(cfg)
 
 	initCtx, initCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer initCancel()
@@ -509,7 +532,8 @@ func main() {
 
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	defer cancelCtx()
-	rld := reloader.New(*configPath, inboundH, outboundH, buildPipelines, cfg)
+	rld := reloader.New(*configPath, inboundH, outboundH, buildPipelines, cfg,
+		reloader.WithOnCommit(applyPricing))
 	if err := rld.Start(ctx); err != nil {
 		log.Fatalf("reloader: %v", err)
 	}

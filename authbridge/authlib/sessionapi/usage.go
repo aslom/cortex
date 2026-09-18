@@ -200,7 +200,13 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		// than 400 — an abctl cost view must degrade to a shorter window, not fail —
 		// and Snapshot reports the window actually served, so the client never
 		// mislabels a 6-hour figure as a day's.
-		snap = s.usage.Snapshot(usage.MaxWindow, resolution, sessionID, group)
+		//
+		// CLAMPED TO THE WINDOW ASKED FOR, not just to the ring's maximum. Serving MaxWindow
+		// unconditionally reached BACKWARDS past the start of the window: at 00:30 local,
+		// window=today returned five and a half hours of YESTERDAY plus thirty minutes of today.
+		// The label said 6h0m0s and was literally true, so nothing was mislabelled — it
+		// over-reported today instead, which is the opposite of the degrade this comment claims.
+		snap = s.usage.Snapshot(servedSpan(spec), resolution, sessionID, group)
 	default:
 		// r.Context(), so a client that hangs up stops the read. The ledger walks one day
 		// file per day in the window — up to eight for window=7d, against a path an
@@ -326,8 +332,15 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 	// being able to see them. Until this, a day that lost lines produced a response
 	// byte-identical to a clean one — a short total under priced:true — so the skip that
 	// saved the rest of the day was invisible to everyone downstream of it.
+	// THE WRITER'S OWN LOSSES COUNT TOO, and they are not in Caveats: Caveats describes what this
+	// READ could not decode, while a dropped row never reached the file for any read to find. So a day
+	// that lost a minute to ENOSPC or to a full queue under a stalled filesystem served a short total
+	// under priced:true with nothing set — the silence this object exists to end, on the half that was
+	// never wired up. Writer.Dropped's own doc named this as the change that belonged next.
+	dropped := s.ledger.Dropped()
+
 	var degraded *usage.Degraded
-	if !caveats.Clean() {
+	if !caveats.Clean() || dropped > 0 {
 		// EVERY FIELD Clean() TESTS, or the disclosure is emptier than the fault. Clean() is
 		// `c == Caveats{}` over all three counters while this copied only two, so a read whose
 		// only fault was an unopenable day file produced `"degraded":{}` — the caveat raised
@@ -335,12 +348,14 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 		// structs in step by counting fields, because adding a fourth counter to Caveats would
 		// otherwise reintroduce exactly this.
 		degraded = degradedFrom(caveats)
+		degraded.DroppedRowsTotal = dropped
 		// At Warn, and unconditionally: a client may not render the field, and an operator
 		// with a corrupt day file wants to hear about it once per read rather than never.
 		slog.Warn("sessionapi: cost ledger read was incomplete — the total is short",
 			"window", spec.Label, "skippedLines", caveats.SkippedLines,
 			"truncatedDays", caveats.TruncatedDays,
-			"unreadableDays", caveats.UnreadableDays)
+			"unreadableDays", caveats.UnreadableDays,
+			"droppedRowsTotal", dropped)
 	}
 	snap := usage.Snapshot{
 		Window:        spec.Label,
@@ -414,4 +429,19 @@ func bucketSecondsFor(from, to time.Time) int {
 		return s
 	}
 	return 1
+}
+
+// servedSpan is how much of a symbolic window the RING can answer: the shorter of the window itself
+// and the ring's maximum.
+//
+// A function so the boundary is testable — the handler reads time.Now() directly, so a test cannot
+// stand at 00:30 through it, and 00:30 is the only interesting hour. Whole buckets are left to
+// Snapshot, which truncates the span to a bucket count and reports what it covered, so a sub-minute
+// window comes back as one bucket labelled a minute rather than as zero.
+func servedSpan(spec usage.Spec) time.Duration {
+	span := spec.To.Sub(spec.From)
+	if span > usage.MaxWindow {
+		return usage.MaxWindow
+	}
+	return span
 }

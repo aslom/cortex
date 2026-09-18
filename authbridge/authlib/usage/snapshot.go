@@ -361,6 +361,17 @@ type Degraded struct {
 	// line by an unbounded amount: the rest of that file is missing, and a file holds a
 	// whole day.
 	TruncatedDays int64 `json:"truncatedDays,omitempty"`
+	// DroppedRowsTotal is rows the WRITER lost: a failed append, or an enqueue dropped because the
+	// queue was full while the filesystem stalled. Cumulative for the life of the process, which the
+	// name says because it cannot be anything else — a drop is a fact about the writer, it happened
+	// once, and no later read can rediscover it, so attributing it to whichever read happened to
+	// notice would be a fiction.
+	//
+	// THE WRITE SIDE OF THIS OBJECT, which had only the read side. A day that lost a minute to ENOSPC
+	// served a short total under priced:true with no caveat at all — exactly the silence this struct
+	// was added to end, on the half nobody wired up. Compare across polls for a rate; a non-zero
+	// value at all means some total below is short.
+	DroppedRowsTotal int64 `json:"droppedRowsTotal,omitempty"`
 	// UnreadableDays is how many day files could not be opened or scanned at all — a
 	// permission change, a vanished mount, an IO error on the first read.
 	//

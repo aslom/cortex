@@ -1233,3 +1233,130 @@ func TestBucketSecondsFor_IsNeverZero(t *testing.T) {
 		})
 	}
 }
+
+// TestServedSpan_DoesNotReachBackPastTheWindow is 00:30 local, which is the only interesting hour.
+//
+// The no-ledger degrade served the ring's maximum unconditionally, so window=today just after midnight
+// answered with five and a half hours of YESTERDAY plus thirty minutes of today. The label was
+// literally true — 6h0m0s of data — so nothing was mislabelled; today was over-reported instead, which
+// is not what "degrade to a shorter window" means.
+func TestServedSpan_DoesNotReachBackPastTheWindow(t *testing.T) {
+	midnight := time.Date(2026, 9, 17, 0, 0, 0, 0, time.Local)
+	for _, tc := range []struct {
+		name string
+		from time.Time
+		to   time.Time
+		want time.Duration
+	}{
+		{"today, thirty minutes in", midnight, midnight.Add(30 * time.Minute), 30 * time.Minute},
+		{"today, an hour in", midnight, midnight.Add(time.Hour), time.Hour},
+		{"today, past the ring's reach", midnight, midnight.Add(9 * time.Hour), usage.MaxWindow},
+		{"7d is always past it", midnight.AddDate(0, 0, -7), midnight, usage.MaxWindow},
+		{"the first instant of the day", midnight, midnight, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := servedSpan(usage.Spec{From: tc.from, To: tc.to}); got != tc.want {
+				t.Errorf("servedSpan = %v, want %v: serving more than the window asked for over-reports it",
+					got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleUsage_AWriterDropReachesTheResponse is the half of Degraded that was never wired up.
+//
+// Caveats describes what a READ could not decode. A dropped row never reached the file, so no read can
+// rediscover it — which is why Writer.Dropped is process-wide, and why a day that lost a minute to
+// ENOSPC or to a full queue under a stalled filesystem served a short total under priced:true with
+// `degraded` absent entirely. Writer.Dropped had no non-test caller at all; its own doc named this as
+// the change that belonged next.
+//
+// Cumulative on the wire, deliberately: a per-read delta would attribute a drop to whichever request
+// happened to notice it. The name says so.
+func TestHandleUsage_AWriterDropReachesTheResponse(t *testing.T) {
+	at := insideToday(t, 3*time.Hour)
+	// Built inline rather than through newTestLedger, because this test needs the directory: it breaks
+	// it below to make the writer really lose a row.
+	dir := t.TempDir()
+	led, err := costledger.New(dir, costledger.WithClock(func() time.Time { return at }))
+	if err != nil {
+		t.Fatalf("costledger.New: %v", err)
+	}
+	t.Cleanup(func() { _ = led.Close() })
+	recordCostedMinute(t, led, at, "gw.example", "m", 1.0)
+	if ferr := led.Flush(); ferr != nil {
+		t.Fatalf("Flush: %v", ferr)
+	}
+	ts, _ := newTestServer(t, WithUsage(usage.New()), WithCostLedger(led))
+
+	// Clean read first: no caveat object at all, which is the convention absence carries.
+	_, body := fetchUsage(t, ts.URL, "?window=today")
+	if strings.Contains(body, "degraded") {
+		t.Fatalf("a clean read already reports degraded: %s", body)
+	}
+
+	// A ROW THE WRITER REALLY LOSES, induced by replacing its directory with a regular FILE so every
+	// append fails with ENOTDIR. Not chmod: root ignores permission bits, and a fixture that silently
+	// stops inducing the fault under CI is worse than no fixture. Not a test-only setter either — that
+	// would be production API existing for this test.
+	//
+	// AND THE DAY FILE IS PUT BACK AFTERWARDS, so the read that follows is CLEAN. Without that, the
+	// broken directory also fails the read, `degraded` appears because of UnreadableDays, and this test
+	// passes whether or not the write-side count is disclosed at all — which is exactly what it is here
+	// to check. Verified: with the restore, removing `|| dropped > 0` from the emission fails this test.
+	saved := map[string][]byte{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		b, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if rerr != nil {
+			t.Fatalf("stash %s: %v", e.Name(), rerr)
+		}
+		saved[e.Name()] = b
+	}
+	if len(saved) == 0 {
+		t.Fatal("no day file to stash, so the restore below cannot make the read clean")
+	}
+
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("clear the ledger dir: %v", err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatalf("put a file where the ledger dir was: %v", err)
+	}
+	recordCostedMinute(t, led, at.Add(time.Minute), "gw.example", "m", 2.0)
+	_ = led.Flush() // expected to fail; the point is the counter it moves
+	if led.Dropped() == 0 {
+		t.Fatal("the fixture induced no drop, so this test cannot see the field it is about")
+	}
+
+	if err := os.Remove(dir); err != nil {
+		t.Fatalf("remove the blocking file: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("restore the ledger dir: %v", err)
+	}
+	for name, b := range saved {
+		if werr := os.WriteFile(filepath.Join(dir, name), b, 0o600); werr != nil {
+			t.Fatalf("restore %s: %v", name, werr)
+		}
+	}
+
+	_, body = fetchUsage(t, ts.URL, "?window=today")
+	var snap usage.Snapshot
+	if err := json.Unmarshal([]byte(body), &snap); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if snap.Degraded == nil {
+		t.Fatalf("no degraded object after the writer lost rows: the total below it is short and says nothing — %s", body)
+	}
+	if snap.Degraded.DroppedRowsTotal != led.Dropped() {
+		t.Errorf("DroppedRowsTotal = %d, want %d — the writer's count is what the field reports",
+			snap.Degraded.DroppedRowsTotal, led.Dropped())
+	}
+	if snap.Degraded.DroppedRowsTotal == 0 {
+		t.Error("DroppedRowsTotal = 0 while the writer counted losses: the response would pass for the wrong reason on the read error alone")
+	}
+}

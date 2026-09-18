@@ -66,6 +66,19 @@ func WithDebounce(d time.Duration) Option { return func(r *Reloader) { r.debounc
 // Start context. Default 60s (same as main.go startup).
 func WithStartTimeout(d time.Duration) Option { return func(r *Reloader) { r.startTimeout = d } }
 
+// WithOnCommit registers a hook run once a reload has been ACCEPTED — after the unreloadable-field
+// check and after both pipelines have started — with the config that took effect.
+//
+// IT EXISTS BECAUSE A BUILDER'S SIDE EFFECTS OTHERWISE LAND TOO EARLY. build runs before
+// validateReloadable, so anything it applies to live traffic is applied by a save this reloader is
+// about to REFUSE: the pricing-table swap sat at the end of build, and a save touching both pricing.*
+// and cost_ledger.* was rejected — pipelines untouched, /config still reporting the old rates — while
+// requests were already being priced from the rejected file. A failed Start had the same shape.
+//
+// So the rule is: build may PREPARE, and only a hook here may APPLY. Called on the reload goroutine,
+// which is serialised (see reloadOnce), so a hook needs no locking of its own.
+func WithOnCommit(f func(*config.Config)) Option { return func(r *Reloader) { r.onCommit = f } }
+
 // Reloader owns the fsnotify watcher and the reload orchestration.
 // Safe for concurrent use — all internal state transitions happen
 // inside the single watch goroutine or are guarded by atomic.Pointer.
@@ -78,6 +91,8 @@ type Reloader struct {
 	drainWindow  time.Duration
 	debounce     time.Duration
 	startTimeout time.Duration
+	// onCommit is run after a reload is accepted; see WithOnCommit.
+	onCommit func(*config.Config)
 
 	status    atomic.Pointer[Status]
 	activeCfg atomic.Pointer[config.Config]
@@ -331,6 +346,12 @@ func (r *Reloader) reloadOnce(parent context.Context) {
 	r.outbound.Store(newOut)
 	r.activeCfg.Store(newCfg)
 	r.lastHash = hash
+
+	// After the swap, so a hook cannot observe a config that was refused, and before the log line, so
+	// "pipelines swapped" means everything this reload applies has been applied.
+	if r.onCommit != nil {
+		r.onCommit(newCfg)
+	}
 
 	slog.Info("reloader: pipelines swapped",
 		"sha256", hash[:12],

@@ -2,6 +2,7 @@ package reloader
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -15,6 +16,9 @@ import (
 // buildFn captures the caller-supplied pipeline results so tests can
 // steer each reload attempt's outcome (success with a given plugin
 // list, build-time failure, Start-time failure).
+// errBuildRefused is a build failure with a recognisable message.
+var errBuildRefused = errors.New("build refused by the fixture")
+
 type fakeBuilder struct {
 	// next is the result returned by the next build() call. Tests
 	// replace this before writing to the config file. The PipelineBuilder
@@ -81,9 +85,15 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool, msg string) 
 	t.Fatalf("timed out waiting for %s", msg)
 }
 
+func setup(t *testing.T) (*Reloader, *fakeBuilder, string, *pipeline.Holder, *pipeline.Holder) {
+	t.Helper()
+	return setupWith(t)
+}
+
 // setup creates a temp dir with an initial config file, builds a
 // Reloader with short debounce + no drain window, and Starts it.
-func setup(t *testing.T) (*Reloader, *fakeBuilder, string, *pipeline.Holder, *pipeline.Holder) {
+// setupWith is setup with extra options, for the tests that need to observe a hook.
+func setupWith(t *testing.T, extra ...Option) (*Reloader, *fakeBuilder, string, *pipeline.Holder, *pipeline.Holder) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -104,9 +114,11 @@ func setup(t *testing.T) (*Reloader, *fakeBuilder, string, *pipeline.Holder, *pi
 	b.set(builderResult{inbound: emptyPipeline(t), outbound: emptyPipeline(t), cfg: initialCfg})
 
 	r := New(cfgPath, inH, outH, b.build, initialCfg,
-		WithDebounce(20*time.Millisecond),
-		WithDrainWindow(0),
-		WithStartTimeout(5*time.Second),
+		append([]Option{
+			WithDebounce(20 * time.Millisecond),
+			WithDrainWindow(0),
+			WithStartTimeout(5 * time.Second),
+		}, extra...)...,
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -547,5 +559,87 @@ func TestReloader_ConfigMapDataSymlinkSwapStillReloads(t *testing.T) {
 		"a reload after the ..data symlink swap")
 	if inH.Load() != newIn {
 		t.Error("inbound holder was not swapped")
+	}
+}
+
+// TestReloader_ARefusedReloadCommitsNothing is the ordering the pricing swap fell through.
+//
+// build() runs BEFORE the unreloadable-field check, so anything it applies to live traffic is applied
+// by a save this reloader then refuses. That is how a config touching both pricing.* and cost_ledger.*
+// left requests priced from a rejected file while /config still served the old rates and the holders
+// still held the old pipelines — the reload reported failure and the process had already changed
+// behaviour. A failed pipeline Start has the same shape.
+//
+// The hook is the fix and this is its contract: build may PREPARE, only a commit may APPLY. Asserted
+// through the reloader rather than through main's pricing wiring, because the ordering is the
+// reloader's to guarantee for every side effect anyone hangs off it later.
+func TestReloader_ARefusedReloadCommitsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		newCfg   *config.Config
+		buildErr error
+		wantWhy  string
+	}{
+		{
+			// Unreloadable field: build succeeds, the check refuses it.
+			name:    "an unreloadable field",
+			newCfg:  &config.Config{Mode: "waypoint"},
+			wantWhy: "mode",
+		},
+		{
+			// The build itself fails, so there is nothing to commit either.
+			name:     "a build failure",
+			newCfg:   &config.Config{Mode: "envoy-sidecar"},
+			buildErr: errBuildRefused,
+			wantWhy:  "build",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var commits int
+			r, b, cfgPath, inH, _ := setupWith(t, WithOnCommit(func(*config.Config) { commits++ }))
+
+			oldIn := inH.Load()
+			b.set(builderResult{
+				inbound: emptyPipeline(t), outbound: emptyPipeline(t),
+				cfg: tc.newCfg, err: tc.buildErr,
+			})
+			writeConfig(t, cfgPath, "mode: "+tc.newCfg.Mode+"\n# refused\n")
+
+			waitFor(t, 2*time.Second, func() bool { return r.Status().ReloadsFailed >= 1 }, "reload to fail")
+
+			if commits != 0 {
+				t.Errorf("commit hook ran %d times on a refused reload: whatever it applies is now live from a config this reloader rejected", commits)
+			}
+			if inH.Load() != oldIn {
+				t.Errorf("inbound holder mutated despite a refused reload")
+			}
+			if !contains(r.Status().LastError, tc.wantWhy) {
+				t.Errorf("LastError = %q, want it to mention %q", r.Status().LastError, tc.wantWhy)
+			}
+		})
+	}
+}
+
+// TestReloader_AnAcceptedReloadCommitsOnce is the other half: the hook is not merely never called.
+func TestReloader_AnAcceptedReloadCommitsOnce(t *testing.T) {
+	var commits int
+	var gotMode string
+	r, b, cfgPath, _, _ := setupWith(t, WithOnCommit(func(c *config.Config) {
+		commits++
+		if c != nil {
+			gotMode = c.Mode
+		}
+	}))
+
+	b.set(builderResult{inbound: emptyPipeline(t), outbound: emptyPipeline(t),
+		cfg: &config.Config{Mode: "envoy-sidecar"}})
+	writeConfig(t, cfgPath, "mode: envoy-sidecar\n# accepted\n")
+
+	waitFor(t, 2*time.Second, func() bool { return r.Status().ReloadsOK >= 1 }, "reload to succeed")
+	if commits != 1 {
+		t.Errorf("commit hook ran %d times, want 1", commits)
+	}
+	if gotMode != "envoy-sidecar" {
+		t.Errorf("hook saw Mode %q, want the config that took effect", gotMode)
 	}
 }
