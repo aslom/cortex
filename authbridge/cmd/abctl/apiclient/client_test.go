@@ -639,20 +639,31 @@ func TestGetBody_ADeadlinelessCallerIsBoundedMidBody(t *testing.T) {
 	}))
 	defer func() { close(release); ts.Close() }()
 
-	start := time.Now()
-	// No deadline, exactly as the TUI's root context has none.
-	_, err := New(ts.URL).GetSessionPage(context.Background(), "s1", 0, 10)
-	elapsed := time.Since(start)
+	// ON A GOROUTINE, AND THE TEST DOES THE BOUNDING. The caller must pass no deadline — that
+	// is the case under test — so if the bound is missing there is nothing to end the read and
+	// a straight call blocks until the whole package's test timeout panics. That reports the
+	// hang as a stack dump minutes later instead of as this assertion, which is the same defect
+	// the pre-header test was rewritten to avoid. Verified: with streamDefaultTimeout removed,
+	// a straight call panicked at the 30s timeout; this fails in 3s naming the cause.
+	type result struct{ err error }
+	done := make(chan result, 1)
+	go func() {
+		// No deadline, exactly as the TUI's root context has none.
+		_, err := New(ts.URL).GetSessionPage(context.Background(), "s1", 0, 10)
+		done <- result{err: err}
+	}()
 
-	if err == nil {
-		t.Fatal("GetSessionPage returned no error against a server that stalled mid-body: with " +
-			"no client-wide Timeout and no caller deadline, this read never ends and the TUI " +
-			"hangs until the operator quits it")
-	}
-	// Generous against the 150ms bound and far under any test timeout, so a loaded runner
-	// cannot flake it while an unbounded read still fails outright.
-	if elapsed > 5*time.Second {
-		t.Errorf("failed only after %v: that is not streamDefaultTimeout doing the bounding", elapsed)
+	// 20x the shortened bound and far under any test timeout, so a loaded runner cannot flake
+	// it while an unbounded read still fails outright.
+	select {
+	case got := <-done:
+		if got.err == nil {
+			t.Fatal("GetSessionPage returned no error against a server that stalled mid-body")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("still blocked 3s into a %v bound: with no client-wide Timeout and no caller "+
+			"deadline, nothing ends this read and the TUI hangs until the operator quits it",
+			streamDefaultTimeout)
 	}
 }
 
