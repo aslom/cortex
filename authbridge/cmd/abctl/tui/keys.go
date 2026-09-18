@@ -556,8 +556,14 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			if !ok {
 				return nil
 			}
+			// Render from the summary immediately, then fill the message bodies in
+			// when they arrive — the timeline no longer carries them. See
+			// fetchDetailEventCmd for why this is not a blocking spinner.
 			m.showDetail(er, true)
 			m.pane = paneDetail
+			if needsFullEvent(m.serverProjects, er.event) && m.client != nil {
+				return fetchDetailEventCmd(m, m.selectedSess, er.event.Seq)
+			}
 			return nil
 		case panePipeline:
 			p := m.selectedPlugin()

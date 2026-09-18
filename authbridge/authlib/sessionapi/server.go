@@ -408,10 +408,16 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	project := eventProjection(r)
+	if project != nil {
+		// Echo what was applied, so a client that asked cannot be left guessing —
+		// see SessionView.View. Safe to set: ViewPage returns a freshly built view.
+		view.View = summaryView
+	}
 	w.Header().Set("Content-Type", "application/json")
 	// Streamed per event rather than Encoded whole: see writeSessionView for the heap
 	// this one response used to cost.
-	if err := writeSessionViewProjected(w, view, eventProjection(r)); err != nil {
+	if err := writeSessionViewProjected(w, view, project); err != nil {
 		slog.Debug("sessionapi: get encode failed", "error", err, "sessionID", id)
 	}
 }

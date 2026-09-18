@@ -131,6 +131,15 @@ func writeSessionViewProjected(
 		_, _ = bw.WriteString(`,"oldestSeq":`)
 		_, _ = bw.WriteString(strconv.FormatUint(view.OldestSeq, 10))
 	}
+	if view.View != "" { // omitempty
+		v, err := json.Marshal(view.View)
+		if err != nil {
+			_ = bw.Flush()
+			return fmt.Errorf("marshal view: %w", err)
+		}
+		_, _ = bw.WriteString(`,"view":`)
+		_, _ = bw.Write(v)
+	}
 	_, _ = bw.WriteString("}\n") // Encode terminates every value with a newline.
 	return bw.Flush()
 }
