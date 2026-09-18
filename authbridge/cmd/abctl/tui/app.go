@@ -200,6 +200,11 @@ type snapshotLoadedMsg struct {
 	// serverOldest is the Seq of the oldest event the server still holds, so paging can
 	// tell "there is more behind me" from "this is the beginning of the session".
 	serverOldest uint64
+	// projected is the server's echo: it applied view=summary, so these events carry
+	// no message bodies and the detail pane has to fetch the row it opens. False
+	// means a proxy that predates the projection returned full events — in which
+	// case the detail pane already has everything and must not fetch.
+	projected bool
 }
 
 // olderPageLoadedMsg carries a page from BEFORE the events already held — the result of
@@ -519,6 +524,29 @@ type model struct {
 	// Set in newPickerModel to edit.DefaultRunner; tests inject a stub.
 	editRunner edit.Runner
 
+	// eventsBuiltFor is the session the events table was last built for. When it
+	// differs from selectedSess the next rebuild is an OPENING, which is the only
+	// moment the OpenAtOldest preference applies — every later rebuild (the
+	// two-second poll, a filter, a column toggle) must preserve where the operator
+	// is, not re-anchor them to an end.
+	eventsBuiltFor string
+
+	// fullFetched is the set of event Seqs, per session, whose bodies have been
+	// fetched for the detail pane. Reset with m.events, so it cannot outlive the rows
+	// it describes.
+	//
+	// Tracked rather than inferred from the event: see needsFullEvent for why a
+	// presence check cannot answer this for response events.
+	fullFetched map[string]map[uint64]bool
+
+	// serverProjects records that this proxy honours view=summary, learned from its
+	// echo on any snapshot. It decides whether the detail pane has to fetch the row
+	// it opens: a proxy that predates the projection already sent whole events, and
+	// asking it for one again would be a round trip for bytes abctl is holding.
+	//
+	// A server capability, so one flag rather than one per session.
+	serverProjects bool
+
 	// localConfigPath is the config file of the Cortex on this machine, and
 	// localStatsURL is where that Cortex serves /reload/status. Both set from
 	// RunOptions, and only when one answered — pipelineStore requires both, so
@@ -626,6 +654,9 @@ func (m *model) backToPodsPane() {
 	m.streamCh = nil
 	m.sessions = nil
 	m.events = make(map[string][]pipeline.SessionEvent)
+	// In lockstep with m.events: a Seq recorded as fetched must not survive the rows
+	// it described, or the next session to reuse that Seq would be assumed complete.
+	m.fullFetched = nil
 	// In lockstep with m.events. A count describing a session whose events are gone is
 	// the bug that made this map per-session in the first place, just with a narrower
 	// window: re-entering the events pane on a matching id before its snapshot lands.
@@ -809,6 +840,7 @@ func (m *model) snapshotCmd(id string) tea.Cmd {
 		}
 		return snapshotLoadedMsg{
 			id: id, events: view.Events, olderNotFetched: older, serverOldest: view.OldestSeq,
+			projected: view.View == apiclient.SummaryView,
 		}
 	}
 }
@@ -959,6 +991,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// listing. abctl holds the same full prompt and completion strings the proxy
 		// does, so resident size tracks the traffic it has watched.
 		//
+		// Learned from the echo, not assumed: see model.serverProjects.
+		m.serverProjects = msg.projected
 		// Only update if we're still focused on this session.
 		m.events[msg.id] = msg.events
 		if m.olderNotFetched == nil {
@@ -1010,6 +1044,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.connState.phase = connReconnecting
+		return m, nil
+
+	case detailEventLoadedMsg:
+		m.applyDetailEvent(msg)
 		return m, nil
 
 	case errMsg:

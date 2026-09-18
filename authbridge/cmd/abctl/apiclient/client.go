@@ -61,19 +61,31 @@ func (c *Client) ListSessions(ctx context.Context) ([]session.SessionSummary, er
 	return body.Sessions, nil
 }
 
+// SummaryView is the projection every timeline fetch asks for. Must match
+// sessionapi's recognised `view` value.
+const SummaryView = "summary"
+
 // SnapshotEventLimit is how many events a snapshot asks for.
 //
 // Sent explicitly rather than relying on the server's default, so what this client is
-// willing to hold is visible here and tunable without a server change. 500 is what the
-// store capped every session at until session.max_events became unset, so it is a
-// window abctl is known to handle; the events it does not cover are counted for the
-// operator rather than silently missing.
+// willing to hold is visible here and tunable without a server change.
 //
-// The reason there is a number at all: the server will encode as much as it is asked
-// for, and a session that has been running for a day is 5000 events and a gigabyte of
-// JSON — 17s to transfer, against this client's 10s timeout. The whole request failed
-// and the timeline came up empty.
-const SnapshotEventLimit = 500
+// RAISED FROM 500 TO THE SERVER'S OWN CEILING, because the reason for the smaller
+// number is gone. 500 was picked when a snapshot carried message bodies: a day-old
+// session was 5000 events and a gigabyte of JSON, 17s against this client's 10s
+// timeout, and the whole request failed with an empty timeline to show for it. With
+// view=summary an event is ~1KB rather than ~209KB, so 2000 events is about 2MB —
+// less than half of what 500 full events cost, fetched in a fraction of the time.
+//
+// The cost of the old number was not just latency. A 1000-event session showed its
+// newest 500 and the operator had to know to press [o] for the rest, so "sort
+// oldest first" silently meant "oldest of the newest 500". Reaching the server's
+// maxEventLimit means a normal session arrives whole and that trap is gone.
+//
+// A ceiling still exists, and this is it: 2000 is what the server clamps to, so
+// asking for more would be a request the server quietly shrinks. Sessions longer
+// than that still page, which is what [o] and the "N older" footer note are for.
+const SnapshotEventLimit = 2000
 
 // GetSession fetches the most recent SnapshotEventLimit events of a session. Returns an
 // error whose Unwrap chain includes ErrNotFound if the server returned 404.

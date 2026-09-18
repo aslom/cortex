@@ -487,7 +487,7 @@ Layered on top of all of them:
 | `s` | column picker | sort by the column under the cursor: descending → ascending → chronological. Pressing it on a different column starts that column descending. `#` is not sortable — its order already *is* chronological |
 | `p` | any | pause/resume stream |
 | `y` | detail | yank event JSON to `~/.cortex/abctl-events` (path stays until the next keypress) |
-| `g` / `G` | lists | jump to top / bottom |
+| `g` / `G` | lists | jump to top / bottom. In the events timeline this also sets where the *next* session opens — see [Where a session opens](#where-a-session-opens) |
 | `u` | sessions, events, detail | open the usage charts (sessions: all sessions; events/detail: the selected session) |
 | `m` | usage | cycle metric: tokens / requests / errors / latency |
 | `w` | usage | cycle window: 10m / 1h / 6h |
@@ -595,6 +595,54 @@ Nothing else feeds a setting: there is no environment variable (no `ABCTL_*`, an
 chooses *which* file, never what is in it — so to try a layout without disturbing
 your own, point it at a throwaway file. Otherwise change the setting in the TUI,
 which saves it, or edit the YAML.
+
+## Where a session opens
+
+Opening a session puts the cursor on the end you last jumped to with `g` or `G`:
+the newest event by default, or the oldest if `g` was the last end you asked for.
+Those two keys already mean "take me to an end", so they double as the preference
+and it persists with your other view settings. An arrow key that happens to reach
+row 0 does not change it — scrolling up to read is navigation, not a preference.
+
+Only the *opening* chooses an end. Every later rebuild — the two-second poll, a
+filter, a column toggle — leaves the cursor where you put it, and the timeline
+follows new events only while you are on the newest row. Under a column sort the
+preference does not apply at all: there "an end" is the largest or smallest value
+rather than the oldest or newest event, so the cursor stays pinned to the event you
+were reading instead.
+
+## How a timeline is fetched
+
+The events table renders no message body, so it does not ask for one. Each fetch
+sends `?view=summary`, which drops the conversation payloads and keeps everything
+the table shows **or its filter searches** — measured at ~163x smaller, and the
+difference between a session that opens in milliseconds and one that takes seconds.
+
+The filter is the part worth spelling out, because it is easy to assume otherwise:
+`/some text` still matches completion and A2A message text, and `plugin:<name>`
+still works, because those fields are searched and so are kept. Dropping them would
+have been ~299x instead of ~163x — both about a megabyte for a 1000-event session,
+so the filter is worth far more than the difference.
+
+The consequence is worth knowing: the first `↵` on a row fetches that one event in
+full from `/v1/sessions/{id}/events/{seq}`. The detail pane renders the summary
+immediately and the bodies appear when they arrive, so there is no loading screen —
+but on a slow link the message text lands a moment after the rest. Re-opening the
+same row is free; the bodies are kept. If the fetch fails, the pane keeps what it
+has and the error goes to the footer.
+
+`y` yanks whatever the pane is showing, so while the bodies are still in flight — or
+after a failed fetch — it says so in the flash rather than handing you a body-less
+event that looks complete.
+
+Because a projected event is ~1KB rather than ~200KB, abctl asks for the server's
+full 2000-event ceiling instead of the old 500. A normal session therefore arrives
+whole, and the `N older ([o] to load)` note appears only for genuinely long ones.
+
+Against a proxy that predates `?view=summary` this still works — that server
+ignores the parameter and returns full events, so the timeline is correct and as
+slow as it used to be. abctl can tell the difference from the response and does not
+waste a per-row fetch on bytes it already holds.
 
 ## Editing the pipeline
 

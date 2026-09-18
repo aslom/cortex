@@ -54,6 +54,23 @@ type EventSettings struct {
 	// SortDesc is that sort's direction. Only meaningful with SortColumn set; false
 	// on its own is simply the ascending half of a sort that is not active.
 	SortDesc bool `yaml:"sortDesc,omitempty"`
+	// OpenAtOldest places the cursor on the OLDEST event when a session is opened,
+	// instead of the newest.
+	//
+	// Set by `g` and cleared by `G` — the two keys that already mean "go to an end",
+	// so the preference is whichever end the operator last deliberately jumped to.
+	// That needs no new binding and teaches itself: press g, leave the session, come
+	// back, and it opened where you were.
+	//
+	// False is the default, and what every file written before this carries, which is
+	// the behaviour abctl has always had: a session opens at the newest event and
+	// follows the tail from there.
+	//
+	// The ENTRY point only. Once open, tail-follow is still governed by whether the
+	// cursor sits on the newest row (see rebuildEventsTable), so opening at the
+	// oldest simply means the operator is not at the tail and arriving events append
+	// below them instead of dragging the cursor along.
+	OpenAtOldest bool `yaml:"openAtOldest,omitempty"`
 }
 
 // UsageSettings is the usage pane's view state: which metric, window and

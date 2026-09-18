@@ -21,7 +21,15 @@ import (
 // holding more memory than the proxy it was watching — 1.64GB against 1.03GB, and the
 // only one of the two still climbing. See decodeSessionView.
 func (c *Client) GetSessionPage(ctx context.Context, id string, before uint64, limit int) (*pipeline.SessionView, error) {
-	path := fmt.Sprintf("/v1/sessions/%s?limit=%d", url.PathEscape(id), limit)
+	// view=summary on every timeline fetch, tail and page alike: the events table
+	// renders no message body, and carrying them made opening a session a
+	// multi-second wait — 99.5 MiB and 1.32s on the wire for one 500-event
+	// response, against roughly half a megabyte projected. The full event is
+	// fetched per row by GetEvent when the operator opens the detail pane.
+	//
+	// An older proxy ignores the parameter and returns full events, so this stays
+	// correct against one, just as slow as before. view.View says which happened.
+	path := fmt.Sprintf("/v1/sessions/%s?limit=%d&view=%s", url.PathEscape(id), limit, SummaryView)
 	if before > 0 {
 		path += fmt.Sprintf("&before=%d", before)
 	}
@@ -36,6 +44,24 @@ func (c *Client) GetSessionPage(ctx context.Context, id string, before uint64, l
 		return nil, fmt.Errorf("%s: decode: %w", path, err)
 	}
 	return view, nil
+}
+
+// GetEvent fetches one event in full, payloads included.
+//
+// The counterpart to view=summary: the timeline no longer carries message bodies, so
+// the detail pane fetches the row under the cursor. This is the one thing the
+// projection makes slower — a round trip where it used to read from memory — and it
+// buys a session that opens in milliseconds instead of seconds.
+//
+// Not decoded through decodeSessionView's interning path: that exists to stop a
+// hundred-megabyte document being held whole, and this is one event.
+func (c *Client) GetEvent(ctx context.Context, id string, seq uint64) (*pipeline.SessionEvent, error) {
+	path := fmt.Sprintf("/v1/sessions/%s/events/%d", url.PathEscape(id), seq)
+	var ev pipeline.SessionEvent
+	if err := c.getJSON(ctx, path, &ev); err != nil {
+		return nil, err
+	}
+	return &ev, nil
 }
 
 // decodeSessionView reads a session snapshot event by event, interning as it goes.
@@ -90,6 +116,12 @@ func decodeSessionView(r io.Reader) (*pipeline.SessionView, error) {
 			}
 		case "oldestSeq":
 			if err := dec.Decode(&view.OldestSeq); err != nil {
+				return nil, err
+			}
+		case "view":
+			// Read, not skipped: this is how abctl learns whether the projection it
+			// asked for was actually applied. Absent means the proxy predates it.
+			if err := dec.Decode(&view.View); err != nil {
 				return nil, err
 			}
 		default:

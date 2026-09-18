@@ -536,6 +536,21 @@ type SessionView struct {
 	// Absent when the view already starts at the oldest held event, so the common
 	// whole-session response is unchanged — same reasoning as TotalEvents above.
 	OldestSeq uint64 `json:"oldestSeq,omitempty"`
+
+	// View names the projection the server applied, and is set only when one was:
+	// "summary" means the message bodies were omitted (see sessionapi.summarizeEvent).
+	//
+	// An ECHO, not a request. It exists because abctl and the proxy install
+	// separately, so a client asking for a summary cannot assume it got one — an
+	// older proxy ignores the parameter and returns full events. Absence therefore
+	// has a precise meaning to a client that asked: "this server does not project",
+	// which is the difference between telling the operator their proxy predates the
+	// feature and leaving them to wonder why opening a session is slow.
+	//
+	// Inferring it from the response instead would be wrong: a session with no
+	// inference traffic has no message bodies to omit, so "no bodies present" does
+	// not distinguish a projected response from a naturally empty one.
+	View string `json:"view,omitempty"`
 }
 
 // Intents returns only inbound A2A request events (user messages).

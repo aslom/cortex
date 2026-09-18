@@ -556,8 +556,14 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			if !ok {
 				return nil
 			}
+			// Render from the summary immediately, then fill the message bodies in
+			// when they arrive — the timeline no longer carries them. See
+			// fetchDetailEventCmd for why this is not a blocking spinner.
 			m.showDetail(er, true)
 			m.pane = paneDetail
+			if m.needsFullEvent(er.event) && m.client != nil {
+				return fetchDetailEventCmd(m, m.selectedSess, er.event.Seq)
+			}
 			return nil
 		case panePipeline:
 			p := m.selectedPlugin()
@@ -593,7 +599,16 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// disappears after three seconds while the success path persists.
 			m.setStickyFlash("yank failed: " + err.Error())
 		} else {
-			m.setStickyFlash("yanked → " + path)
+			// Say so when the bodies are not in the file. `y` exists to hand an
+			// event to somebody for debugging, and a body-less event that LOOKS
+			// complete is the kind of surprise that wastes an afternoon — the
+			// timeline is projected now, so the messages arrive a moment after the
+			// row does, and not at all if that fetch failed.
+			note := ""
+			if m.detailIsProjected() {
+				note = "  (message bodies not loaded yet — re-yank in a moment)"
+			}
+			m.setStickyFlash("yanked → " + path + note)
 		}
 		return nil
 
@@ -747,6 +762,9 @@ func (m *model) goTop() {
 	case paneEvents:
 		setCursorVisible(&m.eventsTbl, 0)
 		m.selectedEventKey = keyOf(m.selectedEvent())
+		// `g` is an explicit "take me to the oldest end", so it also becomes where
+		// the next session opens — see EventSettings.OpenAtOldest.
+		m.setOpenAtOldest(true)
 	case panePipeline:
 		setCursorVisible(&m.pipelineTbl, 0)
 	case paneDetail, panePluginDetail:
@@ -761,6 +779,9 @@ func (m *model) goBottom() {
 	case paneEvents:
 		setCursorVisible(&m.eventsTbl, len(m.eventsTbl.Rows())-1)
 		m.selectedEventKey = keyOf(m.selectedEvent())
+		// The mirror of `g` above: back to the tail, and that is where the next
+		// session opens.
+		m.setOpenAtOldest(false)
 	case panePipeline:
 		setCursorVisible(&m.pipelineTbl, len(m.pipelineTbl.Rows())-1)
 	case paneCatalog:
