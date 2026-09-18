@@ -286,3 +286,57 @@ func TestSessionMoneyCell_NeverExceedsItsColumn(t *testing.T) {
 			"up precision it does not need to", got)
 	}
 }
+
+// A KNOWN NON-ZERO CHARGE MUST NEVER RENDER AS ZERO.
+//
+// The precision ladder gives up decimals to fit a narrow column, and two of its rungs round a
+// sub-cent figure away entirely: %.2f makes $0.0012 into "$0.00" and %.0f makes anything under
+// fifty cents into "$0". This cell's own rule is never $0.00 for a figure that might be unknown —
+// and a figure that is KNOWN and shown as nothing breaks it harder, because "free" is a claim
+// about the traffic.
+//
+// Every width where these columns survive, both markers, and the sub-cent magnitudes the ladder
+// reaches for.
+func TestSessionMoneyCell_NeverRendersAKnownChargeAsZero(t *testing.T) {
+	// The budgets the fitter actually produces for these columns, narrowest first.
+	budgets := map[int]bool{}
+	for term := 40; term <= 200; term++ {
+		if !sessionsShowMoney(term) {
+			continue
+		}
+		cols := fitTableColumns(sessionsColumnsFor(term), term)
+		budgets[sessionsColumnWidth(cols, "COST")] = true
+		budgets[sessionsColumnWidth(cols, "SAVED")] = true
+	}
+	if len(budgets) == 0 {
+		t.Fatal("no width keeps the money columns, so nothing below is exercised")
+	}
+
+	for budget := range budgets {
+		for _, micros := range []int64{1, 12, 1200, 5_000, 499_000} { // $0.000001 … $0.499
+			for _, avoided := range []bool{false, true} {
+				for _, saturated := range []bool{false, true} {
+					got := sessionMoneyCell(micros, avoided, saturated, budget)
+					// A zero-valued amount is the defect; the em dash is the honest fallback.
+					for _, zero := range []string{"$0.00", "$0.0000", "$0 ", "$0"} {
+						if got == zero || got == inexactMarker+zero ||
+							got == zero+partialMarker || got == inexactMarker+zero+partialMarker {
+							t.Errorf("micros=%d budget=%d avoided=%v saturated=%v: cell %q shows a "+
+								"real charge as nothing — free is a claim about the traffic",
+								micros, budget, avoided, saturated, got)
+						}
+					}
+					if n := len([]rune(got)); n > budget {
+						t.Errorf("micros=%d budget=%d: cell %q is %d columns", micros, budget, got, n)
+					}
+				}
+			}
+		}
+	}
+
+	// And where there IS room, the sub-cent figure is stated rather than dropped — the guard must
+	// skip dishonest rungs, not every rung.
+	if got := sessionMoneyCell(1200, false, false, sessionsMoneyWidth); got != "<$0.0001" && got != "$0.0012" {
+		t.Errorf("cell = %q at the declared width, want the sub-cent figure stated", got)
+	}
+}

@@ -322,13 +322,32 @@ func spendDrawerRows(snap *usage.Snapshot, keep int) []drawerRow {
 			totals[label] = t
 		}
 	}
+	// THE BAND THE FOLD MADE BUT DID NOT NAME. foldTailSeries appends "(other)" to its kept list
+	// only when the tail's METRIC TOTAL is positive, while it rewrites the buckets whenever the
+	// tail carried requests — and this drawer's metric is COST. So a tail of UNPRICED models (the
+	// normal case for a gateway without a full rate card) produced folded buckets holding the band
+	// and a ranked list that never mentioned it, and the lookup below dropped the row: 100
+	// requests and 2.7M tokens invisible, with the figures above them unchanged.
+	//
+	// That is the invariant this function's own doc protects, inverted — instead of summing PAST
+	// the headline the rows summed under it, which is the quieter of the two failures and the one
+	// nothing would have noticed.
+	//
+	// FIXED HERE RATHER THAN IN foldTailSeries, which is shared with the Usage pane's stacked
+	// chart. That pane's metric is tokens or requests, so its tail total is positive whenever the
+	// tail exists and it never meets this case; changing when the shared helper emits a band would
+	// alter a surface this fix is not about.
+	if _, folded := totals[tailLabel]; folded && !hasSeries(ranked, tailLabel) {
+		ranked = append(ranked, seriesKey{label: tailLabel})
+	}
 	out := make([]drawerRow, 0, len(ranked))
 	for _, s := range ranked {
 		c, ok := totals[s.label]
 		if !ok {
-			// Defensive only: foldTailSeries returns exactly the labels its folded buckets
-			// carry, so this cannot fire today. It is the guard that stops a future change to
-			// either side rendering a row with no counters behind it.
+			// Defensive, and it has been wrong once: this comment used to say it could not fire,
+			// while it was silently dropping the "(other)" band for an unpriced tail — the case
+			// the append above now covers. A skipped row here is data vanishing off a money
+			// surface, so if this ever fires again it is a defect and not a tidy fallback.
 			continue
 		}
 		out = append(out, drawerRow{label: s.label, counts: c})
@@ -344,6 +363,16 @@ func spendDrawerRows(snap *usage.Snapshot, keep int) []drawerRow {
 		return out[i].counts.CostMicros > out[j].counts.CostMicros
 	})
 	return out
+}
+
+// hasSeries reports whether a ranked list already names a label.
+func hasSeries(ranked []seriesKey, label string) bool {
+	for _, s := range ranked {
+		if s.label == label {
+			return true
+		}
+	}
+	return false
 }
 
 // renderSpendDrawer returns the drawer's rows, ready to join under the strip.
@@ -375,6 +404,20 @@ func renderSpendDrawer(snap *usage.Snapshot, axis usage.Group, windowLabel strin
 		"[w] "+windowLabel,
 		"esc closes",
 	), width))
+
+	// PADDED OUT TO THE RESERVATION. layout() holds back spendDrawerLines unconditionally, and it
+	// has to: a poll can land between the layout and the render, so sizing the body to the rows
+	// that happen to exist right now is a race against the next snapshot. Emitting fewer lines
+	// than were reserved leaves the footer floating above the bottom of the terminal — three rows
+	// up for a deployment using one model, which is the common case, and six before the first poll
+	// answers.
+	//
+	// Blank lines rather than a taller body, because the body is already sized: the drawer occupies
+	// the space that was set aside for it, so the table's position does not jump when a second
+	// model appears.
+	for len(out) < spendDrawerLines {
+		out = append(out, "")
+	}
 	return out
 }
 

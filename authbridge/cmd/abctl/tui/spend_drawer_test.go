@@ -321,9 +321,14 @@ func TestPaneView_FitsTheTerminalWithTheDrawerOpen(t *testing.T) {
 			m.layout()
 
 			lines := strings.Count(m.paneView(), "\n") + 1
-			if lines > m.height {
-				t.Errorf("height %d, drawer open=%v: the view is %d lines — %d too tall, so the "+
-					"footer is off the bottom", h, open, lines, lines-m.height)
+			// EXACTLY the terminal height, not merely within it. "> height" is blind to the
+			// other direction, and that direction shipped: layout() reserves spendDrawerLines
+			// unconditionally while the drawer emitted one line per row it happened to have, so
+			// a deployment using one model left the footer three rows above the bottom and a
+			// fresh session six. Both are the footer in the wrong place.
+			if lines != m.height {
+				t.Errorf("height %d, drawer open=%v: the view is %d lines (%+d) — the footer is "+
+					"not at the bottom of the terminal", h, open, lines, lines-m.height)
 			}
 		}
 	}
@@ -332,12 +337,31 @@ func TestPaneView_FitsTheTerminalWithTheDrawerOpen(t *testing.T) {
 // And the reservation has to be the size the renderer actually emits, or the fit above holds by
 // luck. Asserted against renderSpendDrawer's own output rather than against the number 5.
 func TestSpendDrawerLines_MatchesWhatTheRendererEmits(t *testing.T) {
-	// A snapshot with more series than the drawer keeps, so every row it can produce is produced:
-	// spendDrawerSeries named rows, the "(other)" band, and the hint line.
-	got := len(renderSpendDrawer(drawerSnap(), usage.GroupModel, "1h", 200))
-	if got != spendDrawerLines {
-		t.Errorf("renderSpendDrawer emits %d lines but layout() reserves %d: whichever is smaller, "+
-			"the difference is either wasted rows or a footer off the bottom", got, spendDrawerLines)
+	// EVERY shape, not just the full one. The reservation is a fixed maximum, so a snapshot with
+	// one series or none at all has to occupy it too — a drawer that emits what it happens to have
+	// leaves the footer floating.
+	for _, tc := range []struct {
+		name string
+		snap *usage.Snapshot
+	}{
+		// More series than the drawer keeps: named rows, the band, and the hint.
+		{name: "full", snap: drawerSnap()},
+		{name: "one series", snap: &usage.Snapshot{
+			Window: "1h", Group: usage.GroupModel, Priced: true,
+			Buckets: []usage.Bucket{{Series: map[string]usage.Counts{
+				"opus": {Requests: 1, CostMicros: 5000, PricedRequests: 1, PriceableRequests: 1},
+			}}},
+		}},
+		// Before the first poll answers: the hint line and nothing to break down.
+		{name: "no snapshot", snap: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := len(renderSpendDrawer(tc.snap, usage.GroupModel, "1h", 200)); got != spendDrawerLines {
+				t.Errorf("renderSpendDrawer emits %d lines but layout() reserves %d: the difference "+
+					"is either a footer off the bottom or a footer floating above it",
+					got, spendDrawerLines)
+			}
+		})
 	}
 }
 
@@ -685,3 +709,68 @@ func TestSpendDrawerHost_CoversEveryPane(t *testing.T) {
 func m0() *model { return &model{width: 200, height: 60} }
 
 func (m *model) withPane(p paneID) *model { m.pane = p; return m }
+
+// AN UNPRICED TAIL MUST STILL APPEAR. foldTailSeries appends its "(other)" to the kept list only
+// when the tail's METRIC total is positive, and this drawer's metric is COST — so a tail of models
+// with no rate produced folded buckets carrying the band and a ranked list that never named it,
+// and the row was dropped. 100 requests and 2.7M tokens went missing with every figure above them
+// unchanged.
+//
+// The inverse of TestSpendDrawerRows_AnAggregatorOtherMergesRatherThanDuplicating: that one
+// catches rows summing PAST the snapshot, this one catches them summing under it. The quiet
+// direction needed its own test, which is why it shipped.
+//
+// Reachable rather than exotic: a gateway without a full rate card leaves models permanently
+// unpriced, and the Usage pane never met this because its metric is tokens or requests — positive
+// whenever the tail exists at all.
+func TestSpendDrawerRows_AnUnpricedTailStillGetsItsBand(t *testing.T) {
+	snap := &usage.Snapshot{
+		Window: "1h", Group: usage.GroupModel, Priced: true,
+		Buckets: []usage.Bucket{{Series: map[string]usage.Counts{
+			"opus":   {Requests: 1, CostMicros: 5000, Tokens: 1000, PricedRequests: 1, PriceableRequests: 1},
+			"sonnet": {Requests: 1, CostMicros: 4000, Tokens: 1000, PricedRequests: 1, PriceableRequests: 1},
+			"haiku":  {Requests: 1, CostMicros: 3000, Tokens: 1000, PricedRequests: 1, PriceableRequests: 1},
+			// The tail: real traffic, no rate, so zero cost.
+			"unpriced-a": {Requests: 60, Tokens: 1_000_000, PriceableRequests: 60},
+			"unpriced-b": {Requests: 40, Tokens: 700_000, PriceableRequests: 40},
+		}}},
+	}
+	// What the snapshot holds, so the assertion is against the data and not a copied constant.
+	var wantReq, wantTok int64
+	for _, b := range snap.Buckets {
+		for _, c := range b.Series {
+			wantReq += c.Requests
+			wantTok += c.Tokens
+		}
+	}
+
+	rows := spendDrawerRows(snap, spendDrawerSeries)
+
+	if !func() bool {
+		for _, r := range rows {
+			if r.label == tailLabel {
+				return true
+			}
+		}
+		return false
+	}() {
+		t.Fatalf("no %q row in %v: the tail priced nothing, so its requests and tokens are "+
+			"invisible while the figures above are unchanged", tailLabel, rowLabels(rows))
+	}
+
+	var gotReq, gotTok int64
+	for _, r := range rows {
+		gotReq += r.counts.Requests
+		gotTok += r.counts.Tokens
+	}
+	if gotReq != wantReq || gotTok != wantTok {
+		t.Errorf("rows account for %d requests and %d tokens, snapshot holds %d and %d — the "+
+			"breakdown sums UNDER the answer it breaks down", gotReq, gotTok, wantReq, wantTok)
+	}
+	// The band carries no cost, and must not invent one.
+	for _, r := range rows {
+		if r.label == tailLabel && r.counts.CostMicros != 0 {
+			t.Errorf("%q reports %d micros for a tail that priced nothing", tailLabel, r.counts.CostMicros)
+		}
+	}
+}

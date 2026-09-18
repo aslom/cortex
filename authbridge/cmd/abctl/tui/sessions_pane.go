@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -313,20 +314,41 @@ func sessionMoneyCell(micros int64, avoided, saturated bool, budget int) string 
 		return amount
 	}
 	usd := float64(micros) / 1e6
-	compact := "$" + humanizeCount(int64(usd))
-	for _, amount := range []string{
-		formatUSDCell(usd),
-		"$" + fmt.Sprintf("%.2f", usd),
-		"$" + fmt.Sprintf("%.0f", usd),
+	// A RUNG THAT ROUNDS THE FIGURE TO ZERO IS SKIPPED, not rendered. %.2f turns a sub-cent
+	// charge into "$0.00" and %.0f turns anything under fifty cents into "$0" — and a known
+	// non-zero cost displayed as free is worse than the unknown one emptyCell stands for. This
+	// cell's own rule, fifty lines up, is never $0.00 for a figure that might be unknown; a figure
+	// that is KNOWN and shown as nothing breaks it harder.
+	//
+	// Measured before the guard: at the narrowest widths these columns survive (a six-column
+	// budget), $0.0012 rendered "$0.00" in COST and "~$0.00" in SAVED.
+	//
+	// Each rung carries the rounded value it would print, so "is this rung honest" is one
+	// comparison rather than a guess about the format string.
+	type rung struct {
+		text    string
+		rounded float64
+	}
+	compact := rung{"$" + humanizeCount(int64(usd)), math.Trunc(usd)}
+	for _, r := range []rung{
+		// formatUSDCell has its own floor: anything positive under half a ten-thousandth renders
+		// "<$0.0001" rather than "$0.0000", so this rung never claims zero for a real charge.
+		{formatUSDCell(usd), usd},
+		{"$" + fmt.Sprintf("%.2f", usd), math.Round(usd*100) / 100},
+		{"$" + fmt.Sprintf("%.0f", usd), math.Round(usd)},
 		compact,
 	} {
-		if cell := decorate(amount); len([]rune(cell)) <= budget {
+		if r.rounded == 0 {
+			continue
+		}
+		if cell := decorate(r.text); len([]rune(cell)) <= budget {
 			return cell
 		}
 	}
-	// NOTHING FITS, so nothing is shown. Reachable at the narrowest width these columns survive
-	// at: the compact form plus both markers is seven columns, and the fitter can squeeze them to
-	// six before it drops them entirely.
+	// NOTHING FITS — or nothing that can be shown WITHOUT rounding a real charge to zero — so
+	// nothing is shown. Both are reachable at the narrowest width these columns survive at: the
+	// compact form plus both markers is seven columns against a budget the fitter can squeeze to
+	// six, and a sub-cent charge has no honest form shorter than "<$0.0001".
 	//
 	// The em dash rather than a truncation, and rather than dropping the markers to buy two
 	// columns: a clipped figure is a smaller figure that reads as real, and the markers are the
