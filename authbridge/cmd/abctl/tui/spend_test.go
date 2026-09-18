@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1067,5 +1068,46 @@ func TestCacheHitPct_ReportedKindsWithZeroCountersIsNotNaN(t *testing.T) {
 	})
 	if out := renderSpendStrip(s, 200); strings.Contains(out, "NaN") || strings.Contains(out, "cache") {
 		t.Errorf("strip %q renders a cache figure derived from a zero prompt", out)
+	}
+}
+
+// The DATA half of "a failed window poll must not blank the day figure".
+//
+// spendSummary is where the today figure is carried through the failure, and a renderer test
+// cannot see it: renderSpendStrip takes a hand-built spendSummary, so a summary that dropped
+// HasToday on failure still renders correctly when a test hands it one that did not. Verified by
+// mutation — restoring `return spendSummary{Failed: true}` leaves the renderer test green.
+//
+// Which is the same data-versus-renderer split that produced the original defect: the values were
+// carried on one side and discarded on the other, and each side's tests passed. Both halves now
+// have one.
+func TestSpendSummary_AFailedWindowPollStillCarriesTheDayFigure(t *testing.T) {
+	m := &model{}
+	m.spend.err = errors.New("dial tcp: connection refused")
+	// The today chain answered, on its own generation, moments ago.
+	m.spend.todaySnap = &usage.Snapshot{
+		Window: usage.WindowToday, Priced: true,
+		Totals: usage.Counts{
+			Requests: 250, CostMicros: 30_935_000, PricedRequests: 250, PriceableRequests: 250,
+		},
+	}
+	m.spend.todayLastFetch = time.Now()
+
+	got := m.spendSummary()
+
+	if !got.Failed {
+		t.Fatal("Failed = false with a window poll error")
+	}
+	if !got.HasToday {
+		t.Error("HasToday = false: the window poll failed and took the day figure with it, which " +
+			"is the one thing splitting the two chains was meant to prevent")
+	}
+	if got.TodayUSD != 30.935 {
+		t.Errorf("TodayUSD = %v, want 30.935", got.TodayUSD)
+	}
+	// And the renderer really shows it, so the two halves are joined rather than each correct
+	// in isolation.
+	if out := renderSpendStrip(got, 200); !strings.Contains(out, "$30.9350 today") {
+		t.Errorf("strip %q lost the day figure the summary carried", out)
 	}
 }
