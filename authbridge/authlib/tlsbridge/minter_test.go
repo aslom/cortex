@@ -1,9 +1,19 @@
 package tlsbridge
 
 import (
+	"bytes"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"log/slog"
+	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -177,4 +187,104 @@ func TestMinter_CacheDeadlineIsWallClock(t *testing.T) {
 	if exp != exp.Round(0) {
 		t.Errorf("cache deadline carries a monotonic clock reading; must be wall-clock (.Round(0)) to survive suspend")
 	}
+}
+
+// TestMint_WarnsWhenIssuerIsExpiring covers the gap between renewal being evaluated
+// at STARTUP and a proxy that simply stays up. EnsureFileSource cannot help a process
+// that was already running when the window opened — under launchd or systemd that is
+// the normal case — so it would keep signing with an aging CA, and once past NotAfter
+// every client rejects the chain. The minter is the one path that must run for any of
+// this to matter, and it already holds the issuer.
+func TestMint_WarnsWhenIssuerIsExpiring(t *testing.T) {
+	cases := []struct {
+		name     string
+		notAfter time.Time
+		wantWarn bool
+	}{
+		{"healthy CA", time.Now().Add(200 * 24 * time.Hour), false},
+		{"inside the renewal window", time.Now().Add(caRenewBefore / 2), true},
+		{"already expired", time.Now().Add(-time.Hour), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logbuf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			m := NewMinter(&fixedExpiryCASource{t: t, notAfter: tc.notAfter}, MinterOpts{})
+			if _, err := m.GetCertificateForHost("example.com"); err != nil {
+				t.Fatalf("GetCertificateForHost: %v", err)
+			}
+
+			got := logbuf.String()
+			if warned := strings.Contains(got, "signing CA is expiring"); warned != tc.wantWarn {
+				t.Errorf("warned=%v, want %v; log:\n%s", warned, tc.wantWarn, got)
+			}
+			if tc.wantWarn && !strings.Contains(got, "ca_not_after=") {
+				t.Errorf("warning did not name the deadline, which is what makes it actionable:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestMint_IssuerWarningIsOncePerProcess: mint runs per cache miss, so an unthrottled
+// warning would print on every handshake to a new host and bury the log it belongs in.
+func TestMint_IssuerWarningIsOncePerProcess(t *testing.T) {
+	var logbuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	m := NewMinter(&fixedExpiryCASource{t: t, notAfter: time.Now().Add(-time.Hour)}, MinterOpts{})
+	for _, h := range []string{"a.example.com", "b.example.com", "c.example.com"} {
+		if _, err := m.GetCertificateForHost(h); err != nil {
+			t.Fatalf("GetCertificateForHost(%s): %v", h, err)
+		}
+	}
+	if n := strings.Count(logbuf.String(), "signing CA is expiring"); n != 1 {
+		t.Errorf("warning printed %d times across 3 mints, want exactly 1", n)
+	}
+}
+
+// fixedExpiryCASource is a CASource whose CA carries a caller-chosen NotAfter, so a
+// test can present an aging issuer without waiting a year.
+type fixedExpiryCASource struct {
+	t        *testing.T
+	notAfter time.Time
+	cert     *x509.Certificate
+	key      crypto.Signer
+}
+
+func (f *fixedExpiryCASource) Issuer() (*x509.Certificate, crypto.Signer) {
+	if f.cert == nil {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			f.t.Fatalf("generate key: %v", err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber:          big.NewInt(2),
+			Subject:               pkix.Name{CommonName: "authbridge-tls-bridge-ca"},
+			NotBefore:             time.Now().Add(-365 * 24 * time.Hour),
+			NotAfter:              f.notAfter,
+			IsCA:                  true,
+			KeyUsage:              x509.KeyUsageCertSign,
+			BasicConstraintsValid: true,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+		if err != nil {
+			f.t.Fatalf("create CA: %v", err)
+		}
+		crt, err := x509.ParseCertificate(der)
+		if err != nil {
+			f.t.Fatalf("parse CA: %v", err)
+		}
+		f.cert, f.key = crt, key
+	}
+	return f.cert, f.key
+}
+
+func (f *fixedExpiryCASource) CACertPEM() []byte {
+	crt, _ := f.Issuer()
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: crt.Raw})
 }

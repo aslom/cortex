@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/clientstate"
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
 	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
 )
@@ -65,15 +66,16 @@ const (
 	// value (their CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 is byte-identical to
 	// ours). Kept outside ~/.claude so this command's bookkeeping never appears in
 	// a file Claude Code owns.
-	stateRel = ".cortex/claude-code-state.json"
+	stateRel = ".cortex/" + clientstate.RelPath
 )
 
 // managedState is the ownership record. A nil entry means the key was absent
 // before enable, so disable deletes it; a non-nil entry is the value to restore.
-type managedState struct {
-	Settings string             `json:"settings"`
-	Prior    map[string]*string `json:"prior"`
-}
+// managedState is authlib/clientstate.State: the shape is shared with
+// authbridge-proxy, which reads this file back to check the client is still pointed
+// at the CA in force. Aliased rather than redeclared so a field rename cannot leave
+// the reader silently returning nothing.
+type managedState = clientstate.State
 
 // readState distinguishes "no record" from "record unreadable".
 //

@@ -5,12 +5,15 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -368,5 +371,235 @@ func TestEnsureFileSource_CreatesMissingParentDirs(t *testing.T) {
 	// Reload the persisted pair to prove it's a valid CA, not just files on disk.
 	if _, err := NewFileSource(filepath.Join(caDir, "tls.crt"), filepath.Join(caDir, "tls.key")); err != nil {
 		t.Fatalf("generated CA should reload via NewFileSource: %v", err)
+	}
+}
+
+// writeCAWithValidity persists a complete, structurally VALID CA set into dir
+// whose validity window is caller-chosen, so a test can present the exact
+// on-disk state a laptop reaches after the generated CA's 365 days elapse.
+// Deliberately writes all three files: the point is that the set is COMPLETE,
+// which is what makes EnsureFileSource load it rather than self-heal.
+func writeCAWithValidity(t *testing.T, dir string, notBefore, notAfter time.Time) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "authbridge-tls-bridge-ca"},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+	if err != nil {
+		t.Fatalf("create CA: %v", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	kd, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd})
+	for name, data := range map[string][]byte{"tls.crt": certPEM, "ca.crt": certPEM, "tls.key": keyPEM} {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+}
+
+// caNotAfter reads back the persisted CA's expiry, to prove a replacement is
+// actually a new certificate rather than the same one reloaded.
+func caNotAfter(t *testing.T, dir string) time.Time {
+	t.Helper()
+	pemBytes, err := os.ReadFile(filepath.Join(dir, "tls.crt"))
+	if err != nil {
+		t.Fatalf("read tls.crt: %v", err)
+	}
+	blk, _ := pem.Decode(pemBytes)
+	if blk == nil {
+		t.Fatal("tls.crt is not PEM")
+	}
+	crt, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatalf("parse tls.crt: %v", err)
+	}
+	return crt.NotAfter
+}
+
+// TestEnsureFileSource_RenewsExpiredCA is the anniversary bug. The generated CA
+// is valid 365 days and nothing renews it: reuse is keyed on file EXISTENCE and
+// NewFileSource validates IsCA/KeyUsage/key-match but never expiry. So a year
+// after a first install the same expired CA keeps loading and keeps forging
+// leaves every client rejects — surfacing as client-rejected-ca, whose attached
+// advice ("restart clients started before ca_not_before") cannot help and points
+// at a cutoff ~a year old.
+//
+// Under generate=true an expired CA must be replaced, exactly as an incomplete
+// set self-heals. The window is the laptop's; a mounted Secret is generate=false
+// and is covered by TestEnsureFileSource_NoGenerateNeverTouchesExpiredCA.
+func TestEnsureFileSource_RenewsExpiredCA(t *testing.T) {
+	dir := t.TempDir()
+	// A CA that was valid for its 365 days and lapsed yesterday.
+	expiredAt := time.Now().Add(-24 * time.Hour)
+	writeCAWithValidity(t, dir, expiredAt.Add(-365*24*time.Hour), expiredAt)
+
+	src, generated, err := EnsureFileSource(dir, true)
+	if err != nil {
+		t.Fatalf("EnsureFileSource on an expired CA: %v", err)
+	}
+	if !generated {
+		t.Fatal("an expired CA was reused; it will forge leaves every client rejects, " +
+			"and the client-rejected-ca advice to restart clients cannot fix it")
+	}
+	if src == nil {
+		t.Fatal("nil source")
+	}
+	if got := caNotAfter(t, dir); !got.After(time.Now()) {
+		t.Errorf("persisted CA still expires in the past (%s); it was not actually replaced", got)
+	}
+	// The replacement must be loadable, not just newer.
+	if _, err := NewFileSource(filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")); err != nil {
+		t.Fatalf("renewed CA should reload via NewFileSource: %v", err)
+	}
+}
+
+// TestEnsureFileSource_RenewsCAExpiringSoon: waiting for expiry means every
+// laptop gets a window of hard failures before the fix lands. A CA inside the
+// renewal margin is replaced while it still works, so the swap is invisible.
+func TestEnsureFileSource_RenewsCAExpiringSoon(t *testing.T) {
+	dir := t.TempDir()
+	// Still valid, but with less than caRenewBefore remaining.
+	writeCAWithValidity(t, dir, time.Now().Add(-365*24*time.Hour), time.Now().Add(caRenewBefore/2))
+
+	_, generated, err := EnsureFileSource(dir, true)
+	if err != nil {
+		t.Fatalf("EnsureFileSource on a soon-to-expire CA: %v", err)
+	}
+	if !generated {
+		t.Error("a CA inside the renewal margin was reused; clients will start rejecting " +
+			"its leaves before anything replaces it")
+	}
+	if got := caNotAfter(t, dir); got.Before(time.Now().Add(caRenewBefore)) {
+		t.Errorf("persisted CA still expires within the renewal margin (%s)", got)
+	}
+}
+
+// TestEnsureFileSource_KeepsHealthyCA guards the renewal against overreach: a CA
+// with plenty of life left must still be loaded untouched. Regenerating a healthy
+// CA is the very breakage this issue is about — it invalidates every running
+// client's trust anchor.
+func TestEnsureFileSource_KeepsHealthyCA(t *testing.T) {
+	dir := t.TempDir()
+	if _, generated, err := EnsureFileSource(dir, true); err != nil || !generated {
+		t.Fatalf("seed EnsureFileSource: generated=%v err=%v", generated, err)
+	}
+	before, err := os.ReadFile(filepath.Join(dir, "tls.crt"))
+	if err != nil {
+		t.Fatalf("read tls.crt: %v", err)
+	}
+	_, generated, err := EnsureFileSource(dir, true)
+	if err != nil {
+		t.Fatalf("second EnsureFileSource: %v", err)
+	}
+	if generated {
+		t.Error("a healthy CA was regenerated; every running client's trust anchor just broke")
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, "tls.crt"))
+	if !bytes.Equal(before, after) {
+		t.Error("a healthy CA was overwritten on disk")
+	}
+}
+
+// TestEnsureFileSource_NoGenerateNeverTouchesExpiredCA: in-cluster the CA is an
+// operator-mounted cert-manager Secret and renewal is cert-manager's job. Minting
+// a replacement there would substitute a self-signed CA for the mounted one and
+// mask a real rotation failure, so generate=false must keep failing loud / loading
+// as before, expiry notwithstanding.
+func TestEnsureFileSource_NoGenerateNeverTouchesExpiredCA(t *testing.T) {
+	dir := t.TempDir()
+	expiredAt := time.Now().Add(-24 * time.Hour)
+	writeCAWithValidity(t, dir, expiredAt.Add(-365*24*time.Hour), expiredAt)
+	before, err := os.ReadFile(filepath.Join(dir, "tls.crt"))
+	if err != nil {
+		t.Fatalf("read tls.crt: %v", err)
+	}
+
+	_, generated, err := EnsureFileSource(dir, false)
+	if err != nil {
+		t.Fatalf("generate=false should still load an expired mounted CA: %v", err)
+	}
+	if generated {
+		t.Error("generate=false minted a CA; a mounted Secret must never be replaced")
+	}
+	after, _ := os.ReadFile(filepath.Join(dir, "tls.crt"))
+	if !bytes.Equal(before, after) {
+		t.Error("generate=false overwrote a mounted CA")
+	}
+}
+
+// TestFingerprintSHA256_MatchesOpenSSL pins the rendering to the one form a user can
+// actually compare against. The whole value of printing a fingerprint is that someone
+// runs
+//
+//	openssl x509 -in ca.crt -noout -fingerprint -sha256
+//
+// and matches it by eye, so the encoding must be that command's: uppercase hex,
+// colon-separated. A bare lowercase hex string would be correct and useless.
+//
+// The expectation is computed from the DER rather than from the implementation, so
+// this fails if the function ever hashes the PEM (whose headers and whitespace give a
+// different, uncomparable sum).
+func TestFingerprintSHA256_MatchesOpenSSL(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := EnsureFileSource(dir, true); err != nil {
+		t.Fatalf("EnsureFileSource: %v", err)
+	}
+	pemBytes, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		t.Fatalf("read ca.crt: %v", err)
+	}
+	blk, _ := pem.Decode(pemBytes)
+	if blk == nil {
+		t.Fatal("ca.crt is not PEM")
+	}
+	crt, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	sum := sha256.Sum256(blk.Bytes)
+	want := make([]string, 0, len(sum))
+	for _, b := range sum {
+		want = append(want, fmt.Sprintf("%02X", b))
+	}
+	if got, expected := FingerprintSHA256(crt), strings.Join(want, ":"); got != expected {
+		t.Errorf("FingerprintSHA256() = %q, want %q", got, expected)
+	}
+}
+
+// TestGenSelfSignedCA_SerialsAreDistinct: renewal now produces successive CAs in one
+// directory, so a fixed serial would make old and new share BOTH subject and serial
+// — the pair X.509 uses to name an issuer. A client whose bundle briefly holds both
+// then hands OpenSSL two certificates it considers the same one.
+func TestGenSelfSignedCA_SerialsAreDistinct(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		cert, _, _, _, err := genSelfSignedCA()
+		if err != nil {
+			t.Fatalf("genSelfSignedCA: %v", err)
+		}
+		s := cert.SerialNumber.String()
+		if s == "1" {
+			t.Fatal("serial is the fixed value 1; successive renewed CAs would be " +
+				"indistinguishable by issuer name")
+		}
+		if seen[s] {
+			t.Fatalf("serial %s repeated across mints", s)
+		}
+		seen[s] = true
 	}
 }

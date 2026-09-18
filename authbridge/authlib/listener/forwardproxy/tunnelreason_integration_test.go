@@ -3,6 +3,7 @@ package forwardproxy
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -495,3 +496,106 @@ func TestOneStaleClientDoesNotSuppressAHealthyOne(t *testing.T) {
 // exporting a window accessor purely for a test. What belongs HERE is that bridgeServe
 // routes each failure class to the right call, which TestHangUpAlsoSeedsTheSkip and
 // TestClientRejectedCA_SkipsHostAfterwards cover between them.
+
+// TestClientRejectedCA_NamesTheCAItself is the diagnostic gap behind issue #1033.
+//
+// ca_not_before answers "is this client older than the CA", which is the right
+// question when the CA was regenerated in place. It is the wrong question when the
+// CA MOVED: `--local` derives ca_dir from $HOME, so a sandbox or any redirected
+// $HOME gets its own CA, and every one of them is spelled ~/.cortex/ca and carries
+// the same CN=authbridge-tls-bridge-ca. Two CAs, one name, and a ca_not_before that
+// looks perfectly recent for both — nothing in the line distinguishes "your client
+// is stale" from "your client trusts a different file".
+//
+// The fingerprint does, and it is the only thing that does. ca_file names which
+// anchor the client was supposed to load, which is the other half of the answer.
+func TestClientRejectedCA_NamesTheCAItself(t *testing.T) {
+	s, _, authority := bridgeForRejectTest(t)
+	s.TLSBridge.CAFile = "/tmp/sandbox-a/.cortex/ca/ca.crt"
+
+	var logbuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s.bridgeServe(rejectingClient(t), authority, hostOnly(authority), noopRecorder)
+
+	got := logbuf.String()
+	if !strings.Contains(got, "ca_fingerprint=") {
+		t.Errorf("warning did not fingerprint the CA, so a MOVED CA is indistinguishable "+
+			"from a merely stale client (both share CN=authbridge-tls-bridge-ca):\n%s", got)
+	}
+	if !strings.Contains(got, "ca_file=") {
+		t.Errorf("warning did not name the trust anchor the client should hold:\n%s", got)
+	}
+	if !strings.Contains(got, "/tmp/sandbox-a/.cortex/ca/ca.crt") {
+		t.Errorf("ca_file did not carry the RESOLVED path, which is the part that differs "+
+			"between sandboxes:\n%s", got)
+	}
+}
+
+// TestCAFingerprint_MatchesOpenSSL pins the fingerprint to the one form a user can
+// actually compare against. The whole value of printing it is that someone runs
+//
+//	openssl x509 -in ca.crt -noout -fingerprint -sha256
+//
+// and matches it by eye, so the encoding must be that command's: uppercase hex,
+// colon-separated. A bare lowercase hex string would be correct and useless.
+func TestCAFingerprint_MatchesOpenSSL(t *testing.T) {
+	s, _, _ := bridgeForRejectTest(t)
+
+	got := s.caFingerprint()
+
+	sum := sha256.Sum256(caCertDER(t, s.TLSBridge.CAPEM))
+	want := make([]string, 0, len(sum))
+	for _, b := range sum {
+		want = append(want, fmt.Sprintf("%02X", b))
+	}
+	if expected := strings.Join(want, ":"); got != expected {
+		t.Errorf("caFingerprint() = %q, want %q (openssl -fingerprint -sha256 form)", got, expected)
+	}
+}
+
+// caCertDER pulls the DER out of a PEM CA, so the test computes its expectation
+// from the same bytes openssl would hash rather than from the implementation.
+func caCertDER(t *testing.T, caPEM []byte) []byte {
+	t.Helper()
+	blk, _ := pem.Decode(caPEM)
+	if blk == nil {
+		t.Fatal("CAPEM is not PEM")
+	}
+	return blk.Bytes
+}
+
+// TestCAFingerprint_UnknownWithoutCA: diagnostics must never panic or invent a
+// value. Mirrors caNotBefore's "unknown" contract for the same reason.
+func TestCAFingerprint_UnknownWithoutCA(t *testing.T) {
+	s := &Server{}
+	if got := s.caFingerprint(); got != "unknown" {
+		t.Errorf("caFingerprint() with no bridge = %q, want %q", got, "unknown")
+	}
+	s2 := &Server{TLSBridge: &tlsbridge.Engine{CAPEM: []byte("not pem")}}
+	if got := s2.caFingerprint(); got != "unknown" {
+		t.Errorf("caFingerprint() on garbage PEM = %q, want %q", got, "unknown")
+	}
+}
+
+// TestClientHungUp_GetsNoCAIdentity: the same gating that keeps restart advice off
+// a hang-up must keep the CA identity off it too. An EOF says nothing about trust,
+// and a fingerprint on that line invites someone to go compare certificates over
+// what was probably a cancelled request.
+func TestClientHungUp_GetsNoCAIdentity(t *testing.T) {
+	s, _, authority := bridgeForRejectTest(t)
+	s.TLSBridge.CAFile = "/tmp/sandbox-a/.cortex/ca/ca.crt"
+
+	var logbuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logbuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	s.bridgeServe(hangUpClient(t), authority, hostOnly(authority), noopRecorder)
+
+	if got := logbuf.String(); strings.Contains(got, "ca_fingerprint=") || strings.Contains(got, "ca_file=") {
+		t.Errorf("a hang-up was given CA identity it cannot justify:\n%s", got)
+	}
+}

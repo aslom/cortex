@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net"
 	"sync"
@@ -30,6 +31,39 @@ type Minter struct {
 	mu    sync.Mutex
 	ll    *list.List               // MRU front
 	items map[string]*list.Element // host -> element(*cacheEntry)
+
+	// issuerWarnOnce keeps the CA-expiry warning to one line per process. mint is
+	// on the request path, so an unthrottled warning would print per handshake.
+	issuerWarnOnce sync.Once
+}
+
+// warnIfIssuerExpiring says so out loud when the signing CA is inside its renewal
+// window or already past it.
+//
+// EnsureFileSource only evaluates renewal at STARTUP, so a long-lived proxy — the
+// normal case under launchd or systemd — can run straight through the window and out
+// the far side, signing leaves from an expired CA that every client rejects. That is
+// precisely the state this whole change set exists to prevent, reached by simply
+// staying up. Checking here costs nothing: mint already holds the issuer, and this is
+// the one code path that must run for any of it to matter.
+//
+// A warning rather than a re-mint: replacing the CA under a running proxy would
+// invalidate every client's trust anchor mid-session, with no restart to explain it.
+// Restarting is the operator's call, so name the deadline and let them pick when.
+func (m *Minter) warnIfIssuerExpiring(ca *x509.Certificate) {
+	if ca == nil || time.Now().Add(caRenewBefore).Before(ca.NotAfter) {
+		return
+	}
+	m.issuerWarnOnce.Do(func() {
+		expired := time.Now().After(ca.NotAfter)
+		slog.Warn("tls-bridge: the signing CA is expiring and this proxy has been up too long to renew it",
+			"ca_not_after", ca.NotAfter.Local().Format(time.RFC3339),
+			"already_expired", expired,
+			"ca_fingerprint", FingerprintSHA256(ca),
+			"why", "renewal is evaluated at startup only, so a proxy that stays up past the "+
+				"renewal window keeps signing with the old CA until it is restarted",
+			"fix", "restart the proxy to mint a replacement, then restart the clients that trust it")
+	})
 }
 
 type cacheEntry struct {
@@ -111,6 +145,7 @@ func (m *Minter) GetCertificateForHost(host string) (*tls.Certificate, error) {
 
 func (m *Minter) mint(host string) (*tls.Certificate, error) {
 	caCert, caKey := m.src.Issuer()
+	m.warnIfIssuerExpiring(caCert)
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, fmt.Errorf("tlsbridge: serial for %s: %w", host, err)

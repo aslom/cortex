@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/clientstate"
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
@@ -69,6 +70,12 @@ var version = "dev"
 // :8082, and config can't unset it (the preset refills an empty value), so this
 // gate is the only way to keep the demo to the listeners it actually uses.
 var localMode bool
+
+// localStatePath is abctl's state file for this --local install, resolved while
+// --local sets up and consumed later, once the bridge CA has been loaded, to warn
+// about a client pointed at a different CA. Empty when not in --local: outside it
+// there is no abctl-managed client to compare against.
+var localStatePath string
 
 // spiffeProviderNeeded reports whether any configured feature actually consumes
 // the SPIFFE Provider: top-level mTLS (needs the X509Source on both listeners)
@@ -193,6 +200,10 @@ func main() {
 		if cerr != nil {
 			log.Fatalf("--local: resolving %q: %v", cortexDir, cerr)
 		}
+		// The CA a client was configured against is compared once the CA in force has
+		// actually been loaded — see the tls_bridge setup below. It cannot happen here:
+		// the comparison is on certificates, and ours does not exist yet.
+		localStatePath = filepath.Join(absCortex, clientstate.RelPath)
 		// Drive the normal file-based load + hot-reload path, so editing the
 		// config reloads live.
 		p, werr := writeBuiltinConfig(absCortex, absCA)
@@ -458,13 +469,25 @@ func main() {
 			// so the traffic still flows and every body-reading plugin goes blind
 			// with nothing on the client side to notice.
 			//
-			// Reached on a first install and after ~/.cortex is deleted and
-			// recreated — which the uninstall instructions tell people to do. A
-			// plain upgrade preserves the CA and is unaffected.
+			// Reached on a first install, after ~/.cortex is deleted and recreated —
+			// which the uninstall instructions tell people to do — and when the CA is
+			// RENEWED near its 365-day expiry (EnsureFileSource). The renewal case is
+			// the one nobody expects: a proxy that has been working for a year
+			// suddenly needs every client restarted, on a boot where nothing else
+			// changed. A plain upgrade preserves the CA and is unaffected.
 			slog.Warn("tls-bridge: generated self-signed CA (generate_ca=true; standalone/demo)",
 				"ca_dir", cfg.TLSBridge.CADir,
 				"hint", "clients must trust it, e.g. NODE_EXTRA_CA_CERTS="+cfg.TLSBridge.CADir+"/ca.crt",
 				"restart_clients", "agents already running trust a different CA (or none) and cannot be observed until restarted")
+		}
+		// Now that the CA in force is loaded, compare it against the one a client was
+		// configured with. This has to happen here rather than during --local setup:
+		// the comparison is on certificates, so ours must exist first. Skipped outside
+		// --local, where there is no abctl-managed client to reason about.
+		if localStatePath != "" {
+			if args := staleClientCAWarning(cfg.TLSBridge.CADir, clientCAFromState(localStatePath), src.CACertPEM()); args != nil {
+				slog.Warn("a client is configured against a different bridge CA than the one now in force", args...)
+			}
 		}
 		// Assemble the CA + platform-roots bundle for tools whose CA setting
 		// REPLACES their trust store rather than extending it (Go's SSL_CERT_FILE,
@@ -475,6 +498,15 @@ func main() {
 		// This runs per boot and is a snapshot, not a subscription — see
 		// EnsureTrustBundle's doc for what that costs, notably that a root the OS
 		// distrusts after this point keeps being trusted until the next restart.
+		//
+		// Renewal gives one of those costs teeth it did not have before. When
+		// findSystemRootsFrom cannot locate a host root store, EnsureTrustBundle
+		// deliberately keeps the existing bundle rather than writing a CA-only one
+		// (bundle.go:126-140) — a tradeoff reasoned about stale platform ROOTS. On a
+		// renewal boot that same path also pins the stale bridge CA, and these four
+		// variables REPLACE a client's trust store, so such a client would verify
+		// against a CA the proxy no longer signs with. Narrow (the root store has to
+		// be unfindable) and it still warns below, but it is no longer only about roots.
 		//
 		// Non-fatal in every case: the bridge works without the bundle, only a
 		// client's ability to verify it is affected.
