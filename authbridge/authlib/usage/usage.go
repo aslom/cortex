@@ -173,6 +173,20 @@ type Counts struct {
 	// ratio rather than a tokenizer, and the per-request flag does not survive summation —
 	// so a client must present this as approximate unconditionally rather than inferring
 	// exactness from its absence here.
+	//
+	// GROSS, NOT NET, which is the caveat most likely to be dropped on the way to a screen.
+	// tool-prune's own doc is explicit: changing the remove list re-writes the cached prompt
+	// prefix at the cache-WRITE rate while the recurring saving accrues at the cache-READ
+	// rate, tens of requests apart, and nothing subtracts the re-warm from these dollars. A
+	// short window just after a config change therefore reads optimistically; a long steady
+	// one converges. See docs/tool-prune-plugin.md, "The figure is gross, not net".
+	//
+	// SUMMABLE BECAUSE IT IS DOLLARS. The same doc refuses to publish one "tokens saved"
+	// figure, because prompt tiers differ by up to 12.5x and a single token count invites
+	// multiplying by one rate. That objection does not apply here and its absence is the
+	// reason this field is money rather than tokens: each saving was priced at the tier it
+	// actually came out of BEFORE reaching this counter, so the sum is tier-correct by
+	// construction. A tokens-avoided aggregate would not be, and is deliberately not offered.
 	AvoidedMicros int64 `json:"avoidedMicros,omitempty"`
 	// PricedRequests counts the requests that actually produced a cost. Coverage
 	// is a counter rather than a flag because buckets are summed when a client

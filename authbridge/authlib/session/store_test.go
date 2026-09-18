@@ -657,14 +657,14 @@ func TestSumCost(t *testing.T) {
 	evs := []pipeline.SessionEvent{
 		// An ordinary priced response with a saving on it. Both figures counted.
 		{
-			Phase:   pipeline.SessionResponse,
+			Phase: pipeline.SessionResponse,
 			Plugins: costRecord(t, costevent.Event{CostUSD: 0.25, Settled: true, Provenance: "configured",
 				Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 100, USD: 0.01, Tier: "input"}}}),
 		},
 		// UNPRICED, and carrying a saving. No dollars, and the saving still counts: the
 		// prompt was pruned whether or not anything managed to price the response.
 		{
-			Phase:   pipeline.SessionResponse,
+			Phase: pipeline.SessionResponse,
 			Plugins: costRecord(t, costevent.Event{Source: costevent.SourceUsageFallback,
 				Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 200, USD: 0.02, Tier: "input"}}}),
 		},
@@ -683,7 +683,7 @@ func TestSumCost(t *testing.T) {
 		// A PROJECTED saving: observe mode left every byte on the wire, so this is money
 		// that WAS spent and must not be reported as avoided.
 		{
-			Phase:   pipeline.SessionResponse,
+			Phase: pipeline.SessionResponse,
 			Plugins: costRecord(t, costevent.Event{Source: costevent.SourceUsageFallback,
 				Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 5000, USD: 5, Tier: "input", Projected: true}}}),
 		},

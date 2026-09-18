@@ -168,6 +168,32 @@ Practical reading: change the list rarely, and treat a figure gathered over a fe
 requests immediately after a change as optimistic. Over a long steady session the
 gross figure converges on the net one, because the re-warm is paid once.
 
+### Across a window, and across a restart
+
+The per-row figures above are also summed. `usage.Counts.AvoidedMicros` carries them, so
+`GET /v1/usage` reports `avoidedMicros` for any window it can answer, the cost ledger
+persists the same column per minute, and `GET /v1/sessions` reports a per-session total
+beside the per-session cost.
+
+Four properties of that total, all inherited from the rows rather than decided at the
+aggregate:
+
+- **Dollars, never tokens.** Summing a tokens-saved figure is the error the section above
+  refuses to make; each saving is priced at the tier it actually came out of *before* it
+  reaches the counter, so the money total is tier-correct by construction. There is
+  deliberately no tokens-avoided aggregate.
+- **Applied only.** Observe-mode projections are excluded, not counted separately — under
+  `on_error: observe` every byte stayed on the wire, so the money was spent.
+- **Gross, not net.** Nothing subtracts the cache re-warm, exactly as for `$ saved`.
+- **Never added to spend.** It is its own column everywhere it appears, and no surface may
+  fold it into a cost total or a budget. A test in `authlib/usage` asserts that the spend
+  totals are unchanged by a saving's presence and that the saving still lands.
+
+Independent of `abctl`'s per-run stats pane, which resets when the plugin's counters do.
+The ledger does not: a window survives a proxy restart, while the per-session total is
+scoped to the events the store still holds and resets with it. Both are correct, and they
+answer different questions — do not read one as a check on the other.
+
 ### Costing it
 
 **Dollars work out of the box**, but rates are **not** a tool-prune option any
