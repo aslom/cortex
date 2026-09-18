@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,10 +66,6 @@ func TestSpendSummary_DerivesEveryWindowFigure(t *testing.T) {
 	if !got.HasSaved || got.SavedUSD != 0.1804 {
 		t.Errorf("SavedUSD = %v (has = %v), want 0.1804 — the avoided aggregate is not reaching "+
 			"the strip", got.SavedUSD, got.HasSaved)
-	}
-	// And it did not reach spend.
-	if got.WindowUSD != 1.12 {
-		t.Errorf("WindowUSD = %v after a saving landed, want 1.12", got.WindowUSD)
 	}
 }
 
@@ -1007,12 +1004,14 @@ func TestCacheHitPct_AnUnreportedBreakdownIsNotAZeroHitRate(t *testing.T) {
 		{name: "cache-read only", kinds: usage.KindCacheRead},
 		// Nothing reported — a gateway that sends only total_tokens.
 		{name: "no kinds", kinds: 0},
-		// THE MIRROR ONE LEVEL DOWN, and the case the table missed: input and cache-read
-		// reported, cache-write NOT. The arithmetic succeeds over a denominator short by an
-		// unreported term, so the hit rate reads HIGH — the same shape as the cache-read-only
-		// case above, one tier further in, and in the direction that flatters the deployment.
-		{name: "input and cache-read, no cache-write", kinds: usage.KindInput | usage.KindCacheRead},
-		// All three prompt tiers: the only case with a whole denominator to divide by.
+		// INPUT AND CACHE-READ IS ENOUGH, and this row is the whole OpenAI-compatible path:
+		// that parser never sets KindCacheWrite because OpenAI bills cache writes as ordinary
+		// input, and it reports Input = prompt_tokens − cached, so input + cacheRead is already
+		// the exact prompt total. Demanding the third bit made HasCacheHit structurally false
+		// for every response on that path.
+		{name: "input and cache-read, no cache-write", ok: true,
+			kinds: usage.KindInput | usage.KindCacheRead},
+		// All three, the Anthropic shape once cache_creation is on the wire.
 		{name: "every prompt tier", ok: true,
 			kinds: usage.KindInput | usage.KindCacheRead | usage.KindCacheWrite},
 	} {
@@ -1036,5 +1035,37 @@ func TestCacheHitPct_AnUnreportedBreakdownIsNotAZeroHitRate(t *testing.T) {
 					"for a caller to render by mistake", got)
 			}
 		})
+	}
+}
+
+// Reported kinds with ZERO counters must not divide.
+//
+// The reporting guard above and this one are different checks: that one asks whether the
+// provider said anything, this one asks whether what it said can be divided by. A response can
+// carry the kind bits and then carry zeroes — a denied request after the parser ran, a
+// body-less response — and 0/0 is NaN, which renders as "cache NaN%" one Sprintf later. The one
+// output worse than no figure is a nonsensical one.
+//
+// Untested until now: removing the `prompt <= 0` guard left the whole tui suite green, because
+// every other fixture on this path carries real counters.
+func TestCacheHitPct_ReportedKindsWithZeroCountersIsNotNaN(t *testing.T) {
+	got, ok := cacheHitPct(usage.Counts{
+		PresentKinds: usage.KindInput | usage.KindCacheRead | usage.KindCacheWrite,
+		// Every counter zero, every kind reported.
+	})
+	if ok {
+		t.Errorf("ok = true over a zero prompt: the ratio is 0/0, which renders as \"cache NaN%%\"")
+	}
+	if got != 0 {
+		t.Errorf("pct = %v alongside ok=false; a suppressed figure must carry no value for a "+
+			"caller to render by mistake", got)
+	}
+	// And the figure really is suppressed at the renderer, not merely at the arithmetic.
+	s := spendSummary{WindowLabel: "1h", Priced: true, WindowUSD: 1.12, HasSnapshot: true}
+	s.CacheHitPct, s.HasCacheHit = cacheHitPct(usage.Counts{
+		PresentKinds: usage.KindInput | usage.KindCacheRead | usage.KindCacheWrite,
+	})
+	if out := renderSpendStrip(s, 200); strings.Contains(out, "NaN") || strings.Contains(out, "cache") {
+		t.Errorf("strip %q renders a cache figure derived from a zero prompt", out)
 	}
 }

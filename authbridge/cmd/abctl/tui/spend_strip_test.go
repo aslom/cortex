@@ -31,7 +31,14 @@ func TestRenderSpendStrip_NeverExceedsTheWidth(t *testing.T) {
 func TestRenderSpendStrip_DropsWholeFiguresNeverClipsANumber(t *testing.T) {
 	// #953: "no truncated numbers". A half-rendered dollar amount is worse than a
 	// missing one -- it reads as a real, smaller figure.
-	s := spendSummary{WindowUSD: 1.12, WindowLabel: "1h", Priced: true}
+	// TWO figures, and the second one is why: the "$0." probe below was written for the
+	// per-minute burn rate, which is gone, and the fixture that replaced it set no sub-dollar
+	// figure at all — so half the loop could never fire. The saving is a real sub-dollar money
+	// figure and keeps the probe live.
+	s := spendSummary{
+		WindowUSD: 1.12, WindowLabel: "1h", Priced: true,
+		SavedUSD: 0.0187, HasSaved: true,
+	}
 	for _, w := range []int{120, 100, 80, 64, 48, 32, 24, 16, 8} {
 		got := renderSpendStrip(s, w)
 		if got == "" {
@@ -45,7 +52,7 @@ func TestRenderSpendStrip_DropsWholeFiguresNeverClipsANumber(t *testing.T) {
 		// anywhere in its digits still trips them.
 		for prefix, whole := range map[string]string{
 			"$1.": "$1.1200", // the window figure
-			"$0.": "$0.0187", // the burn rate
+			"$0.": "$0.0187", // the saving
 		} {
 			if strings.Contains(got, prefix) && !strings.Contains(got, whole) {
 				t.Errorf("width %d: %q has a clipped %q figure (want the whole %q)", w, got, prefix, whole)
@@ -58,18 +65,33 @@ func TestRenderSpendStrip_DropsWholeFiguresNeverClipsANumber(t *testing.T) {
 }
 
 func TestRenderSpendStrip_TheClipAssertionCanActuallyFail(t *testing.T) {
-	// Guards the guard above. That test is only worth anything if its assertion
-	// fails on clipped input, so feed it clipped input directly. This is the defect
-	// class that already bit this branch twice: a test that cannot detect the thing
-	// it is named for.
-	for _, clipped := range []string{"SPEND  $1.12", "SPEND  $1.1", "SPEND  $1.120"} {
-		if strings.Contains(clipped, "$1.") && strings.Contains(clipped, "$1.1200") {
+	// Guards the guard above. That test is only worth anything if its assertion fails on clipped
+	// input, so feed it clipped input directly. This is the defect class that already bit this
+	// branch twice: a test that cannot detect the thing it is named for.
+	//
+	// DERIVED FROM formatUSDCell, not written out. With hardcoded literals this called no
+	// production symbol at all — it ran strings.Contains over three string constants, so
+	// deleting spend_strip.go left it green, and changing the formatter to two decimals would
+	// have made the test it guards wrong while this one went on passing. The whole point is to
+	// track the format, so it has to ask the formatter.
+	whole := formatUSDCell(1.12)
+	prefix := whole[:3] // "$1." — the probe the guarded test actually uses
+	if !strings.HasPrefix(whole, prefix) || len(whole) <= len(prefix) {
+		t.Fatalf("formatUSDCell(1.12) = %q, which the %q probe cannot describe: the guarded "+
+			"test's prefix probes need rewriting alongside the formatter", whole, prefix)
+	}
+
+	// EVERY truncation that still trips the prefix probe, rather than three hand-picked ones:
+	// a formatter with more digits gains more clipped forms, and they all have to be caught.
+	for i := len(prefix); i < len(whole); i++ {
+		clipped := "SPEND  " + whole[:i]
+		if strings.Contains(clipped, prefix) && strings.Contains(clipped, whole) {
 			t.Errorf("%q satisfied the whole-figure assertion; the clip test is blind to it", clipped)
 		}
 	}
 	// ...and passes on the real, unclipped rendering, so it is not vacuously strict.
-	if whole := "SPEND  $1.1200 /1h"; strings.Contains(whole, "$1.") && !strings.Contains(whole, "$1.1200") {
-		t.Errorf("%q failed the whole-figure assertion; the clip test rejects correct output", whole)
+	if line := "SPEND  " + whole + " /1h"; strings.Contains(line, prefix) && !strings.Contains(line, whole) {
+		t.Errorf("%q failed the whole-figure assertion; the clip test rejects correct output", line)
 	}
 }
 
@@ -148,12 +170,19 @@ func TestRenderSpendStrip_PartiallyPricedDisclosesTheGap(t *testing.T) {
 	// A dollar total covering only the priced subset must say so; presenting a
 	// subtotal as the whole spend is the failure the coverage counters exist for.
 	s := spendSummary{
-		WindowUSD: 4.17, WindowLabel: "1h",
+		WindowUSD: 4.17, WindowLabel: "1h", HasSnapshot: true,
 		Priced: true, Unpriced: 12, Priceable: 318,
 	}
 	got := renderSpendStrip(s, 120)
-	if !strings.Contains(got, "12") {
+	// The NOTE as coverageNote actually spells it, not a bare "12": that substring matches any
+	// figure containing those digits, so it could pass on a line that disclosed nothing. One
+	// form, not a disjunction — an alternative the producer cannot emit is a dead probe.
+	if !strings.Contains(got, "12 of 318 unpriced") {
 		t.Errorf("strip %q does not disclose the 12 unpriced requests", got)
+	}
+	// And the figure it qualifies is still there, so this cannot pass on an empty line.
+	if !strings.Contains(got, "$4.1700") {
+		t.Errorf("strip %q lost the figure the gap is about", got)
 	}
 }
 
@@ -161,10 +190,15 @@ func TestRenderSpendStrip_FullyPricedIsNotAnnotated(t *testing.T) {
 	// A correctly configured deployment must not carry a permanent warning; that
 	// is what trains an operator to ignore the one signal that matters.
 	s := spendSummary{
-		WindowUSD: 4.17, WindowLabel: "1h",
+		WindowUSD: 4.17, WindowLabel: "1h", HasSnapshot: true,
 		Priced: true, Unpriced: 0, Priceable: 318,
 	}
 	got := renderSpendStrip(s, 120)
+	// ANCHORED FIRST. "Does not contain 'unpriced'" is satisfied by an empty string, so without
+	// this a regression that suppressed the whole line would read as a clean deployment.
+	if !strings.Contains(got, "$4.1700") {
+		t.Fatalf("strip %q did not render the figure at all, so the absence below proves nothing", got)
+	}
 	if strings.Contains(got, "unpriced") {
 		t.Errorf("fully priced strip %q still warns about coverage", got)
 	}
@@ -173,8 +207,12 @@ func TestRenderSpendStrip_FullyPricedIsNotAnnotated(t *testing.T) {
 func TestRenderSpendStrip_NoDataYetRendersNothingUseful(t *testing.T) {
 	// Before the first poll returns. An empty strip is honest; "$0.00" is not.
 	got := renderSpendStrip(spendSummary{}, 120)
-	if strings.Contains(got, "$0.00") {
-		t.Errorf("strip %q renders $0.00 before any data arrived", got)
+	// EXACTLY empty, which is the documented answer for "no poll has answered yet" — asserted
+	// as an equality rather than as the absence of one substring, because absence of "$0.00" is
+	// also satisfied by every wrong non-empty line this could have produced.
+	if got != "" {
+		t.Errorf("strip = %q before any poll answered, want empty: the only state where silence "+
+			"is honest is the one where nothing has been looked at", got)
 	}
 }
 
@@ -1518,18 +1556,43 @@ func TestRenderSpendStrip_AnUnpricedWindowStillShowsWhatItKnows(t *testing.T) {
 
 // The pane pointer is a place to look, not a reading, so it must not outrank one. At a width
 // that cannot hold everything, the token count survives and the advice does not.
+//
+// BOTH HALVES ASSERTED AT A WIDTH THAT PROVES IT. The first version probed 44 columns, where the
+// fitter emits "SPEND  cost unavailable" and nothing else: the hint was absent, the `&&`
+// short-circuited, and the test asserted nothing at all — it could not tell "the advice yielded"
+// from "everything yielded", which is the whole claim. 64 columns is where the token count
+// survives and the hint does not, so requiring BOTH cannot pass vacuously.
+//
+// The ORDER is asserted too, at a width that holds everything, because that is the invariant
+// independent of any particular column count — the ladder drops from the right, so position IS
+// priority.
 func TestRenderSpendStrip_TheUsageHintYieldsToRealReadings(t *testing.T) {
 	s := spendSummary{
 		WindowLabel: "1h", Priced: false, HasSnapshot: true, Unpriced: 318, Priceable: 318,
 		HasCacheHit: true, CacheHitPct: 81, Tokens: 9_890_000,
 	}
+
 	wide := renderSpendStrip(s, 200)
-	if !strings.Contains(wide, "[u] usage") {
-		t.Errorf("a 200-column strip %q dropped the pane pointer entirely", wide)
+	hintAt, tokensAt := strings.Index(wide, "[u] usage"), strings.Index(wide, "9.9M")
+	if hintAt < 0 {
+		t.Fatalf("a 200-column strip %q dropped the pane pointer entirely", wide)
 	}
-	narrow := renderSpendStrip(s, 44)
-	if strings.Contains(narrow, "[u] usage") && !strings.Contains(narrow, "9.9M") {
-		t.Errorf("narrow strip %q kept the advice and dropped the reading", narrow)
+	if tokensAt < 0 {
+		t.Fatalf("a 200-column strip %q dropped the token count", wide)
+	}
+	if hintAt < tokensAt {
+		t.Errorf("strip %q puts the advice ahead of the reading: the ladder drops from the right, "+
+			"so that is the order in which they would be given up", wide)
+	}
+
+	// 64 columns: room for the reading, not for the advice.
+	narrow := renderSpendStrip(s, 64)
+	if !strings.Contains(narrow, "9.9M") {
+		t.Fatalf("strip %q at 64 columns dropped the token count, so this width cannot "+
+			"distinguish yielding advice from yielding everything", narrow)
+	}
+	if strings.Contains(narrow, "[u] usage") {
+		t.Errorf("strip %q kept the advice at a width that had to give something up", narrow)
 	}
 }
 
@@ -1572,5 +1635,123 @@ func TestRenderSpendStrip_TheCoverageGapIsStatedOnce(t *testing.T) {
 					"safe immediately after the reading it qualifies", got, labelled, tc.label)
 			}
 		})
+	}
+}
+
+// A FAILED WINDOW POLL MUST NOT BLANK A GOOD DAY FIGURE.
+//
+// spendState.todaySnap gives this as the reason the two chains are split at all: "the two can
+// fail independently — an older proxy answers the window fine and 400s on window=today — and one
+// broken figure must not blank the other." It held in one direction only. Today failing left the
+// window alone; the window failing discarded today, because the renderer returned on Failed
+// before reading any figure.
+//
+// Both directions asserted, since a fix that blanked the window instead would satisfy either
+// half alone.
+func TestRenderSpendStrip_EitherChainCanFailWithoutBlankingTheOther(t *testing.T) {
+	t.Run("window failed, day answered", func(t *testing.T) {
+		got := renderSpendStrip(spendSummary{
+			Failed: true, WindowLabel: "1h",
+			TodayUSD: 30.935, HasToday: true, TodayPriceable: 100,
+			SavedUSD: 0.1804, HasSaved: true,
+		}, 200)
+		if !strings.Contains(got, "$30.9350 today") {
+			t.Errorf("strip %q lost the day figure to a failed WINDOW poll — the two chains are "+
+				"split precisely so that cannot happen", got)
+		}
+		if !strings.Contains(got, "~$0.1804") {
+			t.Errorf("strip %q lost the saving as well", got)
+		}
+		// And it says which reading is missing, with the window's label so it cannot be read
+		// as qualifying the day.
+		if !strings.Contains(got, "poll failed /1h") {
+			t.Errorf("strip %q does not say the window poll failed, or says it unlabelled beside "+
+				"a day figure", got)
+		}
+	})
+
+	t.Run("day failed, window answered", func(t *testing.T) {
+		// HasToday false is how a failed or absent today chain arrives; the window is fine.
+		got := renderSpendStrip(spendSummary{
+			WindowLabel: "1h", Priced: true, WindowUSD: 2.91, Priceable: 10, HasSnapshot: true,
+			Tokens: 9_890_000,
+		}, 200)
+		if !strings.Contains(got, "$2.9100 /1h") {
+			t.Errorf("strip %q lost the window figure to an absent day figure", got)
+		}
+		if strings.Contains(got, "poll failed") {
+			t.Errorf("strip %q reports a failure for a window poll that answered", got)
+		}
+	})
+}
+
+// A wedged poll must be visible on the figure it belongs to, and the day figure is the one that
+// could go hours stale unnoticed: it outranks the window, polls twelve times more slowly, and is
+// the last thing the fitter drops.
+//
+// The age is ONE reading for the line, taken from the OLDER chain — so a fresh window poll
+// cannot vouch for a wedged day poll.
+func TestSpendSummary_TheAgeComesFromTheOlderChain(t *testing.T) {
+	now := time.Now()
+	m := &model{}
+	m.spend.snap = &usage.Snapshot{
+		Window: "1h", Priced: true,
+		Totals: usage.Counts{Requests: 1, CostMicros: 1, PricedRequests: 1, PriceableRequests: 1},
+	}
+	// The window answered a moment ago; the day chain has been wedged for an hour.
+	m.spend.lastFetch = now
+	m.spend.todayLastFetch = now.Add(-time.Hour)
+
+	got := m.spendSummary()
+	if !got.Stale {
+		t.Fatal("a day poll wedged for an hour reports no staleness, because a window poll from " +
+			"one second ago was the only clock consulted — which puts the gap on the most " +
+			"prominent figure on the line")
+	}
+	if got.Age < 59*time.Minute {
+		t.Errorf("Age = %v, want ~1h: the age must be the OLDER chain's, not the fresher one's",
+			got.Age)
+	}
+
+	// And a chain that has NEVER answered is not infinitely stale: today is unavailable on a
+	// proxy with no ledger, and reporting that as staleness would mark every Kubernetes
+	// deployment's strip permanently old.
+	m.spend.todayLastFetch = time.Time{}
+	if fresh := m.spendSummary(); fresh.Stale {
+		t.Errorf("Stale = true with a today chain that never answered (age %v); an absent ledger "+
+			"is not a wedged poll", fresh.Age)
+	}
+}
+
+// The saving's label is its IDENTITY, not an explanation, so it can never be dropped while the
+// figure is shown.
+//
+// ~ is inexactMarker, and on a money figure that means "lower bound" — an inexact spend figure
+// renders "~$4.1700 today" and keeps its label. So a bare "~$0.1804" sitting between two
+// labelled figures reads as spend whose label the ladder happened to drop, which is a different
+// claim rather than a terser one. The ladder's rule is that it gives up explanations before
+// figures; this is not an explanation.
+func TestRenderSpendStrip_TheSavingNeverLosesItsLabel(t *testing.T) {
+	s := spendSummary{
+		TodayUSD: 30.935, HasToday: true, TodayPriceable: 100,
+		SavedUSD: 0.1804, HasSaved: true,
+		WindowUSD: 2.91, WindowLabel: "1h", Priced: true, HasSnapshot: true,
+		CacheHitPct: 81, HasCacheHit: true, Tokens: 9_890_000, Errors: 2,
+	}
+	amount := inexactMarker + formatUSDCell(0.1804)
+	shown := 0
+	for _, w := range []int{200, 120, 100, 90, 80, 72, 64, 56, 48, 40, 32, 24} {
+		got := renderSpendStrip(s, w)
+		if !strings.Contains(got, amount) {
+			continue // the ladder dropped the whole figure, which is the allowed outcome
+		}
+		shown++
+		if !strings.Contains(got, "saved "+amount) {
+			t.Errorf("width %d: strip %q shows the amount without its label — between two "+
+				"labelled money figures that reads as a spend lower bound", w, got)
+		}
+	}
+	if shown == 0 {
+		t.Fatal("the saving never appeared at any width, so nothing above was asserted")
 	}
 }
