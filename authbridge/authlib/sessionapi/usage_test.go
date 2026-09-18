@@ -651,11 +651,21 @@ func TestHandleUsage_TodayCountsTheOpenMinuteOnceAcrossAFlush(t *testing.T) {
 
 func TestHandleUsage_TodayWithoutALedgerDegradesAndSaysSo(t *testing.T) {
 	// Kubernetes has no ledger by design. A 400 would make the abctl cost view
-	// fail there rather than showing what IS available, so the handler serves the
-	// ring's maximum window and reports the window it actually served.
+	// fail there rather than showing what IS available, so the handler serves what
+	// the ring can cover and reports the window it actually served.
+	//
+	// WHAT IT SERVES IS CLOCK-DEPENDENT, and asserting the flat ring maximum here encoded a defect:
+	// before 06:00 local, "the ring's maximum" reaches back into YESTERDAY, so window=today answered
+	// with up to five and a half hours that are not today's. This test held that in place and passed
+	// for eighteen hours a day — it failed in CI at 01:17 local, against a fix that was correct.
+	//
+	// So the assertion is the RULE — the shorter of the ring's maximum and however much of today has
+	// happened — which discriminates at every hour instead of only after six.
 	ts, _ := newTestServer(t, WithUsage(usage.New())) // no ledger
 
+	before := time.Now()
 	status, body := fetchUsage(t, ts.URL, "?window=today")
+	after := time.Now()
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", status, body)
 	}
@@ -666,9 +676,33 @@ func TestHandleUsage_TodayWithoutALedgerDegradesAndSaysSo(t *testing.T) {
 	if snap.Window == "today" {
 		t.Error("window = \"today\" but no ledger exists; the response must name the window actually served")
 	}
-	if snap.Window != usage.MaxWindow.String() {
-		t.Errorf("window = %q, want the ring maximum %q", snap.Window, usage.MaxWindow)
+	got, err := time.ParseDuration(snap.Window)
+	if err != nil {
+		t.Fatalf("window = %q, which is not a duration: %v", snap.Window, err)
 	}
+	// Bracketed by the clock either side of the request, so a day boundary crossed mid-test cannot
+	// make this flap: the elapsed part of today is somewhere between the two readings.
+	lower := elapsedToday(before)
+	upper := elapsedToday(after)
+	if upper < lower {
+		t.Skip("the local day rolled over during the request; nothing to assert about which day it served")
+	}
+	want := func(d time.Duration) time.Duration {
+		if d > usage.MaxWindow {
+			return usage.MaxWindow
+		}
+		return d.Truncate(usage.BucketWidth)
+	}
+	if got < want(lower) || got > want(upper)+usage.BucketWidth {
+		t.Errorf("window = %v, want between %v and %v: the shorter of the ring's %v maximum and the part of today that has happened",
+			got, want(lower), want(upper)+usage.BucketWidth, usage.MaxWindow)
+	}
+}
+
+// elapsedToday is how much of the local day has happened at t — the span window=today asks for.
+func elapsedToday(t time.Time) time.Duration {
+	midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	return t.Sub(midnight)
 }
 
 func TestHandleUsage_SevenDaysIsServedFromTheLedger(t *testing.T) {
