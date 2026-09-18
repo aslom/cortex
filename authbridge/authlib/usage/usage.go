@@ -262,6 +262,28 @@ type Counts struct {
 	PriceableRequests int64 `json:"priceableRequests,omitempty"`
 }
 
+// The PresentKinds bits, one per token kind a provider can report.
+//
+// EXPORTED, AND HERE, because PresentKinds is where the layout is documented and this is the
+// package every consumer of it already imports. The authority is
+// authlib/plugins/internal/parsercommon.Kind, which cannot be imported from outside
+// authlib/plugins — so before these existed, every reader spelled the bits itself: abctl's
+// `cost` command, abctl's spend strip, and this package's own tests as a bare `1 | 8`. Three
+// uncoordinated copies of a wire format, with nothing comparing them.
+//
+// TestKindBits_MatchTheParserThatProducesThem, which lives with parsercommon because that is
+// the one place both sets are visible, is what pins these to it.
+//
+// WIRE FORMAT: they are serialised in PresentKinds and stored in the cost ledger, so they
+// cannot be renumbered whatever any Go identifier is called.
+const (
+	KindInput uint8 = 1 << iota
+	KindCacheRead
+	KindCacheWrite
+	KindOutput
+	KindReasoning
+)
+
 // Add accumulates o into c, field by field — except PresentKinds, which is
 // OR-ed. It is a set of which token kinds a response reported, so adding two
 // buckets' flags would produce a number that is not a bit set at all. Do not
