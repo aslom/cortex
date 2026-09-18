@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/clientstate"
+	"github.com/rossoctl/cortex/authbridge/authlib/config"
 	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
 )
 
@@ -242,6 +243,32 @@ tls_bridge:
 # For a gateway whose prices are genuinely negotiated per model rather than
 # derived from list, give rates instead of a multiplier -- see
 # docs/plugin-catalog.md.
+#
+# Cost history on disk. Per-minute totals only -- no prompts, no completions,
+# no tool arguments -- under ~/.cortex/cost/YYYY-MM-DD.jsonl, kept 30 days
+# (roughly 10 MB). The in-memory counters are a 6-hour ring and this proxy
+# restarts several times a day, so without this "what did today cost" answers
+# over whatever is left in that ring, and window=7d cannot be answered at all.
+#
+# WRITTEN OUT RATHER THAN LEFT TO THE DEFAULT, which is belt-and-braces now
+# rather than the mechanism. The default used to be "on for --local, off
+# otherwise", and since "abctl service install" runs this file with --config
+# and never --local, every INSTALLED laptop had the ledger off while the docs
+# promised it was on. The default is no longer keyed on the flag at all: it is
+# on wherever the ledger can survive a restart, which means an explicit
+# cost_ledger.dir or a config inside ~/.cortex -- this file's own location, and
+# what both an installed service and --local pass. See ledgerDefaultOn. This
+# line therefore states what would happen anyway, and keeps saying it if that
+# rule ever changes.
+#
+# Set enabled: false to turn it off. Restart-only, not hot-reloaded: the ledger
+# is opened once at startup, so an edit here is REFUSED by the reloader (the
+# whole save with it) rather than accepted and ignored. "abctl service restart"
+# applies it, and cuts attached Claude Code sessions.
+cost_ledger:
+  enabled: true
+  # dir: /absolute/path        # default ~/.cortex/cost; a RELATIVE path is refused
+  # retention_days: 30         # minimum 9 -- window=7d can open nine local day files
 pipeline:
   outbound:
     plugins:
@@ -324,4 +351,49 @@ func writeBuiltinConfig(cortexDir, caDir string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// costLedgerDirName is the ledger's directory under ~/.cortex, beside the config
+// and the CA — one place a user looks for everything Cortex wrote.
+const costLedgerDirName = "cost"
+
+// costLedgerDir returns where the durable cost ledger writes its day files.
+//
+// cost_ledger.dir wins when set, so an operator can put the files on a different
+// volume. Otherwise it is ~/.cortex/cost, derived at runtime rather than stored in
+// the config: a $HOME-derived absolute path written into a file that gets copied
+// between machines is a path that silently points at someone else's home.
+//
+// Returns an error rather than falling back to the working directory, for the reason
+// defaultCortexDir does: a cwd fallback drops spend records into whatever directory
+// the proxy happened to start from, including checkouts, with nothing said about it.
+//
+// Which is why a RELATIVE cost_ledger.dir is refused rather than resolved. It used to
+// be returned verbatim, so `dir: cost` produced exactly the failure the paragraph
+// above says this function refuses — resolved against the proxy's working directory,
+// which is not a property of the config and differs between a launchd job, a
+// container, and a shell in a checkout. The same setting would scatter day files
+// across all three, and a query would open one of them and report the others' spend
+// as absent. The comment was making a promise the code did not keep; the code keeps
+// it now.
+//
+// Cleaned on the way out so `/var/lib/cortex/cost/` and `/var/lib//cortex/cost` name
+// one directory rather than three, which matters because the writer's per-day file
+// locking is keyed on the path.
+func costLedgerDir(cfg *config.Config) (string, error) {
+	if cfg != nil && cfg.CostLedger != nil && cfg.CostLedger.Dir != "" {
+		dir := cfg.CostLedger.Dir
+		if !filepath.IsAbs(dir) {
+			return "", fmt.Errorf("cost_ledger.dir must be an absolute path, got %q: a relative path "+
+				"resolves against the proxy's working directory, which is not a property of the config — "+
+				"a launchd job, a container and a shell in a checkout would each write a different %q, "+
+				"and a query would report the others' spend as absent", dir, dir)
+		}
+		return filepath.Clean(dir), nil
+	}
+	dir, err := defaultCortexDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, costLedgerDirName), nil
 }

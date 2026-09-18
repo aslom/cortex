@@ -52,6 +52,163 @@ type Config struct {
 	// internal usage with no manual setup is the point. Set `pricing.bundled:
 	// false` to price only what you configure. See authlib/pricing.
 	Pricing *pricing.Config `yaml:"pricing,omitempty" json:"pricing,omitempty"`
+	// CostLedger configures the durable per-minute cost ledger (authlib/costledger),
+	// which persists closed minutes so "what did today cost" survives a restart.
+	//
+	// Absent means the caller's default, and the callers differ deliberately: a local
+	// install turns it ON (a laptop has a home directory and a developer who wants
+	// yesterday's number), Kubernetes leaves it OFF (writing files in a pod is the
+	// wrong sink; a central collector is the right one). Set `cost_ledger.enabled:
+	// false` to turn it off locally.
+	CostLedger *CostLedgerConfig `yaml:"cost_ledger,omitempty" json:"cost_ledger,omitempty"`
+}
+
+// CostLedgerConfig configures the durable cost ledger.
+//
+// NOT HOT-RELOADABLE, unlike most of this file. The reloader swaps the plugin pipeline
+// and per-plugin config in place, but the ledger is constructed once at startup and
+// handed to the session store as a recorder, so a running proxy holds whichever writer
+// it opened. Editing anything here — enabled, dir, retention_days — takes effect on
+// RESTART.
+//
+// The edit is REFUSED rather than ignored: reloader.validateReloadable compares this
+// block the way it compares mode and listener.*, so a live edit fails the reload,
+// leaves LastError naming cost_ledger on /reload/status, and asks for a pod restart.
+//
+// It did not always. This doc used to warn that "an operator who edits this to stop
+// writing cost history has every reason to believe it stopped" — and they did, because
+// the edit was ACCEPTED: ReloadsOK incremented, ActiveConfigSHA256 moved, and /config
+// served the new values while the startup writer kept appending under the old
+// retention. Documenting that was the weaker of the two options available; the guard
+// is three lines and the precedent for it was already in the same function. Pinned by
+// reloader.TestReloader_RefusesCostLedgerChange.
+type CostLedgerConfig struct {
+	// Enabled is a POINTER so "unset" and "explicitly false" are different states.
+	// The local default is on, and an operator has to be able to turn it off; with a
+	// plain bool an absent block and `enabled: false` would be the same value, so the
+	// only way to disable it would be to delete the whole block — which also discards
+	// the retention setting beside it.
+	//
+	// Takes effect on restart. See the type doc.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Dir is where day files are written. Empty means the caller's default, which for
+	// a local install is ~/.cortex/cost — kept out of this struct so the config does
+	// not pin a $HOME-derived absolute path into a file that may be copied between
+	// machines.
+	Dir string `yaml:"dir,omitempty" json:"dir,omitempty"`
+	// RetentionDays is how many day files survive. Zero means the package default of
+	// 30, which is roughly 10 MB.
+	//
+	// A non-zero value must be at least minCostLedgerRetentionDays; see there.
+	RetentionDays int `yaml:"retention_days,omitempty" json:"retention_days,omitempty"`
+}
+
+// minCostLedgerRetentionDays is the floor a NON-ZERO retention_days has to clear, so
+// window=7d cannot be answered over a partial week without saying so.
+//
+// NINE, not seven. window=7d is a rolling 7x24h, so it starts part-way through a date
+// and reads EIGHT local day files — and nine in a spring-forward week, which is 167
+// hours long and so reaches an hour further back. Both corrections had the same shape:
+// counting days instead of counting the files the span opens.
+//
+// Refused at load rather than clamped: an operator who chose the number should hear that
+// it is wrong, and a silent clamp makes /config disagree with what was written.
+//
+// A literal rather than derived from usage.Window7dLocalDays, because this package is the
+// leaf every binary loads to parse its config and must not import the aggregator.
+// TestMinCostLedgerRetentionDays_MatchesTheWindowItProtects keeps the two equal, which is
+// the right shape for a cross-package invariant that is agreement rather than a
+// dependency.
+const minCostLedgerRetentionDays = 9
+
+// maxCostLedgerRetentionDays is the ceiling a retention_days has to stay under, and the
+// reason there is one at all is that the failure INVERTS.
+//
+// prune counts back with ref.AddDate(0, 0, -(retainDays-1)). AddDate normalises, so a large
+// enough retention does not merely reach further back — it wraps. Measured at
+// retainDays = 1<<62-1 against a reference of 2026-09-15: the cutoff came out as
+// 2026-09-17, TWO DAYS IN THE FUTURE, which makes every day file including today older than
+// the cutoff. So the largest number an operator can type, meaning "keep everything", deletes
+// the entire ledger on the first prune. A validator that bounded only the floor let that
+// through while carefully explaining why 7 was too small.
+//
+// TEN YEARS, which is far past any use for a per-minute cost file on a laptop (3,650 days is
+// roughly 1.2 GB at the measured ~10 MB per 30 days) and far below the region where the
+// arithmetic misbehaves. It is deliberately not derived from math.MaxInt: a bound chosen to
+// be "just safe" would need a reader to verify the overflow arithmetic to know it is safe,
+// where a bound this far away is obviously so.
+const maxCostLedgerRetentionDays = 3650
+
+// DirSet reports whether an operator named a directory for the ledger.
+//
+// IT IS THE STRONGEST AVAILABLE SIGNAL THAT THE LEDGER CAN DELIVER, which is why the caller
+// uses it to pick the default. The ledger's whole purpose is surviving a restart; writing to a
+// path nobody chose achieves the opposite in a container, where the only place left is the
+// image's writable layer — wiped on every restart and counted against the pod's
+// ephemeral-storage limit, which is an eviction rather than a lost figure. An operator who
+// names a path has mounted something to put it on, and that is a fact this package can see
+// where "is there a volume here" is not.
+//
+// A method rather than a field read, and nil-safe, because the block is absent in the common
+// Kubernetes case and every caller would otherwise repeat the same check.
+func (c *CostLedgerConfig) DirSet() bool {
+	return c != nil && c.Dir != ""
+}
+
+// LedgerEnabled reports whether the ledger should run, given the default for this
+// deployment shape.
+//
+// WHAT defaultOn USED TO MEAN, AND WHY IT CHANGED. It was localMode — true under --local,
+// false otherwise — and that made the default a property of WHICH FLAG STARTED THE BINARY
+// rather than of whether the ledger could do its job. Every service install runs --config, so
+// the documented "on by default" was false for every installed laptop. The caller now derives
+// defaultOn from whether a durable location exists at all (see DirSet), so the answer no
+// longer depends on the command line.
+//
+// A method on the pointer receiver so a nil block — the common case in Kubernetes —
+// answers without every caller writing the same nil check and one of them getting it
+// backwards.
+func (c *CostLedgerConfig) LedgerEnabled(defaultOn bool) bool {
+	if c == nil || c.Enabled == nil {
+		return defaultOn
+	}
+	return *c.Enabled
+}
+
+// Validate is called from the loader when CostLedger != nil.
+func (c *CostLedgerConfig) Validate() error {
+	if c.RetentionDays < 0 {
+		return fmt.Errorf("cost_ledger.retention_days must not be negative, got %d", c.RetentionDays)
+	}
+	if c.RetentionDays > maxCostLedgerRetentionDays {
+		// Named as the inversion it is rather than as a preference about disk. An operator who
+		// typed a huge number meant "keep everything", and the honest message is that this one
+		// would keep nothing.
+		return fmt.Errorf("cost_ledger.retention_days must be at most %d (ten years), got %d: "+
+			"retention is counted back with AddDate, which NORMALISES rather than saturating, so a "+
+			"large enough value wraps the cutoff into the FUTURE and the first prune deletes every "+
+			"day file including today — the opposite of what the number says",
+			maxCostLedgerRetentionDays, c.RetentionDays)
+	}
+	if c.RetentionDays > 0 && c.RetentionDays < minCostLedgerRetentionDays {
+		// Says NINE and says why it is not seven: an operator who typed 7 for a seven-day
+		// window is not making a careless mistake, and a message that only quoted the floor
+		// would read as an off-by-one in the software rather than as the rolling span it is.
+		// It names both increments, because 8 is as reasonable a guess as 7 and was the floor
+		// until a spring-forward week was measured against it.
+		// The numbers are spelled out rather than interpolated from authlib/usage, for the
+		// reason minCostLedgerRetentionDays is a literal: this package must not import the
+		// aggregator. Every one of them is pinned against usage's own constants by
+		// TestMinCostLedgerRetentionDays_MatchesTheWindowItProtects, so a window change
+		// makes this message wrong in a test rather than wrong in front of an operator.
+		return fmt.Errorf("cost_ledger.retention_days must be at least %d, or 0 for the default: "+
+			"the usage API serves window=7d from these day files, and that window is a ROLLING "+
+			"7x24h, so it reads 8 local day files rather than 7 — and 9 in a spring-forward "+
+			"week, which is only 167 hours long — a shorter retention reports a partial week "+
+			"as a full one, got %d",
+			minCostLedgerRetentionDays, c.RetentionDays)
+	}
+	return nil
 }
 
 // TLSBridgeConfig configures the outbound TLS bridge (TLS termination of
@@ -766,6 +923,12 @@ func Load(path string) (*Config, error) {
 	}
 	if err := cfg.SPIFFE.Validate(); err != nil {
 		return nil, err
+	}
+
+	if cfg.CostLedger != nil {
+		if err := cfg.CostLedger.Validate(); err != nil {
+			return nil, err
+		}
 	}
 
 	if cfg.TLSBridge != nil {

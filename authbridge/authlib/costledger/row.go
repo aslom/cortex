@@ -50,6 +50,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 // Row is one minute's totals for one (endpoint, model, agent, provenance) key.
@@ -192,7 +194,7 @@ func truncateLabel(s string) string {
 // a working escape sequence. An invalid byte is replaced too, so the label held in memory, the
 // label served, and the label encoding/json would have written are one string, not three.
 //
-// SHARED RULE, THREE COPIES, AND THE FIRST TWO MUST STAY IDENTICAL:
+// SHARED RULE, ONE DEFINITION, THREE SANITISERS AROUND IT:
 //
 //   - pipeline.sanitizeUA is the PRIMARY guard for the Agent label. It sits in
 //     ParseUserAgent, where a User-Agent header becomes a value, so it covers the live
@@ -207,19 +209,21 @@ func truncateLabel(s string) string {
 //     library must not import. It still filters C0 and DEL only — named here because a
 //     divergence stated is a divergence someone can fix.
 //
-// Two copies of a five-line rule beats a dependency edge the wrong way round; two copies
-// with different rules is the thing to avoid, so a change to either of the first two
-// belongs in both.
+// WHICH RUNES COUNT is not copied any more: it is pipeline.IsControlRune, imported by this
+// package and by usage, so there is one definition repo-wide. This comment used to say the
+// rule had to be duplicated to avoid a dependency edge the wrong way round — it does not;
+// nothing in pipeline imports either of us. Three byte-identical copies lived on that
+// sentence, and only pipeline's was tested against the bidi marks.
 //
 // NOT a JSON-integrity guard — encoding/json escapes control bytes, so an unsanitised
 // label could never split a line or break readDay. Every consumer downstream of the
 // decode is what this protects.
 //
-// The one consequence worth stating: usage (the ring) does not sanitise, so a label
-// carrying control bytes is now spelled differently in the two halves and group=model
-// would show it as two series. That only happens for a label that is already hostile,
-// the ring's copy dies with the process, and the ledger's is the one that survives —
-// so the divergence is the right way round. The matching fix belongs in usage.
+// AND THE DIVERGENCE THIS USED TO WARN ABOUT IS CLOSED. It read "usage (the ring) does not
+// sanitise, so a label carrying control bytes is spelled differently in the two halves and
+// group=model would show it as two series" — the ring sanitises now, with the same predicate,
+// so one hostile label is one series in both halves. abctl's render-time copy is the only
+// remaining narrower filter, and it is named above rather than left to be discovered.
 func sanitizeLabel(s string) string {
 	if !hasControlRunes(s) {
 		// The overwhelmingly common case, and no allocation for it: this runs on the
@@ -230,7 +234,7 @@ func sanitizeLabel(s string) string {
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+		if pipeline.IsControlRune(r) || (r == utf8.RuneError && size == 1) {
 			b.WriteRune('\uFFFD')
 			i += size
 			continue
@@ -255,43 +259,10 @@ func sanitizeLabel(s string) string {
 func hasControlRunes(s string) bool {
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+		if pipeline.IsControlRune(r) || (r == utf8.RuneError && size == 1) {
 			return true
 		}
 		i += size
-	}
-	return false
-}
-
-// isControlRune reports whether r is a C0 control, DEL, a C1 control, or a rune that
-// rewrites or hides the text around it without being a control character at all.
-//
-// The one predicate the scan and the rewrite both read, so they cannot disagree about what a
-// control character is. pipeline.isControlRune has the same clauses in the same order and
-// both copies move together; see sanitizeLabel for why there are two. There is a THIRD copy
-// in cmd/abctl/tui/usage_render.go which is still C0+DEL only; it belongs to the abctl PR and
-// is named here so the divergence is recorded rather than discovered.
-//
-// The bidi and zero-width clause is the C1 argument applied to the runes that reasoning
-// missed. C1 is here because U+009B opens a terminal escape sequence; a bidi override needs
-// no escape sequence and no terminal to make one label render as another's name, and a
-// zero-width rune makes two distinct keys look identical in a table a reader is comparing.
-// Same class, same choke point. See pipeline.isControlRune for the full argument.
-func isControlRune(r rune) bool {
-	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-		return true
-	}
-	switch r {
-	case // Bidi overrides and isolates: reorder the glyphs around them.
-		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
-		'\u2066', '\u2067', '\u2068', '\u2069',
-		// Bidi MARKS, which are the same class and strictly easier to use: a mark needs no
-		// matching pop, so one LRM reorders the neutral characters around it on its own.
-		// U+200E LRM, U+200F RLM, U+061C ALM.
-		'\u200e', '\u200f', '\u061c',
-		// Zero-width: make two distinct labels render identically.
-		'\u200b', '\u200c', '\u200d', '\u2060', '\ufeff':
-		return true
 	}
 	return false
 }

@@ -1349,7 +1349,7 @@ func ringLabel(s string) string {
 // is a single-character CSI, so a byte scan for anything below 0x20 steps straight past a
 // working escape sequence, which is why the scan below decodes runes.
 //
-// FOURTH COPY OF A FIVE-LINE RULE, AND THE LAYERING IS WHY:
+// FOUR SANITISING SURFACES, ONE RULE, AND THE RULE IS NOW SHARED:
 //
 //   - pipeline.sanitizeUA is PRIMARY for the Agent label, at the point a User-Agent header
 //     becomes a value, so it already covers this package's byAgent.
@@ -1360,11 +1360,15 @@ func ringLabel(s string) string {
 //   - abctl's tui.sanitizeLabel is a render-time copy in a main module this library must not
 //     import, and still filters C0 and DEL only.
 //
-// Neither of the first two is reachable from here: pipeline's is unexported and costledger
-// IMPORTS this package, so referencing it would invert the layering into a cycle. A shared
-// leaf package is the real fix and cannot be done from this side alone — migrating one caller
-// to it while the other two stay put makes five copies rather than one. So: copied, with the
-// rule stated identically, and a change to any of them belongs in all of them.
+// The first three no longer each carry their own copy of WHICH RUNES COUNT: that predicate is
+// pipeline.IsControlRune, and both this package and costledger import pipeline, so there is one
+// definition repo-wide. This comment used to argue the opposite — that referencing pipeline's
+// would "invert the layering into a cycle" and so the rule had to be copied — which was wrong
+// in the direction that matters: nothing in pipeline imports this package. Three byte-identical
+// copies existed on the strength of that paragraph, only one of them tested for the bidi marks.
+//
+// What is still per-surface is the SHAPE of the sanitiser around it (what it replaces with, and
+// whether it caps), and abctl's is deliberately narrower and out of this module's reach.
 func sanitizeLabel(s string) string {
 	if !hasControlRunes(s) {
 		// The overwhelmingly common case, and no allocation for it: this runs on the fold path,
@@ -1375,7 +1379,7 @@ func sanitizeLabel(s string) string {
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+		if pipeline.IsControlRune(r) || (r == utf8.RuneError && size == 1) {
 			b.WriteRune('�')
 			i += size
 			continue
@@ -1395,37 +1399,10 @@ func sanitizeLabel(s string) string {
 func hasControlRunes(s string) bool {
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isControlRune(r) || (r == utf8.RuneError && size == 1) {
+		if pipeline.IsControlRune(r) || (r == utf8.RuneError && size == 1) {
 			return true
 		}
 		i += size
-	}
-	return false
-}
-
-// isControlRune is the shared rule: C0, DEL, C1, and the bidi and zero-width runes that
-// rewrite or hide the text around them. Identical to costledger.isControlRune and pipeline's,
-// deliberately — see sanitizeLabel.
-//
-// THE THREE COPIES MOVE TOGETHER. This one is the /v1/usage serving path, so a rune that gets
-// past it reaches every client of that endpoint whatever the other two do — which is the
-// reason the identical-rule rule exists rather than being tidiness. See
-// pipeline.isControlRune for why bidi and zero-width belong in the same set as C1.
-func isControlRune(r rune) bool {
-	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-		return true
-	}
-	switch r {
-	case // Bidi overrides and isolates: reorder the glyphs around them.
-		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
-		'\u2066', '\u2067', '\u2068', '\u2069',
-		// Bidi MARKS, which are the same class and strictly easier to use: a mark needs no
-		// matching pop, so one LRM reorders the neutral characters around it on its own.
-		// U+200E LRM, U+200F RLM, U+061C ALM.
-		'\u200e', '\u200f', '\u061c',
-		// Zero-width: make two distinct labels render identically.
-		'\u200b', '\u200c', '\u200d', '\u2060', '\ufeff':
-		return true
 	}
 	return false
 }

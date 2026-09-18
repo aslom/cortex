@@ -134,7 +134,107 @@ Set `session.ttl` (e.g. `30m`) if you would rather raw prompts not sit in memory
 indefinitely.
 
 The store is in memory only, so a restart clears it regardless. Both `session.*` limits
-need a restart to change — they are not hot-reloaded.
+need a restart to change — they are not hot-reloaded. Cost totals are the one thing that
+does survive a restart; see below.
+
+## Cost history is written to `~/.cortex/cost`
+
+**A local install keeps a cost ledger on disk, on by default.** Sessions themselves —
+prompts, completions, tool arguments — stay in memory and die with the process. Per-minute
+cost totals do not: they are appended to `~/.cortex/cost/YYYY-MM-DD.jsonl`, one file per
+local day, **kept for 30 days**.
+
+**Sizing, because "roughly 10 MB" was a laptop figure and is not general.** A row is about 418
+bytes, and there is one per minute *per distinct (endpoint, model, agent, provenance)*. A laptop
+writes rows only for minutes with traffic, which is where 10 MB comes from. Continuous traffic
+populates all 1,440 minutes of a day:
+
+| Distinct combinations per minute | Per day | Per 30 days |
+|---|---|---|
+| 2 | 1.2 MB | 36 MB |
+| 8 | 4.8 MB | 144 MB |
+| 64 (the per-minute cap) | 38.5 MB | 1.16 GB |
+
+Size a mounted volume from that table, not from the laptop number, and lower
+`retention_days` if the top row is closer to your traffic.
+
+**Where that default comes from.** It is **on wherever the ledger can survive a restart** —
+which means either an explicit `cost_ledger.dir` (in Kubernetes, a path on a mounted volume) or
+being started from a config inside `~/.cortex`, which is what a local install is and what both
+`abctl service install` and `--local` do. A resolvable `$HOME` is deliberately *not* enough:
+`HOME=/root` resolves in almost every container, and neither is a leftover `~/.cortex` directory,
+which is not a decision anybody made. A container with neither signal can only write to a layer
+that is discarded on restart, so there it stays off and says why in a startup log line.
+
+That rule replaced an earlier one keyed on `--local`, which was the cause of a real bug: the
+installed service runs `authbridge-proxy --config ~/.cortex/config.yaml` and never `--local`, so
+"on by default" was false for every install. The generated config also writes
+`cost_ledger: {enabled: true}` explicitly, which is now belt-and-braces rather than the
+mechanism — a config generated before that was added still gets the ledger, because the default
+no longer depends on the file. `grep -A1 cost_ledger ~/.cortex/config.yaml` shows which you
+have.
+
+It exists because the in-memory counters are a 6-hour ring, and the proxy restarts several
+times a day. Without the ledger, both `today` and `7d` are still answered — from the ring's
+maximum window, with the response's own `window` field naming the span that was actually
+covered rather than the one you asked for. So the figures stay honest and get much smaller:
+six hours of a day, and six hours of a week.
+
+**What is in the files.** One JSON line per minute per (endpoint, model, agent,
+provenance): the host, the model name, the calling agent's User-Agent, token counts,
+dollar figures and a timestamp. **No prompt content, no completions, no tool arguments** —
+that is a promise a test asserts against the serialized bytes, not a convention.
+
+**Who can read them.** Anything that can read your home directory, and anything that can
+reach the session API, which is **unauthenticated** (the proxy logs `UNAUTHENTICATED; contains
+raw user content; never expose via ingress` when it starts). On a laptop it binds to localhost.
+
+`abctl` is not yet one of those readers, and the distinction is worth being exact about:
+`GET /v1/usage` reaches these files only for the symbolic windows `today` and `7d`, and
+`apiclient.GetUsage` takes a duration, so every view abctl draws today is served from the
+6-hour ring instead. Reading the ledger from abctl is the next step, not this one.
+Nothing about the ledger makes that worse, but "my spend is on disk and readable" is worth
+knowing rather than discovering.
+
+**To turn it off**, in `~/.cortex/config.yaml`:
+
+```yaml
+cost_ledger:
+  enabled: false
+```
+
+then `abctl service restart`.
+
+**The setting takes effect on restart, not on reload.** The running proxy watches that file
+and hot-reloads most of it, but the ledger is opened once at startup, so a `cost_ledger`
+edit is *refused* rather than quietly accepted: the reload fails, `LastError` names
+`cost_ledger`, and nothing in the block changes until the proxy restarts. That refusal
+applies to the whole save — anything else edited in the same pass is refused with it —
+which is deliberate. It used to be accepted, meaning the reload reported success and
+`/config` served `enabled: false` while the startup writer kept appending under the old
+retention. A restart costs the requests in flight and not the sessions themselves (see
+*Re-running the installer is safe* for the measurements), so the edit is cheap — but it is
+still worth batching with any other change that needs one.
+
+Turning it off stops new files being written; it does not delete the ones already there.
+`rm -rf ~/.cortex/cost` does that.
+
+**Expired files are renamed before they are deleted**, so you may see
+`2026-08-01.jsonl.expired` in that directory. Retention is counted back from a clock the proxy
+cannot verify, and a host clock that steps forward — then records a day file at the wrong date
+— makes a wrong cutoff indistinguishable from time having genuinely passed. A condemned file is
+therefore invisible to every query but kept until a *second* prune agrees, and **restored if
+the cutoff moves back**, so a clock fault costs a delay in retention rather than your cost
+history. The cost is disk: between the two passes the directory can hold up to two retention
+windows — double whichever row of the sizing table above matches your traffic — and
+`rm ~/.cortex/cost/*.expired` is always safe.
+
+Two other knobs, same restart rule:
+
+| Setting | Default | Notes |
+|---|---|---|
+| `cost_ledger.dir` | `~/.cortex/cost` | Must be an absolute path. A relative one is refused, because it would resolve against whatever directory the proxy started from |
+| `cost_ledger.retention_days` | 30 | Minimum **9** when set. `window=7d` is a rolling 7×24h, not seven calendar days, so it can open **nine** local day files: one extra because a rolling span starts part-way through a date, and one more because a spring-forward week is 167 hours, so the span reaches an hour further back. A shorter retention answers `window:"7d"` over a partial week with nothing saying so |
 
 ## `abctl: command not found`
 
@@ -383,7 +483,7 @@ enable` puts it back.
 ```sh
 abctl configure claude-code disable   # 1. unwire Claude Code
 abctl service uninstall               # 2. stop it and remove the service
-rm -rf ~/.cortex                      # 3. config, CA, logs, abctl's UI settings
+rm -rf ~/.cortex                      # 3. config, CA, logs, cost history, abctl's UI settings
 rm -f ~/.local/bin/abctl ~/.local/bin/authbridge-proxy
 ```
 

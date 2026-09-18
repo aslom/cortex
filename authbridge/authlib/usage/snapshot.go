@@ -361,6 +361,26 @@ type Degraded struct {
 	// line by an unbounded amount: the rest of that file is missing, and a file holds a
 	// whole day.
 	TruncatedDays int64 `json:"truncatedDays,omitempty"`
+	// DroppedRowsTotal is rows the WRITER lost: a failed append, or an enqueue dropped because the
+	// queue was full while the filesystem stalled. Cumulative for the life of the process, which the
+	// name says because it cannot be anything else — a drop is a fact about the writer, it happened
+	// once, and no later read can rediscover it, so attributing it to whichever read happened to
+	// notice would be a fiction.
+	//
+	// THE WRITE SIDE OF THIS OBJECT, which had only the read side. A day that lost a minute to ENOSPC
+	// served a short total under priced:true with no caveat at all — exactly the silence this struct
+	// was added to end, on the half nobody wired up. Compare across polls for a rate; a non-zero
+	// value at all means some total below is short.
+	DroppedRowsTotal int64 `json:"droppedRowsTotal,omitempty"`
+	// UnreadableDays is how many day files could not be opened or scanned at all — a
+	// permission change, a vanished mount, an IO error on the first read.
+	//
+	// THE WORST OF THE THREE, and the one this struct was missing. A producer reports a
+	// caveat when any of them is non-zero, so a read whose only fault was an unopenable
+	// day serialised as `"degraded":{}` — every field omitempty, nothing quantified — which
+	// says "something was wrong" and withholds what. A whole day of spend is missing on
+	// this path, which is more than a truncated file loses.
+	UnreadableDays int64 `json:"unreadableDays,omitempty"`
 }
 
 // Reconcilable reports whether a client can reconcile this group's series against
@@ -669,8 +689,8 @@ const Window7dSpan = 7 * 24 * time.Hour
 // TestParseWindowSpec_SevenDaysTouchesAtMostWindow7dLocalDays pins the ordinary week and
 // TestParseWindowSpec_ASpringForwardWeekReachesTheNinthLocalDate pins the week that forced the
 // second +1. The agreement with config's retention floor is pinned on the CONFIG side, by
-// TestCostLedgerConfig_TheFloorCoversEveryDayTheWindowTouches — which arrives with the
-// cost_ledger settings themselves and cannot be cited from here until it does.
+// TestCostLedgerConfig_TheFloorCoversEveryDayTheWindowTouches, which this change adds along with the
+// cost_ledger settings it guards.
 const Window7dLocalDays = int(Window7dSpan/(24*time.Hour)) + 2
 
 // Spec is a parsed window request. Either Dur is set (a fixed length the ring can
@@ -752,6 +772,102 @@ func ParseWindowSpec(s string, now time.Time) (Spec, error) {
 	return Spec{Label: label, Dur: d}, nil
 }
 
+// resolutionError is a resolution rejection that knows whether its reason came from the WINDOW.
+//
+// A TYPE RATHER THAN A SENTINEL PER CASE, because the caller's question is "did this bound come from
+// a window the requester actually named?" and there are two rejections for which the answer is no —
+// the span being too short, and the span not dividing evenly. The first version of this exported one
+// sentinel for the first of them, so the second still reached a caller as an unclassifiable
+// errors.New: window=7d&resolution=7m was refused because 6h does not divide by 7m, even though 7m
+// divides seven days exactly and the ledger path never reads the resolution at all.
+//
+// Keeping the flag on the error means a FIFTH check has to choose a side here, in the constructor,
+// instead of being classified by a switch somewhere else that nobody updates.
+type resolutionError struct {
+	msg string
+	// cause is which window-dependent rejection fired, or ResolutionWindowNone. Not a boolean:
+	// a caller restating these has to say WHICH bound the served span broke, and one flag let a
+	// message written for "too coarse" be reused for "does not divide" — where the requested
+	// resolution was 51x FINER than the ceiling that message quotes, so the restatement named a
+	// bound the caller had not hit. That is the defect the restatement exists to prevent, arriving
+	// through the mechanism built to prevent it.
+	cause ResolutionWindowReason
+}
+
+func (e *resolutionError) Error() string { return e.msg }
+
+// ResolutionWindowReason names WHY a resolution was rejected against a window, for a caller that has
+// to explain it in terms of a span the requester never named.
+type ResolutionWindowReason int
+
+const (
+	// ResolutionWindowNone: the rejection was about the resolution alone — unparseable, finer than
+	// the storage bucket, or not a multiple of it — and its own wording is already correct.
+	ResolutionWindowNone ResolutionWindowReason = iota
+	// ResolutionTooCoarseForWindow: the resolution is wider than the span being served.
+	ResolutionTooCoarseForWindow
+	// ResolutionIndivisibleByWindow: the resolution fits, but does not divide the span evenly, so the
+	// newest bucket would be narrower than the width reported for it.
+	ResolutionIndivisibleByWindow
+)
+
+// ResolutionWindowCause reports which window-dependent rejection produced err, or
+// ResolutionWindowNone.
+//
+// ONE FUNCTION RATHER THAN A PREDICATE PLUS A LOOKUP, so a caller cannot ask "was it the window?"
+// without being handed the answer to "which one?". The version this replaces answered only the first
+// question, and the caller then wrote one message for both.
+func ResolutionWindowCause(err error) ResolutionWindowReason {
+	var re *resolutionError
+	if errors.As(err, &re) {
+		return re.cause
+	}
+	return ResolutionWindowNone
+}
+
+// parseResolutionAgainstStorage runs the checks that hold for ANY window: the value parses, and it is
+// a whole number of storage buckets. Both callers start here, so the split is where the two kinds of
+// rejection are separated rather than a fact restated in two places.
+func parseResolutionAgainstStorage(s string) (time.Duration, error) {
+	if s == "" {
+		return BucketWidth, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		// Does not echo the caller's value — see ParseGroup.
+		return 0, &resolutionError{msg: "bad resolution (want a duration such as 1m, 5m or 30m)"}
+	}
+	if d < BucketWidth {
+		return 0, &resolutionError{msg: fmt.Sprintf("resolution %s is finer than the %s storage bucket", d, BucketWidth)}
+	}
+	if d%BucketWidth != 0 {
+		return 0, &resolutionError{msg: fmt.Sprintf("resolution %s is not a multiple of %s", d, BucketWidth)}
+	}
+	return d, nil
+}
+
+// ParseResolutionUnbounded validates a resolution that will not be used to slice anything, so only
+// the checks that do not depend on a window apply.
+//
+// FOR THE WINDOW THAT IS ANSWERED AS ONE BUCKET. A symbolic window served from the cost ledger
+// returns a single bucket spanning the whole window and never reads the resolution — so validating it
+// against the RING's maximum refused requests that were fine: window=7d&resolution=7m came back 400
+// because 6h does not divide by 7m, while 7m divides seven days exactly (1440 buckets). The bound was
+// a property of a window the caller had not named and of a code path that was not going to run.
+//
+// The two remaining checks are still meaningful, because they are about the STORAGE bucket rather
+// than the window: a resolution finer than BucketWidth or not a multiple of it cannot be honoured by
+// any window. And a malformed value is still refused rather than ignored, so a typo in a parameter
+// this path does not read is not silently accepted.
+//
+// NOT ParseResolution(s, MaxWindow), which is the shape I first wrote and which reproduces the very
+// defect: MaxWindow is 360 minutes, so a 7m resolution fails the divisibility check against it just
+// as it did against the 6h window. "Unbounded" has to mean the checks are skipped, not that a wide
+// window is passed.
+func ParseResolutionUnbounded(s string) (time.Duration, error) {
+	return parseResolutionAgainstStorage(s)
+}
+
 // ParseResolution validates a resolution parameter — the width of the buckets
 // the caller wants back, as opposed to the window's total span.
 //
@@ -764,22 +880,24 @@ func ParseWindowSpec(s string, now time.Time) (Spec, error) {
 // than BucketWidth is an error rather than a silent upgrade: returning coarser
 // data than asked for would make a client's axis labels wrong.
 func ParseResolution(s string, window time.Duration) (time.Duration, error) {
-	if s == "" {
-		return BucketWidth, nil
-	}
-	d, err := time.ParseDuration(s)
+	d, err := parseResolutionAgainstStorage(s)
 	if err != nil {
-		// Does not echo the caller's value — see ParseGroup.
-		return 0, errors.New("bad resolution (want a duration such as 1m, 5m or 30m)")
-	}
-	if d < BucketWidth {
-		return 0, fmt.Errorf("resolution %s is finer than the %s storage bucket", d, BucketWidth)
-	}
-	if d%BucketWidth != 0 {
-		return 0, fmt.Errorf("resolution %s is not a multiple of %s", d, BucketWidth)
+		return 0, err
 	}
 	if d > window {
-		return 0, fmt.Errorf("resolution %s exceeds the %s window", d, window)
+		// CLASSIFIED, because a caller has to tell the two WINDOW-dependent rejections from the three
+		// that are about the resolution alone — and from each other. sessionapi restates these for a
+		// symbolic window, where the span validated against is the ring's maximum rather than the
+		// seven days the caller named; the others must keep their own wording, or the restatement
+		// points at a bound the caller never hit.
+		//
+		// A SIXTH CHECK BELONGS HERE, with a cause chosen deliberately: ResolutionWindowNone if it is
+		// about the resolution alone, a new reason if it is about the span. Leaving it unclassified is
+		// how the divisibility case below stayed invisible for a round.
+		return 0, &resolutionError{
+			msg:   fmt.Sprintf("resolution %s exceeds the %s window", d, window),
+			cause: ResolutionTooCoarseForWindow,
+		}
 	}
 	// The window must divide by the resolution, or the NEWEST bucket is a lie.
 	//
@@ -799,7 +917,11 @@ func ParseResolution(s string, window time.Duration) (time.Duration, error) {
 	// above interpolate only a re-stringified time.Duration, which cannot carry
 	// arbitrary bytes; this one needs neither operand to be actionable.
 	if window%d != 0 {
-		return 0, errors.New("resolution does not divide the window evenly (the newest bucket would be shorter than the width reported for it)")
+		return 0, &resolutionError{
+			msg: "resolution does not divide the window evenly (the newest bucket would be " +
+				"shorter than the width reported for it)",
+			cause: ResolutionIndivisibleByWindow,
+		}
 	}
 	return d, nil
 }
@@ -929,9 +1051,20 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 	// "6h0m0s" is the example it gives. Whole buckets rather than the raw duration for the same
 	// reason BucketSeconds is rounded: a 90s request is answered with one bucket, so it covers 1m.
 	covered := time.Duration(n) * BucketWidth
+	// AND THE BUCKET WIDTH CANNOT EXCEED THE WINDOW IT SITS IN. BucketSeconds was the requested
+	// resolution verbatim while Window is derived, so the pair could contradict each other on a
+	// SHORTENED span: window=today at 00:30 with resolution=1h came back window "30m0s" with
+	// bucketSeconds 3600 — fold packs the thirty one-minute buckets into one partial group covering
+	// half an hour and labels it six times its width, which is the mislabel Window's own derivation
+	// three lines above exists to prevent. The divisibility check cannot catch it, because 1h divides
+	// the 6h span the resolution is validated against; only the served span is shorter.
+	bucketWidth := resolution
+	if bucketWidth > covered {
+		bucketWidth = covered
+	}
 	out := Snapshot{
 		Window:        covered.String(),
-		BucketSeconds: int(resolution / time.Second),
+		BucketSeconds: int(bucketWidth / time.Second),
 		Session:       sessionID,
 		Group:         group,
 		Buckets:       make([]Bucket, 0, n),
