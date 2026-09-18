@@ -5,7 +5,6 @@ package session
 
 import (
 	"log/slog"
-	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
 // DefaultSessionID is used when no explicit A2A SessionID is present and no
@@ -47,6 +47,31 @@ type entry struct {
 	// rather than Seq for exactly this reason — see abctl's applyOlderPage. See also
 	// pipeline.SessionEvent.Seq.
 	nextSeq uint64
+
+	// cost and avoided are RUNNING TOTALS over Events, maintained by Append and read by
+	// ListSessions. Micros, in the units usage.Counts uses.
+	//
+	// INCREMENTAL BECAUSE THE ALTERNATIVE WAS A REGRESSION. These were first summed on
+	// demand, by decoding every event of every session inside ListSessions. That runs under
+	// the read lock, abctl re-fetches /v1/sessions every two seconds, and the event list is
+	// UNCAPPED by default (see New) — so a long session put an unbounded number of
+	// json.Unmarshal calls on a timer, in front of a lock whose writer side is
+	// Store.Append on the proxy's request path. sumTokens beside it is a pointer-deref
+	// loop; this was parsing. costledger.Writer.Record hoists its own phase guard above
+	// costevent.Record for exactly this reason.
+	//
+	// usage.CostSum, not two int64s: it saturates rather than wrapping AND records that it
+	// did, so a clamped lifetime total arrives labelled instead of as a plausible
+	// ~$9.2 trillion. It is the one saturating money accumulator in this codebase; a local
+	// copy here would be a second implementation of that rule with the label dropped.
+	//
+	// MAINTAINED IN LOCKSTEP WITH Events, including on trim: whatever leaves the slice is
+	// subtracted, so these stay equal to sumCost(Events) — the invariant
+	// TestAppend_RunningTotalsMatchAFullRecomputation exists to hold. That is what keeps
+	// the COST column scoped exactly like the TOKENS column beside it, which is the claim
+	// SessionSummary.CostMicros makes.
+	cost    usage.CostSum
+	avoided usage.CostSum
 }
 
 // MaxSessionIDLen is the longest session ID the store keeps intact; longer ids
@@ -214,6 +239,13 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 		sessionID = sessionID[:MaxSessionIDLen]
 	}
 
+	// BEFORE THE LOCK. This is a json.Unmarshal of the event's plugin map, the most
+	// expensive thing on this path, and it touches no store state — so it has no business
+	// inside a critical section that blocks every reader and every other appender. Doing it
+	// here is also what lets ListSessions read two integers instead of decoding every event
+	// of every session on abctl's two-second poll; see entry.cost.
+	money := moneyOf(&event)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -246,6 +278,10 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 	sess.intern.InternEvent(&event)
 
 	sess.Events = append(sess.Events, event)
+	// In lockstep with the append above, and subtracted again by the trim below if this
+	// event is ever evicted.
+	sess.cost.Add(money.cost)
+	sess.avoided.Add(money.avoided)
 	sess.UpdatedAt = now
 	s.activeID = sessionID
 
@@ -261,7 +297,19 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 	}
 
 	if s.maxEvents > 0 && len(sess.Events) > s.maxEvents {
-		sess.Events = trimEventsPinIntent(sess.Events, s.maxEvents)
+		var dropped []pipeline.SessionEvent
+		sess.Events, dropped = trimEventsPinIntent(sess.Events, s.maxEvents)
+		// Subtracted, not recomputed. A full re-sum here would be O(maxEvents) unmarshals
+		// on every append past the cap — worse than the on-demand version this replaced,
+		// in the one configuration that opts into a cap. One decode per evicted event is
+		// one decode per append in the steady state.
+		//
+		// Sub, not Add(-x): see usage.CostSum.Sub for the math.MinInt64 case it exists for.
+		for i := range dropped {
+			m := moneyOf(&dropped[i])
+			sess.cost.Sub(m.cost)
+			sess.avoided.Sub(m.avoided)
+		}
 	}
 
 	// Evict oldest session if cap is exceeded.
@@ -306,9 +354,15 @@ func isIntentEvent(e pipeline.SessionEvent) bool {
 //
 // Caller guarantees len(events) > maxEvents and maxEvents > 0;
 // otherwise this is a no-op shape (returns events unchanged).
-func trimEventsPinIntent(events []pipeline.SessionEvent, maxEvents int) []pipeline.SessionEvent {
+//
+// RETURNS WHAT IT DROPPED as well as what it kept, so the caller can subtract those events
+// from the session's running money totals. Derived here rather than by the caller
+// re-deriving it: the pinned-intent branch does not drop a plain prefix, and a second
+// implementation of that rule would drift from this one and silently leave a session's cost
+// counting money it no longer holds events for.
+func trimEventsPinIntent(events []pipeline.SessionEvent, maxEvents int) (kept, dropped []pipeline.SessionEvent) {
 	if maxEvents <= 0 || len(events) <= maxEvents {
-		return events
+		return events, nil
 	}
 	excess := len(events) - maxEvents
 
@@ -325,7 +379,7 @@ func trimEventsPinIntent(events []pipeline.SessionEvent, maxEvents int) []pipeli
 		// No protected event in the eviction prefix; FIFO trim.
 		trimmed := make([]pipeline.SessionEvent, maxEvents)
 		copy(trimmed, events[excess:])
-		return trimmed
+		return trimmed, events[:excess]
 	}
 
 	// Protected intent is in the eviction prefix. Build the result
@@ -338,7 +392,17 @@ func trimEventsPinIntent(events []pipeline.SessionEvent, maxEvents int) []pipeli
 	out = append(out, events[intentIdx])
 	tailStart := len(events) - (maxEvents - 1)
 	out = append(out, events[tailStart:]...)
-	return out
+	// Everything before the surviving tail EXCEPT the pinned intent, which moved to the
+	// front of out rather than being evicted. Built by exclusion so it cannot disagree with
+	// what was kept: len(gone) is exactly excess either way.
+	gone := make([]pipeline.SessionEvent, 0, tailStart-1)
+	for i := 0; i < tailStart; i++ {
+		if i == intentIdx {
+			continue
+		}
+		gone = append(gone, events[i])
+	}
+	return out, gone
 }
 
 // AddRecorder registers a Recorder. Call before the store serves traffic; it is
@@ -495,7 +559,25 @@ type SessionSummary struct {
 	// invariant on costevent.Event.Avoided. Reported beside it because the two answer
 	// different questions about the same session.
 	AvoidedMicros int64 `json:"avoidedMicros,omitempty"`
-	Active        bool  `json:"active"` // true if this is the most recently updated session
+	// Saturated says the two figures above are FLOORS: an addition into one of them reached
+	// the int64 ceiling and was clamped rather than allowed to wrap.
+	//
+	// It exists because the clamp on its own is not honest. MaxInt64 micros is about
+	// $9.2 trillion, which renders as a perfectly well-formed dollar amount and is
+	// indistinguishable from a measured one — "a clamped figure is a wrong number wearing a
+	// right label", which is why pricing.MicrosFromUSD refuses an out-of-range figure
+	// instead of clamping it. Here the sum cannot be refused (the money was really spent),
+	// so the figure is clamped and this field is what makes that admissible.
+	//
+	// ONE FLAG FOR BOTH, on usage.Counts.Saturated's reasoning: it means "read every money
+	// figure here as a bound", and a second flag for the same fact would let a client
+	// believe one while the other contradicted it.
+	//
+	// Practically unreachable — it takes over a thousand maximal per-request figures in one
+	// session — and carried anyway, because the alternative is a number no consumer can
+	// tell apart from a real one.
+	Saturated bool `json:"saturated,omitempty"`
+	Active    bool `json:"active"` // true if this is the most recently updated session
 }
 
 // ListSessions returns summaries for every non-expired session. Order is
@@ -510,16 +592,22 @@ func (s *Store) ListSessions() []SessionSummary {
 		if s.isExpired(sess, now) {
 			continue
 		}
-		cost, avoided := sumCost(sess.Events)
 		out = append(out, SessionSummary{
-			ID:            id,
-			CreatedAt:     sess.CreatedAt,
-			UpdatedAt:     sess.UpdatedAt,
-			EventCount:    len(sess.Events),
-			TotalTokens:   sumTokens(sess.Events),
-			CostMicros:    cost,
-			AvoidedMicros: avoided,
-			Active:        id == s.activeID,
+			ID:         id,
+			CreatedAt:  sess.CreatedAt,
+			UpdatedAt:  sess.UpdatedAt,
+			EventCount: len(sess.Events),
+			// Still a walk, and deliberately left as one: it is a pointer deref per event
+			// with no allocation, where the money figures below needed a JSON unmarshal.
+			TotalTokens: sumTokens(sess.Events),
+			// Read, not computed. Append maintains these; see entry.cost.
+			CostMicros:    sess.cost.Micros,
+			AvoidedMicros: sess.avoided.Micros,
+			// Either total having clamped makes BOTH figures on this row bounds rather than
+			// sums, which is why one flag covers them — the same reasoning
+			// usage.Counts.Saturated gives for covering every money field in a Counts.
+			Saturated: sess.cost.Saturated || sess.avoided.Saturated,
+			Active:    id == s.activeID,
 		})
 	}
 	// Most recently updated first.
@@ -546,56 +634,69 @@ func sumTokens(events []pipeline.SessionEvent) int {
 	return total
 }
 
-// sumCost aggregates one session's settled cost and its avoided cost, both in micros.
+// eventMoney is one event's contribution to a session's running totals.
 //
-// TWO RETURNS FROM ONE PASS because both come off the same record, and costevent.Record is a
-// JSON unmarshal: two functions would decode every event in every session twice on a call
-// that already runs under the store's read lock for every session at once.
-//
-// Priced dollars only in the first return — costevent.Event.Priced is the one predicate for
-// that, so a refused or unsettled figure contributes nothing here exactly as it contributes
-// nothing to /v1/usage. The second return ignores pricedness on purpose: a request that could
-// not be priced still had prompt tokens removed. See usage.Aggregator.costOf, which this
-// deliberately mirrors, and note the two totals must never be added together.
-//
-// SATURATING, not wrapping. A session's event list is capped, but the cap is large and a
-// gateway-reported figure is bounded per request rather than per session, so an unchecked
-// `+=` over a hostile stream of maximal figures could wrap a lifetime total negative. The
-// aggregate has usage.Counts.Add for this; here it is two lines, and the ceiling is the same
-// reasoning that function's doc spells out.
-func sumCost(events []pipeline.SessionEvent) (cost, avoided int64) {
-	for i := range events {
-		// The two phases that carry a settled figure, matching what the aggregator and the
-		// durable ledger both fold. SessionResponse is the ordinary path; a DENIAL can still
-		// carry one, because the proxy charges for a response whose body never arrived — so
-		// restricting this to sumTokens' response-only rule would drop real dollars. It adds
-		// no token skew against TotalTokens above: a denial carries no Inference extension, so
-		// those events contribute zero tokens either way.
-		if events[i].Phase != pipeline.SessionResponse && events[i].Phase != pipeline.SessionDenied {
-			continue
-		}
-		ev, ok := costevent.Record(&events[i])
-		if !ok {
-			continue
-		}
-		if ev.Priced() {
-			cost = addSat(cost, ev.Micros())
-		}
-		avoided = addSat(avoided, ev.TotalAvoidedMicros())
-	}
-	return cost, avoided
+// Decoded ONCE, by Append, and never again. See Store.Append for why that matters and
+// entry.cost for what holds the result.
+type eventMoney struct {
+	cost    int64
+	avoided int64
 }
 
-// addSat adds b to a, clamping at the int64 ceiling instead of wrapping.
+// moneyOf reads one event's settled cost and its avoided cost, in micros.
 //
-// Both inputs are non-negative here (costevent bounds each through
-// pricing.MicrosFromUSD, which refuses a negative), so only the upper bound can be
-// reached and one comparison covers it.
-func addSat(a, b int64) int64 {
-	if a > math.MaxInt64-b {
-		return math.MaxInt64
+// ONE DECODE FOR BOTH, because both come off the same record and costevent.Record is a JSON
+// unmarshal. Asking for them separately would parse every plugin map twice.
+//
+// Priced dollars only in cost — costevent.Event.Priced is the one predicate for that, so a
+// refused or unsettled figure contributes nothing here exactly as it contributes nothing to
+// /v1/usage. avoided ignores pricedness on purpose: a request that could not be priced still
+// had prompt tokens removed. See usage.Aggregator.costOf, which this deliberately mirrors,
+// and note the two must never be added together.
+//
+// CALLED OUTSIDE THE STORE'S LOCK. It touches no store state and takes the event by pointer
+// only to avoid copying it, so Append resolves it before acquiring mu — the unmarshal is the
+// most expensive thing on that path and it does not belong inside the critical section.
+func moneyOf(e *pipeline.SessionEvent) eventMoney {
+	// The two phases that carry a settled figure, matching what the aggregator and the
+	// durable ledger both fold. SessionResponse is the ordinary path; a DENIAL can still
+	// carry one, because the proxy charges for a response whose body never arrived — so
+	// restricting this to sumTokens' response-only rule would drop real dollars. It adds no
+	// token skew against TotalTokens: a denial carries no Inference extension, so those
+	// events contribute zero tokens either way.
+	//
+	// CHECKED BEFORE THE DECODE, matching costledger.Writer.Record's own hoisted guard and
+	// for the same reason it gives: a request event's plugin map must not be parsed to
+	// answer a question the phase already settles.
+	if e.Phase != pipeline.SessionResponse && e.Phase != pipeline.SessionDenied {
+		return eventMoney{}
 	}
-	return a + b
+	ev, ok := costevent.Record(e)
+	if !ok {
+		return eventMoney{}
+	}
+	var m eventMoney
+	if ev.Priced() {
+		m.cost = ev.Micros()
+	}
+	m.avoided = ev.TotalAvoidedMicros()
+	return m
+}
+
+// sumCost aggregates one session's settled cost and its avoided cost by walking every event.
+//
+// NOT ON ANY SERVING PATH. ListSessions reads the running totals Append maintains; this is
+// the REFERENCE DEFINITION those totals must agree with, kept because an incremental total is
+// only as good as the full recomputation it claims to equal, and
+// TestAppend_RunningTotalsMatchAFullRecomputation asserts exactly that after appends, trims
+// and evictions. Deleting it would leave the increments with nothing to check them against.
+func sumCost(events []pipeline.SessionEvent) (cost, avoided usage.CostSum) {
+	for i := range events {
+		m := moneyOf(&events[i])
+		cost.Add(m.cost)
+		avoided.Add(m.avoided)
+	}
+	return cost, avoided
 }
 
 // ActiveSession returns the most recently updated session ID.

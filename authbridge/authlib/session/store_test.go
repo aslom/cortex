@@ -694,18 +694,23 @@ func TestSumCost(t *testing.T) {
 	cost, avoided := sumCost(evs)
 	// 0.25 + 0.05. The request event's $99 is the discriminator: 99_300_000 means the
 	// request half was counted too.
-	if want := int64(300_000); cost != want {
-		t.Errorf("cost = %d, want %d", cost, want)
+	if want := int64(300_000); cost.Micros != want {
+		t.Errorf("cost = %d, want %d", cost.Micros, want)
 	}
 	// 0.01 + 0.02, the priced and the unpriced request alike. 30_000 with the $5 projected
 	// entry excluded — 5_030_000 would mean observe-mode figures are being reported as
 	// savings.
-	if want := int64(30_000); avoided != want {
-		t.Errorf("avoided = %d, want %d", avoided, want)
+	if want := int64(30_000); avoided.Micros != want {
+		t.Errorf("avoided = %d, want %d", avoided.Micros, want)
+	}
+	// Nothing here is anywhere near the ceiling, so neither figure may claim to be a bound.
+	if cost.Saturated || avoided.Saturated {
+		t.Errorf("Saturated set on ordinary figures (%d, %d): every row would render as a floor",
+			cost.Micros, avoided.Micros)
 	}
 
-	if c, a := sumCost(nil); c != 0 || a != 0 {
-		t.Errorf("sumCost(nil) = %d, %d; want 0, 0", c, a)
+	if c, a := sumCost(nil); c.Micros != 0 || a.Micros != 0 {
+		t.Errorf("sumCost(nil) = %d, %d; want 0, 0", c.Micros, a.Micros)
 	}
 }
 
@@ -727,12 +732,84 @@ func TestSumCost_SaturatesRatherThanWrapping(t *testing.T) {
 	}
 
 	cost, _ := sumCost(evs)
-	if cost < 0 {
+	if cost.Micros < 0 {
 		t.Errorf("cost = %d: a lifetime total wrapped negative, which is the one answer a "+
-			"cost column must never print", cost)
+			"cost column must never print", cost.Micros)
 	}
-	if cost != math.MaxInt64 {
-		t.Errorf("cost = %d, want the int64 ceiling: the sum should clamp there", cost)
+	if cost.Micros != math.MaxInt64 {
+		t.Errorf("cost = %d, want the int64 ceiling: the sum should clamp there", cost.Micros)
+	}
+	// THE CLAMP IS NOT ENOUGH ON ITS OWN, and this is the assertion that says so. MaxInt64
+	// micros is about $9.2 trillion — a well-formed dollar amount no consumer can tell apart
+	// from a measured one. pricing.MicrosFromUSD refuses an out-of-range figure rather than
+	// clamping it for exactly this reason; a sum cannot refuse (the money was really spent),
+	// so it clamps AND says it clamped.
+	if !cost.Saturated {
+		t.Error("the clamped total is not labelled: $9.2 trillion would render as a measured " +
+			"figure, which is a wrong number wearing a right label")
+	}
+}
+
+// The running totals Append maintains must equal what a full walk computes, after appends,
+// after a trim, and after a trim that pins an intent event.
+//
+// THIS IS THE INVARIANT THAT MAKES THE INCREMENT SAFE. ListSessions stopped decoding every
+// event on every poll — that was an unbounded json.Unmarshal loop under the read lock, on
+// abctl's two-second timer — and reads two integers instead. An incremental total is only as
+// good as the recomputation it claims to equal, and the trim is where they can part company:
+// trimEventsPinIntent does not drop a plain prefix when it pins an intent, so a caller
+// re-deriving the dropped set would subtract the wrong events.
+func TestAppend_RunningTotalsMatchAFullRecomputation(t *testing.T) {
+	priced := costRecord(t, costevent.Event{CostUSD: 0.25, Settled: true, Provenance: "configured",
+		Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 100, USD: 0.01, Tier: "input"}}})
+
+	for _, tc := range []struct {
+		name      string
+		maxEvents int
+		appends   int
+		// intentFirst puts an inbound A2A request at the front, which trimEventsPinIntent
+		// pins in place rather than evicting — the branch that does not drop a prefix.
+		intentFirst bool
+	}{
+		{name: "uncapped", maxEvents: 0, appends: 40},
+		{name: "trimmed", maxEvents: 5, appends: 40},
+		{name: "trimmed with a pinned intent", maxEvents: 5, appends: 40, intentFirst: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := New(5*time.Minute, tc.maxEvents, 0)
+			defer st.Close()
+			if tc.intentFirst {
+				st.Append("s1", pipeline.SessionEvent{
+					Direction: pipeline.Inbound, Phase: pipeline.SessionRequest,
+					A2A: &pipeline.A2AExtension{Method: "message/send"},
+				})
+			}
+			for i := 0; i < tc.appends; i++ {
+				st.Append("s1", pipeline.SessionEvent{Phase: pipeline.SessionResponse, Plugins: priced})
+			}
+
+			st.mu.RLock()
+			sess := st.sessions["s1"]
+			wantCost, wantAvoided := sumCost(sess.Events)
+			gotCost, gotAvoided := sess.cost, sess.avoided
+			held := len(sess.Events)
+			st.mu.RUnlock()
+
+			if gotCost.Micros != wantCost.Micros {
+				t.Errorf("running cost = %d over %d held events, full walk says %d — the "+
+					"increment and the events have parted company",
+					gotCost.Micros, held, wantCost.Micros)
+			}
+			if gotAvoided.Micros != wantAvoided.Micros {
+				t.Errorf("running avoided = %d, full walk says %d",
+					gotAvoided.Micros, wantAvoided.Micros)
+			}
+			// And the fixture really did trim, or the trimming cases prove nothing.
+			if tc.maxEvents > 0 && held != tc.maxEvents {
+				t.Fatalf("session holds %d events with maxEvents %d; no trim happened, so the "+
+					"subtraction path was never exercised", held, tc.maxEvents)
+			}
+		})
 	}
 }
 
