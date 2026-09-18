@@ -220,12 +220,13 @@ func spendDrawerRows(snap *usage.Snapshot, keep int) []drawerRow {
 	if snap == nil || len(snap.Buckets) == 0 {
 		return nil
 	}
-	ranked := rankSeriesByCost(snap.Buckets)
-	_, folded := foldTailSeries(snap.Buckets, ranked, keep)
-	if len(ranked) > keep {
-		ranked = ranked[:keep]
-		ranked = append(ranked, seriesKey{label: tailLabel})
-	}
+	// BOTH RETURNS, and the first one is the whole reason to call this rather than truncate the
+	// slice here. foldTailSeries merges an "(other)" the AGGREGATOR already produced — from its
+	// own label capping — into the tail total instead of appending a second band. Hand-rolling
+	// the truncation appended unconditionally, so a snapshot whose Series already held an
+	// "(other)" ranking inside the top three rendered that band TWICE, each carrying the same
+	// merged total: the rows then summed past the strip's headline above them by the whole tail.
+	ranked, folded := foldTailSeries(snap.Buckets, rankSeriesByCost(snap.Buckets), keep)
 
 	totals := make(map[string]usage.Counts, len(ranked))
 	for _, b := range folded {
@@ -239,8 +240,9 @@ func spendDrawerRows(snap *usage.Snapshot, keep int) []drawerRow {
 	for _, s := range ranked {
 		c, ok := totals[s.label]
 		if !ok {
-			// A label the fold dropped — reachable when the tail was empty, so no
-			// "(other)" band was produced for the placeholder appended above.
+			// Defensive only: foldTailSeries returns exactly the labels its folded buckets
+			// carry, so this cannot fire today. It is the guard that stops a future change to
+			// either side rendering a row with no counters behind it.
 			continue
 		}
 		out = append(out, drawerRow{label: s.label, counts: c})

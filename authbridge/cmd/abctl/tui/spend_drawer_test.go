@@ -290,3 +290,58 @@ func rowLabels(rows []drawerRow) []string {
 	}
 	return out
 }
+
+// An "(other)" the AGGREGATOR produced must merge into the tail, not appear beside it.
+//
+// usage caps how many labels it tracks per bucket and folds the rest into its own "(other)"
+// entry, so that label can arrive in the snapshot's Series map — and rank inside the top three,
+// since it is a sum of everything the server dropped. foldTailSeries merges it; the drawer
+// truncated the ranked list by hand and appended a band unconditionally, so the row appeared
+// TWICE, each copy carrying the same merged total. The rows then summed past the strip's
+// headline above them by the whole tail.
+//
+// THE SUM IS THE ASSERTION, not just the row count. Two bands with the same label is a visible
+// oddity; two bands with the same TOTAL is a wrong number, and it is the one a reader would act
+// on. Every existing case here exercises a fold-produced "(other)" only, which is why this
+// survived.
+func TestSpendDrawerRows_AnAggregatorOtherMergesRatherThanDuplicating(t *testing.T) {
+	snap := &usage.Snapshot{
+		Window: "1h", Group: usage.GroupModel, Priced: true,
+		Buckets: []usage.Bucket{{Series: map[string]usage.Counts{
+			"opus":   {Requests: 17, CostMicros: 10_000_000, PricedRequests: 17, PriceableRequests: 17},
+			"sonnet": {Requests: 2, CostMicros: 8_000_000, PricedRequests: 2, PriceableRequests: 2},
+			// The server's own band, ranking SECOND by cost — inside the top three.
+			tailLabel: {Requests: 30, CostMicros: 9_000_000, PricedRequests: 30, PriceableRequests: 30},
+			// And a genuine tail for the fold to merge into it.
+			"haiku":  {Requests: 40, CostMicros: 1_900_000, PricedRequests: 40, PriceableRequests: 40},
+			"gpt-4o": {Requests: 9, CostMicros: 1_000_000, PricedRequests: 9, PriceableRequests: 9},
+		}}},
+	}
+	// The snapshot's own total, which the rows must not exceed.
+	var snapTotal int64
+	for _, b := range snap.Buckets {
+		for _, c := range b.Series {
+			snapTotal += c.CostMicros
+		}
+	}
+
+	rows := spendDrawerRows(snap, spendDrawerSeries)
+
+	seen := 0
+	var rowTotal int64
+	for _, r := range rows {
+		rowTotal += r.counts.CostMicros
+		if r.label == tailLabel {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Errorf("%q appears %d times in %v, want once: two bands both meaning \"the rest\" is "+
+			"indefensible, which is why foldTailSeries merges them", tailLabel, seen, rowLabels(rows))
+	}
+	if rowTotal != snapTotal {
+		t.Errorf("the rows sum to %d micros against a snapshot holding %d (delta %+d): the drawer "+
+			"is reporting more spend than the strip's headline above it",
+			rowTotal, snapTotal, rowTotal-snapTotal)
+	}
+}
