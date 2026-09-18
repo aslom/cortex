@@ -126,8 +126,15 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		//
 		// AND THERE ARE TWO WINDOW-DEPENDENT REJECTIONS, NOT ONE, which the first version of this
 		// missed: the span being too short, and the span not dividing evenly. Asking
-		// usage.IsResolutionWindowError rather than naming a sentinel means a third one is classified
+		// usage.ResolutionWindowCause rather than naming a sentinel means a third one is classified
 		// where it is constructed instead of here.
+		//
+		// AND A MESSAGE PER REASON, which the previous version did not have: one text written for "too
+		// coarse" was used for both, so ?window=7d&resolution=7m — 51x FINER than the ceiling that text
+		// quotes — was told that 6h is the coarsest resolution available. Advice the request already
+		// satisfied, about a bound it never hit, from the very restatement that exists to stop exactly
+		// that. Switching on the cause is what makes reusing the wrong text impossible rather than
+		// merely discouraged.
 		//
 		// AND IT INTERPOLATES NOTHING FROM THE QUERY. The first version of this message put the raw
 		// resolution parameter in the body, which is a reflection primitive on an unauthenticated
@@ -135,11 +142,21 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		// branch runs precisely BECAUSE those bytes failed validation. spec.Label is safe here and
 		// only here: it is one of two constants on the symbolic path, while for a duration window
 		// ParseWindowSpec echoes the caller's own spelling into it.
-		if spec.Symbolic() && usage.IsResolutionWindowError(err) {
-			err = fmt.Errorf("resolution too coarse for window=%s: a symbolic window is answered as "+
-				"one bucket from the cost ledger, or from the ring's %s maximum where there is no "+
-				"ledger, so %s is the coarsest resolution available",
-				spec.Label, usage.MaxWindow, usage.MaxWindow)
+		if spec.Symbolic() {
+			switch usage.ResolutionWindowCause(err) {
+			case usage.ResolutionTooCoarseForWindow:
+				err = fmt.Errorf("resolution too coarse for window=%s: with no cost ledger this window "+
+					"is served from the ring's %s maximum, so %s is the coarsest resolution available",
+					spec.Label, usage.MaxWindow, usage.MaxWindow)
+			case usage.ResolutionIndivisibleByWindow:
+				err = fmt.Errorf("resolution does not divide evenly for window=%s: with no cost ledger "+
+					"this window is served from the ring's %s maximum, and a resolution that does not "+
+					"divide that span leaves the newest bucket narrower than the width reported for it "+
+					"— pick one that divides %s",
+					spec.Label, usage.MaxWindow, usage.MaxWindow)
+			case usage.ResolutionWindowNone:
+				// About the resolution alone. Its own wording is already right.
+			}
 		}
 		writeUsageError(w, err)
 		return

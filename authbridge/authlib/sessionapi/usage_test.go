@@ -1123,20 +1123,52 @@ func TestHandleUsage_ALedgerWindowDoesNotJudgeResolutionAgainstTheRing(t *testin
 		}
 	})
 
+	// WITHOUT A LEDGER THE REFUSAL IS CORRECT, and then the message has to name the RIGHT bound. One
+	// restatement text served both window rejections, so a resolution 51x finer than the ceiling was
+	// told that 6h is the coarsest available — advice the request already satisfied. Asserting only
+	// "names the window" and "does not echo the resolution" accepted that text, which is how this test
+	// locked the defect in for a round: both rows below assert the CAUSE, and that the other cause's
+	// wording is absent.
 	t.Run("without a ledger, the ring's span is what gets sliced", func(t *testing.T) {
-		ts, _ := newTestServer(t, WithUsage(usage.New()))
+		for _, tc := range []struct {
+			name       string
+			resolution string
+			wantSaid   string
+			wantAbsent string
+		}{
+			{
+				name: "too coarse for the span", resolution: "12h",
+				wantSaid: "too coarse", wantAbsent: "divide",
+			},
+			{
+				// 7m divides 7d exactly and is far finer than 6h; what it cannot do is divide 6h.
+				name: "fits but does not divide the span", resolution: "7m",
+				wantSaid: "does not divide", wantAbsent: "coarsest",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ts, _ := newTestServer(t, WithUsage(usage.New()))
 
-		status, body := fetchUsage(t, ts.URL, "?window=7d&resolution=7m")
+				status, body := fetchUsage(t, ts.URL, "?window=7d&resolution="+tc.resolution)
 
-		if status != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400: the ring serves its maximum here and 7m cannot label those buckets honestly", status)
-		}
-		// Restated, because the span it could not divide is not the one the caller named.
-		if !strings.Contains(body, "window=7d") {
-			t.Errorf("body %q does not name the window the caller asked for", body)
-		}
-		if strings.Contains(body, "7m") {
-			t.Errorf("body %q echoes the caller's resolution parameter", body)
+				if status != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400: the ring serves its maximum here", status)
+				}
+				if !strings.Contains(body, tc.wantSaid) {
+					t.Errorf("body %q does not state the actual cause (%q)", body, tc.wantSaid)
+				}
+				if strings.Contains(body, tc.wantAbsent) {
+					t.Errorf("body %q gives the OTHER rejection's reason (%q), which names a bound this request did not hit",
+						body, tc.wantAbsent)
+				}
+				// Restated in terms of the window the caller named, and never echoing their bytes.
+				if !strings.Contains(body, "window=7d") {
+					t.Errorf("body %q does not name the window the caller asked for", body)
+				}
+				if strings.Contains(body, tc.resolution) {
+					t.Errorf("body %q echoes the caller's resolution parameter", body)
+				}
+			})
 		}
 	})
 }

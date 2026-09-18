@@ -774,22 +774,44 @@ func ParseWindowSpec(s string, now time.Time) (Spec, error) {
 // instead of being classified by a switch somewhere else that nobody updates.
 type resolutionError struct {
 	msg string
-	// fromWindow is true when the rejection depends on the span being served rather than on the
-	// resolution alone. IsResolutionWindowError is how callers ask.
-	fromWindow bool
+	// cause is which window-dependent rejection fired, or ResolutionWindowNone. Not a boolean:
+	// a caller restating these has to say WHICH bound the served span broke, and one flag let a
+	// message written for "too coarse" be reused for "does not divide" — where the requested
+	// resolution was 51x FINER than the ceiling that message quotes, so the restatement named a
+	// bound the caller had not hit. That is the defect the restatement exists to prevent, arriving
+	// through the mechanism built to prevent it.
+	cause ResolutionWindowReason
 }
 
 func (e *resolutionError) Error() string { return e.msg }
 
-// IsResolutionWindowError reports whether a ParseResolution error's reason depends on the window it
-// was validated against, rather than on the resolution alone.
+// ResolutionWindowReason names WHY a resolution was rejected against a window, for a caller that has
+// to explain it in terms of a span the requester never named.
+type ResolutionWindowReason int
+
+const (
+	// ResolutionWindowNone: the rejection was about the resolution alone — unparseable, finer than
+	// the storage bucket, or not a multiple of it — and its own wording is already correct.
+	ResolutionWindowNone ResolutionWindowReason = iota
+	// ResolutionTooCoarseForWindow: the resolution is wider than the span being served.
+	ResolutionTooCoarseForWindow
+	// ResolutionIndivisibleByWindow: the resolution fits, but does not divide the span evenly, so the
+	// newest bucket would be narrower than the width reported for it.
+	ResolutionIndivisibleByWindow
+)
+
+// ResolutionWindowCause reports which window-dependent rejection produced err, or
+// ResolutionWindowNone.
 //
-// sessionapi asks because a symbolic window is validated against a span the caller never named — the
-// ring's maximum — so those two rejections need restating and the other two must keep their own
-// wording.
-func IsResolutionWindowError(err error) bool {
+// ONE FUNCTION RATHER THAN A PREDICATE PLUS A LOOKUP, so a caller cannot ask "was it the window?"
+// without being handed the answer to "which one?". The version this replaces answered only the first
+// question, and the caller then wrote one message for both.
+func ResolutionWindowCause(err error) ResolutionWindowReason {
 	var re *resolutionError
-	return errors.As(err, &re) && re.fromWindow
+	if errors.As(err, &re) {
+		return re.cause
+	}
+	return ResolutionWindowNone
 }
 
 // parseResolutionAgainstStorage runs the checks that hold for ANY window: the value parses, and it is
@@ -852,15 +874,18 @@ func ParseResolution(s string, window time.Duration) (time.Duration, error) {
 		return 0, err
 	}
 	if d > window {
-		// WRAPPED IN A SENTINEL, because one caller has to tell this rejection apart from the other
-		// three: sessionapi restates it for a symbolic window, where the span validated against is
-		// the ring's maximum rather than the seven days the caller named. Keyed on the error rather
-		// than on the window kind, or the restatement overwrites the reason for "finer than the
-		// bucket", "not a multiple" and "unparseable" as well — which is the same defect it exists
-		// to fix, pointing the caller at a bound they did not hit.
+		// CLASSIFIED, because a caller has to tell the two WINDOW-dependent rejections from the three
+		// that are about the resolution alone — and from each other. sessionapi restates these for a
+		// symbolic window, where the span validated against is the ring's maximum rather than the
+		// seven days the caller named; the others must keep their own wording, or the restatement
+		// points at a bound the caller never hit.
+		//
+		// A SIXTH CHECK BELONGS HERE, with a cause chosen deliberately: ResolutionWindowNone if it is
+		// about the resolution alone, a new reason if it is about the span. Leaving it unclassified is
+		// how the divisibility case below stayed invisible for a round.
 		return 0, &resolutionError{
-			msg:        fmt.Sprintf("resolution %s exceeds the %s window", d, window),
-			fromWindow: true,
+			msg:   fmt.Sprintf("resolution %s exceeds the %s window", d, window),
+			cause: ResolutionTooCoarseForWindow,
 		}
 	}
 	// The window must divide by the resolution, or the NEWEST bucket is a lie.
@@ -884,7 +909,7 @@ func ParseResolution(s string, window time.Duration) (time.Duration, error) {
 		return 0, &resolutionError{
 			msg: "resolution does not divide the window evenly (the newest bucket would be " +
 				"shorter than the width reported for it)",
-			fromWindow: true,
+			cause: ResolutionIndivisibleByWindow,
 		}
 	}
 	return d, nil
