@@ -571,3 +571,41 @@ func TestNew_NeitherClientCarriesAWholeRequestTimeout(t *testing.T) {
 			"pool would both apply to only one of them")
 	}
 }
+
+// A caller's budget must survive the server THINKING for longer than the deadline-less
+// default, which is the shape `abctl cost` is built around: /v1/usage computes its snapshot
+// before writing any header, so a symbolic window's day-file walk happens entirely inside the
+// wait for headers.
+//
+// The bound that gets this wrong is the transport's, not the client's, and it got it wrong
+// once already: a 10s header bound capped a 15s budget exactly as the deleted 10s
+// http.Client.Timeout had. Neither of the two tests above could see it — both shorten their
+// own seam and sleep in milliseconds, three orders of magnitude under the real bound — so this
+// one leaves HeaderTimeout at its production value and only shortens the DEFAULT, putting the
+// server's think time in the window between them.
+//
+// TestCallerBudgets_FitUnderTheHeaderBackstop in package main is the other half: this proves
+// the mechanism works at production scale, that proves the two constants cannot invert.
+func TestGetJSON_ServerThinkTimeInsideTheCallersBudgetSucceeds(t *testing.T) {
+	shortenRESTDefault(t, 50*time.Millisecond)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Stands in for the ledger scan: no header written until it is done.
+		time.Sleep(400 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(map[string]any{"window": "today"})
+	}))
+	defer ts.Close()
+
+	// A budget well above the think time, as costFetchTimeout is above a real scan.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	snap, err := New(ts.URL).GetUsageWindow(ctx, "today", 0, "", "")
+	if err != nil {
+		t.Fatalf("GetUsageWindow: %v — the caller budgeted 5s and the server answered in 400ms, "+
+			"so this is a bound the CLIENT imposed on the server's think time. That is what a "+
+			"header timeout at a caller-budget scale does, and it is why HeaderTimeout is %v",
+			err, HeaderTimeout)
+	}
+	if snap.Window != "today" {
+		t.Errorf("Window = %q, want today", snap.Window)
+	}
+}

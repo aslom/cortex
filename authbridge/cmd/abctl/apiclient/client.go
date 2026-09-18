@@ -27,14 +27,12 @@ import (
 // idle-connection pool warm across reconnects so a long session doesn't leak
 // Transports.
 //
-// The fixed timeout this used to set was 10s, which SILENTLY PRE-EMPTED any caller
-// that budgeted more: `abctl cost` allows 15s because a symbolic window reads day
-// files off disk, and it could never reach it — http.Client.Timeout and the request
-// context are both hard stops and the shorter one always wins, so a comment
-// explaining the longer budget described behaviour that could not happen. A per-call
-// default that DEFERS to a deadline the caller set keeps the protection for callers
-// with none (the TUI passes its root context to GetPipeline / GetPluginCatalog /
-// ListSessions / GetSession) without overriding one that does.
+// NO CLIENT-WIDE TIMEOUT, because one applies to every call this Client will ever make and
+// so cannot be reconciled with per-call budgets that legitimately differ by 3x. A per-call
+// default that DEFERS to a deadline the caller set keeps the protection for callers with none
+// (the TUI passes its root context to GetPipeline / GetPluginCatalog / ListSessions /
+// GetSession) without overriding one that does. The transport's HeaderTimeout is the liveness
+// backstop underneath both, sized so it cannot pre-empt either.
 type Client struct {
 	endpoint   string
 	http       *http.Client
@@ -53,13 +51,31 @@ type Client struct {
 // milliseconds. Nothing in production writes it.
 var restDefaultTimeout = 10 * time.Second
 
-// responseHeaderTimeout bounds dial-through-response-headers on every call, buffered or
-// streamed. See New for why it is the transport's job and not the client's.
+// HeaderTimeout is the longest this client waits for a peer to BEGIN answering, on every
+// call, buffered or streamed. See New for why the bound belongs to the transport.
 //
-// 10s, the reach-the-server protection the deleted http.Client.Timeout used to provide,
-// kept at the same number so no caller's failure time gets longer. A var for the same
-// reason as restDefaultTimeout.
-var responseHeaderTimeout = 10 * time.Second
+// A LIVENESS BACKSTOP, NEVER A BUDGET, and the difference is the whole reason it is two
+// minutes rather than the 10s the deleted http.Client.Timeout used. "Waiting for headers" is
+// not the same as "reaching the server": net/http starts this clock at the request and stops
+// it at the first response header, so everything the SERVER does in between is inside the
+// window. /v1/usage does all of its work there — handleUsage computes the snapshot and only
+// then writes headers, and for a symbolic window that means walking up to eight day files off
+// a path an operator configured and possibly a slow mount.
+//
+// So a 10s value reinstated exactly the pre-emption removing http.Client.Timeout was meant to
+// end: `abctl cost` budgets 15s BECAUSE the ledger scan is slow, and a scan over 10s died at
+// 10s with "timeout awaiting response headers". Measured, not reasoned about: with the bound
+// at 200ms and a caller budget of 2s, a server that spent 500ms scanning failed at 202ms.
+//
+// Two minutes is above every budget any caller in this module sets and still bounds a wedged
+// peer, which is all this is for. EXPORTED so that relationship can be asserted rather than
+// remembered — see TestCallerBudgets_FitUnderTheHeaderBackstop in package main. A caller
+// adding a longer budget than this has to raise it.
+const HeaderTimeout = 2 * time.Minute
+
+// responseHeaderTimeout is HeaderTimeout, as a var so a test can shorten it to milliseconds.
+// Nothing in production writes it.
+var responseHeaderTimeout = HeaderTimeout
 
 // New returns a Client pointed at endpoint (e.g. "http://localhost:9094").
 // Trailing slash is tolerated.
@@ -67,20 +83,21 @@ func New(endpoint string) *Client {
 	// Clone the default transport rather than reuse it so tests / multiple
 	// Clients don't share connection pools.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// Bounds reaching the SERVER without bounding the transfer, which is the one thing a
-	// Timeout on the http.Client could not express. It covers dial through response
-	// headers and stops there, so a dead or wedged endpoint fails in seconds while a
-	// legitimately slow BODY runs as long as it needs.
+	// Bounds the wait for a peer to START answering, without bounding the transfer — the one
+	// shape a Timeout on the http.Client could not express, and the reason it is safe to
+	// remove that Timeout rather than merely convenient.
 	//
-	// This is what makes removing http.Client.Timeout safe rather than merely convenient.
 	// GetSessionPage streams through getBody and returns an unread body, so it has no
-	// buffered-call deadline to inherit — without this, a proxy that accepted the
-	// connection and then stalled would hang the TUI until the operator quit it. The
-	// deleted Timeout was the only bound that path had.
+	// buffered-call deadline to inherit; without this, a proxy that accepted the connection
+	// and then stalled would hang the TUI until the operator quit it. The deleted Timeout was
+	// the only bound that path had. And it fixes what that Timeout broke: that one covered the
+	// body read too, which is why a large snapshot failed at 10s and came up empty. A header
+	// bound cannot do that however big the response is.
 	//
-	// It also fixes what that Timeout broke: it applied to the whole request INCLUDING the
-	// body read, which is why a large snapshot failed at 10s and came up empty. A header
-	// timeout cannot do that however big the response is.
+	// IT IS NOT A "REACH THE SERVER" BOUND, which is how it was first described and is the
+	// mistake worth stating here: the server's own work happens inside this window, because
+	// nothing obliges a handler to write headers before it computes — and /v1/usage does not.
+	// That is why HeaderTimeout is a generous backstop and not a budget; see its doc.
 	//
 	// Safe on the shared transport, SSE included: a server sends event-stream headers
 	// immediately and this does not bound the gaps between events afterwards.

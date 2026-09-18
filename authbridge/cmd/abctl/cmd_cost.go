@@ -22,13 +22,15 @@ import (
 // a real case rather than a hypothetical one, because a symbolic window is served by
 // reading day files off disk instead of a ring out of memory.
 //
-// It is also the bound the request ACTUALLY gets, which it was not. apiclient carried
-// a fixed 10s http.Client.Timeout applying to every call it made; that and a context
-// deadline are both hard stops and the shorter one wins, so every fetch died at 10s
-// and the paragraph above described behaviour that could not happen. The client now
-// sets no timeout of its own and supplies a default only for a caller that passed no
-// deadline (apiclient.restDefaultTimeout), so this figure is what binds. Do not
-// lengthen it much further: a CLI that appears to hang is its own kind of wrong answer.
+// IT IS ALSO THE BOUND THE REQUEST ACTUALLY GETS, which took two fixes to become true and is
+// asserted rather than asserted-in-prose: apiclient sets no timeout of its own, supplies a
+// default only for a caller that passed no deadline, and keeps its transport-level
+// HeaderTimeout well above this figure. That last one matters because the ledger scan happens
+// INSIDE the wait for headers — the server computes before it writes any — so a header bound
+// at this figure's scale would cap the very read this budget exists for.
+// TestCallerBudgets_FitUnderTheHeaderBackstop is what fails if that relationship inverts.
+//
+// Do not lengthen it much further: a CLI that appears to hang is its own kind of wrong answer.
 const costFetchTimeout = 15 * time.Second
 
 // runCost answers "what did today cost" in a few lines.
