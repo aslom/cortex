@@ -478,10 +478,17 @@ func (g Group) Reconcilable() bool {
 // own saturation flag is what stops the two conditions being confused; an int64 plus a bool a
 // caller could forget is the shape that produced it.
 func (s *Snapshot) SetUngroupedCost(sum CostSum) {
-	// Totals.Saturated already means "read every money figure here as a bound" and is OR-ed
-	// through Counts.Add, so the flag reaches a client through the field it already consults.
-	// The three rules live in setResidual, shared with SetUngroupedAvoided.
-	setResidual(sum, &s.UngroupedCostMicros, &s.SeriesOvershootMicros, &s.Totals.Saturated)
+	// SATURATION FIRST, and unconditionally: it is a statement about the money in this
+	// snapshot, not about which of the two residual fields gets set, and it holds even when
+	// the residual itself lands on zero. Totals.Saturated already means "read every money
+	// figure here as a bound" and is OR-ed through Counts.Add, so the flag reaches a client
+	// through the field it already has to consult.
+	if sum.Saturated {
+		s.Totals.Saturated = true
+	}
+	// The sign split lives in residualOf, shared with SetUngroupedAvoided; the FIELDS are
+	// named here, in the setter that owns them. See residualOf for why that direction.
+	s.UngroupedCostMicros, s.SeriesOvershootMicros = residualOf(sum)
 }
 
 // SetUngroupedAvoided is SetUngroupedCost for avoided cost.
@@ -497,26 +504,30 @@ func (s *Snapshot) SetUngroupedCost(sum CostSum) {
 // counterfactual so a breakdown of it reconciles, on the same rule that forbids adding it to
 // any dollar total. See Counts.AvoidedMicros.
 func (s *Snapshot) SetUngroupedAvoided(sum CostSum) {
-	setResidual(sum, &s.UngroupedAvoidedMicros, &s.SeriesAvoidedOvershootMicros, &s.Totals.Saturated)
+	if sum.Saturated {
+		s.Totals.Saturated = true
+	}
+	s.UngroupedAvoidedMicros, s.SeriesAvoidedOvershootMicros = residualOf(sum)
 }
 
-// setResidual is the arithmetic both residual setters share.
+// residualOf splits a residual into the two fields that publish it: shortfall for a positive
+// one, overshoot for the magnitude of a negative one. At most one is non-nil.
 //
-// residual receives a positive shortfall, overshoot the magnitude of a negative one, and
-// saturated is OR-ed when the sum arrived clamped. Extracted when the second money field
-// needed the same three rules: a copy would have been a second place for the MinInt64 sign
-// trap to be got wrong.
-func setResidual(sum CostSum, residual, overshoot **int64, saturated *bool) {
-	// SATURATION FIRST, and unconditionally: it is a statement about the money in this
-	// snapshot, not about which of the two fields gets set, and it holds even when the
-	// residual itself lands on zero.
-	if sum.Saturated {
-		*saturated = true
-	}
+// RETURNS THEM RATHER THAN WRITING THROUGH **int64 OUT-PARAMS, which is what it did first and
+// is a hazard worth naming. Two `**int64` parameters are type-identical and positionally
+// interchangeable, so `setResidual(sum, &s.UngroupedAvoidedMicros, &s.SeriesOvershootMicros,
+// …)` — the avoided shortfall wired to the COST overshoot — compiled and passed the entire
+// suite. Returning the pair puts the destination field names on the left of an assignment
+// inside the setter that owns them, where a cross-field write has to be written out to happen
+// and the positive tests for both fields catch it.
+//
+// Extracted rather than duplicated because the MinInt64 sign trap below is the one piece of
+// arithmetic here that must be obviously right, and a copy is a second place to get it wrong.
+func residualOf(sum CostSum) (shortfall, overshoot *int64) {
 	micros := sum.Micros
 	switch {
 	case micros > 0:
-		*residual = &micros
+		return &micros, nil
 	case micros < 0:
 		// Negated into a magnitude, with the MinInt64 case guarded: negating it blindly
 		// returns the same negative number and publishes the sign confusion the overshoot
@@ -525,8 +536,9 @@ func setResidual(sum CostSum, residual, overshoot **int64, saturated *bool) {
 		if micros != math.MinInt64 {
 			over = -micros
 		}
-		*overshoot = &over
+		return nil, &over
 	}
+	return nil, nil
 }
 
 // seriesAvoided is the avoided cost a label breakdown accounts for.

@@ -793,7 +793,36 @@ func TestAppend_RunningTotalsMatchAFullRecomputation(t *testing.T) {
 			wantCost, wantAvoided := sumCost(sess.Events)
 			gotCost, gotAvoided := sess.cost, sess.avoided
 			held := len(sess.Events)
+			moneyLen := len(sess.money)
+			// Per-position, not just per-total: a money slice reshaped by a different rule
+			// from Events could still sum correctly while attributing every figure to the
+			// wrong event, and the next trim would then subtract the wrong ones.
+			perEvent := make([]eventMoney, 0, held)
+			for i := range sess.Events {
+				perEvent = append(perEvent, moneyOf(&sess.Events[i]))
+			}
 			st.mu.RUnlock()
+
+			// THE PARALLEL-SLICE INVARIANT. entry.money exists so a trim needs no decode, and
+			// it is only safe while it stays in lockstep with Events — same length, same
+			// order. Nothing but Append and applyTrim may touch either, and this is what
+			// fails if something else ever does.
+			if moneyLen != held {
+				t.Fatalf("entry.money holds %d figures for %d events: the parallel slice has "+
+					"drifted, so every subtraction after this trim is attributed wrongly",
+					moneyLen, held)
+			}
+			if len(perEvent) == moneyLen {
+				st.mu.RLock()
+				for i := range perEvent {
+					if sess.money[i] != perEvent[i] {
+						t.Errorf("entry.money[%d] = %+v, but event %d decodes to %+v — the two "+
+							"slices are the same length in a different order",
+							i, sess.money[i], i, perEvent[i])
+					}
+				}
+				st.mu.RUnlock()
+			}
 
 			if gotCost.Micros != wantCost.Micros {
 				t.Errorf("running cost = %d over %d held events, full walk says %d — the "+

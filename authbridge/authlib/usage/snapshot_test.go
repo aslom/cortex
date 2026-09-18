@@ -981,3 +981,99 @@ func TestSnapshot_AnUnlabellableSavingIsDisclosedAsItsOwnResidual(t *testing.T) 
 			snap.SeriesOvershootMicros, snap.SeriesAvoidedOvershootMicros)
 	}
 }
+
+// SetUngroupedAvoided's two fields, both signs, and — the point of the test — the COST fields
+// staying untouched.
+//
+// The avoided overshoot had only a negative assertion ("must be absent on healthy data"), and
+// its own doc claims it is not redundant with the cost twin precisely because "a row carrying
+// a saving and NO COST double-counted moves only this one". Nothing pinned that. While the two
+// setters shared a helper taking `**int64` out-params, the two overshoot pointers were
+// type-identical and positionally interchangeable, so wiring the avoided residual to the COST
+// overshoot passed the entire suite: the ungrouped assertions caught a swap of the first
+// pointer and nothing caught a swap of the second.
+//
+// residualOf now returns the pair instead, so the destination fields are named in the setter
+// that owns them — and these assertions are what make a cross-field write fail rather than
+// merely look wrong.
+func TestSetUngroupedAvoided_PublishesItsOwnFieldsAndLeavesCostAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		micros        int64
+		wantUngrouped *int64
+		wantOvershoot *int64
+	}{
+		{
+			// The ordinary case: the breakdown accounts for less than the total.
+			name: "shortfall", micros: 60_000, wantUngrouped: ptr(int64(60_000)),
+		},
+		{
+			// The defect report. A saving-only row counted twice in the series makes the
+			// avoided residual negative while the COST residual stays at zero — which reads
+			// as "the breakdown accounts for everything". That asymmetry is the entire
+			// argument for this field existing beside SeriesOvershootMicros.
+			name: "overshoot", micros: -60_000, wantOvershoot: ptr(int64(60_000)),
+		},
+		{
+			// Nothing to disclose is absence, not a zero: a zero would have to mean both
+			// "checked, complete" and "no residual was computed on this path".
+			name: "exactly accounted for", micros: 0,
+		},
+		{
+			// math.MinInt64 has no positive counterpart, so a blind negation republishes the
+			// same negative number as a magnitude. Reachable only from a saturated total.
+			name: "unnegatable", micros: math.MinInt64, wantOvershoot: ptr(int64(math.MaxInt64)),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var snap Snapshot
+			snap.SetUngroupedAvoided(CostSum{Micros: tc.micros})
+
+			for _, f := range []struct {
+				name      string
+				got, want *int64
+			}{
+				{"UngroupedAvoidedMicros", snap.UngroupedAvoidedMicros, tc.wantUngrouped},
+				{"SeriesAvoidedOvershootMicros", snap.SeriesAvoidedOvershootMicros, tc.wantOvershoot},
+			} {
+				switch {
+				case f.want == nil && f.got != nil:
+					t.Errorf("SetUngroupedAvoided(%d) set %s = %d, want absent", tc.micros, f.name, *f.got)
+				case f.want != nil && f.got == nil:
+					t.Errorf("SetUngroupedAvoided(%d) left %s absent, want %d — a residual with "+
+						"this sign is a signal, and dropping it is how the fault stays invisible",
+						tc.micros, f.name, *f.want)
+				case f.want != nil && *f.got != *f.want:
+					t.Errorf("SetUngroupedAvoided(%d) set %s = %d, want %d", tc.micros, f.name, *f.got, *f.want)
+				}
+			}
+
+			// THE ANTI-SWAP ASSERTION. Publishing a saving's residual on either COST field
+			// would report spend the traffic never had, or a spend-breakdown defect that did
+			// not happen — and both are invisible to every assertion above.
+			if snap.UngroupedCostMicros != nil {
+				t.Errorf("SetUngroupedAvoided(%d) set UngroupedCostMicros = %d: a saving is not "+
+					"spend, and this field is a band a client renders as dollars",
+					tc.micros, *snap.UngroupedCostMicros)
+			}
+			if snap.SeriesOvershootMicros != nil {
+				t.Errorf("SetUngroupedAvoided(%d) set SeriesOvershootMicros = %d: that field says "+
+					"the SPEND breakdown contradicts itself, which is a different claim about a "+
+					"different quantity", tc.micros, *snap.SeriesOvershootMicros)
+			}
+		})
+	}
+}
+
+// And the mirror: the cost setter must not reach the avoided fields either. Cheap, and it is
+// the half a reader would assume was covered by the test above.
+func TestSetUngroupedCost_LeavesTheAvoidedFieldsAlone(t *testing.T) {
+	for _, micros := range []int64{250_000, -250_000} {
+		var snap Snapshot
+		snap.SetUngroupedCost(CostSum{Micros: micros})
+		if snap.UngroupedAvoidedMicros != nil || snap.SeriesAvoidedOvershootMicros != nil {
+			t.Errorf("SetUngroupedCost(%d) wrote an avoided field: ungrouped=%v overshoot=%v",
+				micros, snap.UngroupedAvoidedMicros, snap.SeriesAvoidedOvershootMicros)
+		}
+	}
+}

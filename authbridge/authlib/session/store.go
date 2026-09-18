@@ -72,6 +72,21 @@ type entry struct {
 	// SessionSummary.CostMicros makes.
 	cost    usage.CostSum
 	avoided usage.CostSum
+
+	// money is each event's decoded contribution, PARALLEL TO Events: same length, same
+	// order, same trim.
+	//
+	// It exists so a TRIM needs no decode. The running totals above have to shed whatever
+	// leaves Events, and the first version did that by re-decoding each evicted event —
+	// inside the write lock, one json.Unmarshal per append in the capped configuration, on
+	// the proxy's request path. That is the same critical-section parsing the hoist in Append
+	// exists to avoid, reintroduced through the back door; the defence written for it argued
+	// only against a full O(maxEvents) re-sum, not against being in the lock at all.
+	//
+	// Keeping the figure costs 16 bytes per event against an event struct orders of magnitude
+	// larger, and it is the only way to subtract without either parsing again or re-deriving
+	// the pin rule. applyTrim reshapes this and Events together for that second reason.
+	money []eventMoney
 }
 
 // MaxSessionIDLen is the longest session ID the store keeps intact; longer ids
@@ -278,8 +293,9 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 	sess.intern.InternEvent(&event)
 
 	sess.Events = append(sess.Events, event)
-	// In lockstep with the append above, and subtracted again by the trim below if this
-	// event is ever evicted.
+	// Both in lockstep with the append above: the running totals, and the per-event figure
+	// the trim below subtracts from them without decoding anything.
+	sess.money = append(sess.money, money)
 	sess.cost.Add(money.cost)
 	sess.avoided.Add(money.avoided)
 	sess.UpdatedAt = now
@@ -296,20 +312,23 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 		r.Record(sessionID, &event)
 	}
 
-	if s.maxEvents > 0 && len(sess.Events) > s.maxEvents {
-		var dropped []pipeline.SessionEvent
-		sess.Events, dropped = trimEventsPinIntent(sess.Events, s.maxEvents)
-		// Subtracted, not recomputed. A full re-sum here would be O(maxEvents) unmarshals
-		// on every append past the cap — worse than the on-demand version this replaced,
-		// in the one configuration that opts into a cap. One decode per evicted event is
-		// one decode per append in the steady state.
+	if p, ok := planTrim(sess.Events, s.maxEvents); ok {
+		// NO DECODE HERE. The figures come off the parallel money slice, so the only work
+		// this adds to the critical section is integer subtraction — see entry.money for
+		// what the first version did instead.
 		//
 		// Sub, not Add(-x): see usage.CostSum.Sub for the math.MinInt64 case it exists for.
-		for i := range dropped {
-			m := moneyOf(&dropped[i])
+		for i, m := range sess.money {
+			if p.keeps(i) {
+				continue
+			}
 			sess.cost.Sub(m.cost)
 			sess.avoided.Sub(m.avoided)
 		}
+		// One plan, both slices. They must come out the same length in the same order, and
+		// applyTrim is what makes that structural rather than a convention.
+		sess.Events = applyTrim(sess.Events, p)
+		sess.money = applyTrim(sess.money, p)
 	}
 
 	// Evict oldest session if cap is exceeded.
@@ -355,14 +374,15 @@ func isIntentEvent(e pipeline.SessionEvent) bool {
 // Caller guarantees len(events) > maxEvents and maxEvents > 0;
 // otherwise this is a no-op shape (returns events unchanged).
 //
-// RETURNS WHAT IT DROPPED as well as what it kept, so the caller can subtract those events
-// from the session's running money totals. Derived here rather than by the caller
-// re-deriving it: the pinned-intent branch does not drop a plain prefix, and a second
-// implementation of that rule would drift from this one and silently leave a session's cost
-// counting money it no longer holds events for.
-func trimEventsPinIntent(events []pipeline.SessionEvent, maxEvents int) (kept, dropped []pipeline.SessionEvent) {
+// RETURNS A PLAN RATHER THAN A SLICE, expressed as POSITIONS. The entry carries a parallel
+// money slice, and both have to survive the trim identically — so the decision is made once
+// here and applied by applyTrim to each. A caller re-deriving "which events went" would be a
+// second implementation of the pin rule below, and the two would drift the day either changed.
+//
+// ok is false when nothing needs trimming, so a caller can skip the work entirely.
+func planTrim(events []pipeline.SessionEvent, maxEvents int) (trimPlan, bool) {
 	if maxEvents <= 0 || len(events) <= maxEvents {
-		return events, nil
+		return trimPlan{}, false
 	}
 	excess := len(events) - maxEvents
 
@@ -377,9 +397,7 @@ func trimEventsPinIntent(events []pipeline.SessionEvent, maxEvents int) (kept, d
 	}
 	if intentIdx == -1 || intentIdx >= excess {
 		// No protected event in the eviction prefix; FIFO trim.
-		trimmed := make([]pipeline.SessionEvent, maxEvents)
-		copy(trimmed, events[excess:])
-		return trimmed, events[:excess]
+		return trimPlan{pinned: -1, tailStart: excess}, true
 	}
 
 	// Protected intent is in the eviction prefix. Build the result
@@ -388,21 +406,35 @@ func trimEventsPinIntent(events []pipeline.SessionEvent, maxEvents int) (kept, d
 	// timestamp is preserved AND the resulting slice stays
 	// chronologically ordered (intent.At < kept-tail.At by construction —
 	// it's the oldest surviving event).
-	out := make([]pipeline.SessionEvent, 0, maxEvents)
-	out = append(out, events[intentIdx])
-	tailStart := len(events) - (maxEvents - 1)
-	out = append(out, events[tailStart:]...)
-	// Everything before the surviving tail EXCEPT the pinned intent, which moved to the
-	// front of out rather than being evicted. Built by exclusion so it cannot disagree with
-	// what was kept: len(gone) is exactly excess either way.
-	gone := make([]pipeline.SessionEvent, 0, tailStart-1)
-	for i := 0; i < tailStart; i++ {
-		if i == intentIdx {
-			continue
-		}
-		gone = append(gone, events[i])
+	return trimPlan{pinned: intentIdx, tailStart: len(events) - (maxEvents - 1)}, true
+}
+
+// trimPlan is which POSITIONS survive a trim. See planTrim for the rule and why it is
+// positions rather than values.
+type trimPlan struct {
+	// pinned is the index moved to the front of the result, or -1 for a plain FIFO drop.
+	pinned int
+	// tailStart is the first index of the surviving suffix.
+	tailStart int
+}
+
+// keeps reports whether the element at i survives.
+func (p trimPlan) keeps(i int) bool { return i == p.pinned || i >= p.tailStart }
+
+// applyTrim rebuilds one slice under a plan.
+//
+// GENERIC so the events and their parallel money slice cannot be reshaped by two different
+// pieces of code. They are different element types and must end up the same length in the same
+// order, and the only way to guarantee that is for one function to do both.
+func applyTrim[T any](in []T, p trimPlan) []T {
+	if p.pinned < 0 {
+		out := make([]T, len(in)-p.tailStart)
+		copy(out, in[p.tailStart:])
+		return out
 	}
-	return out, gone
+	out := make([]T, 0, len(in)-p.tailStart+1)
+	out = append(out, in[p.pinned])
+	return append(out, in[p.tailStart:]...)
 }
 
 // AddRecorder registers a Recorder. Call before the store serves traffic; it is
