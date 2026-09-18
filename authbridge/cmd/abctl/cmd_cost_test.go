@@ -885,7 +885,15 @@ func TestCostIncompleteReasonLines_OrdersTheFloorFirstAndSaysNothingForNone(t *t
 // to end.
 func TestRunCost_AsksForAnAxisThatCannotCarryAResidual(t *testing.T) {
 	var gotGroup string
+	// HITS, because "" is the answer to two different questions. gotGroup is "" when the
+	// command asked for no group AND when the handler never ran at all, and
+	// usage.ParseGroup("") returns GroupNone with no error — which is non-reconcilable, so the
+	// assertion below passed either way. This test is cited from two places in cmd_cost.go as
+	// the pin that fails if this command ever takes an axis, so a green run has to mean a
+	// request was actually made and inspected.
+	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
 		gotGroup = r.URL.Query().Get("group")
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := w.Write([]byte(`{"window":"today","totals":{"requests":1},"priced":false}`)); err != nil {
@@ -895,11 +903,20 @@ func TestRunCost_AsksForAnAxisThatCannotCarryAResidual(t *testing.T) {
 	defer srv.Close()
 
 	var out, errOut strings.Builder
-	runCost([]string{"--endpoint", srv.URL}, &out, &errOut)
+	// And the exit code, discarded before: a command that failed before it reached the server
+	// leaves hits at zero, but one that reached it and then failed would still have exercised
+	// nothing this test is about.
+	if code := runCost([]string{"--endpoint", srv.URL}, &out, &errOut); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr = %s", code, errOut.String())
+	}
+	if hits != 1 {
+		t.Fatalf("the server saw %d requests, want exactly 1: with none, gotGroup is \"\" and "+
+			"every assertion below passes without this command having asked for anything", hits)
+	}
 
 	// Absent on the wire is how apiclient spells GroupNone, and usage.ParseGroup reads "" as
 	// exactly that — so the parse is the check rather than a string comparison that would
-	// pass for a group nobody validated.
+	// pass for a group nobody validated. Sound only because hits is 1 above.
 	group, err := usage.ParseGroup(gotGroup)
 	if err != nil {
 		t.Fatalf("server saw group=%q, which the API does not accept: %v", gotGroup, err)

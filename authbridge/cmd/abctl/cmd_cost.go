@@ -328,9 +328,6 @@ func writeCostJSON(snap *usage.Snapshot, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// Token-kind bits, matching pipeline.InferenceExtension.PresentKinds and
-// parsercommon.Kind. Declared here rather than imported because abctl decodes a
-// wire shape; the bit layout is what the JSON contract pins.
 // writeCostSummary renders the human answer: a headline, a split, and only the
 // caveats that actually apply.
 //
