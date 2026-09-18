@@ -263,6 +263,36 @@ func (e Event) TotalAvoidedUSD() float64 {
 	return t
 }
 
+// TotalAvoidedMicros is TotalAvoidedUSD in millionths of a dollar.
+//
+// Exists so the aggregate accumulates savings in the same integer unit it accumulates spend,
+// for the reason Micros gives: bucket addition stays exact and the JSON round-trips. A
+// consumer summing the float and converting at the end would drift against a total the
+// server already converted per record.
+//
+// BOUNDED through the same pricing.MicrosFromUSD, and zero when the figure will not
+// represent — not clamped. A saving is a modelled counterfactual, so an implausible one is
+// likelier to be a broken estimator than a real bargain, and "no figure" is the honest
+// answer for one this package cannot hold. Reachable: TokensAvoided is provider-adjacent and
+// the tier multiplier spans 12.5x.
+//
+// RejectedReason IS DELIBERATELY NOT CONSULTED, unlike Micros. That reason is a judgment
+// about the figure that was INCURRED — a cost header the producer refused as implausible —
+// while a saving is modelled from the rate table on a separate path, and costing.NewRecord
+// carries Avoided orthogonally to it. Zeroing here would discard a sound estimate because an
+// unrelated figure on the same record was unsound, and Record's own doc names savings on
+// requests that could not be priced as the interesting case.
+//
+// STILL NOT SPEND. This returns the aggregate's unit, not permission to add it to one: see
+// Event.Avoided for the invariant, and usage.Counts.AvoidedMicros for where it lands.
+func (e Event) TotalAvoidedMicros() int64 {
+	m, ok := pricing.MicrosFromUSD(e.TotalAvoidedUSD())
+	if !ok {
+		return 0
+	}
+	return m
+}
+
 // Micros converts CostUSD to millionths of a dollar, rounded to nearest.
 //
 // The integer unit is what usage.Counts accumulates: it keeps bucket addition

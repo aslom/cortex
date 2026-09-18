@@ -460,6 +460,18 @@ func (w *Writer) Record(_ string, e *pipeline.SessionEvent) {
 		// of on the arithmetic — one rule for every string this package writes to a durable
 		// file is easier to keep than three plus an exception.
 		r.Provenance = rowLabel(ev.Provenance)
+		// Cost that was not incurred, in the same unit as the cost that was, and OUTSIDE the
+		// pricedness branch below on purpose: tool-prune removed prompt tokens whether or not
+		// anything managed to price the response, and the request that could not be priced is
+		// where a saving is most interesting. See usage.Counts.AvoidedMicros for the invariant
+		// that keeps it out of every dollar total, and note the row-key fields are unaffected —
+		// a saving is attributed to the same endpoint/model/agent/provenance tuple as the
+		// request that avoided it.
+		//
+		// AFTER the token literal above, which assigns r.Counts wholesale: setting this before
+		// it would be silently overwritten for every inference row, which is all of them that
+		// can carry a saving.
+		r.AvoidedMicros = ev.TotalAvoidedMicros()
 		if ev.Priced() {
 			r.CostMicros = ev.Micros()
 			r.PricedRequests = 1
@@ -506,8 +518,8 @@ func (w *Writer) Record(_ string, e *pipeline.SessionEvent) {
 			// figure, and ev.Micros() returns zero for a refused record anyway.
 			//
 			// A DIVERGENCE FROM THE RING, stated here and in the package doc rather than
-			// discovered: usage.Aggregator.costOf goes through costevent.Decode, which reports
-			// no record at all for an unpriced one, so the ring counts a refusal in Requests
+			// discovered: usage.Aggregator.costOf takes only the arm a priced record satisfies
+			// and has no branch for an unpriced one, so the ring counts a refusal in Requests
 			// and in nothing else, and the ledger's denominator is one larger for the same
 			// traffic. That is the right way round — the ring cannot see the refusal, and this
 			// file is the surface an operator reads tomorrow — and the dollars agree at zero.

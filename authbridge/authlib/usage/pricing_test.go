@@ -492,4 +492,62 @@ func TestAggregator_TotalsAreInvariantToAvoidedCost(t *testing.T) {
 	if with.Totals.CostMicros != 250_000 {
 		t.Errorf("CostMicros = %d, want the record's own 250000", with.Totals.CostMicros)
 	}
+
+	// THE OTHER HALF OF THE SAME PROOF. Everything above shows the savings did not reach
+	// spend, which a fold that dropped them entirely would also show. These two assertions
+	// are what distinguish "kept out of the total" from "never counted".
+	if without.Totals.AvoidedMicros != 0 {
+		t.Errorf("AvoidedMicros = %d with no savings on the record, want 0",
+			without.Totals.AvoidedMicros)
+	}
+	// 999.99 alone, in micros. The $42 entry is PROJECTED — observe mode left every byte on
+	// the wire — so it is money that WAS spent and must not appear here. 1041990000 is the
+	// figure a fold that summed both would report, and it is the whole reason this asserts an
+	// exact number rather than `> 0`.
+	if got, want := with.Totals.AvoidedMicros, int64(999_990_000); got != want {
+		t.Errorf("AvoidedMicros = %d, want %d — the applied saving and only it (1041990000 "+
+			"would mean the projected $42 was counted as money not spent)", got, want)
+	}
+}
+
+// A saving on a request NOTHING COULD PRICE must still be counted, which is the case
+// costevent.Record was split out from Decode to serve — its own doc calls it the interesting
+// one, and it is the case a fold reading the priced record would silently lose.
+//
+// The record here is unsettled with no cost at all: costevent.Event.Priced is false, so the
+// aggregator's cost arm does not take it and the request lands in the unpriced gap. The prompt
+// tokens were still removed, and the estimate of what they would have cost is still the only
+// evidence tool-prune did anything on this request.
+func TestAggregator_CountsASavingOnAnUnpricedRequest(t *testing.T) {
+	a := New(WithPricing(nil))
+	raw, err := json.Marshal(costevent.Event{
+		// No CostUSD, not settled: unpriced, and deliberately so.
+		Source: costevent.SourceUsageFallback,
+		Avoided: []costevent.Saving{
+			{Component: "tool-prune", TokensAvoided: 2_000, USD: 0.5, Tier: "input", Estimated: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Record("session-1", &pipeline.SessionEvent{
+		Phase:     pipeline.SessionResponse,
+		Host:      "gw.internal",
+		Inference: &pipeline.InferenceExtension{Model: "claude-opus-5", InputTokens: 100, OutputTokens: 10},
+		Plugins:   map[string]json.RawMessage{costevent.Key: raw},
+	})
+
+	totals := a.Snapshot(10*BucketWidth, BucketWidth, "", GroupNone).Totals
+	if got, want := totals.AvoidedMicros, int64(500_000); got != want {
+		t.Errorf("AvoidedMicros = %d, want %d — a saving on an unpriced request is lost, which "+
+			"is what reading the PRICED record instead of the record does", got, want)
+	}
+	// The rest of the record's shape is unchanged by the saving: still unpriced, still counted
+	// as a coverage gap. Asserted so this test cannot pass by the record having been priced
+	// after all, which would make the case above untested.
+	if totals.CostMicros != 0 || totals.PricedRequests != 0 {
+		t.Errorf("CostMicros = %d, PricedRequests = %d; want both zero — the record carries no "+
+			"price, so this test would otherwise be exercising the priced path",
+			totals.CostMicros, totals.PricedRequests)
+	}
 }

@@ -5,11 +5,13 @@ package session
 
 import (
 	"log/slog"
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
@@ -468,7 +470,32 @@ type SessionSummary struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 	EventCount  int       `json:"eventCount"`
 	TotalTokens int       `json:"totalTokens,omitempty"` // sum of Inference.TotalTokens across response events
-	Active      bool      `json:"active"`                // true if this is the most recently updated session
+	// CostMicros is what this session's events cost, in millionths of a dollar, summed from
+	// the records the session itself holds.
+	//
+	// FROM THE EVENTS, not from the ledger, and that is the only honest source available: the
+	// ledger's row key is (endpoint, model, agent, provenance) with no session dimension by
+	// design, so it cannot answer "what did this session cost" at all. The live ring can, but
+	// only over its rolling window, which would put a partial figure beside the LIFETIME
+	// TotalTokens above and understate the row by whatever fell off the ring.
+	//
+	// SCOPED TO WHAT THE STORE STILL HOLDS, and it therefore RESETS ON RESTART while a ledger
+	// window does not. Both are correct: this is "the cost of the events in this session", the
+	// ledger is "the cost of the day". A client showing them together must not present one as
+	// a check on the other.
+	//
+	// Omitted when zero rather than sent as 0, on this codebase's standing rule that an
+	// unknown cost must never render as $0.00: a session whose traffic nothing could price is
+	// indistinguishable here from one that was free, so the field's absence lets a client show
+	// "—" instead of asserting either.
+	CostMicros int64 `json:"costMicros,omitempty"`
+	// AvoidedMicros is cost this session did NOT incur, same unit, APPLIED savings only.
+	//
+	// NOT SPEND, and never to be added to CostMicros — see usage.Counts.AvoidedMicros and the
+	// invariant on costevent.Event.Avoided. Reported beside it because the two answer
+	// different questions about the same session.
+	AvoidedMicros int64 `json:"avoidedMicros,omitempty"`
+	Active        bool  `json:"active"` // true if this is the most recently updated session
 }
 
 // ListSessions returns summaries for every non-expired session. Order is
@@ -483,13 +510,16 @@ func (s *Store) ListSessions() []SessionSummary {
 		if s.isExpired(sess, now) {
 			continue
 		}
+		cost, avoided := sumCost(sess.Events)
 		out = append(out, SessionSummary{
-			ID:          id,
-			CreatedAt:   sess.CreatedAt,
-			UpdatedAt:   sess.UpdatedAt,
-			EventCount:  len(sess.Events),
-			TotalTokens: sumTokens(sess.Events),
-			Active:      id == s.activeID,
+			ID:            id,
+			CreatedAt:     sess.CreatedAt,
+			UpdatedAt:     sess.UpdatedAt,
+			EventCount:    len(sess.Events),
+			TotalTokens:   sumTokens(sess.Events),
+			CostMicros:    cost,
+			AvoidedMicros: avoided,
+			Active:        id == s.activeID,
 		})
 	}
 	// Most recently updated first.
@@ -514,6 +544,58 @@ func sumTokens(events []pipeline.SessionEvent) int {
 		total += events[i].Inference.TotalTokens
 	}
 	return total
+}
+
+// sumCost aggregates one session's settled cost and its avoided cost, both in micros.
+//
+// TWO RETURNS FROM ONE PASS because both come off the same record, and costevent.Record is a
+// JSON unmarshal: two functions would decode every event in every session twice on a call
+// that already runs under the store's read lock for every session at once.
+//
+// Priced dollars only in the first return — costevent.Event.Priced is the one predicate for
+// that, so a refused or unsettled figure contributes nothing here exactly as it contributes
+// nothing to /v1/usage. The second return ignores pricedness on purpose: a request that could
+// not be priced still had prompt tokens removed. See usage.Aggregator.costOf, which this
+// deliberately mirrors, and note the two totals must never be added together.
+//
+// SATURATING, not wrapping. A session's event list is capped, but the cap is large and a
+// gateway-reported figure is bounded per request rather than per session, so an unchecked
+// `+=` over a hostile stream of maximal figures could wrap a lifetime total negative. The
+// aggregate has usage.Counts.Add for this; here it is two lines, and the ceiling is the same
+// reasoning that function's doc spells out.
+func sumCost(events []pipeline.SessionEvent) (cost, avoided int64) {
+	for i := range events {
+		// The two phases that carry a settled figure, matching what the aggregator and the
+		// durable ledger both fold. SessionResponse is the ordinary path; a DENIAL can still
+		// carry one, because the proxy charges for a response whose body never arrived — so
+		// restricting this to sumTokens' response-only rule would drop real dollars. It adds
+		// no token skew against TotalTokens above: a denial carries no Inference extension, so
+		// those events contribute zero tokens either way.
+		if events[i].Phase != pipeline.SessionResponse && events[i].Phase != pipeline.SessionDenied {
+			continue
+		}
+		ev, ok := costevent.Record(&events[i])
+		if !ok {
+			continue
+		}
+		if ev.Priced() {
+			cost = addSat(cost, ev.Micros())
+		}
+		avoided = addSat(avoided, ev.TotalAvoidedMicros())
+	}
+	return cost, avoided
+}
+
+// addSat adds b to a, clamping at the int64 ceiling instead of wrapping.
+//
+// Both inputs are non-negative here (costevent bounds each through
+// pricing.MicrosFromUSD, which refuses a negative), so only the upper bound can be
+// reached and one comparison covers it.
+func addSat(a, b int64) int64 {
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
 }
 
 // ActiveSession returns the most recently updated session ID.
