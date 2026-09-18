@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
@@ -178,11 +180,15 @@ func TestSpendState_ZeroValueRequestsThePreDrawerDefaults(t *testing.T) {
 // that repeated a value would waste a keypress, and one that never returned to the default
 // would trap the user away from it.
 func TestSpendDrawer_CyclesWrapThroughEveryDistinctStop(t *testing.T) {
+	// THROUGH THE REAL CYCLERS, not a copy of their arithmetic. Re-implementing
+	// `(step + 1) % len(...)` inline left this green when the modulus was dropped from either
+	// cycler — the test asserted that its own expression wraps. fetchSpend returns nil on a nil
+	// client, so the returned tea.Cmd can be discarded here.
 	m := &model{}
 	seenSpans := map[time.Duration]bool{}
 	for range spendDrawerWindows {
 		seenSpans[m.spend.window()] = true
-		m.spend.windowStep = (m.spend.windowStep + 1) % len(spendDrawerWindows)
+		_ = m.cycleSpendWindow()
 	}
 	if len(seenSpans) != len(spendDrawerWindows) {
 		t.Errorf("the span cycle visited %d distinct spans, want %d", len(seenSpans),
@@ -195,7 +201,7 @@ func TestSpendDrawer_CyclesWrapThroughEveryDistinctStop(t *testing.T) {
 	seenAxes := map[usage.Group]bool{}
 	for range spendDrawerAxes {
 		seenAxes[m.spend.axis()] = true
-		m.spend.groupIdx = (m.spend.groupIdx + 1) % len(spendDrawerAxes)
+		_ = m.cycleSpendAxis()
 	}
 	if len(seenAxes) != len(spendDrawerAxes) {
 		t.Errorf("the axis cycle visited %d distinct axes, want %d", len(seenAxes),
@@ -440,3 +446,192 @@ func TestRenderSpendDrawer_AFullyUnpricedSeriesSaysItsCostIsUnknown(t *testing.T
 		}
 	}
 }
+
+// A NEGATIVE SERIES TOTAL must not print, on the rule every other money surface in this package
+// already follows through negativeCost: spendSummary refuses it for the window figure,
+// applyTodayFigure for the day, renderCostSummary for the pane, sessionMoneyCell for the column.
+// The drawer was the newest money surface and the only one that did not inherit the guard, so a
+// series with priced requests and an impossible sum rendered "$-5.0000" — a credit nobody issued
+// in a column of costs.
+//
+// The sum is what is refused, not each bucket: a positive bucket and a negative one can cancel to
+// something plausible, and it is the PUBLISHED figure that has to be refusable.
+func TestRenderSpendDrawer_ANegativeSeriesTotalIsUnpricedNotARefund(t *testing.T) {
+	snap := &usage.Snapshot{
+		Window: "1h", Group: usage.GroupModel, Priced: true,
+		Buckets: []usage.Bucket{{Series: map[string]usage.Counts{
+			// Priced, and impossible — which the gate on PricedRequests admitted.
+			"broken-producer": {Requests: 4, CostMicros: -5_000_000,
+				PricedRequests: 4, PriceableRequests: 4},
+			"claude-opus-5": {Requests: 17, CostMicros: 11_121_400,
+				PricedRequests: 17, PriceableRequests: 17},
+		}}},
+	}
+	lines := renderSpendDrawer(snap, usage.GroupModel, "1h", 200)
+	joined := strings.Join(lines, "\n")
+
+	if strings.Contains(joined, "$-5") || strings.Contains(joined, "-$5") {
+		t.Errorf("the drawer prints a negative cost:\n%s", joined)
+	}
+	var row string
+	for _, l := range lines {
+		if strings.Contains(l, "broken-producer") {
+			row = l
+		}
+	}
+	if row == "" {
+		t.Fatal("no row for the series with the impossible total")
+	}
+	if !strings.Contains(row, "cost unavailable") {
+		t.Errorf("row %q shows no figure and does not say the cost is unknown either", row)
+	}
+	// Coverage is NOT the complaint here — every request priced — so naming a gap would send a
+	// reader to the rate table for a producer bug.
+	if strings.Contains(row, "unpriced") {
+		t.Errorf("row %q blames coverage for an impossible figure", row)
+	}
+	// And the healthy series in the same drawer still shows its figure.
+	if !strings.Contains(joined, "$11.1214") {
+		t.Errorf("the good row lost its figure:\n%s", joined)
+	}
+}
+
+// runeKey builds the KeyMsg handleKey sees for an ordinary character.
+func runeKey(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
+
+// THROUGH handleKey, which nothing in this suite did — and that is the gap the esc defect
+// slipped through. Every other drawer test calls toggleSpendDrawer, cycleSpendAxis and the
+// renderer directly, so the bindings themselves, their guards and their ORDER against the rest of
+// the key handler were untested.
+func TestHandleKey_TheDrawersBindings(t *testing.T) {
+	newModel := func(pane paneID) *model {
+		m := &model{width: 200, height: 60}
+		m.pane = pane
+		m.sessionsTbl = newSessionsTable()
+		m.spend.snap = drawerSnap()
+		return m
+	}
+
+	t.Run("$ toggles", func(t *testing.T) {
+		m := newModel(paneSessions)
+		m.handleKey(runeKey('$'))
+		if !m.spendDrawerVisible() {
+			t.Fatal("$ did not open the drawer")
+		}
+		m.handleKey(runeKey('$'))
+		if m.spend.expanded {
+			t.Error("a second $ did not close it")
+		}
+	})
+
+	t.Run("a and w only act while it is open", func(t *testing.T) {
+		m := newModel(paneSessions)
+		// Closed: both must be inert, or they take letters from the rest of the UI.
+		before := m.spend
+		m.handleKey(runeKey('a'))
+		m.handleKey(runeKey('w'))
+		if m.spend.groupIdx != before.groupIdx || m.spend.windowStep != before.windowStep {
+			t.Error("a or w changed the drawer's state while it was closed")
+		}
+
+		m.handleKey(runeKey('$'))
+		m.handleKey(runeKey('a'))
+		if m.spend.axis() != spendDrawerAxes[1] {
+			t.Errorf("axis = %q after one `a`, want %q", m.spend.axis(), spendDrawerAxes[1])
+		}
+		m.handleKey(runeKey('w'))
+		if m.spend.window() == spendWindow {
+			t.Errorf("window = %v after one `w`, want it moved off the default", m.spend.window())
+		}
+	})
+
+	// THE REGRESSION. esc used to be gated on the flag rather than on what is on screen, so a
+	// drawer left open on one pane swallowed esc on a pane that cannot host it — the Usage pane
+	// then needed a second press to exit.
+	t.Run("esc is not swallowed where the drawer cannot show", func(t *testing.T) {
+		m := newModel(paneSessions)
+		m.handleKey(runeKey('$'))
+		if !m.spend.expanded {
+			t.Fatal("setup: the drawer did not open")
+		}
+		// Move to a pane that cannot host it. The flag survives, deliberately.
+		m.pane = paneUsage
+		if m.spendDrawerVisible() {
+			t.Fatal("setup: the drawer is visible on the usage pane")
+		}
+		m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+		if !m.spend.expanded {
+			t.Error("esc closed a drawer that is not on screen, so it never reached the pane — " +
+				"the Usage pane needs a second press to exit")
+		}
+	})
+
+	t.Run("esc closes it where it does show", func(t *testing.T) {
+		m := newModel(paneSessions)
+		m.handleKey(runeKey('$'))
+		m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+		if m.spend.expanded {
+			t.Error("esc did not close a drawer that was on screen")
+		}
+	})
+
+	// A resize below the floor is the other way the flag and the screen part company.
+	t.Run("esc is not swallowed below the height floor", func(t *testing.T) {
+		m := newModel(paneSessions)
+		m.handleKey(runeKey('$'))
+		m.height = spendDrawerMinHeight - 1
+		if m.spendDrawerVisible() {
+			t.Fatal("setup: still visible below the floor")
+		}
+		m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+		if !m.spend.expanded {
+			t.Error("esc closed an off-screen drawer after a resize")
+		}
+	})
+}
+
+// EVERY pane, with its host decision stated — so adding a pane forces a choice here rather than
+// inheriting one, and so the README's scope column and the `?` overlay have a single list to be
+// checked against. Both have already drifted from it once.
+func TestSpendDrawerHost_CoversEveryPane(t *testing.T) {
+	// Keyed by pane, and the switch in spendDrawerHost lists the refusals — so a new paneID
+	// appears here as a missing map entry rather than silently defaulting to "hosts it". It
+	// caught panePluginDetail missing from this list on the first run, which is the same service
+	// TestPaneKeysCoverAllPanes performs for the help overlay and for the same reason: paneUsage
+	// once shipped reachable by `u` and named nowhere.
+	want := map[paneID]bool{
+		paneNamespaces:   false, // nothing connected yet
+		panePods:         false, // likewise
+		paneUsage:        false, // already a breakdown, and it owns w/b/m
+		paneSessions:     true,
+		paneEvents:       true,
+		paneDetail:       true,
+		panePipeline:     true,
+		panePluginDetail: true,
+		paneCatalog:      true,
+	}
+	for p := paneID(0); p <= lastPaneID; p++ {
+		expect, listed := want[p]
+		if !listed {
+			t.Errorf("pane %d is not listed here: a new pane must have its drawer decision made "+
+				"deliberately, and the README's scope column has to be updated with it", p)
+			continue
+		}
+		if ok, why := m0().withPane(p).spendDrawerHost(); ok != expect {
+			t.Errorf("pane %d: hosts = %v, want %v (reason %q)", p, ok, expect, why)
+		}
+	}
+	// A refusal without a reason is what produced the wrong-reason bug; none may be silent.
+	for p, expect := range want {
+		if expect {
+			continue
+		}
+		if _, why := m0().withPane(p).spendDrawerHost(); why == "" {
+			t.Errorf("pane %d refuses with no reason to show the user", p)
+		}
+	}
+}
+
+func m0() *model { return &model{width: 200, height: 60} }
+
+func (m *model) withPane(p paneID) *model { m.pane = p; return m }
