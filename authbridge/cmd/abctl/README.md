@@ -614,9 +614,15 @@ were reading instead.
 ## How a timeline is fetched
 
 The events table renders no message body, so it does not ask for one. Each fetch
-sends `?view=summary`, which drops the conversation payloads and leaves everything
-the table shows — measured at ~200x smaller, and the difference between a session
-that opens in milliseconds and one that takes seconds.
+sends `?view=summary`, which drops the conversation payloads and keeps everything
+the table shows **or its filter searches** — measured at ~163x smaller, and the
+difference between a session that opens in milliseconds and one that takes seconds.
+
+The filter is the part worth spelling out, because it is easy to assume otherwise:
+`/some text` still matches completion and A2A message text, and `plugin:<name>`
+still works, because those fields are searched and so are kept. Dropping them would
+have been ~299x instead of ~163x — both about a megabyte for a 1000-event session,
+so the filter is worth far more than the difference.
 
 The consequence is worth knowing: pressing `↵` on a row fetches that one event in
 full from `/v1/sessions/{id}/events/{seq}`. The detail pane renders the summary

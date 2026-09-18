@@ -1,6 +1,10 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+)
 
 func TestOpenAtRow(t *testing.T) {
 	for _, tc := range []struct {
@@ -147,5 +151,49 @@ func TestSetOpenAtOldest_Persists(t *testing.T) {
 	m.setOpenAtOldest(false)
 	if saved != 2 {
 		t.Errorf("save called %d times after a change, want 2", saved)
+	}
+}
+
+// THE PATH THAT ACTUALLY HAPPENS, and the one the first version of this feature
+// silently failed: entering a session rebuilds the table BEFORE the snapshot
+// returns, so for any session whose history is not cached the first rebuild has
+// zero rows. Latching "opening" on that empty rebuild made the real one a refresh,
+// and the cursor went to the newest row with the preference ignored.
+//
+// The earlier test set m.eventsBuiltFor = "" by hand and so never exercised this —
+// it tested the implementation rather than the sequence.
+func TestEventsTable_OpeningSurvivesAnEmptyFirstRebuild(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		oldest bool
+		want   int
+	}{
+		{"oldest", true, 0},
+		{"newest", false, 39},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSettingsForTest(t)
+			Settings.Events.OpenAtOldest = tc.oldest
+
+			// Entering a session: selectedSess is set and the table is rebuilt with
+			// nothing in it yet, exactly as keys.go does before snapshotCmd.
+			m := &model{
+				pane: paneEvents, selectedSess: "s", bodyHeight: 12, width: 200,
+				events: map[string][]pipeline.SessionEvent{},
+			}
+			m.eventsTbl = newEventsTable()
+			m.rebuildEventsTable()
+			if got := len(m.eventsTbl.Rows()); got != 0 {
+				t.Fatalf("setup: expected an empty first rebuild, got %d rows", got)
+			}
+
+			// The snapshot lands.
+			m.events["s"] = cursorRowsFixture(40)
+			m.rebuildEventsTable()
+
+			if got := m.eventsTbl.Cursor(); got != tc.want {
+				t.Errorf("cursor = %d, want %d — the empty rebuild consumed the opening", got, tc.want)
+			}
+		})
 	}
 }

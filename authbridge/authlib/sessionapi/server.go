@@ -201,7 +201,7 @@ const indexBody = `Cortex / AuthBridge Session API
 
   GET /v1/sessions        list active sessions
   GET /v1/sessions/{id}   recent events (?limit=N max 2000, ?before=<seq>,
-                          ?view=summary omits bodies, ~200x smaller)
+                          ?view=summary drops message bodies, ~163x smaller)
   GET /v1/sessions/{id}/events/{seq}
                           one event in full, payloads included
   GET /v1/events          SSE stream of new events (?session=<id> to filter)

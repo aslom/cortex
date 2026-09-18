@@ -13,24 +13,41 @@ import "github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 // 0.98 MiB, which is the difference between waiting seconds to open a session
 // and fetching the whole thing.
 //
+// THE RULE: a field may be dropped only if NEITHER the events table nor its
+// filter reads it. The filter is the half that is easy to forget, and forgetting
+// it is silent — a `/completion text` search simply stops matching. abctl's
+// eventHaystack and matchEventRow (cmd/abctl/tui/events_pane.go) are the source of
+// truth for that half; TestSummarizeEvent_KeepsEverythingTheFilterSearches names
+// each field they read so this cannot drift again.
+//
 // WHAT STAYS, and why each one is not obvious:
-//   - Invocations. This is timeline data, not detail data — abctl renders one row
-//     PER INVOCATION and the ACTION column comes from it. Dropping it would empty
-//     the timeline it is meant to speed up.
+//   - Invocations. Timeline data, not detail data — abctl renders one row PER
+//     INVOCATION, the ACTION column comes from it, and the filter searches each
+//     invocation's plugin, action, reason, path and Details.
 //   - Token counts, all of them separately. Cost is derived from the
 //     cache-read/write split rather than the total, so a partial set silently
 //     changes the COST column.
-//   - Error fields (MCP.Err, A2A.ErrorMessage, Error). Small, and a failure is
-//     the thing an operator scans a timeline for.
-//   - IsAction on each parser extension. It is what says whether a row is a
-//     user-meaningful action or protocol mechanics.
+//   - Inference.Completion and A2A.Parts. Both are searched by the free-text
+//     filter, so dropping them made `/` stop matching completion and A2A message
+//     text. Measured cost of keeping them: 299x → 289x. Not a trade.
+//   - Plugins. The `plugin:<name>` filter is a lookup into this map, so dropping
+//     it made that filter match nothing at all. It is the expensive one to keep —
+//     299x → 163x — and still worth it, because 163x is 1.12 MiB for a
+//     1000-event session against 0.61, and both open instantly.
+//   - Error fields and IsAction. Small; a failure is what an operator scans a
+//     timeline for, and IsAction says whether a row is an action or mechanics.
 //
-// WHAT GOES: Inference.Messages / Tools / Completion / ToolCalls, A2A.Parts /
-// Artifact, MCP.Params / Result, and Plugins. All are rendered only in the detail
-// pane, which fetches the full event for the row under the cursor. Plugins is in
-// that list for a different reason than size (it measured 0.3%): it is an
-// escape hatch any plugin can put anything into, so it is unbounded, and the
-// timeline never reads it.
+// WHAT GOES: Inference.Messages / Tools / ToolCalls, A2A.Artifact, and
+// MCP.Params / Result. Those are read by the detail pane alone, which fetches the
+// full event for the row under the cursor. Messages is the one that matters —
+// every inference request carries the whole conversation, and it is essentially
+// all of the 99.5%.
+//
+// One consistency note that motivated keeping the filter's fields rather than
+// narrowing the filter: SSE-streamed events are NOT projected, so a filter that
+// worked on the stream but not on the snapshot would match newly arrived rows and
+// miss everything the snapshot replaced — the same query giving different answers
+// depending on when a row happened to arrive.
 //
 // COPIES, NEVER CLEARS. The store hands out pointers to the events it keeps, so
 // clearing fields in place would delete the operator's conversation from the
@@ -40,20 +57,19 @@ import "github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 func summarizeEvent(e *pipeline.SessionEvent) *pipeline.SessionEvent {
 	s := *e
 
-	// An unbounded per-plugin JSON blob the timeline never reads.
-	s.Plugins = nil
+	// Plugins is NOT dropped: `plugin:<name>` is a lookup into it.
 
 	if e.Inference != nil {
 		inf := *e.Inference
 		inf.Messages = nil
 		inf.Tools = nil
-		inf.Completion = ""
 		inf.ToolCalls = nil
+		// Completion is NOT dropped: the free-text filter searches it.
 		s.Inference = &inf
 	}
 	if e.A2A != nil {
 		a := *e.A2A
-		a.Parts = nil
+		// Parts is NOT dropped: the free-text filter searches Parts[].Content.
 		a.Artifact = ""
 		s.A2A = &a
 	}

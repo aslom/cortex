@@ -152,3 +152,67 @@ func TestSnapshotLoaded_LearnsWhetherTheServerProjects(t *testing.T) {
 		}
 	}
 }
+
+// The full event has to land in the slice abctl holds, not just on detailRow, or
+// ↵ → Esc → ↵ on the same row pays the round trip every time.
+func TestApplyDetailEvent_WritesBackToTheHeldSlice(t *testing.T) {
+	summary := &pipeline.SessionEvent{
+		Seq: 7, Host: "h", Inference: &pipeline.InferenceExtension{Model: "opus"},
+	}
+	m := detailModel(t, "s1", summary)
+	m.events = map[string][]pipeline.SessionEvent{
+		"s1": {{Seq: 6, Host: "other"}, *summary, {Seq: 8, Host: "other"}},
+	}
+
+	full := &pipeline.SessionEvent{
+		Seq: 7, Host: "h",
+		Inference: &pipeline.InferenceExtension{
+			Model:    "opus",
+			Messages: []pipeline.InferenceMessage{{Role: "user", Content: "BODY"}},
+		},
+	}
+	m.applyDetailEvent(detailEventLoadedMsg{sessionID: "s1", seq: 7, event: full})
+
+	held := m.events["s1"]
+	if len(held[1].Inference.Messages) != 1 {
+		t.Error("the held event was not upgraded; the next open would re-fetch")
+	}
+	// Matched by Seq, so its neighbours are untouched.
+	if held[0].Seq != 6 || held[2].Seq != 8 {
+		t.Error("the write-back disturbed neighbouring rows")
+	}
+	// A Seq the session does not hold is a no-op, not a panic: eviction and pod
+	// switches both make this normal.
+	m.applyDetailEvent(detailEventLoadedMsg{sessionID: "s1", seq: 7,
+		event: &pipeline.SessionEvent{Seq: 999}})
+}
+
+// `y` writes the event's JSON out for debugging. Handing somebody a body-less event
+// that looks complete is a bad surprise, so the flash says when the bodies are not
+// in yet.
+func TestDetailIsProjected(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		projects bool
+		event    *pipeline.SessionEvent
+		want     bool
+	}{
+		{"summary awaiting its bodies", true,
+			&pipeline.SessionEvent{Inference: &pipeline.InferenceExtension{Model: "opus"}}, true},
+		{"full event has landed", true,
+			&pipeline.SessionEvent{Inference: &pipeline.InferenceExtension{
+				Messages: []pipeline.InferenceMessage{{Content: "x"}}}}, false},
+		{"mcp payload present", true,
+			&pipeline.SessionEvent{MCP: &pipeline.MCPExtension{Params: map[string]any{"a": 1}}}, false},
+		{"old proxy sent everything", false,
+			&pipeline.SessionEvent{Inference: &pipeline.InferenceExtension{Model: "opus"}}, false},
+		{"no protocol extension at all", true, &pipeline.SessionEvent{Host: "h"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{serverProjects: tc.projects, detailEvent: tc.event}
+			if got := m.detailIsProjected(); got != tc.want {
+				t.Errorf("detailIsProjected = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

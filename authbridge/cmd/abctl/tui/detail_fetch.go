@@ -69,8 +69,63 @@ func (m *model) applyDetailEvent(msg detailEventLoadedMsg) {
 		m.setFlash("could not load the full event: " + msg.err.Error())
 		return
 	}
+	// Write the full event back into the slice abctl holds, so re-opening the same
+	// row is free. Without this the summary stays in m.events and every ↵ → Esc → ↵
+	// pays the round trip again for bytes already fetched.
+	//
+	// Matched on Seq rather than position: the slice is rebuilt from the stream and
+	// snapshots, so an index taken when the fetch was issued may not be the same row
+	// by the time it lands.
+	m.replaceHeldEvent(msg.sessionID, msg.event)
+
 	// Re-render through showDetail so the tunnel/TLS headers, wrapping and scroll
 	// position are all rebuilt exactly as the first render built them.
 	m.detailRow.event = msg.event
 	m.showDetail(m.detailRow, false)
+}
+
+// replaceHeldEvent swaps the stored event with the same Seq for the full one.
+//
+// A no-op when the session is gone or the Seq is not held — both happen normally
+// (a pod switch, FIFO eviction) and neither is worth reporting: the detail pane
+// already has what it fetched.
+func (m *model) replaceHeldEvent(sessionID string, full *pipeline.SessionEvent) {
+	if full == nil || full.Seq == 0 {
+		return
+	}
+	held := m.events[sessionID]
+	for i := range held {
+		if held[i].Seq == full.Seq {
+			held[i] = *full
+			return
+		}
+	}
+}
+
+// detailIsProjected reports that the event on screen is still a summary: the
+// server projects, it carries a protocol extension, and the bodies have not
+// arrived — either because the fetch is in flight or because it failed.
+//
+// Used to warn on yank. `y` writes the event's JSON out for debugging, and handing
+// somebody a body-less event that looks complete is the kind of surprise that
+// wastes an afternoon.
+func (m *model) detailIsProjected() bool {
+	e := m.detailEvent
+	if !needsFullEvent(m.serverProjects, e) {
+		return false
+	}
+	// The fields the projection drops. Any one of them present means the full event
+	// has landed; a genuinely empty conversation is indistinguishable, and calling
+	// that "projected" is the safe direction — the note says the bodies may be
+	// missing, not that they are.
+	if e.Inference != nil && (len(e.Inference.Messages) > 0 || len(e.Inference.Tools) > 0) {
+		return false
+	}
+	if e.MCP != nil && (e.MCP.Params != nil || e.MCP.Result != nil) {
+		return false
+	}
+	if e.A2A != nil && e.A2A.Artifact != "" {
+		return false
+	}
+	return true
 }

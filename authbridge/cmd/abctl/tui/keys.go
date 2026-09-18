@@ -599,7 +599,16 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// disappears after three seconds while the success path persists.
 			m.setStickyFlash("yank failed: " + err.Error())
 		} else {
-			m.setStickyFlash("yanked → " + path)
+			// Say so when the bodies are not in the file. `y` exists to hand an
+			// event to somebody for debugging, and a body-less event that LOOKS
+			// complete is the kind of surprise that wastes an afternoon — the
+			// timeline is projected now, so the messages arrive a moment after the
+			// row does, and not at all if that fetch failed.
+			note := ""
+			if m.detailIsProjected() {
+				note = "  (message bodies not loaded yet — re-yank in a moment)"
+			}
+			m.setStickyFlash("yanked → " + path + note)
 		}
 		return nil
 

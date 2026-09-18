@@ -275,8 +275,22 @@ func (m *model) rebuildEventsTable() {
 	// one rebuild that gets to choose an end, because there is no position to
 	// preserve yet — every later one (the poll, a filter, a column toggle) must
 	// leave the operator where they are.
+	//
+	// LATCHED ONLY ONCE THERE ARE ROWS, which is the whole subtlety. Entering a
+	// session calls rebuildEventsTable BEFORE snapshotCmd returns (keys.go), so for
+	// any session whose history is not already cached the first rebuild has zero
+	// rows. Latching on that one made the post-snapshot rebuild a "refresh", the
+	// preference was skipped, and tail-follow placed the cursor on the newest row —
+	// silently ignoring the setting in exactly the case it exists for, a
+	// pre-existing session opened to read from the oldest end.
+	//
+	// A table with no rows has no end to land on anyway, so deferring costs nothing.
+	// A session that stays empty simply never latches, and every rebuild of it is a
+	// harmless no-op opening.
 	opening := m.eventsBuiltFor != m.selectedSess
-	m.eventsBuiltFor = m.selectedSess
+	if len(rows) > 0 {
+		m.eventsBuiltFor = m.selectedSess
+	}
 
 	target := prevRow
 	switch {

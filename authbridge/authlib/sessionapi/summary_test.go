@@ -2,6 +2,7 @@ package sessionapi
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -34,9 +35,12 @@ func fullEvent() pipeline.SessionEvent {
 			Model:       "opus",
 			Temperature: &temp,
 			Stream:      true,
-			Messages: []pipeline.InferenceMessage{
-				{Role: "user", Content: strings.Repeat("x", 4096)},
-			},
+			// Proportioned like real traffic, which is what the whole design rests
+			// on: an inference request re-sends the WHOLE conversation, so Messages
+			// is ~190KB while the completion it produced is a couple of KB. A
+			// fixture with those two the same size makes the projection look 3x
+			// rather than the ~163x it measures against a live proxy.
+			Messages:         bigConversation(24, 8192),
 			Tools:            []pipeline.InferenceTool{{Name: "search"}},
 			Completion:       strings.Repeat("y", 2048),
 			ToolCalls:        []pipeline.InferenceToolCall{{Name: "search"}},
@@ -82,14 +86,8 @@ func TestSummarizeEvent_DropsPayloadsKeepsTimelineFields(t *testing.T) {
 	if got.Inference.Tools != nil {
 		t.Error("Inference.Tools survived")
 	}
-	if got.Inference.Completion != "" {
-		t.Error("Inference.Completion survived")
-	}
 	if got.Inference.ToolCalls != nil {
 		t.Error("Inference.ToolCalls survived")
-	}
-	if got.A2A.Parts != nil {
-		t.Error("A2A.Parts survived")
 	}
 	if got.A2A.Artifact != "" {
 		t.Error("A2A.Artifact survived")
@@ -99,9 +97,6 @@ func TestSummarizeEvent_DropsPayloadsKeepsTimelineFields(t *testing.T) {
 	}
 	if got.MCP.Result != nil {
 		t.Error("MCP.Result survived")
-	}
-	if got.Plugins != nil {
-		t.Error("Plugins survived — unbounded per-plugin JSON, rendered only in the detail pane")
 	}
 
 	// Kept: everything the events table and its sort keys read.
@@ -168,7 +163,7 @@ func TestSummarizeEvent_DoesNotMutateTheStoredEvent(t *testing.T) {
 	full := fullEvent()
 	_ = summarizeEvent(&full)
 
-	if len(full.Inference.Messages) != 1 {
+	if len(full.Inference.Messages) != 24 {
 		t.Error("Inference.Messages was cleared on the source event")
 	}
 	if full.Inference.Completion == "" {
@@ -204,9 +199,11 @@ func TestSummarizeEvent_LeavesAbsentExtensionsAbsent(t *testing.T) {
 	}
 }
 
-// The size claim this whole change rests on. Measured at 203x on real traffic;
-// asserted well under that so the test pins the order of magnitude rather than
-// one machine's sample.
+// The size claim this whole change rests on. Measured at 163x against a live
+// proxy's real events, with the filter's fields kept (299x if they were dropped,
+// which broke the filter — see TestSummarizeEvent_KeepsEverythingTheFilterSearches).
+// Asserted well under that, so this pins the order of magnitude rather than one
+// machine's sample.
 func TestSummarizeEvent_IsOrdersOfMagnitudeSmaller(t *testing.T) {
 	full := fullEvent()
 	fb, err := json.Marshal(&full)
@@ -223,4 +220,91 @@ func TestSummarizeEvent_IsOrdersOfMagnitudeSmaller(t *testing.T) {
 		t.Errorf("summary is only %.1fx smaller (full=%d summary=%d); the payloads are the point",
 			ratio, len(fb), len(sb))
 	}
+}
+
+// The half that was missed the first time, and silently: the events table has a
+// FILTER, and it searches fields the projection had been dropping. `plugin:foo`
+// matched nothing because it is a lookup into Plugins, and `/some completion text`
+// stopped matching because eventHaystack reads Inference.Completion and
+// A2A.Parts[].Content.
+//
+// Worse than losing a feature, it was INCONSISTENT: SSE-streamed events are not
+// projected, so the same query matched newly arrived rows and missed everything a
+// snapshot had replaced.
+//
+// Each field below is named by abctl's eventHaystack / matchEventRow
+// (cmd/abctl/tui/events_pane.go). Keeping them costs 299x → 163x, which is 1.12 MiB
+// against 0.61 for a 1000-event session — both instant.
+func TestSummarizeEvent_KeepsEverythingTheFilterSearches(t *testing.T) {
+	full := fullEvent()
+	got := summarizeEvent(&full)
+
+	// `plugin:<name>` is a lookup into this map.
+	if _, ok := got.Plugins["cost"]; !ok {
+		t.Error("Plugins was dropped — the plugin:<name> filter is a lookup into it")
+	}
+	// Free-text: eventHaystack appends both of these.
+	if got.Inference.Completion != full.Inference.Completion {
+		t.Error("Inference.Completion was dropped — the / filter searches it")
+	}
+	if len(got.A2A.Parts) != 1 || got.A2A.Parts[0].Content != full.A2A.Parts[0].Content {
+		t.Error("A2A.Parts was dropped — the / filter searches Parts[].Content")
+	}
+	// Also in the haystack, and already kept for other reasons — asserted here so
+	// this test is the one place the filter's whole surface is listed.
+	if got.MCP.Err == nil || got.MCP.Err.Message != "boom" {
+		t.Error("MCP.Err.Message was dropped — the / filter searches it")
+	}
+	if got.Inference.FinishReason != "stop" {
+		t.Error("Inference.FinishReason was dropped — the / filter searches it")
+	}
+	if got.Identity == nil {
+		t.Error("Identity was dropped — the / filter searches Subject and ClientID")
+	}
+	if got.Invocations == nil {
+		t.Error("Invocations was dropped — the / filter searches plugin/action/reason/path/Details")
+	}
+}
+
+// An exhaustiveness guard, because every check above is hand-enumerated: a large
+// field added to any of these structs later would pass straight through and
+// re-inflate the timeline with every other test still green.
+//
+// Counting fields rather than naming them is deliberate. The point is to FAIL when
+// the shape changes, so that whoever adds a field has to decide whether it is
+// timeline data or detail data and record the answer here. The numbers carry no
+// meaning on their own; the failure message carries the instruction.
+func TestSummarizeEvent_ShapeIsGuarded(t *testing.T) {
+	for _, g := range []struct {
+		name string
+		typ  reflect.Type
+		want int
+	}{
+		{"SessionEvent", reflect.TypeOf(pipeline.SessionEvent{}), 22},
+		{"InferenceExtension", reflect.TypeOf(pipeline.InferenceExtension{}), 22},
+		{"A2AExtension", reflect.TypeOf(pipeline.A2AExtension{}), 11},
+		{"MCPExtension", reflect.TypeOf(pipeline.MCPExtension{}), 6},
+	} {
+		t.Run(g.name, func(t *testing.T) {
+			if got := g.typ.NumField(); got != g.want {
+				t.Errorf("%s has %d fields, this guard was written against %d.\n"+
+					"A field was added or removed. Decide which it is:\n"+
+					"  TIMELINE data — rendered in the events table, or searched by abctl's\n"+
+					"    eventHaystack/matchEventRow — then it MUST survive summarizeEvent, and\n"+
+					"    belongs in one of the assertions above.\n"+
+					"  DETAIL data — read only by the detail pane — then drop it in summarizeEvent.\n"+
+					"Then update this count.", g.name, got, g.want)
+			}
+		})
+	}
+}
+
+// bigConversation builds n messages of size bytes each — the shape of a real
+// inference request, which carries every earlier turn.
+func bigConversation(n, size int) []pipeline.InferenceMessage {
+	msgs := make([]pipeline.InferenceMessage, 0, n)
+	for i := 0; i < n; i++ {
+		msgs = append(msgs, pipeline.InferenceMessage{Role: "user", Content: strings.Repeat("x", size)})
+	}
+	return msgs
 }

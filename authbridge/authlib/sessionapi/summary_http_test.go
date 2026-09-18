@@ -52,14 +52,18 @@ func TestHandleGet_ViewSummaryDropsPayloads(t *testing.T) {
 	}
 	t.Logf("full=%d summary=%d ratio=%.1fx", len(full), len(summ), float64(len(full))/float64(len(summ)))
 
-	// The payload fields must be gone from the wire.
-	for _, gone := range []string{`"messages"`, `"completion"`, `"tools"`, `"parts"`, `"artifact"`, `"params"`, `"result"`, `"plugins"`} {
+	// Only what the timeline never reads. completion/parts/plugins are deliberately
+	// NOT here — the events filter searches them, so dropping them silently broke
+	// `/text` and `plugin:name`. See summarizeEvent's rule.
+	for _, gone := range []string{`"messages"`, `"tools"`, `"toolCalls"`, `"artifact"`, `"params"`, `"result"`} {
 		if strings.Contains(string(summ), gone) {
 			t.Errorf("%s still present in the summary response", gone)
 		}
 	}
 	// And the timeline fields must remain.
-	for _, kept := range []string{`"host"`, `"statusCode"`, `"totalTokens"`, `"invocations"`, `"isAction"`, `"model"`} {
+	for _, kept := range []string{`"host"`, `"statusCode"`, `"totalTokens"`, `"invocations"`, `"isAction"`, `"model"`,
+		// The filter's fields, on the wire.
+		`"completion"`, `"parts"`, `"plugins"`} {
 		if !strings.Contains(string(summ), kept) {
 			t.Errorf("%s missing from the summary response — the timeline renders it", kept)
 		}
