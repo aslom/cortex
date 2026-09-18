@@ -1628,6 +1628,16 @@ func (m *model) paneView() string {
 	if m.spendStripVisible() {
 		if strip := renderSpendStrip(m.spendSummary(), m.width); strip != "" {
 			rows = append(rows, styleMuted.Render(strip))
+			// The breakdown goes directly under the figure it breaks down, and only when
+			// the strip itself drew — a headless breakdown would be a pane. Styled the
+			// same way and for the same reason: fitted first, coloured after, so the
+			// width measurement never counts escape bytes.
+			if m.spendDrawerVisible() {
+				for _, line := range renderSpendDrawer(m.spend.snap, m.spend.axis(),
+					formatWindowLabel(m.spend.window()), m.width) {
+					rows = append(rows, styleMuted.Render(line))
+				}
+			}
 		}
 	}
 	rows = append(rows, body, m.footerView())

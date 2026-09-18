@@ -143,6 +143,44 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 
+	// The spend drawer's three keys, handled where `u` is and gated the same way: not
+	// while filtering (they are characters the user is typing), not under the column
+	// picker, not mid-edit.
+	//
+	// GLOBAL, unlike every pane binding below, because the strip is global — it draws on
+	// every pane except the two pickers, and a breakdown of it that only opened on one
+	// pane would be a pane's feature wearing the strip's clothes.
+	//
+	// `g` and `w` are live ONLY while the drawer is open. They are ordinary letters, and
+	// claiming them permanently would take them from any future pane binding for the sake
+	// of a surface that is closed most of the time; scoped to the open drawer they are
+	// discoverable from its own hint line and inert otherwise.
+	if !m.filtering && !m.colPicker && m.editState.phase == editPhaseDone {
+		switch msg.String() {
+		case "$":
+			m.toggleSpendDrawer()
+			return nil
+		case "g":
+			if m.spendDrawerVisible() {
+				return m.cycleSpendAxis()
+			}
+		case "w":
+			if m.spendDrawerVisible() {
+				return m.cycleSpendWindow()
+			}
+		case "esc":
+			// Closes the drawer FIRST, before esc reaches whatever else it means on this
+			// pane. The drawer is the most recently opened thing on screen, so it is what
+			// a user pressing esc is closing — and esc's other meanings (leave a pane, go
+			// back) are still one more press away, which is the behaviour every overlay in
+			// this package already has.
+			if m.spend.expanded {
+				m.spend.expanded = false
+				return nil
+			}
+		}
+	}
+
 	// The column picker owns the keyboard while it is up, so ↑↓/space cannot also
 	// move the table cursor underneath it. Checked before pane dispatch for the
 	// same reason the help overlay is.

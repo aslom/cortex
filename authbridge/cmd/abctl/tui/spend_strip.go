@@ -25,7 +25,7 @@ const stripGap = "   "
 // "approximately", and the real number is at least this much.
 //
 // ONE SPELLING, EVERYWHERE. This is the marker the strip puts on the today and window
-// figures, the sessions table puts on its COST cell (see fitCostCell) and the Usage
+// figures, the sessions table puts on its SAVED cell (see sessionMoneyCell) and the Usage
 // pane puts on its cost cell (see renderCostSummary). A branch that carries a commit
 // titled "Stop publishing a truncated stream's floor as an exact total" had three money
 // surfaces republishing that floor with no annotation at all, and three different

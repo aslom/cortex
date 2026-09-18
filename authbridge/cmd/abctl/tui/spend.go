@@ -111,6 +111,23 @@ type spendState struct {
 	// error are its own: the two chains answer at different cadences and can wedge
 	// independently, so one timestamp cannot describe both. See spendStaleAfter.
 	todayLastFetch time.Time
+	// expanded is the spend drawer's only state: whether the strip is showing its
+	// breakdown. See spend_drawer.go for why a drawer rather than a pane.
+	expanded bool
+	// groupIdx indexes spendDrawerAxes; windowStep is an OFFSET from
+	// spendDrawerWindowDefault into spendDrawerWindows. Together they are the axis the
+	// server folds for and the span it covers.
+	//
+	// ON THIS STRUCT rather than on a drawer struct of its own, because they are what the
+	// STRIP's poll asks for: the drawer renders the same snapshot the strip does, so one
+	// poll serves both and there is one place that knows what was requested.
+	//
+	// BOTH ZERO VALUES ARE THE PRE-DRAWER DEFAULTS, which is why one is an index and the
+	// other an offset: GroupModel is already first in the axis slice, but spendWindow is in
+	// the MIDDLE of an ascending span slice, so an index of zero there would silently move
+	// the strip's own poll to 15m. See spendState.window.
+	groupIdx   int
+	windowStep int
 }
 
 // invalidate drops the data this state describes and disowns anything in flight.
@@ -531,62 +548,6 @@ func (m *model) applyAges(out *spendSummary) {
 	}
 }
 
-// sessionCost returns what one session cost over the strip's window.
-//
-// Reads the strip's own snapshot rather than issuing anything: fetchSpend asks for
-// group=session on the all-sessions ring, so the poll that feeds the strip already
-// carries a Series entry per session. A per-row fetch would be one request per
-// visible row on a 20s cadence.
-//
-// priced=false means NO FIGURE, and the caller must render it as blank rather than
-// as $0.00 — a table cell has even less room to explain itself than the strip does.
-// Three distinct states collapse into it, all of them "unknown" and none of them
-// "free": no snapshot yet, a window that priced nothing at all, and a session this
-// window has no priced request for. The last is the one worth naming, because
-// Snapshot.Priced is WINDOW-wide: a snapshot that priced another session's traffic
-// says Priced == true, so trusting that flag alone would render $0.0000 against a
-// session whose cost is simply unknown.
-//
-// inexact is the third answer, and it is about the figure rather than about whether
-// there is one: true means at least one of this session's priced requests carries a
-// figure that is not exact (usage.Counts.IncompleteRequests), so usd is a LOWER BOUND.
-// Returned rather than folded into priced because the dollars are real and belong on
-// screen — only the claim of exactness is withdrawn. The cell marks it; see
-// fitCostCell.
-func (m *model) sessionCost(id string) (usd float64, priced, inexact bool) {
-	if m.spend.snap == nil || !m.spend.snap.Priced || id == "" {
-		return 0, false, false
-	}
-	var micros int64
-	var pricedReqs, incompleteReqs int64
-	// Every bucket, not Buckets[0]. The strip asks for a single-bucket resolution
-	// but the server negotiates it (see Snapshot.BucketSeconds), so reading the
-	// first bucket would report the first slice of the window as the whole of it.
-	for _, b := range m.spend.snap.Buckets {
-		c, ok := b.Series[id]
-		if !ok {
-			continue
-		}
-		micros += c.CostMicros
-		pricedReqs += c.PricedRequests
-		incompleteReqs += c.IncompleteRequests
-	}
-	// A session whose summed figure is negative is UNPRICED, not cheap. The COST cell
-	// renders priced=false as blank, which already means "nobody knows what this cost" in
-	// this table — the honest answer for an impossible number, and the same treatment
-	// costTotalSection chose. Without it the cell printed "$-5.0000", a credit nobody
-	// issued, in a column a reader scans for the expensive row.
-	//
-	// Summed rather than per-bucket, because that is the figure the cell publishes: a
-	// positive bucket and a negative one can cancel to something plausible, and it is the
-	// PUBLISHED total that has to be refusable. See negativeCost — the guarantee is
-	// upstream and this is defence in depth.
-	if pricedReqs == 0 || negativeCost(micros) {
-		return 0, false, false
-	}
-	return float64(micros) / 1e6, true, incompleteReqs > 0
-}
-
 // parseWindowSpan interprets a snapshot's Window string as a duration.
 //
 // Not every value has to be one. The symbolic windows now exist — usage.WindowToday
@@ -680,20 +641,22 @@ func (m *model) fetchSpend() tea.Cmd {
 	client := m.client
 	m.spend.reqSeq++
 	req := m.spend.reqSeq
+	// Read on the update goroutine and captured, not read inside the closure: the closure
+	// runs on bubbletea's command goroutine, where touching m is a data race.
+	window, axis := m.spend.window(), m.spend.axis()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		// Session "" is every session, and group=session asks for the per-session
-		// breakdown ON that all-sessions ring — which is what makes ONE poll serve
-		// both consumers: the strip reads Totals, the sessions table reads one
-		// Series entry per row. The alternative is a request per row.
+		// Session "" is every session, and the axis is whatever the drawer is showing —
+		// one poll serves both, the strip reading Totals and the drawer reading Series.
 		//
-		// Totals is unaffected by grouping (Snapshot sums it from the raw buckets
-		// before folding), so the strip's figures are byte-identical to what
-		// group=none returned. This asked for group=none until the sessions table
-		// existed, on the sound-at-the-time grounds that a breakdown nothing renders
-		// is a label map paid for and thrown away.
-		snap, err := client.GetUsage(ctx, spendWindow, spendResolution, "", usage.GroupSession)
+		// Totals is unaffected by grouping (Snapshot sums it from the raw buckets before
+		// folding), so the strip's figures are byte-identical under any axis and the
+		// breakdown rides along for free. This asked for group=session while the sessions
+		// table summed its COST column out of this snapshot; that column is now summed
+		// server-side over each session's whole life instead, which is why the axis is free
+		// for the drawer to choose.
+		snap, err := client.GetUsage(ctx, window, spendResolution, "", axis)
 		return spendLoadedMsg{snap: snap, req: req, err: err}
 	}
 }
