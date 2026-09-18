@@ -531,6 +531,14 @@ type model struct {
 	// is, not re-anchor them to an end.
 	eventsBuiltFor string
 
+	// fullFetched is the set of event Seqs, per session, whose bodies have been
+	// fetched for the detail pane. Reset with m.events, so it cannot outlive the rows
+	// it describes.
+	//
+	// Tracked rather than inferred from the event: see needsFullEvent for why a
+	// presence check cannot answer this for response events.
+	fullFetched map[string]map[uint64]bool
+
 	// serverProjects records that this proxy honours view=summary, learned from its
 	// echo on any snapshot. It decides whether the detail pane has to fetch the row
 	// it opens: a proxy that predates the projection already sent whole events, and
@@ -646,6 +654,9 @@ func (m *model) backToPodsPane() {
 	m.streamCh = nil
 	m.sessions = nil
 	m.events = make(map[string][]pipeline.SessionEvent)
+	// In lockstep with m.events: a Seq recorded as fetched must not survive the rows
+	// it described, or the next session to reuse that Seq would be assumed complete.
+	m.fullFetched = nil
 	// In lockstep with m.events. A count describing a session whose events are gone is
 	// the bug that made this map per-session in the first place, just with a narrower
 	// window: re-entering the events pane on a matching id before its snapshot lands.

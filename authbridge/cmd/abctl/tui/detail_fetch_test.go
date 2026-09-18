@@ -8,35 +8,62 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
-// The predicate decides whether Enter costs a round trip. Both arms matter: not
+// The predicate decides whether Enter costs a round trip. Every arm matters: not
 // fetching when the bodies are missing leaves the detail pane permanently
-// incomplete, and fetching when they are already present spends a request per
+// incomplete, and fetching when they are already here spends a request per
 // keystroke for bytes abctl is holding.
 func TestNeedsFullEvent(t *testing.T) {
-	withInference := &pipeline.SessionEvent{Inference: &pipeline.InferenceExtension{}}
-	withA2A := &pipeline.SessionEvent{A2A: &pipeline.A2AExtension{}}
-	withMCP := &pipeline.SessionEvent{MCP: &pipeline.MCPExtension{}}
-	tunnel := &pipeline.SessionEvent{Host: "example.com:443"}
+	withInference := &pipeline.SessionEvent{Seq: 1, Inference: &pipeline.InferenceExtension{}}
+	withA2A := &pipeline.SessionEvent{Seq: 2, A2A: &pipeline.A2AExtension{}}
+	withMCP := &pipeline.SessionEvent{Seq: 3, MCP: &pipeline.MCPExtension{}}
+	tunnel := &pipeline.SessionEvent{Seq: 4, Host: "example.com:443"}
 
 	for _, tc := range []struct {
 		name      string
 		projects  bool
+		fetched   bool
 		event     *pipeline.SessionEvent
 		want      bool
 		reasoning string
 	}{
-		{"projected inference", true, withInference, true, "messages were stripped"},
-		{"projected a2a", true, withA2A, true, "parts were stripped"},
-		{"projected mcp", true, withMCP, true, "params/result were stripped"},
-		{"projected tunnel", true, tunnel, false, "no protocol extension, so nothing was stripped"},
-		{"old proxy sent everything", false, withInference, false, "re-fetching bytes we already hold"},
-		{"nil event", true, nil, false, "nothing to fetch"},
+		{"projected inference", true, false, withInference, true, "messages were stripped"},
+		{"projected a2a", true, false, withA2A, true, "artifact was stripped"},
+		{"projected mcp", true, false, withMCP, true, "params/result were stripped"},
+		{"projected tunnel", true, false, tunnel, false, "no protocol extension, so nothing was stripped"},
+		{"old proxy sent everything", false, false, withInference, false, "re-fetching bytes we already hold"},
+		{"nil event", true, false, nil, false, "nothing to fetch"},
+		// The case that was missing, and the whole reason this is tracked rather
+		// than inferred: a plain text RESPONSE carries none of the dropped fields
+		// even after a successful fetch, so a body-presence check would ask for it
+		// again on every open.
+		{"already fetched", true, true, withInference, false, "the bodies are already here"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := needsFullEvent(tc.projects, tc.event); got != tc.want {
+			m := &model{serverProjects: tc.projects, selectedSess: "s1"}
+			if tc.fetched && tc.event != nil {
+				m.markFullFetched("s1", tc.event.Seq)
+			}
+			if got := m.needsFullEvent(tc.event); got != tc.want {
 				t.Errorf("needsFullEvent = %v, want %v — %s", got, tc.want, tc.reasoning)
 			}
 		})
+	}
+}
+
+// A Seq recorded as fetched must not be trusted for a different session, or
+// switching pods would show one session's row as complete on the strength of
+// another's fetch.
+func TestNeedsFullEvent_MarkIsPerSession(t *testing.T) {
+	e := &pipeline.SessionEvent{Seq: 7, Inference: &pipeline.InferenceExtension{}}
+	m := &model{serverProjects: true, selectedSess: "s1"}
+	m.markFullFetched("s1", 7)
+
+	if m.needsFullEvent(e) {
+		t.Error("s1/seq7 was fetched; it should not be fetched again")
+	}
+	m.selectedSess = "s2"
+	if !m.needsFullEvent(e) {
+		t.Error("s2 has never fetched seq 7 — it must not inherit s1's mark")
 	}
 }
 
@@ -187,31 +214,72 @@ func TestApplyDetailEvent_WritesBackToTheHeldSlice(t *testing.T) {
 		event: &pipeline.SessionEvent{Seq: 999}})
 }
 
-// `y` writes the event's JSON out for debugging. Handing somebody a body-less event
-// that looks complete is a bad surprise, so the flash says when the bodies are not
-// in yet.
+// `y` writes the event's JSON out for debugging, and handing somebody a body-less
+// event that looks complete is a bad surprise — so the flash says when the bodies
+// are not in yet. Now exactly needsFullEvent, which is the point: two lists that
+// could disagree is what produced the bug below.
 func TestDetailIsProjected(t *testing.T) {
+	inf := func(seq uint64) *pipeline.SessionEvent {
+		return &pipeline.SessionEvent{Seq: seq, Inference: &pipeline.InferenceExtension{Model: "opus"}}
+	}
 	for _, tc := range []struct {
 		name     string
 		projects bool
+		fetched  bool
 		event    *pipeline.SessionEvent
 		want     bool
 	}{
-		{"summary awaiting its bodies", true,
-			&pipeline.SessionEvent{Inference: &pipeline.InferenceExtension{Model: "opus"}}, true},
-		{"full event has landed", true,
-			&pipeline.SessionEvent{Inference: &pipeline.InferenceExtension{
-				Messages: []pipeline.InferenceMessage{{Content: "x"}}}}, false},
-		{"mcp payload present", true,
-			&pipeline.SessionEvent{MCP: &pipeline.MCPExtension{Params: map[string]any{"a": 1}}}, false},
-		{"old proxy sent everything", false,
-			&pipeline.SessionEvent{Inference: &pipeline.InferenceExtension{Model: "opus"}}, false},
-		{"no protocol extension at all", true, &pipeline.SessionEvent{Host: "h"}, false},
+		{"summary awaiting its bodies", true, false, inf(1), true},
+		{"bodies have landed", true, true, inf(2), false},
+		{"old proxy sent everything", false, false, inf(3), false},
+		{"no protocol extension at all", true, false, &pipeline.SessionEvent{Seq: 4, Host: "h"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := &model{serverProjects: tc.projects, detailEvent: tc.event}
+			m := &model{serverProjects: tc.projects, selectedSess: "s1", detailEvent: tc.event}
+			if tc.fetched {
+				m.markFullFetched("s1", tc.event.Seq)
+			}
 			if got := m.detailIsProjected(); got != tc.want {
 				t.Errorf("detailIsProjected = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// THE SHAPE THAT BROKE IT: a tool-only response turn — tool_use blocks and no text
+// block. ToolCalls is set, and Messages/Tools are request-side so they are empty on
+// a response, and Completion is empty because there was no text. The old
+// body-presence check tested Messages and Tools only, so this event stayed
+// "projected" after a successful fetch and `y` told the operator to re-yank
+// something already complete — advice that could never come true.
+//
+// Equally broken for a plain TEXT response, which has no dropped field populated at
+// all. That is why the mark is tracked rather than inferred.
+func TestDetailIsProjected_ToolOnlyAndTextOnlyResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		infer *pipeline.InferenceExtension
+	}{
+		{"tool-only response", &pipeline.InferenceExtension{
+			ToolCalls: []pipeline.InferenceToolCall{{Name: "search"}},
+		}},
+		{"text-only response", &pipeline.InferenceExtension{
+			Completion: "hello", FinishReason: "stop",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &pipeline.SessionEvent{Seq: 9, Inference: tc.infer}
+			m := &model{serverProjects: true, selectedSess: "s1", detailEvent: e}
+
+			if !m.detailIsProjected() {
+				t.Fatal("before the fetch this is a summary")
+			}
+			m.markFullFetched("s1", 9)
+			if m.detailIsProjected() {
+				t.Error("after a successful fetch the event is complete; the yank note must stop")
+			}
+			if m.needsFullEvent(e) {
+				t.Error("after a successful fetch re-opening must not fetch again")
 			}
 		})
 	}

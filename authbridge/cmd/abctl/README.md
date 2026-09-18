@@ -624,11 +624,16 @@ still works, because those fields are searched and so are kept. Dropping them wo
 have been ~299x instead of ~163x — both about a megabyte for a 1000-event session,
 so the filter is worth far more than the difference.
 
-The consequence is worth knowing: pressing `↵` on a row fetches that one event in
+The consequence is worth knowing: the first `↵` on a row fetches that one event in
 full from `/v1/sessions/{id}/events/{seq}`. The detail pane renders the summary
 immediately and the bodies appear when they arrive, so there is no loading screen —
-but on a slow link the message text lands a moment after the rest. If that fetch
-fails, the pane keeps what it has and the error goes to the footer.
+but on a slow link the message text lands a moment after the rest. Re-opening the
+same row is free; the bodies are kept. If the fetch fails, the pane keeps what it
+has and the error goes to the footer.
+
+`y` yanks whatever the pane is showing, so while the bodies are still in flight — or
+after a failed fetch — it says so in the flash rather than handing you a body-less
+event that looks complete.
 
 Because a projected event is ~1KB rather than ~200KB, abctl asks for the server's
 full 2000-event ceiling instead of the old 500. A normal session therefore arrives

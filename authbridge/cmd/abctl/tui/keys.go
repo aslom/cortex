@@ -561,7 +561,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// fetchDetailEventCmd for why this is not a blocking spinner.
 			m.showDetail(er, true)
 			m.pane = paneDetail
-			if needsFullEvent(m.serverProjects, er.event) && m.client != nil {
+			if m.needsFullEvent(er.event) && m.client != nil {
 				return fetchDetailEventCmd(m, m.selectedSess, er.event.Seq)
 			}
 			return nil
