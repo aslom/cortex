@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,6 +96,79 @@ func (m *model) localEndpointOr() string {
 		return m.localEndpoint
 	}
 	return defaultLocalEndpoint
+}
+
+// pipelineStore resolves where `e` should read and write the pipeline, paired
+// with the base URL whose /reload/status confirms the edit landed. Returns a
+// nil store when neither target is available, which is the only case `e`
+// refuses.
+//
+// The two are returned together because they must describe the SAME proxy:
+// writing a local file and then polling a pod's reload status — or the
+// reverse — would report success for an edit that never took effect.
+//
+// Local wins when the endpoint on screen IS the local Cortex. Deliberately a
+// question about the connection rather than about how abctl was started, so
+// `--endpoint http://127.0.0.1:47601` aimed at your own proxy edits it just
+// like a bare `abctl` does, and `[l]` gains the same ability mid-session.
+// Compared against localEndpoint rather than localEndpointOr(): the fallback
+// is the in-cluster 9094, and matching that would claim a hand-run
+// port-forward to a POD is this machine's config file.
+func (m *model) pipelineStore() (edit.Store, string) {
+	if m.client != nil && m.localEndpoint != "" && sameEndpoint(m.client.Endpoint(), m.localEndpoint) &&
+		m.localConfigPath != "" && m.localStatsURL != "" {
+		return edit.FileStore{Path: m.localConfigPath}, m.localStatsURL
+	}
+	if m.editRunner != nil && m.selectedNamespace != "" && m.selectedPod != "" && m.statusURL != "" {
+		return edit.ConfigMapStore{
+			Run:       m.editRunner,
+			Namespace: m.selectedNamespace,
+			Pod:       m.selectedPod,
+		}, m.statusURL
+	}
+	return nil, ""
+}
+
+// sameEndpoint reports whether two session-API URLs name the same server.
+//
+// Not a string compare. localEndpoint is built by dialURL, which emits
+// "http://127.0.0.1:47601" for the built-in config, while `--endpoint
+// http://localhost:47601` is the same proxy spelled the way a human types it.
+// An exact compare rejected that and flashed "…or point abctl at a Cortex
+// running on this machine" at an operator who had just done exactly that —
+// the same misleading refusal this whole change exists to remove.
+//
+// Loopback names are folded together; every other host must match outright, so
+// a config bound to a specific LAN address is not confused with anything else.
+// Ports are compared as written: two proxies on one host differ only by port.
+func sameEndpoint(a, b string) bool {
+	ua, err := url.Parse(a)
+	if err != nil {
+		return false
+	}
+	ub, err := url.Parse(b)
+	if err != nil {
+		return false
+	}
+	if ua.Scheme != ub.Scheme || ua.Port() != ub.Port() {
+		return false
+	}
+	ha, hb := ua.Hostname(), ub.Hostname()
+	if isLoopbackHost(ha) && isLoopbackHost(hb) {
+		return true
+	}
+	return ha == hb
+}
+
+// isLoopbackHost covers the spellings of "this machine" that appear in a
+// config, on a command line, and in Go's own URL output. net.IP.IsLoopback
+// handles 127.0.0.0/8 and ::1; "localhost" is not an IP, so it is named.
+func isLoopbackHost(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 // localProbeTimeout bounds the pre-connect reachability check for `[l]`.
@@ -444,6 +519,17 @@ type model struct {
 	// Set in newPickerModel to edit.DefaultRunner; tests inject a stub.
 	editRunner edit.Runner
 
+	// localConfigPath is the config file of the Cortex on this machine, and
+	// localStatsURL is where that Cortex serves /reload/status. Both set from
+	// RunOptions, and only when one answered — pipelineStore requires both, so
+	// either being empty means `e` has no local target.
+	//
+	// Passed in rather than resolved here, like save: this package does no
+	// home-directory or filesystem lookup, which is what keeps its tests off
+	// $HOME.
+	localConfigPath string
+	localStatsURL   string
+
 	// save persists Settings when a setting changes. A callback rather than a path
 	// so this package needs no home-directory or filesystem logic, and so its tests
 	// never touch $HOME. Nil disables saving, which is what every test wants.
@@ -529,6 +615,11 @@ func (m *model) backToPodsPane() {
 		_ = m.activePF.Close()
 		m.activePF = nil
 	}
+	// The status URL described that forward, so it dies with it. Not merely
+	// tidy: it is one of the four fields pipelineStore reads to decide an edit
+	// targets a pod, and a URL for a closed forward is never the right answer.
+	// portForwardReadyMsg sets a fresh one for the next pod.
+	m.statusURL = ""
 
 	// Reset session-view state so the next pod starts fresh.
 	m.client = nil
@@ -977,11 +1068,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pickerErr = ""
-		// No port-forward subprocess and no pod identity: this is a
-		// direct connection to whatever is already listening locally.
-		// activePF stays nil (nothing to tear down) and selectedPod /
-		// selectedNamespace stay empty, so `e` correctly reports that
-		// pipeline editing needs the picker — same as --endpoint mode.
+		// No port-forward subprocess and no pod identity: this is a direct
+		// connection to whatever is already listening locally. activePF stays
+		// nil because there is nothing to tear down.
+		//
+		// The pod fields are CLEARED rather than assumed empty. They are only
+		// empty when no pod was ever visited: backToPodsPane clears ~20 fields
+		// but not these, so "pick a pod → esc → [l]" arrives here with
+		// selectedNamespace / selectedPod naming the pod and statusURL naming
+		// its closed port-forward. Since pipelineStore falls back to the
+		// ConfigMap branch on exactly those three, leaving them set let `e`
+		// kubectl-apply against a pod the screen was not showing — and poll a
+		// forward this path never established. Harmless while `[l]` sessions
+		// were assumed storeless; a wrong-target write once they were not.
+		m.selectedNamespace = ""
+		m.selectedPod = ""
+		m.statusURL = ""
 		m.endpoint = msg.endpoint
 		m.client = msg.client
 		m.localDirect = true
@@ -1111,7 +1213,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.editState.applyTime = msg.ApplyTime
 		m.editState.phase = editPhaseWaiting
-		return m, withGen(m.editState.generation, edit.PollCmd(m.ctx, m.statusURL, msg.ApplyTime))
+		return m, withGen(m.editState.generation, edit.PollCmd(
+			m.ctx, m.editState.statusURL, msg.ApplyTime,
+			describeTarget(m.editState.store)))
 
 	case genPolledMsg:
 		// Drop stale (different gen), fully-aborted (phase=Done), or
@@ -1132,25 +1236,32 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editState = editState{phase: editPhaseDone}
 			return m, m.loadPipelineCmd()
 		case edit.PollFailure, edit.PollTimeout:
-			// In-pod reload didn't take. The running pipeline is still
-			// the previous one; reconcile the ConfigMap back to match.
+			// Reload didn't take. The running pipeline is still the previous
+			// one; reconcile the stored config back to match.
 			//
 			// Caveat: the rollback bytes come from m.editState.fetched —
-			// captured at this edit's Fetch time. With Apply's
-			// --force-conflicts=true and field-manager=abctl, if a third
-			// party (operator reconcile, kubectl edit, kustomize) modified
-			// the ConfigMap between our forward apply and this rollback,
-			// our rollback silently reverts their change too. This is not
-			// a true undo. The framework's running pipeline is unaffected
-			// (build failure → keeps the previous in-memory pipeline), but
-			// the on-disk ConfigMap can lose third-party state. Surfacing
-			// a "third-party change detected" path is a future option.
+			// captured at this edit's Fetch time — so a third party who
+			// changed the config between our forward apply and this rollback
+			// has their change silently reverted too. This is not a true undo.
+			// In a cluster that third party is an operator reconcile, a
+			// kubectl edit or a kustomize apply, and Apply's
+			// --force-conflicts=true and field-manager=abctl let us win; on a
+			// local file it is another editor holding the same path. Either
+			// way the framework's running pipeline is unaffected (build
+			// failure → keeps the previous in-memory pipeline), but the stored
+			// config can lose third-party state. Surfacing a "third-party
+			// change detected" path is a future option.
 			reason := msg.Result.LastError
 			if msg.Result.Status == edit.PollTimeout {
-				reason = "reload not observed in 120s"
+				// The deadline this store actually waited, not a literal: a
+				// hardcoded "120s" was already wrong for a local edit, which
+				// gives up after LocalPollDeadline. Same Target PollCmd was
+				// given, so the number reported is the number waited.
+				reason = "reload not observed in " +
+					describeTarget(m.editState.store).Deadline().String()
 			}
-			origManifest, mErr := edit.BuildManifest(
-				m.editState.fetched.ConfigMapYAML,
+			origManifest, mErr := m.editState.store.Build(
+				m.editState.fetched,
 				m.editState.fetched.InnerYAML,
 			)
 			if mErr != nil {
@@ -1170,7 +1281,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.editState.phase = editPhaseRollback
 			}
-			return m, withGen(m.editState.generation, edit.RollbackCmd(m.ctx, m.editRunner, origManifest, reason))
+			return m, withGen(m.editState.generation, edit.RollbackCmd(m.ctx, m.editState.store, origManifest, reason))
 		}
 		return m, nil
 
@@ -1180,13 +1291,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		bg := m.editState.phase == editPhaseBackground
+		// The rollback messages name the target too. Sending a local operator to
+		// kubectl about a ConfigMap that does not exist is the same lie Target
+		// was introduced to kill; the overlay renderer was only half of it.
+		rbTarget := describeTarget(m.editState.store)
 		if bg {
 			if msg.Err != nil {
 				m.setFlash("hot-reload failed: " + msg.ReloadErr +
 					"; rollback failed: " + msg.Err.Error())
 			} else {
 				m.setFlash("hot-reload failed: " + msg.ReloadErr +
-					"; rolled back to previous ConfigMap")
+					"; rolled back to previous " + rbTarget.Noun)
 			}
 			m.editState = editState{phase: editPhaseDone}
 			return m, nil
@@ -1195,11 +1310,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			m.editState.err = "reload failed: " + msg.ReloadErr +
 				"\nrollback also failed: " + msg.Err.Error() +
-				"\nConfigMap and running pipeline are out of sync; check kubectl"
+				"\n" + rbTarget.Noun + " and running pipeline are out of sync; " + rbTarget.OutOfSyncHint
 			return m, nil
 		}
 		m.editState.err = "reload failed: " + msg.ReloadErr +
-			"\nrolled back to previous ConfigMap"
+			"\nrolled back to previous " + rbTarget.Noun
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1624,6 +1739,17 @@ type RunOptions struct {
 	// LocalEndpoint overrides where `[l]` connects. Empty means
 	// defaultLocalEndpoint.
 	LocalEndpoint string
+	// LocalConfigPath and LocalStatsURL describe the Cortex running on this
+	// machine: the config file it was started with, and where it serves
+	// /reload/status. Together they let `e` edit its pipeline directly —
+	// no kubectl, no ConfigMap, since the proxy already watches that file.
+	//
+	// Set only alongside LocalEndpoint, i.e. only when a local Cortex
+	// answered. Either left empty disables local editing rather than
+	// half-enabling it, because an apply we cannot confirm reloaded is
+	// worse than an edit we declined to start.
+	LocalConfigPath string
+	LocalStatsURL   string
 	// Save persists the user's settings whenever one changes. Deliberately not a
 	// list of the keypresses that trigger it: the list was already stale once, and
 	// the triggers live with the settings they write. A callback rather than a path
@@ -1647,6 +1773,8 @@ func Run(ctx context.Context, opts RunOptions) error {
 		m = newPickerModel(ctx, opts.Lister, opts.PortForwarder)
 	}
 	m.localEndpoint = opts.LocalEndpoint
+	m.localConfigPath = opts.LocalConfigPath
+	m.localStatsURL = opts.LocalStatsURL
 	// After the constructor branch, so the two paths cannot disagree about it:
 	// newPickerModel and New would otherwise each need their own copy.
 	m.save = opts.Save

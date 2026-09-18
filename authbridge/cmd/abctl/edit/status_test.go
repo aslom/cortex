@@ -37,7 +37,7 @@ func TestPollUntilReloaded_Success(t *testing.T) {
 		}
 		return ReloadStatus{LastSuccess: time.Now()}
 	})
-	res := PollUntilReloaded(context.Background(), srv.URL, applyTime)
+	res := PollUntilReloaded(context.Background(), srv.URL, applyTime, "")
 	if res.Status != PollSuccess {
 		t.Fatalf("status = %v, want PollSuccess", res.Status)
 	}
@@ -53,7 +53,7 @@ func TestPollUntilReloaded_Failure(t *testing.T) {
 		}
 		return ReloadStatus{ReloadsFailed: 6, LastError: "invalid YAML at line 3"}
 	})
-	res := PollUntilReloaded(context.Background(), srv.URL, applyTime)
+	res := PollUntilReloaded(context.Background(), srv.URL, applyTime, "")
 	if res.Status != PollFailure {
 		t.Fatalf("status = %v, want PollFailure", res.Status)
 	}
@@ -69,7 +69,7 @@ func TestPollUntilReloaded_Timeout(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	res := PollUntilReloaded(ctx, srv.URL, applyTime)
+	res := PollUntilReloaded(ctx, srv.URL, applyTime, "")
 	if res.Status != PollTimeout {
 		t.Fatalf("status = %v, want PollTimeout", res.Status)
 	}
@@ -82,7 +82,7 @@ func TestPollUntilReloaded_HTTPError(t *testing.T) {
 	defer srv.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	res := PollUntilReloaded(ctx, srv.URL, time.Now())
+	res := PollUntilReloaded(ctx, srv.URL, time.Now(), "")
 	if res.Status != PollTimeout {
 		t.Fatalf("status = %v, want PollTimeout", res.Status)
 	}

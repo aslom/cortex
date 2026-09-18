@@ -82,6 +82,12 @@ type Reloader struct {
 	status    atomic.Pointer[Status]
 	activeCfg atomic.Pointer[config.Config]
 
+	// resolvedBase is the base name of configPath with symlinks followed, set
+	// by Start when it differs enough to need its own watch, and read only by
+	// the watch goroutine Start then launches. Empty when configPath is not a
+	// symlink, or when the real file's directory could not be watched.
+	resolvedBase string
+
 	// serialized by the watch goroutine
 	lastHash string
 }
@@ -135,6 +141,52 @@ func (r *Reloader) Start(ctx context.Context) error {
 		return fmt.Errorf("fsnotify.Add(%s): %w", dir, err)
 	}
 
+	// Also watch the directory holding the real file when configPath is a
+	// symlink pointing elsewhere.
+	//
+	// Watching only the link's directory means a writer that correctly writes
+	// THROUGH the link — replacing the target rather than the link, which is
+	// what preserves a config symlinked into a dotfiles repo — changes nothing
+	// in this directory. On Linux, inotify reports directory-entry changes, so
+	// no event arrives and the reload never happens: abctl's editor then times
+	// out and rolls a correct edit back two minutes later, and `abctl tools
+	// scan --write` / `abctl config migrate` land silently unreloaded. (macOS
+	// happens to survive this: kqueue watches the resolved file, so replacing
+	// it reports on the link. Relying on that is relying on the platform.)
+	//
+	// ADDITIVE on purpose — the watch and filter above are untouched. A
+	// ConfigMap mount resolves to a TIMESTAMPED directory (..2026_05_08_xx)
+	// that is deleted on every update, so making the resolved path primary
+	// would break cluster reloads; that case keeps working through the ..data
+	// alias exactly as before.
+	//
+	// What the extra watch actually does under a ConfigMap, stated plainly
+	// rather than as "harmless": it lands on the current generation directory,
+	// and dies with it at the first update — Start runs once, so it is never
+	// re-added. Before that it admits events for config.yaml INSIDE the
+	// generation dir, which previously never arrived; those are redundant
+	// rather than wrong, since reloadOnce hashes the content and dedups an
+	// unchanged file. So the mechanism is "the watch dies on the first update",
+	// and it costs nothing only because the cluster path never depended on it.
+	// Re-arming it per generation would be real work for no benefit; if a
+	// future change ever makes the cluster path rely on the resolved watch,
+	// that has to be revisited, not assumed.
+	if real, err := filepath.EvalSymlinks(r.configPath); err == nil {
+		if rdir := filepath.Dir(real); rdir != dir {
+			if aerr := watcher.Add(rdir); aerr != nil {
+				// Non-fatal: the link's own directory is still watched, so this
+				// is a degradation, not a reason to refuse to start.
+				slog.Warn("reloader: cannot watch the symlink target's directory; "+
+					"edits written through the link may not be observed",
+					"link", r.configPath, "target", real, "error", aerr)
+			} else {
+				r.resolvedBase = filepath.Base(real)
+				slog.Info("reloader: also watching the symlink target",
+					"link", r.configPath, "target", real)
+			}
+		}
+	}
+
 	go r.watchLoop(ctx, watcher)
 	slog.Info("reloader: watching for config changes",
 		"path", r.configPath, "dir", dir, "drainWindow", r.drainWindow)
@@ -185,7 +237,13 @@ func (r *Reloader) watchLoop(ctx context.Context, watcher *fsnotify.Watcher) {
 			// alias directory ..data that symlink-swaps to it). The
 			// underlying timestamped dirs (..2026_05_08_xx) produce
 			// events too, but we catch the swap via the ..data rewrite.
-			if filepath.Base(ev.Name) != base && filepath.Base(ev.Name) != "..data" {
+			//
+			// resolvedBase admits the real file behind a symlinked config; see
+			// Start. Empty unless such a watch was added, and filepath.Base
+			// never returns "", so the comparison is inert in that case.
+			evBase := filepath.Base(ev.Name)
+			if evBase != base && evBase != "..data" &&
+				(r.resolvedBase == "" || evBase != r.resolvedBase) {
 				continue
 			}
 			slog.Debug("reloader: fs event", "name", ev.Name, "op", ev.Op.String())

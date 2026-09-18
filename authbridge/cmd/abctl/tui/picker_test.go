@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/cluster"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/edit"
 )
 
 // fakeLister returns a fixed []AgentNamespace and counts ListAgents calls.
@@ -246,8 +250,12 @@ type fakePortForwarder struct {
 	startedNs  string
 	startedPod string
 	endpoint   string
-	startErr   error
-	closeCount int
+	// statusEndpoint is what the forward reports as its :9093 stats URL. Empty
+	// for most tests, which never read it; set where the model's statusURL
+	// matters — see TestLocalConnectClearsPodIdentity.
+	statusEndpoint string
+	startErr       error
+	closeCount     int
 }
 
 func (f *fakePortForwarder) Start(ctx context.Context, ns, pod string) (cluster.PortForward, error) {
@@ -255,16 +263,17 @@ func (f *fakePortForwarder) Start(ctx context.Context, ns, pod string) (cluster.
 		return nil, f.startErr
 	}
 	f.startedNs, f.startedPod = ns, pod
-	return &fakePortForward{endpoint: f.endpoint, parent: f}, nil
+	return &fakePortForward{endpoint: f.endpoint, statusEndpoint: f.statusEndpoint, parent: f}, nil
 }
 
 type fakePortForward struct {
-	endpoint string
-	parent   *fakePortForwarder
+	endpoint       string
+	statusEndpoint string
+	parent         *fakePortForwarder
 }
 
 func (p *fakePortForward) Endpoint() string       { return p.endpoint }
-func (p *fakePortForward) StatusEndpoint() string { return "" } // unused by current picker tests
+func (p *fakePortForward) StatusEndpoint() string { return p.statusEndpoint }
 func (p *fakePortForward) Close() error           { p.parent.closeCount++; return nil }
 
 func TestPodEnterStartsPortForwardAndTransitions(t *testing.T) {
@@ -591,28 +600,222 @@ func TestLocalhostKeybindScoping(t *testing.T) {
 	}
 }
 
-// A session entered via `[l]` has no pod/namespace, so pipeline editing
-// must report the limitation rather than opening a broken edit. This is
-// the same guard `--endpoint` mode relies on; asserted here because the
-// README documents the behavior for `[l]` specifically.
-func TestLocalhostEditIsUnavailable(t *testing.T) {
-	srv := sessionAPIStub(t)
+// localConnected drives a picker model through an `[l]` connect to srv and
+// leaves it on the pipeline pane, ready for an `e` press.
+func localConnected(t *testing.T, srvURL string) *model {
+	t.Helper()
 	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
 	updated, _ := m.Update(m.Init()())
 	mm := updated.(*model)
-	updated, _ = mm.Update(connectLocalCmd(context.Background(), srv.URL)())
+	updated, _ = mm.Update(connectLocalCmd(context.Background(), srvURL)())
 	mm = updated.(*model)
 	mm.pane = panePipeline
+	return mm
+}
+
+// A connection with no pod/namespace AND no known local config has nothing to
+// edit, so `e` must say so rather than open a broken edit. The message has to
+// name a remedy: the old one blamed `--endpoint`, which a bare `abctl` that
+// auto-connected to a local Cortex never passed.
+func TestEditUnavailableWithoutAStore(t *testing.T) {
+	srv := sessionAPIStub(t)
+	mm := localConnected(t, srv.URL)
 
 	updated, cmd := mm.Update(keyRune('e'))
 	mm = updated.(*model)
 	if cmd != nil {
-		t.Fatal("`e` after an `l` connect should not start an edit")
+		t.Fatal("`e` with no store should not start an edit")
 	}
 	if mm.editState.phase != editPhaseDone {
 		t.Fatalf("`e` should not enter an edit phase, got %v", mm.editState.phase)
 	}
-	if !strings.Contains(mm.flash, "picker") {
-		t.Fatalf("`e` should flash the picker-required hint, got %q", mm.flash)
+	if !strings.Contains(mm.flash, "--kubernetes") {
+		t.Errorf("flash should point at a remedy, got %q", mm.flash)
+	}
+	if strings.Contains(mm.flash, "--endpoint") {
+		t.Errorf("flash blames a flag the user did not pass, got %q", mm.flash)
+	}
+}
+
+// The point of the local store: when the endpoint on screen IS this machine's
+// Cortex, `e` edits its config file — no picker, no pod, no kubectl. Nothing
+// about how abctl was launched gates this, only what it is connected to.
+func TestEditUsesTheLocalFileStoreWhenConnectedLocally(t *testing.T) {
+	srv := sessionAPIStub(t)
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("mode: proxy-sidecar\npipeline:\n  outbound: []\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mm := localConnected(t, srv.URL)
+	// What main.go passes when a local Cortex answered. localEndpoint must equal
+	// the connected endpoint — that equality is the whole discriminator.
+	mm.localEndpoint = mm.client.Endpoint()
+	mm.localConfigPath = cfgPath
+	mm.localStatsURL = "http://127.0.0.1:47602"
+
+	updated, cmd := mm.Update(keyRune('e'))
+	mm = updated.(*model)
+	if cmd == nil {
+		t.Fatal("`e` should start an edit against the local config")
+	}
+	if mm.editState.phase != editPhaseFetching {
+		t.Fatalf("phase = %v, want fetching", mm.editState.phase)
+	}
+	fs, ok := mm.editState.store.(edit.FileStore)
+	if !ok {
+		t.Fatalf("store is %T, want edit.FileStore", mm.editState.store)
+	}
+	if fs.Path != cfgPath {
+		t.Errorf("FileStore.Path = %q, want %q", fs.Path, cfgPath)
+	}
+	// The store and the polled endpoint must describe the same proxy, or a
+	// local write would be confirmed against somebody else's reload status.
+	if mm.editState.statusURL != "http://127.0.0.1:47602" {
+		t.Errorf("statusURL = %q, want the local stats URL", mm.editState.statusURL)
+	}
+}
+
+// dialURL emits http://127.0.0.1:47601 for the built-in config, but an
+// operator types --endpoint http://localhost:47601. An exact string compare
+// refused that and told them to "point abctl at a Cortex running on this
+// machine" — which they had just done.
+func TestSameEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"http://127.0.0.1:47601", "http://127.0.0.1:47601", true},
+		{"http://localhost:47601", "http://127.0.0.1:47601", true},
+		{"http://127.0.0.1:47601", "http://localhost:47601", true},
+		{"http://[::1]:47601", "http://127.0.0.1:47601", true},
+		// Path is not part of the comparison, so a trailing slash still names
+		// the same server. apiclient.New trims it anyway; this holds even if it
+		// stops.
+		{"http://localhost:47601", "http://localhost:47601/", true},
+		// A different port is a different proxy, loopback or not.
+		{"http://localhost:9094", "http://127.0.0.1:47601", false},
+		// A non-loopback host must match outright: a config bound to a LAN
+		// address is not "this machine" for anyone else's purposes.
+		{"http://192.168.1.10:47601", "http://127.0.0.1:47601", false},
+		{"http://192.168.1.10:47601", "http://192.168.1.10:47601", true},
+		{"http://cortex.example:47601", "http://localhost:47601", false},
+		{"://nonsense", "http://localhost:47601", false},
+	} {
+		if got := sameEndpoint(tc.a, tc.b); got != tc.want {
+			t.Errorf("sameEndpoint(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// The end-to-end consequence of the above: connecting with the human spelling
+// still gets the local file store.
+func TestEditUsesLocalStoreAcrossLoopbackSpellings(t *testing.T) {
+	srv := sessionAPIStub(t)
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("mode: proxy-sidecar\npipeline:\n  outbound: []\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mm := localConnected(t, srv.URL)
+	// The connected endpoint is 127.0.0.1:<port> (httptest); the config-derived
+	// localEndpoint spells the same server as localhost.
+	u, err := url.Parse(mm.client.Endpoint())
+	if err != nil {
+		t.Fatalf("parse endpoint: %v", err)
+	}
+	mm.localEndpoint = "http://localhost:" + u.Port()
+	mm.localConfigPath = cfgPath
+	mm.localStatsURL = "http://127.0.0.1:47602"
+
+	updated, cmd := mm.Update(keyRune('e'))
+	mm = updated.(*model)
+	if cmd == nil {
+		t.Fatal("`e` should start an edit despite the differing loopback spelling")
+	}
+	if _, ok := mm.editState.store.(edit.FileStore); !ok {
+		t.Fatalf("store is %T, want edit.FileStore", mm.editState.store)
+	}
+}
+
+// Visit a pod, Esc out, then connect to the local Cortex with `[l]`. The pod's
+// identity must not survive into that session.
+//
+// backToPodsPane clears ~20 fields but not selectedPod / selectedNamespace /
+// statusURL, so before this was fixed all three still named the pod and its
+// now-closed port-forward. pipelineStore tries local first and falls through to
+// the ConfigMap branch — whose conditions those three stale fields satisfy — so
+// `e` would fetch and kubectl-apply against a pod the screen was not showing,
+// polling a port-forward that `[l]` never established. Latent until this became
+// a store selector; a wrong-target write once it did.
+func TestLocalConnectClearsPodIdentity(t *testing.T) {
+	srv := sessionAPIStub(t)
+	pf := &fakePortForwarder{
+		endpoint:       "http://127.0.0.1:60001",
+		statusEndpoint: "http://127.0.0.1:60002",
+	}
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, pf)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	// Drill namespaces → pods → port-forward → sessions.
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(*model)
+	updated, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(*model)
+	updated, _ = mm.Update(cmd())
+	mm = updated.(*model)
+	if mm.selectedPod == "" || mm.statusURL == "" {
+		t.Fatalf("setup failed: expected a pod and a statusURL, got %q / %q", mm.selectedPod, mm.statusURL)
+	}
+
+	// Esc back to Pods, then `[l]` to the local Cortex.
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(*model)
+	updated, _ = mm.Update(connectLocalCmd(context.Background(), srv.URL)())
+	mm = updated.(*model)
+
+	if mm.selectedPod != "" || mm.selectedNamespace != "" {
+		t.Errorf("pod identity survived `[l]`: namespace=%q pod=%q", mm.selectedNamespace, mm.selectedPod)
+	}
+	if mm.statusURL != "" {
+		t.Errorf("statusURL survived `[l]`: %q — it names a closed port-forward", mm.statusURL)
+	}
+
+	// The consequence: `e` must not silently pick the pod's ConfigMap. With no
+	// local config path configured there is no store at all, so it refuses.
+	mm.pane = panePipeline
+	updated, ecmd := mm.Update(keyRune('e'))
+	mm = updated.(*model)
+	if store, _ := mm.pipelineStore(); store != nil {
+		t.Errorf("pipelineStore returned %T after `[l]`, want nil", store)
+	}
+	if ecmd != nil {
+		t.Error("`e` started an edit against stale pod state")
+	}
+}
+
+// A local Cortex running on this machine must not make `e` edit its file while
+// the operator is looking at a POD. The endpoint decides, not mere presence of
+// a local install.
+func TestEditPrefersThePodWhenViewingAPod(t *testing.T) {
+	srv := sessionAPIStub(t)
+	mm := localConnected(t, srv.URL)
+	// A local install exists and answered, but at a different address than the
+	// one on screen — which is what viewing a pod through a port-forward looks
+	// like.
+	mm.localEndpoint = "http://127.0.0.1:47601"
+	mm.localConfigPath = "/Users/somebody/.cortex/config.yaml"
+	mm.localStatsURL = "http://127.0.0.1:47602"
+	mm.editRunner = func(context.Context, ...string) ([]byte, error) { return nil, nil }
+	mm.selectedNamespace, mm.selectedPod = "team1", "email-agent"
+	mm.statusURL = "http://127.0.0.1:19093"
+
+	updated, _ := mm.Update(keyRune('e'))
+	mm = updated.(*model)
+	if _, ok := mm.editState.store.(edit.ConfigMapStore); !ok {
+		t.Fatalf("store is %T, want edit.ConfigMapStore — a local install must not hijack a pod edit", mm.editState.store)
+	}
+	if mm.editState.statusURL != "http://127.0.0.1:19093" {
+		t.Errorf("statusURL = %q, want the port-forward's", mm.editState.statusURL)
 	}
 }

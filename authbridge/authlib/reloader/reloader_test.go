@@ -275,3 +275,134 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// setupAt is setup() with the config path chosen by the caller, for layouts
+// where the watched path is not a plain file in its own directory.
+func setupAt(t *testing.T, cfgPath string) (*Reloader, *fakeBuilder, *pipeline.Holder, *pipeline.Holder) {
+	t.Helper()
+
+	initialCfg := &config.Config{Mode: "envoy-sidecar"}
+	inH := pipeline.NewHolder(emptyPipeline(t))
+	outH := pipeline.NewHolder(emptyPipeline(t))
+
+	b := &fakeBuilder{}
+	b.set(builderResult{inbound: emptyPipeline(t), outbound: emptyPipeline(t), cfg: initialCfg})
+
+	r := New(cfgPath, inH, outH, b.build, initialCfg,
+		WithDebounce(20*time.Millisecond),
+		WithDrainWindow(0),
+		WithStartTimeout(5*time.Second),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return r, b, inH, outH
+}
+
+// A symlinked config, written THROUGH the link — the shape abctl's editor
+// produces for a config pointed at a dotfiles repo, and what `abctl tools scan
+// --write` / `abctl config migrate` do too.
+//
+// Watching only filepath.Dir(configPath) misses this on Linux, where inotify
+// reports directory-entry changes and the link's directory has none: the reload
+// never fires, so abctl's editor times out and rolls a correct edit back two
+// minutes later. macOS survives it by accident (kqueue watches the resolved
+// file), which is exactly why this is pinned rather than left to the platform.
+func TestReloader_SymlinkedConfigWrittenThroughTheLink(t *testing.T) {
+	linkDir := t.TempDir()
+	realDir := t.TempDir() // a different directory, as a dotfiles repo would be
+	realPath := filepath.Join(realDir, "cortex-config.yaml")
+	if err := os.WriteFile(realPath, []byte("mode: envoy-sidecar\n"), 0o600); err != nil {
+		t.Fatalf("write real: %v", err)
+	}
+	linkPath := filepath.Join(linkDir, "config.yaml")
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	r, b, inH, _ := setupAt(t, linkPath)
+
+	// Assert the MECHANISM, not just the outcome. The outcome below passes on
+	// macOS even without the extra watch, because kqueue happens to report the
+	// replacement against the link — so on this platform this assertion is the
+	// only thing that would catch someone removing it, and on Linux nothing
+	// else would fire at all.
+	if r.resolvedBase == "" {
+		t.Fatal("Start added no watch for the symlink target; on Linux the reload would never fire")
+	}
+	if r.resolvedBase != filepath.Base(realPath) {
+		t.Errorf("resolvedBase = %q, want %q", r.resolvedBase, filepath.Base(realPath))
+	}
+
+	newIn := emptyPipeline(t)
+	b.set(builderResult{inbound: newIn, outbound: emptyPipeline(t), cfg: &config.Config{Mode: "envoy-sidecar"}})
+
+	// Replace the TARGET, leaving the link intact — write-temp-then-rename, as
+	// edit.FileStore.Apply does.
+	writeConfig(t, realPath, "mode: envoy-sidecar\n# edited through the link\n")
+
+	waitFor(t, 3*time.Second, func() bool { return r.Status().ReloadsOK >= 1 },
+		"a reload after the symlink target was replaced")
+	if inH.Load() != newIn {
+		t.Error("inbound holder was not swapped")
+	}
+	// The link must still be a link.
+	fi, err := os.Lstat(linkPath)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink did not survive")
+	}
+}
+
+// The ConfigMap layout must keep working: config.yaml → ..data → a TIMESTAMPED
+// directory that is deleted on every update. Making the resolved path primary
+// would put the watch on a directory that vanishes, so the symlink support
+// above is additive and this pins that it stayed so.
+func TestReloader_ConfigMapDataSymlinkSwapStillReloads(t *testing.T) {
+	root := t.TempDir()
+	gen1 := filepath.Join(root, "..2026_05_08_01")
+	if err := os.MkdirAll(gen1, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gen1, "config.yaml"), []byte("mode: envoy-sidecar\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataLink := filepath.Join(root, "..data")
+	if err := os.Symlink(gen1, dataLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfgPath := filepath.Join(root, "config.yaml")
+	if err := os.Symlink(filepath.Join("..data", "config.yaml"), cfgPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	r, b, inH, _ := setupAt(t, cfgPath)
+
+	newIn := emptyPipeline(t)
+	b.set(builderResult{inbound: newIn, outbound: emptyPipeline(t), cfg: &config.Config{Mode: "envoy-sidecar"}})
+
+	// kubelet's update: new generation dir, then swap ..data onto it.
+	gen2 := filepath.Join(root, "..2026_05_08_02")
+	if err := os.MkdirAll(gen2, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gen2, "config.yaml"),
+		[]byte("mode: envoy-sidecar\n# generation 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmpLink := filepath.Join(root, "..data_tmp")
+	if err := os.Symlink(gen2, tmpLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmpLink, dataLink); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.RemoveAll(gen1)
+
+	waitFor(t, 3*time.Second, func() bool { return r.Status().ReloadsOK >= 1 },
+		"a reload after the ..data symlink swap")
+	if inH.Load() != newIn {
+		t.Error("inbound holder was not swapped")
+	}
+}

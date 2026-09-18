@@ -55,6 +55,10 @@ const pollMaxBackoff = 5 * time.Second
 // drop or framework crash surfaces fast.
 const unreachableThreshold = 5
 
+// defaultUnreachableHint is used when a caller has no Target to draw on (a
+// test, or a degraded path with no store). Names neither backend's mechanism.
+const defaultUnreachableHint = "is the endpoint still up?"
+
 // PollUntilReloaded watches statusURL/reload/status until either:
 //   - LastSuccess > applyTime → PollSuccess.
 //   - ReloadsFailed exceeds the value at first successful poll → PollFailure
@@ -68,9 +72,16 @@ const unreachableThreshold = 5
 //
 // Backoff: poll at pollInterval, doubled on each transport error up to
 // pollMaxBackoff. Reset to pollInterval on the next successful response.
-func PollUntilReloaded(ctx context.Context, statusURL string, applyTime time.Time) PollResult {
+// unreachableHint completes the synthesized "unreachable" error; empty falls
+// back to defaultUnreachableHint. It comes from the Store's Target, because
+// what to check differs by backend: a cluster edit rides a port-forward that
+// can drop, a local one talks straight to a proxy that can have exited.
+func PollUntilReloaded(ctx context.Context, statusURL string, applyTime time.Time, unreachableHint string) PollResult {
 	url := statusURL + "/reload/status"
 	client := &http.Client{Timeout: 2 * time.Second}
+	if unreachableHint == "" {
+		unreachableHint = defaultUnreachableHint
+	}
 
 	baselineFailed := baselineFailedSentinel
 	consecErrors := 0
@@ -114,7 +125,7 @@ func PollUntilReloaded(ctx context.Context, statusURL string, applyTime time.Tim
 			if consecErrors >= unreachableThreshold {
 				return PollResult{
 					Status:    PollFailure,
-					LastError: "reload status endpoint unreachable (port-forward dropped or framework down?)",
+					LastError: "reload status endpoint unreachable (" + unreachableHint + ")",
 				}
 			}
 			if wait < pollMaxBackoff {

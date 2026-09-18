@@ -55,12 +55,15 @@ type FetchedMsg struct {
 	Err      error
 }
 
-// FetchCmd returns a tea.Cmd that resolves the pod's agent name (via the
-// app.kubernetes.io/name label), fetches the agent's ConfigMap, locates
-// the pipeline subtree, writes the subtree to a tempfile (ready for
+// FetchCmd returns a tea.Cmd that fetches the runtime YAML from store,
+// locates the pipeline subtree, writes the subtree to a tempfile (ready for
 // $EDITOR), and emits FetchedMsg. The tempfile lives in $TMPDIR; abctl
 // leaves it in place on every exit path (success, error, abort) so users
 // can recover an in-progress edit.
+//
+// Where the YAML comes from is the store's business: a pod's ConfigMap via
+// kubectl, or the config file of a local Cortex. Everything after the fetch
+// is identical either way.
 //
 // cachedCatalog is the catalog the TUI has already fetched (e.g. via
 // the catalog pane). When non-nil it's used as-is to render templates.
@@ -70,17 +73,12 @@ type FetchedMsg struct {
 // (used by tests and degraded server paths).
 func FetchCmd(
 	ctx context.Context,
-	run Runner,
+	store Store,
 	client *apiclient.Client,
-	namespace, pod string,
 	cachedCatalog []apiclient.PluginCatalogEntry,
 ) tea.Cmd {
 	return func() tea.Msg {
-		agent, err := ResolveAgentName(ctx, run, namespace, pod)
-		if err != nil {
-			return FetchedMsg{Err: err}
-		}
-		fp, err := Fetch(ctx, run, namespace, agent)
+		fp, err := store.Fetch(ctx)
 		if err != nil {
 			return FetchedMsg{Err: err}
 		}
@@ -126,11 +124,21 @@ type AppliedMsg struct {
 	Err       error
 }
 
-// ApplyCmd returns a tea.Cmd that runs kubectl apply --server-side on
-// the supplied manifest and emits AppliedMsg with the apply timestamp.
-func ApplyCmd(ctx context.Context, run Runner, manifest []byte) tea.Cmd {
+// ApplyCmd returns a tea.Cmd that writes the supplied payload back through
+// store and emits AppliedMsg with the apply timestamp.
+//
+// orig is the fetch this payload was derived from. When the store implements
+// ConflictChecker, it is consulted first and a concurrent write aborts the apply
+// instead of overwriting it. Checked here rather than at the keypress so the
+// re-read happens off the Update loop, next to the write it guards.
+func ApplyCmd(ctx context.Context, store Store, orig *FetchedPipeline, payload []byte) tea.Cmd {
 	return func() tea.Msg {
-		at, err := Apply(ctx, run, manifest)
+		if cc, ok := store.(ConflictChecker); ok && orig != nil {
+			if err := cc.CheckUnchanged(ctx, orig); err != nil {
+				return AppliedMsg{Err: err}
+			}
+		}
+		at, err := store.Apply(ctx, payload)
 		return AppliedMsg{ApplyTime: at, Err: err}
 	}
 }
@@ -143,14 +151,19 @@ type RolledBackMsg struct {
 	Err       error
 }
 
-// RollbackCmd re-applies the supplied (original) manifest to undo a
-// successful API write whose subsequent in-pod reload failed. The
-// running pipeline never moved (the framework keeps the previous
-// pipeline on build failure), so this just reconciles the ConfigMap
-// on disk back to what's actually serving.
-func RollbackCmd(ctx context.Context, run Runner, manifest []byte, reloadErr string) tea.Cmd {
+// RollbackCmd re-applies the supplied (original) payload to undo a
+// successful write whose subsequent reload failed. The running pipeline
+// never moved (the framework keeps the previous pipeline on build
+// failure), so this just reconciles the stored config back to what's
+// actually serving.
+//
+// Deliberately skips ConflictChecker: the file has changed since the fetch —
+// this apply changed it — so the check would refuse every rollback. That leaves
+// the documented caveat below intact for the narrow case of a third party
+// writing between the forward apply and this one.
+func RollbackCmd(ctx context.Context, store Store, payload []byte, reloadErr string) tea.Cmd {
 	return func() tea.Msg {
-		_, err := Apply(ctx, run, manifest)
+		_, err := store.Apply(ctx, payload)
 		return RolledBackMsg{ReloadErr: reloadErr, Err: err}
 	}
 }
@@ -160,20 +173,51 @@ type PolledMsg struct {
 	Result PollResult
 }
 
-// pollDeadline bounds how long PollCmd waits for an in-pod reload to
-// reach a terminal state. Picked to outlast the worst-case kubelet
-// ConfigMap sync (~60s) plus the framework's drain window (30s) plus
-// jitter, while still surfacing a stuck reload in a reasonable time.
-const pollDeadline = 120 * time.Second
+// ClusterPollDeadline bounds a ConfigMap edit's wait: the worst-case kubelet
+// sync (~60s) plus the framework's drain window (30s) plus jitter.
+//
+// The drain does NOT actually delay the verdict — the reloader records success
+// synchronously right after the Holder swap and drains the old pipelines in a
+// goroutine — so this is generous rather than tight. Kept at 120s regardless,
+// because for a cluster the kubelet sync is the real variable and it is not
+// worth shaving.
+const ClusterPollDeadline = 120 * time.Second
+
+// LocalPollDeadline bounds a local file edit's wait. The proxy is already
+// watching the file, so the path is fsnotify → a 250ms debounce → build and
+// start the pipelines → swap → record success, and it lands in about a second.
+//
+// 30s is ~30x that, which leaves generous room for plugin Start doing real work
+// (a JWKS fetch, say) while not making a failure take two minutes to report.
+// Only the failure path is affected: the poll returns the moment last_success
+// advances, so a healthy reload never waits on this at all.
+const LocalPollDeadline = 30 * time.Second
 
 // PollCmd returns a tea.Cmd that polls /reload/status until the framework
-// reload completes (success or failure) or pollDeadline elapses. Emits
-// PolledMsg. The deadline is enforced internally; the caller's ctx is
+// reload completes (success or failure) or the target's deadline elapses.
+// Emits PolledMsg. The deadline is enforced internally; the caller's ctx is
 // only used for parent-cancellation (e.g. process shutdown).
-func PollCmd(ctx context.Context, statusURL string, applyTime time.Time) tea.Cmd {
+//
+// Takes the whole Target rather than a growing list of scalars — the deadline
+// and the unreachable wording both come from it, and passing it entire keeps
+// them from being sourced from different stores.
+func PollCmd(ctx context.Context, statusURL string, applyTime time.Time, tg Target) tea.Cmd {
 	return func() tea.Msg {
-		c, cancel := context.WithTimeout(ctx, pollDeadline)
+		c, cancel := context.WithTimeout(ctx, tg.Deadline())
 		defer cancel()
-		return PolledMsg{Result: PollUntilReloaded(c, statusURL, applyTime)}
+		return PolledMsg{Result: PollUntilReloaded(c, statusURL, applyTime, tg.UnreachableHint)}
 	}
+}
+
+// Deadline is PollDeadline with a floor, so a zero-valued Target (a test, or a
+// nil store) waits the conservative cluster ceiling rather than returning
+// instantly and reporting a timeout that never happened.
+//
+// Exported because the TUI reports the value it waited in the timeout message,
+// and that has to be the same number PollCmd used.
+func (t Target) Deadline() time.Duration {
+	if t.PollDeadline <= 0 {
+		return ClusterPollDeadline
+	}
+	return t.PollDeadline
 }

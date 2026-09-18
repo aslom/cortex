@@ -351,6 +351,10 @@ func runObserve(args []string) int {
 	}
 	if localUp {
 		opts.LocalEndpoint = local
+		// Only when it answered, same reasoning as LocalEndpoint above: these
+		// are what let `e` edit the local pipeline, and offering that against a
+		// proxy that is not running would apply an edit nothing reloads.
+		opts.LocalConfigPath, opts.LocalStatsURL = localEditTargets()
 	}
 	if *endpoint == "" {
 		opts.Lister = cluster.NewLister()

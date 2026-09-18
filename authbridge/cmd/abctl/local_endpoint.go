@@ -28,15 +28,92 @@ const localProbeTimeout = 400 * time.Millisecond
 // changed. The in-cluster default is 9094 and a local install uses 47601, which
 // is exactly the kind of difference a constant gets wrong.
 func localSessionEndpoint() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	cfg, err := config.Load(filepath.Join(home, ".cortex", "config.yaml"))
+	cfg, _, err := localCortexConfig()
 	if err != nil {
 		return ""
 	}
-	addr := cfg.Listener.SessionAPIAddr
+	return dialURL(cfg.Listener.SessionAPIAddr)
+}
+
+// localCortexConfig loads ~/.cortex/config.yaml and returns it with the path it
+// came from. The path is what the editor needs: it is the file the local proxy
+// was started with and is watching, so writing it is how a local pipeline edit
+// takes effect.
+func localCortexConfig() (*config.Config, string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil, "", fmt.Errorf("no home directory")
+	}
+	path := filepath.Join(home, ".cortex", "config.yaml")
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return cfg, path, nil
+}
+
+// localEditTargets returns the config file a local pipeline edit writes and the
+// base URL whose /reload/status confirms the proxy picked it up. Both empty when
+// this machine has no usable local Cortex config, or when nothing answers where
+// the config says the stats server is.
+//
+// The address has to be bootstrapped from the file — asking the running proxy
+// where it serves /reload/status would require already knowing that address —
+// but the value is then PROVEN by probing it, for a reason worth spelling out.
+// config.Load defaults an absent stats.address to ":9093" (an in-cluster
+// default), while a local install serves 47602. So a hand-written or
+// pre-pinning config with no stats: block yields http://localhost:9093, where
+// nothing is listening. That is not a harmless wrong guess: the poll would take
+// 5 transport errors to a PollFailure, and RollbackCmd would then REVERT an
+// edit that had already applied and hot-reloaded correctly, while reporting "is
+// the local proxy still running?" about a perfectly healthy proxy.
+//
+// Returning empty instead means `e` declines with a message about there being
+// no local target, which is a far better outcome than undoing the operator's
+// work and blaming the proxy. Mirrors localSessionAPIUp, which probes for the
+// same class of reason.
+func localEditTargets() (configPath, statsURL string) {
+	cfg, path, err := localCortexConfig()
+	if err != nil {
+		return "", ""
+	}
+	statsURL = dialURL(cfg.Stats.StatsAddress)
+	if statsURL == "" || !localStatsUp(statsURL) {
+		return "", ""
+	}
+	return path, statsURL
+}
+
+// localStatsUp reports whether a reload-status endpoint is answering at base.
+//
+// Probes /reload/status specifically, not just the port: that is the endpoint
+// the edit flow depends on, and it is absent unless the stats server was built
+// WithReloadStatus. A 200 from something else holding the port would be just as
+// wrong as nothing at all.
+func localStatsUp(base string) bool {
+	c := &http.Client{Timeout: localProbeTimeout}
+	resp, err := c.Get(base + "/reload/status") //nolint:noctx // bounded by Timeout
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	// Decode it: the poll parses this same shape, so a body it cannot read is a
+	// dead end however healthy the status code looked.
+	var probe struct {
+		ReloadsOK *int64 `json:"reloads_ok"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&probe); err != nil {
+		return false
+	}
+	return probe.ReloadsOK != nil
+}
+
+// dialURL turns a bind address from the config into a URL a client can connect
+// to, or "" if it names no port.
+func dialURL(addr string) string {
 	if addr == "" {
 		return ""
 	}

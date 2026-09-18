@@ -49,19 +49,25 @@ context abctl uses. There's no separate auth.
 
 ### Connecting to an existing port-forward
 
-Press `l` on the Namespaces pane to skip the cluster entirely and
-connect straight to `http://localhost:9094` — the session API's default
-port on the local host. Useful when you already have your own
-`kubectl port-forward` running, when abctl runs inside the mesh, or when
-your kubeconfig can't list pods but a tunnel is up.
+Press `l` on the Namespaces pane to skip the cluster entirely and connect to a
+session API on this host. Where that is depends on whether you have a Cortex
+installed: it goes to the address in `~/.cortex/config.yaml` when one answered
+there (47601 by default), and otherwise to `http://localhost:9094`, the
+in-cluster default port. The second case is the useful one when you already have
+your own `kubectl port-forward` running, when abctl runs inside the mesh, or
+when your kubeconfig can't list pods but a tunnel is up.
 
 abctl probes `/v1/sessions` before switching panes, so an endpoint with
 nothing listening surfaces as a footer error and leaves you in the
 picker rather than dropping you into a silently empty session view.
 `Esc` from a session entered this way returns to the Namespaces pane
-(there's no pod to go back to). Pipeline editing (`e`) is unavailable,
-same as `--endpoint` mode: the cluster fields needed to fetch and apply
-the ConfigMap aren't populated.
+(there's no pod to go back to).
+
+Pipeline editing (`e`) follows the same split. Connected to this machine's
+Cortex, `e` edits its config file — see [Editing the pipeline](#editing-the-pipeline).
+Connected to `:9094` through somebody else's port-forward, there is neither a pod
+identity to resolve a ConfigMap from nor a local config file to write, so `e`
+flashes a hint instead.
 
 ### Power-user / scripting bypass
 
@@ -468,7 +474,7 @@ Layered on top of all of them:
 | `↑ ↓` / `k j`, `b`/`f`, `u`/`d`, `g`/`G` | key help | scroll the overlay |
 | `↑ ↓` / `k j` | picker, list | navigate rows |
 | `Enter` | namespaces | open the namespace |
-| `l` | namespaces | connect directly to `localhost:9094` |
+| `l` | namespaces | connect directly to this machine's Cortex, or to `localhost:9094` when none is installed |
 | `Enter` | pods | port-forward + connect |
 | `Esc` | pods | back to namespaces |
 | `r` | namespaces, pods | reload agent list from cluster |
@@ -592,14 +598,64 @@ which saves it, or edit the YAML.
 
 ## Editing the pipeline
 
-Press `e` on the Pipeline pane to edit the agent's runtime `pipeline:`
-subtree in `$EDITOR` (or `vi` if unset). On save, abctl shows a diff
-and asks `apply this change? (y/N)`. Confirming runs
-`kubectl apply --server-side` against the per-agent ConfigMap with
-`--field-manager=abctl --force-conflicts=true` (taking ownership of
-`data.config.yaml` from the operator's webhook on first
-edit), then polls the framework's `/reload/status` until the reload
-completes (success or failure).
+Press `e` on the Pipeline pane to edit the runtime `pipeline:` subtree in
+`$EDITOR` (or `vi` if unset). On save, abctl shows a diff and asks
+`apply this change? (y/N)`. Confirming writes the change back, then polls the
+framework's `/reload/status` until the reload completes (success or failure).
+
+Where it writes depends on what you are connected to, not on how abctl was
+started:
+
+| Connected to | `e` writes | Reload confirmed via |
+|---|---|---|
+| a pod, via the picker | `kubectl apply --server-side` against the per-agent ConfigMap, `--field-manager=abctl --force-conflicts=true` (taking ownership of `data.config.yaml` from the operator's webhook on first edit) | the port-forward's `:9093/reload/status` |
+| the Cortex on this machine | `~/.cortex/config.yaml` directly — the file that proxy was started with and already watches | that proxy's own stats address, `stats.address` in the same file |
+
+The local path needs neither kubectl nor a ConfigMap: the proxy watches its
+config file with fsnotify, so writing the file *is* the apply. abctl writes a
+temporary sibling and renames it over the target, so the watcher only ever sees
+a complete file — a half-written one would book a reload failure against an
+edit you never made.
+
+Local editing is offered whenever the endpoint on screen is this machine's
+Cortex: a bare `abctl` that auto-connected to it, `[l]` from the picker, or an
+explicit `--endpoint` aimed at its session API. Loopback spellings are
+interchangeable, so `--endpoint http://localhost:47601` and
+`http://127.0.0.1:47601` both match a config bound to either. A local Cortex
+merely *running* is not enough — while you are looking at a pod, `e` edits the
+pod.
+
+If neither target applies, `e` says so and names the remedy instead of starting
+an edit it cannot finish.
+
+A **symlinked** `~/.cortex/config.yaml` — pointing at a dotfiles repo, say — is
+written *through*, not over. `rename(2)` replaces the link itself, so without
+resolving it the live config would become a regular file while the tracked copy
+silently kept the old pipeline, with nothing in `git status` to show it.
+Resolving also keeps the temporary file a sibling of the real one, which the
+atomicity guarantee needs: a rename across filesystems fails `EXDEV`.
+
+That relies on the proxy watching the resolved file's directory, which the
+reloader does — but the reloader ships in `authbridge-proxy`, and that installs
+separately from abctl. **A proxy started before that change still has the old
+single watch**, so on Linux a symlinked config will not observe the write: the
+poll times out and rolls the edit back. Run `abctl service restart` after
+upgrading the proxy. abctl cannot detect the mismatch — nothing the proxy
+exposes describes its watcher — so this is a note rather than a check.
+
+**A concurrent write aborts the apply.** This file has other writers — `abctl
+tools scan --write`, `abctl config migrate`, a second abctl session — and
+`$EDITOR` can be open for minutes. The apply re-reads the file first and refuses
+if it moved, rather than renaming a whole file built from stale bytes over
+somebody else's change. The refusal names the likely culprits; re-open the edit
+to work from the current file. This is a compare, not a lock, so a writer
+landing in the last moment before the rename still wins — it closes the
+realistic window, not every window. The cluster path has no equivalent check on
+purpose: it applies with `--force-conflicts=true` and takes field-manager
+ownership, which is what makes editing an operator-owned ConfigMap possible.
+
+A config with no top-level `pipeline:` key is reported as such; inventing the
+block is not the editor's job.
 
 The single edit flow covers four operations:
 - **Edit a value** — change a config field of an existing plugin
@@ -610,17 +666,21 @@ The single edit flow covers four operations:
 All four work because they're all just lines you change inside the
 pipeline subtree.
 
-`e` is only available in picker mode. With `--endpoint`, the cluster
-fields needed to fetch and apply aren't populated; pressing `e`
-flashes a hint instead of opening a broken edit.
+`e` needs a target it can write. That means either a pod chosen through the
+picker, or a connection to the Cortex on this machine — including via
+`--endpoint`, as described above. Pointed at anything else (a hand-run
+`kubectl port-forward`, a remote session API), neither is available: there is no
+pod identity to resolve a ConfigMap from and no local config file to write, so
+pressing `e` flashes a hint naming the remedy instead of opening an edit it
+cannot finish.
 
 ### Pre-apply validation
 
 After save, abctl runs the same Requires/RequiresAny/After/Claims
 checks the framework runs at reload-time, against the cached
-`/v1/plugins` catalog. Issues land as a red banner above the diff
-in ~50ms instead of waiting through the kubelet sync (~60s) to
-discover them at hot-reload:
+`/v1/plugins` catalog. Issues land as a red banner above the diff in ~50ms
+instead of at hot-reload — which means after the kubelet sync (~60s) in a
+cluster, or about a second later locally:
 
 ```text
 ⚠ 1 validation issue — framework reload will reject:
@@ -637,6 +697,8 @@ populate it for the rest of the session.
 
 ### Agent-name resolution
 
+Cluster path only — a local edit has no agent and skips all of this.
+
 The per-agent ConfigMap is named `authbridge-config-<agent>`. abctl
 resolves `<agent>` from the selected pod's `app.kubernetes.io/name`
 label (operator sets this). If the label is absent, abctl
@@ -645,19 +707,25 @@ pod name (the ReplicaSet hash + pod suffix).
 
 ### Auto-rollback on reload failure
 
-If `kubectl apply` succeeds but the in-pod reload fails (unknown
-plugin name, malformed config, validation error), the framework
-keeps the previous in-memory pipeline serving requests. The on-disk
-ConfigMap, however, now holds the bad YAML. abctl detects this via
-`/reload/status` and re-applies the original ConfigMap content
-captured at Fetch time, reconciling the on-disk state back to what's
-actually running. The error overlay then reports
-`reload failed: <reason>; rolled back to previous ConfigMap`.
+If the write succeeds but the reload fails (unknown plugin name, malformed
+config, validation error), the framework keeps the previous in-memory pipeline
+serving requests — but the stored config now holds the bad YAML. abctl detects
+this via `/reload/status` and re-applies the content captured at Fetch time,
+reconciling the stored state back to what is actually running.
 
-The rollback is best-effort — with `--force-conflicts=true`, if a
-third party (controller, kubectl edit, kustomize) modified the
-ConfigMap between Fetch and the failed reload, the rollback
-overwrites their change. The running pipeline is unaffected.
+The error overlay names the target it reconciled:
+`reload failed: <reason>; rolled back to previous ConfigMap` in the cluster, and
+`…rolled back to previous config file` locally. If the rollback itself also
+fails, the message says where to look — `check kubectl` for a pod, the config's
+own path for a local edit.
+
+The rollback is best-effort in both, for the same reason and by different
+mechanisms. In the cluster, `--force-conflicts=true` means a third party
+(controller, `kubectl edit`, kustomize) who modified the ConfigMap between Fetch
+and the failed reload has their change overwritten. Locally the forward apply is
+guarded by the staleness check described above, but the rollback deliberately is
+not — it runs *because* the file changed, so checking would refuse every
+rollback. The running pipeline is unaffected either way.
 
 ### Backgrounding the watch
 
@@ -669,11 +737,13 @@ can resume navigating the TUI. When the watch terminates, the
 result lands as a one-line flash:
 
 - `hot-reload succeeded`
-- `hot-reload failed: <reason>; rolled back to previous ConfigMap`
+- `hot-reload failed: <reason>; rolled back to previous ConfigMap` — or
+  `previous config file` for a local edit
 - `hot-reload failed: <reason>; rollback failed: <err>` (rare)
 
 Flashes auto-dismiss after a few seconds; if you miss one, query
-`/reload/status` directly via the port-forward.
+`/reload/status` directly — through the port-forward for a pod, or at the
+`stats.address` in `~/.cortex/config.yaml` for a local Cortex.
 
 ### Permissions
 
@@ -692,10 +762,13 @@ automatically — no manual cleanup needed.
 
 ### Hot-reload window
 
-The framework reloads via a config-file watcher; kubelet syncs
-ConfigMap edits into the pod's mount within ~60s, then the framework
-debounces and reloads. Total wall-clock from `apply` to reload is
-typically under 90s. abctl shows a spinner during the wait.
+The framework reloads via a config-file watcher, so how long the wait is depends
+on how the edit reaches that file. In a cluster, kubelet syncs ConfigMap edits
+into the pod's mount within ~60s and the framework then debounces and reloads —
+typically under 90s wall-clock from apply. Locally there is nothing to sync: the
+proxy is already watching the file abctl wrote, so a reload normally lands in
+about a second. The overlay says which of the two you are waiting on. abctl shows
+a spinner either way.
 
 The poller terminates with one of:
 
@@ -703,13 +776,18 @@ The poller terminates with one of:
   time.
 - **Failure** — `reloads_failed` increments past its baseline; the
   framework's `last_error` is shown.
-- **Unreachable** — 5 consecutive transport errors against
-  `:9093/reload/status` (port-forward dropped, framework crashed,
-  etc.) surface as `reload status endpoint unreachable` after a few
-  seconds rather than waiting the full deadline.
-- **Timeout** — none of the above within 120s. Triggers an
-  auto-rollback so the on-disk ConfigMap doesn't drift from the
-  running pipeline.
+- **Unreachable** — 5 consecutive transport errors against `/reload/status`
+  surface as `reload status endpoint unreachable` after a few seconds rather than
+  waiting the full deadline. The endpoint is the port-forward's `:9093` for a pod
+  and the local proxy's `stats.address` otherwise, so the message asks the
+  question that fits: a dropped port-forward or crashed framework in the cluster,
+  or simply whether the local proxy is still running.
+- **Timeout** — none of the above within the target's deadline: 120s for a
+  ConfigMap, sized for the kubelet sync, and 30s for a local file, which lands
+  in about a second. Triggers an auto-rollback so the stored config doesn't
+  drift from the running pipeline. A ceiling, not a wait — the poll returns the
+  moment `last_success` moves, so this only bounds how long a *failed* reload
+  takes to be declared.
 
 ## Plugin dependencies
 
@@ -732,8 +810,9 @@ abctl surfaces these in three places:
 - **Plugin detail pane**: per-dependency rows with ✓/✗ and the
   satisfying upstream's position when applicable.
 - **Pre-apply validation in the editor**: catches missing/misordered
-  Requires before kubectl apply (~50ms vs ~60s framework roundtrip).
-  See the "Pre-apply validation" subsection above.
+  Requires before the write goes out (~50ms, against a framework roundtrip of
+  ~60s in a cluster or ~1s locally). See the "Pre-apply validation" subsection
+  above.
 
 The framework's own validateRelationships is the source of truth and
 runs at every reload. abctl's checks are the fast-feedback layer.
