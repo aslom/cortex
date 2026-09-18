@@ -396,7 +396,22 @@ func badRequestDetail(body []byte) string {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(payload.Error)
+	// CONTROL RUNES STRIPPED before anything else. This string is printed to a terminal and, in
+	// the TUI, into a flash line — so an escape sequence in it can reposition the cursor, recolour
+	// the rest of the session or hide what follows. The endpoint is UNAUTHENTICATED and this client
+	// cannot verify what answered, which is the same reason the read is already bounded at 512
+	// bytes: that bound stops a flood, this one stops a payload that fits inside it.
+	//
+	// pipeline.IsControlRune is the predicate the ledger and the aggregate already sanitise their
+	// labels with, so a byte refused on one surface is not accepted on another.
+	var clean strings.Builder
+	for _, r := range payload.Error {
+		if pipeline.IsControlRune(r) {
+			continue
+		}
+		clean.WriteRune(r)
+	}
+	return strings.TrimSpace(clean.String())
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, out any) error {

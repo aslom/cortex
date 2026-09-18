@@ -510,24 +510,71 @@ func writeCostSummary(snap *usage.Snapshot, stdout io.Writer) {
 // fact is the same arrangement the coverage gap already has, and for the same reason: this
 // is a package boundary, and each surface has a different amount of room.
 func costDegradedText(d *usage.Degraded) string {
-	switch {
-	case d.SkippedLines > 0 && d.TruncatedDays > 0:
-		return fmt.Sprintf("this total is SHORT — the cost ledger skipped %s unreadable line%s "+
-			"and abandoned %s day file%s part-way; that spend happened and is missing from the "+
-			"sum, by an amount nothing here can state",
-			plainCount(d.SkippedLines), plainPlural(d.SkippedLines),
-			plainCount(d.TruncatedDays), plainPlural(d.TruncatedDays))
-	case d.SkippedLines > 0:
-		return fmt.Sprintf("this total is SHORT — the cost ledger skipped %s unreadable line%s; "+
-			"that spend happened and is missing from the sum, by an amount nothing here can state",
-			plainCount(d.SkippedLines), plainPlural(d.SkippedLines))
-	case d.TruncatedDays > 0:
-		return fmt.Sprintf("this total is SHORT — the cost ledger abandoned %s day file%s "+
-			"part-way; a file holds a whole day, so the amount missing from the sum is unbounded",
-			plainCount(d.TruncatedDays), plainPlural(d.TruncatedDays))
-	default:
+	// EVERY COUNTER usage.Degraded CARRIES, composed rather than enumerated. Two of the four went
+	// unrendered, so a read whose only fault was an unopenable day file or a writer-side drop fell
+	// through to the "did not say how much it lost" branch — while the response said exactly how
+	// much. That is the defect UnreadableDays was added to end (a read that "serialised as
+	// `degraded:{}` … says 'something was wrong' and withholds what"), reproduced one layer up at
+	// the rendering step.
+	//
+	// A CLAUSE LIST, not a switch over combinations: four counters make fifteen non-empty
+	// combinations, and a switch over a subset of them is how two came to be missing. A counter
+	// added to the struct needs one clause here and any mixture composes.
+	//
+	// Ordered by how much each kind loses, worst first: a whole day, the rest of a day, the named
+	// lines, then the writer's own drops.
+	var lost []string
+	if d.UnreadableDays > 0 {
+		lost = append(lost, fmt.Sprintf("could not read %s day file%s at all",
+			plainCount(d.UnreadableDays), plainPlural(d.UnreadableDays)))
+	}
+	if d.TruncatedDays > 0 {
+		lost = append(lost, fmt.Sprintf("abandoned %s day file%s part-way",
+			plainCount(d.TruncatedDays), plainPlural(d.TruncatedDays)))
+	}
+	if d.SkippedLines > 0 {
+		lost = append(lost, fmt.Sprintf("skipped %s unreadable line%s",
+			plainCount(d.SkippedLines), plainPlural(d.SkippedLines)))
+	}
+	if d.DroppedRowsTotal > 0 {
+		lost = append(lost, fmt.Sprintf("dropped %s row%s before they reached disk",
+			plainCount(d.DroppedRowsTotal), plainPlural(d.DroppedRowsTotal)))
+	}
+	if len(lost) == 0 {
+		// A present object with every counter zero. Still damage — see usage.Snapshot.Degraded, a
+		// producer that sent the object found some — and the one case where the amount genuinely
+		// is not stated.
 		return "this total is SHORT — the cost ledger reported an incomplete read without " +
 			"saying how much it lost; rows are missing from the sum"
+	}
+
+	// HOW MUCH IS MISSING, keyed on the worst kind present: a day-level fault loses a whole day or
+	// the remainder of one, which is unbounded, where line-level faults lose the lines they name.
+	amount := "by an amount nothing here can state"
+	if d.UnreadableDays > 0 || d.TruncatedDays > 0 {
+		amount = "and a file holds a whole day, so the amount missing from the sum is unbounded"
+	}
+	out := "this total is SHORT — the cost ledger " + joinClauses(lost) +
+		"; that spend happened and is missing from the sum, " + amount
+	if d.DroppedRowsTotal > 0 {
+		// NOT THIS WINDOW'S LOSS. That counter is cumulative for the life of the writer, and its
+		// own doc says why it cannot be anything else: a drop is a fact about the writer, it
+		// happened once, and attributing it to whichever read noticed would be a fiction. A reader
+		// who subtracted it from this window would be wrong.
+		out += ". The dropped rows are a running total for this proxy, not this window"
+	}
+	return out
+}
+
+// joinClauses renders a clause list as prose: "a", "a and b", "a, b and c".
+func joinClauses(cs []string) string {
+	switch len(cs) {
+	case 1:
+		return cs[0]
+	case 2:
+		return cs[0] + " and " + cs[1]
+	default:
+		return strings.Join(cs[:len(cs)-1], ", ") + " and " + cs[len(cs)-1]
 	}
 }
 
