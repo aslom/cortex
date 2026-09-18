@@ -495,6 +495,22 @@ func drawerFigures(r drawerRow) []stripFigure {
 		// one does.
 		figs = append(figs, plainFigure("cost unavailable"),
 			plainFigure(coverageNote(gapOf(r.counts), r.counts.PriceableRequests)))
+	case r.counts.Requests > 0:
+		// NOTHING HERE COULD EVER CARRY A PRICE, which is a different answer from the branch
+		// above and needs a different word. Requests without a single priceable one is the
+		// shape PriceableRequests' own doc describes: Model Context Protocol (MCP) tool calls,
+		// health checks, any proxied traffic that is not inference. Under the endpoint and agent
+		// axes that is not a corner case — it is what an MCP-only row looks like every poll.
+		//
+		// "cost unavailable" WOULD BE A LIE HERE. That phrase means the figure exists and this
+		// surface cannot produce it; here the figure is nothing, and the row's own counters say
+		// so definitively. Sending a reader to check the rate table for traffic that has no rate
+		// is the same class of false lead as an empty gap list beside a "1/10 priced" warning.
+		//
+		// And a blank was the third wrong answer: before this branch the row rendered
+		// "some-endpoint  9 req  8.0k tokens" with the cost slot simply missing, which reads as
+		// a drawer that failed to fill a cell rather than as an answer.
+		figs = append(figs, plainFigure("not priceable"))
 	}
 	if r.counts.Requests > 0 {
 		figs = append(figs, stripFigure{
@@ -554,16 +570,28 @@ func axisHint(axis usage.Group) string {
 // the quantity summed. Ties break on the label so the order is deterministic: two series
 // that cost the same must not swap places between polls, which would make the drawer flicker
 // under a reader who is trying to compare rows.
+//
+// MONEY THROUGH usage.CostSum, not a raw `+=`. The figures these rows display come from
+// Counts.Add, which saturates; ranking them with a raw accumulator let the two disagree, and
+// disagree in the one direction that loses a row. A series summing past MaxInt64 across
+// buckets wraps NEGATIVE, ranks below a ten-micro series, and foldTailSeries then folds the
+// window's single most expensive model into (other) — its figure still correct wherever it
+// lands, its row simply gone. That needs $9.2T in one label to reach, so this is not a bug
+// anybody will hit; it is the drawer being the one money surface in the package that added
+// its own way, and the fix is the idiom already here.
 func rankSeriesByCost(buckets []usage.Bucket) []seriesKey {
-	totals := map[string]int64{}
+	totals := map[string]*usage.CostSum{}
 	for _, b := range buckets {
 		for label, c := range b.Series {
-			totals[label] += c.CostMicros
+			if totals[label] == nil {
+				totals[label] = &usage.CostSum{}
+			}
+			totals[label].Add(c.CostMicros)
 		}
 	}
 	out := make([]seriesKey, 0, len(totals))
-	for label, total := range totals {
-		out = append(out, seriesKey{label: label, total: total})
+	for label, sum := range totals {
+		out = append(out, seriesKey{label: label, total: sum.Micros})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].total != out[j].total {

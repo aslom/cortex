@@ -340,3 +340,138 @@ func TestSessionMoneyCell_NeverRendersAKnownChargeAsZero(t *testing.T) {
 		t.Errorf("cell = %q at the declared width, want the sub-cent figure stated", got)
 	}
 }
+
+// Every width that keeps the money columns can render an honest figure in them.
+//
+// THE COLLISION THIS REFUSES: emptyCell means "not known here", and sessionMoneyCell falls
+// back to it when no rung fits without rounding a real charge to zero. So a width that keeps
+// COST but cannot fit "<$0.0001" renders a KNOWN charge as unknown — the same lie as "$0.00"
+// for a sub-cent figure, read from the other end. Measured before sessionsShowMoney gained its
+// money half: a $0.0012 charge printed "—" in COST at widths 53-58 and in SAVED at 53-64.
+//
+// Sub-cent deliberately, because that is the figure the narrow widths could not express; an
+// ordinary $36.58 fits in six runes and would pass at widths this test rejects.
+func TestSessionsShowMoney_EveryKeptWidthFitsASubCentCharge(t *testing.T) {
+	const subCent = 1_200 // $0.0012
+	kept := 0
+	for termWidth := 1; termWidth <= 200; termWidth++ {
+		if !sessionsShowMoney(termWidth) {
+			continue
+		}
+		kept++
+		cols := fitTableColumns(sessionsColumnsFor(termWidth), termWidth)
+		for _, c := range []struct {
+			title   string
+			avoided bool
+		}{{"COST", false}, {"SAVED", true}} {
+			budget := sessionsColumnWidth(cols, c.title)
+			cell := sessionMoneyCell(subCent, c.avoided, false, budget)
+			if cell == emptyCell {
+				t.Errorf("width %d: %s has a %d-rune budget, which renders a known $0.0012 as %q "+
+					"— the cell that means \"not known here\"", termWidth, c.title, budget, cell)
+			}
+		}
+	}
+	if kept == 0 {
+		t.Fatal("no width kept the money columns, so the loop asserted nothing")
+	}
+}
+
+// The cells are rendered against the column's FITTED width, not its declared one.
+//
+// rebuildSessionsTable reads each money column's fitted width because the fitter shrinks
+// columns on a narrow terminal — and until this test the wiring was exercised only at width
+// 200, where fitted and declared are both 10. A regression passing the declared 10 instead
+// passed every other test in this file.
+//
+// The gap is real and narrow: measured across every width, COST fits to 9 rather than 10 at
+// terminal widths 72-76 (SAVED at 72-75), the band just above the floor where sessionsShowMoney
+// drops them. So the fixture is a charge whose honest form needs all ten runes — $1234.5678 —
+// because a $36.58 cell fits either budget and cannot tell the two apart.
+func TestSessionsMoneyCells_UseTheFittedWidthNotTheDeclaredOne(t *testing.T) {
+	const bigCost = 1_234_567_800 // $1234.5678, ten runes
+	shrunken := 0
+	for termWidth := 1; termWidth <= 200; termWidth++ {
+		if !sessionsShowMoney(termWidth) {
+			continue
+		}
+		cols := fitTableColumns(sessionsColumnsFor(termWidth), termWidth)
+		budget := sessionsColumnWidth(cols, "COST")
+		declared := 0
+		for _, c := range sessionsColumns() {
+			if c.Title == "COST" {
+				declared = c.Width
+			}
+		}
+		if budget >= declared {
+			continue
+		}
+		shrunken++
+
+		m := &model{width: termWidth}
+		m.sessionsTbl = newSessionsTable()
+		m.sessions = []session.SessionSummary{{
+			ID: "abc", UpdatedAt: time.Now(), EventCount: 3, CostMicros: bigCost,
+		}}
+		m.rebuildSessionsTable()
+		rows := m.sessionsTbl.Rows()
+		if len(rows) != 1 {
+			t.Fatalf("width %d: rows = %d, want 1", termWidth, len(rows))
+		}
+		row := strings.Join(rows[0], " ")
+		// What the fitted budget can honestly hold.
+		if want := sessionMoneyCell(bigCost, false, false, budget); !strings.Contains(row, want) {
+			t.Errorf("width %d: row %q does not carry %q, the cell a %d-rune budget allows",
+				termWidth, row, want, budget)
+		}
+		// And emphatically not the wider form the declared width would have allowed, which
+		// bubbles/table would then truncate.
+		if wide := sessionMoneyCell(bigCost, false, false, declared); wide != "" &&
+			len([]rune(wide)) > budget && strings.Contains(row, wide) {
+			t.Errorf("width %d: row %q carries %q, %d runes in a %d-rune column — the cell was "+
+				"built against the declared width", termWidth, row, wide, len([]rune(wide)), budget)
+		}
+	}
+	if shrunken == 0 {
+		t.Fatal("no width shrinks COST below its declared size, so this test asserted nothing " +
+			"about the fitted budget")
+	}
+}
+
+// And the rendered cells never exceed the column they sit in, at every width that keeps them.
+//
+// Row arity was already pinned; cell WIDTH was not, and a cell wider than its column is what
+// bubbles/table truncates — the clipped figure this file's own rule forbids.
+func TestSessionsMoneyCells_NeverOutgrowTheirColumn(t *testing.T) {
+	widths := 0
+	for termWidth := 40; termWidth <= 200; termWidth++ {
+		if !sessionsShowMoney(termWidth) {
+			continue
+		}
+		widths++
+		m := &model{width: termWidth}
+		m.sessionsTbl = newSessionsTable()
+		m.sessions = []session.SessionSummary{{
+			ID: "abc", UpdatedAt: time.Now(), EventCount: 315,
+			TotalTokens: 77_980_000, CostMicros: 36_577_700, AvoidedMicros: 366_100,
+		}}
+		m.rebuildSessionsTable()
+		rows := m.sessionsTbl.Rows()
+		if len(rows) != 1 {
+			t.Fatalf("width %d: rows = %d, want 1", termWidth, len(rows))
+		}
+		cols := m.sessionsTbl.Columns()
+		for i, cell := range rows[0] {
+			if i >= len(cols) {
+				t.Fatalf("width %d: row has %d cells for %d columns", termWidth, len(rows[0]), len(cols))
+			}
+			if n := len([]rune(cell)); n > cols[i].Width {
+				t.Errorf("width %d: %s cell %q is %d runes in a %d-rune column",
+					termWidth, cols[i].Title, cell, n, cols[i].Width)
+			}
+		}
+	}
+	if widths == 0 {
+		t.Fatal("no width kept the money columns, so the loop asserted nothing")
+	}
+}

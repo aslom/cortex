@@ -227,7 +227,10 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
 - **Sessions** (default): table of active sessions in the store, most
   recently updated first. Columns: ID, updated (relative), event count,
-  tokens, active marker.
+  tokens, cost, saved, active marker. The two money columns are lifetime
+  totals for the session and are dropped entirely on a terminal too narrow to
+  show a sub-cent charge honestly — below 72 columns — rather than rounded to
+  `$0.00` or blanked.
 
   ```
   abctl · http://localhost:9094 · [Sessions] Pipeline

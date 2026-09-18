@@ -374,6 +374,18 @@ func sessionsColumnWidth(cols []table.Column, title string) int {
 // and TestSessionTokens_FitsEveryFittedWidth, which walks the same boundary.
 const sessionTokensCellMin = 6
 
+// sessionMoneyCellMin is the narrowest money cell that can hold an honest figure for ANY
+// non-zero charge. sessionMoneyCell's last honest rung is formatUSDCell's own floor,
+// "<$0.0001" at eight runes, and SAVED wears the estimate marker on top: "~<$0.0001", nine.
+// Below that every rung either rounds a real charge to zero — which the ladder skips — or does
+// not fit, so the cell can only ever come out as emptyCell.
+//
+// Deliberately NOT ten, the declared width, even though the fitter's shrink order means the
+// columns are at their declared width whenever they survive today. Ten is what the widest
+// value happens to need; nine is what honesty needs, and only the second one stays true if a
+// column's declared width changes.
+const sessionMoneyCellMin = 9
+
 // sessionsShowMoney reports whether this terminal can afford the COST and SAVED columns.
 //
 // MEASURED, not thresholded. fitTableColumns squeezes the widest column repeatedly until the
@@ -389,13 +401,36 @@ const sessionTokensCellMin = 6
 //
 // True before the first layout, when the width is still zero: newSessionsTable is built from
 // the declared columns, so the rows must match them, and the first WindowSizeMsg refits both.
+// AND ON THE MONEY COLUMNS' OWN FLOOR, which measuring TOKENS alone did not cover. The two
+// tests are independent: a budget can be generous enough to leave TOKENS readable and still be
+// too small for any honest money figure. Measured before this half existed, with a known
+// $0.0012 charge: COST printed the em-dash at widths 53-58 and SAVED at 53-64, because the
+// narrowest form that does not round a real charge to zero is "~<$0.0001" at nine runes.
+//
+// That em-dash is the collision worth refusing. emptyCell means "not known here", and
+// sessionMoneyCell falls back to it when nothing fits — so a column kept at a width where the
+// fallback is the only outcome renders a KNOWN charge as unknown. That is the same lie as
+// "$0.00" for a sub-cent figure, read from the other end, and the rule this file states fifty
+// lines above sessionMoneyCell forbids it in both directions.
+//
+// The cost is real and measured: the columns now disappear below 72 columns, where an ordinary
+// "$36.58" would still have fitted. Dropping a whole column is this file's stated answer to
+// not being able to render a cell honestly, and a reader who cannot see COST at all goes
+// looking for the width; one who sees "—" against a session that definitely spent money
+// concludes the figure is missing from the server.
 func sessionsShowMoney(termWidth int) bool {
 	if termWidth <= 0 {
 		return true
 	}
-	for _, c := range fitTableColumns(sessionsColumns(), termWidth) {
-		if c.Title == "TOKENS" {
-			return c.Width >= sessionTokensCellMin
+	fitted := fitTableColumns(sessionsColumns(), termWidth)
+	for _, c := range fitted {
+		if c.Title == "TOKENS" && c.Width < sessionTokensCellMin {
+			return false
+		}
+	}
+	for _, title := range []string{"COST", "SAVED"} {
+		if sessionsColumnWidth(fitted, title) < sessionMoneyCellMin {
+			return false
 		}
 	}
 	return true

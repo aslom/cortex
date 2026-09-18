@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"math"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -716,6 +717,14 @@ func TestHandleKey_TheDrawersBindings(t *testing.T) {
 			t.Error("esc closed a drawer that is not on screen, so it never reached the pane — " +
 				"the Usage pane needs a second press to exit")
 		}
+		// THE POSITIVE HALF, and the reason this subtest was not a control for its own name.
+		// Asserting only that the flag survived says nothing about where esc went: a handler
+		// that swallowed the key entirely, or returned before the pane got it, passed. What the
+		// regression was actually about is the back-out, so assert the back-out.
+		if m.pane == paneUsage {
+			t.Errorf("esc did not leave the usage pane (pane = %v) — the flag surviving only "+
+				"means the drawer ignored the key, not that the pane received it", m.pane)
+		}
 	})
 
 	t.Run("esc closes it where it does show", func(t *testing.T) {
@@ -735,7 +744,15 @@ func TestHandleKey_TheDrawersBindings(t *testing.T) {
 		if m.spendDrawerVisible() {
 			t.Fatal("setup: still visible below the floor")
 		}
+		// An open filter is this pane's own observable use of esc, and it stands in for the
+		// back-out the Usage subtest asserts: if the key reached the pane, the filter cancels.
+		// Without it this subtest could only say the drawer ignored esc, which a handler that
+		// dropped the key on the floor satisfies just as well.
+		m.filtering = true
 		m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+		if m.filtering {
+			t.Error("esc never reached the pane below the height floor — the filter is still open")
+		}
 		if !m.spend.expanded {
 			t.Error("esc closed an off-screen drawer after a resize")
 		}
@@ -849,6 +866,77 @@ func TestSpendDrawerRows_AnUnpricedTailStillGetsItsBand(t *testing.T) {
 	for _, r := range rows {
 		if r.label == tailLabel && r.counts.CostMicros != 0 {
 			t.Errorf("%q reports %d micros for a tail that priced nothing", tailLabel, r.counts.CostMicros)
+		}
+	}
+}
+
+// Ranking is money, so it saturates like money.
+//
+// The drawer displays Counts.Add's saturating totals and used to RANK on a raw `+=`, which
+// makes the two disagree exactly where int64 runs out. The consequence is not a wrong figure
+// but a missing row: a negative rank sorts below every real series, foldTailSeries folds the
+// window's most expensive model into (other), and the reader sees four cheap models and a
+// band. Unreachable in practice at $9.2T per label — pinned because the fix is the package's
+// own accumulator and the next money surface should copy this one, not the old one.
+func TestRankSeriesByCost_SaturatesInsteadOfWrapping(t *testing.T) {
+	half := int64(math.MaxInt64/2) + 100
+	buckets := []usage.Bucket{
+		{Series: map[string]usage.Counts{"whale": {Requests: 1, CostMicros: half}}},
+		{Series: map[string]usage.Counts{"whale": {Requests: 1, CostMicros: half}}},
+		{Series: map[string]usage.Counts{"minnow": {Requests: 1, CostMicros: 10}}},
+	}
+	ranked := rankSeriesByCost(buckets)
+	if len(ranked) == 0 {
+		t.Fatal("no series ranked")
+	}
+	if ranked[0].label != "whale" {
+		t.Errorf("ranked first = %q (total %d), want whale — the overflowing series must rank "+
+			"above a 10-micro one, not below it", ranked[0].label, ranked[0].total)
+	}
+	for _, s := range ranked {
+		if s.total < 0 {
+			t.Errorf("series %q ranks at %d: a money total wrapped negative", s.label, s.total)
+		}
+	}
+}
+
+// Traffic that can never carry a price says so, in its own words.
+//
+// Requests with no priceable one among them is what an MCP-only endpoint or agent looks like,
+// and it took the branch nothing matched: no cost cell, no caveat. "cost unavailable" is the
+// wrong word for it — the cost is known to be nothing — so the row needs a third spelling, and
+// this test pins both halves of that: the row says something, and it does not say the thing
+// that would send a reader to the rate table.
+func TestDrawerFigures_NamesTrafficThatCannotBePriced(t *testing.T) {
+	snap := &usage.Snapshot{
+		Window: "1h", Group: usage.GroupEndpoint, Priced: true,
+		Buckets: []usage.Bucket{{Series: map[string]usage.Counts{
+			"inference.svc": {Requests: 5, Tokens: 100, CostMicros: 900,
+				PricedRequests: 5, PriceableRequests: 5},
+			"mcp-tools.svc": {Requests: 9, Tokens: 8000},
+		}}},
+	}
+	var row string
+	for _, line := range renderSpendDrawer(snap, usage.GroupEndpoint, "1h", 200) {
+		if strings.Contains(line, "mcp-tools.svc") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatal("the unpriceable series has no row at all")
+	}
+	if !strings.Contains(row, "not priceable") {
+		t.Errorf("row %q leaves the cost slot blank for traffic that cannot carry a price", row)
+	}
+	if strings.Contains(row, "cost unavailable") {
+		t.Errorf("row %q says the cost is unavailable, but nothing here is priceable — that "+
+			"sends a reader to the rate table for traffic that has no rate", row)
+	}
+	// The priced row beside it is untouched: this branch is reached only when nothing priced
+	// AND nothing could have.
+	for _, line := range renderSpendDrawer(snap, usage.GroupEndpoint, "1h", 200) {
+		if strings.Contains(line, "inference.svc") && strings.Contains(line, "not priceable") {
+			t.Errorf("priced row %q picked up the unpriceable caveat", line)
 		}
 	}
 }

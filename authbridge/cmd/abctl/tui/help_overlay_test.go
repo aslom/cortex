@@ -263,12 +263,24 @@ func TestFooterHintsMentionUsageKey(t *testing.T) {
 		{paneSessions, "[u] usage"},
 		{paneEvents, "[u] usage"},
 		{paneDetail, "[u] usage"},
+		// The spend drawer's key, on the pane the README's own footer sample shows. It was
+		// written down in the [?] overlay and in that sample and missing from the line both
+		// describe, so `$` existed only for a reader who went looking for it.
+		{paneSessions, "[$] spend"},
 	} {
 		m.pane = tc.pane
 		if got := m.helpView(); !strings.Contains(got, tc.want) {
 			t.Errorf("pane %v footer omits %q:\n  %s", tc.pane, tc.want, got)
 		}
 	}
+	// Both spellings of the Sessions footer, since the drilled-in one is a separate string and
+	// has its own [esc] pods.
+	m.pane = paneSessions
+	m.parentCtx = context.Background()
+	if got := m.helpView(); !strings.Contains(got, "[$] spend") {
+		t.Errorf("the drilled-in sessions footer omits [$] spend:\n  %s", got)
+	}
+	m.parentCtx = nil
 
 	// The usage pane's own footer must not fall through to the bare default.
 	m.pane = paneUsage
