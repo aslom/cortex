@@ -62,16 +62,22 @@ func (m *model) rebuildSessionsTable() {
 		prev = rows[m.sessionsTbl.Cursor()][0]
 	}
 	now := time.Now()
-	// Read off the TABLE's own columns, not re-derived from m.width. The header and the rows
-	// are set by two different functions — layout() sets columns, this sets rows — so a
-	// predicate evaluated twice can disagree, and a row with fewer cells than the header
-	// renders its data under the wrong headings rather than failing. Asking the table makes
-	// the alignment structural.
+	// ONE FUNCTION SETS THE HEADER AND THE ROWS, and it is this one. They have to change
+	// together — the money columns come and go with the terminal width — and anything that
+	// moves one without the other is a crash rather than a cosmetic bug:
 	//
-	// It also removes an ordering dependency that WAS reachable: layout() returns early until
-	// both terminal dimensions are known, so a rebuild that ran first would have followed the
-	// width while the header still carried the declared set.
-	showMoney := hasSessionsColumn(m.sessionsTbl.Columns(), "COST")
+	//   - bubbles' SetColumns calls UpdateViewport SYNCHRONOUSLY, and renderRow indexes
+	//     cols[i] once per CELL. So installing a 5-column header while 7-cell rows are still
+	//     loaded panics inside SetColumns itself — "index out of range [5] with length 5" —
+	//     and layout() did exactly that on any resize across 53 columns. A tmux split was
+	//     enough. Appending a rebuild after SetColumns cannot help; the panic is inside it.
+	//   - The other direction does not crash, it MISALIGNS: a 5-cell row under a 7-column
+	//     header puts ACTIVE's dot under COST.
+	//
+	// Reading the flag off the table's own columns fixed the disagreement WITHIN a rebuild and
+	// did nothing for this, because the columns were still set somewhere else. Derived once
+	// here now, and used for both, so the two cannot be produced by separate decisions at all.
+	showMoney := sessionsShowMoney(m.width)
 	rows := make([]table.Row, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		if m.filter != "" && !strings.Contains(s.ID, m.filter) {
@@ -126,6 +132,18 @@ func (m *model) rebuildSessionsTable() {
 		}
 		row = append(row, "cached")
 		rows = append(rows, row)
+	}
+	// ONLY WHEN THE HEADER ACTUALLY CHANGES, which is a resize and nothing else. SetRows(nil)
+	// resets the viewport's offset, and this function runs on every poll — clearing
+	// unconditionally scrolled the picker back under the operator twice a second, which
+	// TestSessionsTable_PollRebuildKeepsScrollPosition exists to catch.
+	//
+	// When it does change, the rows go first: SetColumns renders whatever rows are loaded, so
+	// there must be none it could misread. A scroll reset is unavoidable there — the rows are
+	// being rebuilt against a different header — and a resize is already a re-layout.
+	if want := fitTableColumns(sessionsColumnsFor(m.width), m.width); !sameColumns(m.sessionsTbl.Columns(), want) {
+		m.sessionsTbl.SetRows(nil)
+		m.sessionsTbl.SetColumns(want)
 	}
 	m.sessionsTbl.SetRows(rows)
 
@@ -324,14 +342,20 @@ func sessionsColumnsFor(termWidth int) []table.Column {
 	return out
 }
 
-// hasSessionsColumn reports whether the laid-out header carries the named column. The one
-// place row-building asks what the header looks like; see rebuildSessionsTable for why it
-// asks rather than re-deciding.
-func hasSessionsColumn(cols []table.Column, title string) bool {
-	for _, c := range cols {
-		if c.Title == title {
-			return true
+// sameColumns reports whether two header sets are identical in titles and widths.
+//
+// Both matter. A title change is the money columns coming or going, and a WIDTH change is the
+// fitter squeezing the same columns for a narrower terminal — either one means the loaded rows
+// were measured against a different header, and only a change justifies the scroll reset that
+// reinstalling them costs.
+func sameColumns(a, b []table.Column) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Title != b[i].Title || a[i].Width != b[i].Width {
+			return false
 		}
 	}
-	return false
+	return true
 }

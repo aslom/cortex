@@ -81,11 +81,11 @@ func TestSessionMoneyCell_NeverAssertsFreeOrARefund(t *testing.T) {
 // feature.
 func TestSessionsColumns_MoneyColumnsYieldRatherThanTruncateTokens(t *testing.T) {
 	wide := sessionsColumnsFor(200)
-	if !hasSessionsColumn(wide, "COST") || !hasSessionsColumn(wide, "SAVED") {
+	if !hasColumn(wide, "COST") || !hasColumn(wide, "SAVED") {
 		t.Errorf("a 200-column terminal dropped the money columns: %v", titles(wide))
 	}
 	narrow := sessionsColumnsFor(50)
-	if hasSessionsColumn(narrow, "COST") || hasSessionsColumn(narrow, "SAVED") {
+	if hasColumn(narrow, "COST") || hasColumn(narrow, "SAVED") {
 		t.Errorf("a 50-column terminal kept the money columns: %v — TOKENS truncates there",
 			titles(narrow))
 	}
@@ -155,5 +155,82 @@ func TestSessionMoneyCell_AClampedFigureIsMarkedAsAFloor(t *testing.T) {
 	if !strings.HasPrefix(saved, inexactMarker) || !strings.HasSuffix(saved, partialMarker) {
 		t.Errorf("clamped saving = %q, want both %q (estimated) and %q (a floor)",
 			saved, inexactMarker, partialMarker)
+	}
+}
+
+// hasColumn reports whether a header set carries the named column. Local to the tests: the
+// production side no longer asks that question — rebuildSessionsTable derives the money flag
+// from the width and sets the header itself — so a helper for it would be dead code.
+func hasColumn(cols []table.Column, title string) bool {
+	for _, c := range cols {
+		if c.Title == title {
+			return true
+		}
+	}
+	return false
+}
+
+// RESIZING one model across the money-column boundary, in both directions.
+//
+// This is the case TestSessionsPicker_RowArityMatchesTheHeaderAtEveryWidth could not see: it
+// builds a FRESH model per width, so the header and the rows are always created together and no
+// transition is ever crossed. A real terminal transitions — a tmux split is enough — and on the
+// way down it CRASHED:
+//
+//	index out of range [5] with length 5
+//
+// inside layout(), because bubbles' SetColumns calls UpdateViewport synchronously and renderRow
+// indexes cols[i] once per cell, so a 5-column header met 7-cell rows. On the way up it did not
+// crash, it put ACTIVE's dot under COST.
+//
+// 53 is the narrowest width that keeps the money columns and 52 the widest that drops them, so
+// the sequence walks across that boundary twice and ends where it started.
+func TestSessionsPicker_ResizingAcrossTheMoneyBoundaryNeitherPanicsNorMisaligns(t *testing.T) {
+	m := &model{width: 200, height: 40}
+	m.sessionsTbl = newSessionsTable()
+	m.sessions = []session.SessionSummary{
+		{ID: "abc", UpdatedAt: time.Now(), EventCount: 3, TotalTokens: 1_000, CostMicros: 36_577_700},
+		{ID: "def", UpdatedAt: time.Now(), EventCount: 1, TotalTokens: 10},
+	}
+	m.events = map[string][]pipeline.SessionEvent{"cached-one": {{}}}
+	m.layout()
+
+	for _, w := range []int{200, 53, 52, 40, 52, 53, 200} {
+		// THE PRODUCTION SEQUENCE, and getting it wrong made the first version of this test
+		// unable to fail: a poll builds the rows at the CURRENT width, and the resize arrives
+		// afterwards. Leaving it to layout() to populate them meant the table was empty when the
+		// old code ran, so the arity loop below iterated nothing and the panic never fired.
+		m.rebuildSessionsTable()
+		if len(m.sessionsTbl.Rows()) == 0 {
+			t.Fatalf("width %d: no rows to check — every assertion below would pass vacuously", w)
+		}
+
+		m.width = w
+		// layout() is what a WindowSizeMsg runs, and it is where the panic was.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("width %d: layout() panicked: %v — a resize across the money-column "+
+						"boundary crashes the TUI", w, r)
+				}
+			}()
+			m.layout()
+		}()
+
+		cols := m.sessionsTbl.Columns()
+		if len(m.sessionsTbl.Rows()) == 0 {
+			t.Fatalf("width %d: the resize emptied the table", w)
+		}
+		for i, r := range m.sessionsTbl.Rows() {
+			if len(r) != len(cols) {
+				t.Fatalf("width %d: row %d has %d cells against a %d-column header %v: the cells "+
+					"render under the wrong headings", w, i, len(r), len(cols), titles(cols))
+			}
+		}
+		// And the last column really is the one the last cell belongs to, which is what
+		// misalignment actually looks like on screen.
+		if last := cols[len(cols)-1].Title; last != "ACTIVE" {
+			t.Errorf("width %d: last column is %q, want ACTIVE — the header itself is wrong", w, last)
+		}
 	}
 }

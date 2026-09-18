@@ -1078,10 +1078,10 @@ func (m *model) layout() {
 	// than an 80-column terminal, wrapping every row. Applied from the constructors' own
 	// definitions each time rather than to the live columns, so widening the terminal back up
 	// restores what a narrower one took away.
-	// sessionsColumnsFor, not sessionsColumns: the money columns are dropped outright on a
-	// terminal too narrow to hold them without truncating TOKENS. rebuildSessionsTable makes
-	// the same call so the rows match.
-	m.sessionsTbl.SetColumns(fitTableColumns(sessionsColumnsFor(m.width), m.width))
+	// The sessions table is NOT fitted here. Its header and its rows have to change together —
+	// the money columns come and go with the width — and setting columns with the old rows still
+	// loaded panics inside bubbles' SetColumns. rebuildSessionsTable owns both; see its doc. It
+	// is called below, after the heights are set.
 	m.pipelineTbl.SetColumns(fitTableColumns(pipelineColumns(), m.width))
 	m.catalogTbl.SetColumns(fitTableColumns(catalogColumns(), m.width))
 
@@ -1090,6 +1090,9 @@ func (m *model) layout() {
 	// tables are not rebuilt from here, so nothing else would reconcile it.
 	setTableHeight(&m.sessionsTbl, bodyH)
 	m.bodyHeight = bodyH
+	// AFTER the height, so the cursor-visibility maths inside it uses the new window. This is
+	// what fits the sessions header to the new width, rows included.
+	m.rebuildSessionsTable()
 	// Picker tables share the same body area as the session tables so the
 	// terminal real estate stays constant as the user navigates panes.
 	setTableHeight(&m.namespacesTbl, bodyH)
