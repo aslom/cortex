@@ -558,7 +558,7 @@ func TestQuery_AHostileLabelCannotDestroyTheRestOfTheDay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	totals, _, _ := Fold(rows, usage.GroupNone)
+	totals, _, _, _ := Fold(rows, usage.GroupNone)
 	if want := int64(3_250_000); totals.CostMicros != want {
 		t.Errorf("CostMicros = %d, want %d; 250000 is the measured loss — the oversized "+
 			"line ended the day's read and took every later minute with it",
@@ -601,7 +601,7 @@ func TestWindow_IncludesTheOpenMinuteWithNothingOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Window: %v", err)
 	}
-	totals, _, _ := Fold(rows, usage.GroupNone)
+	totals, _, _, _ := Fold(rows, usage.GroupNone)
 	if totals.CostMicros != 250_000 {
 		t.Errorf("CostMicros = %d, want 250000 from the open minute", totals.CostMicros)
 	}
@@ -626,7 +626,7 @@ func TestWindow_CountsAMinuteExactlyOnceAcrossTheFlush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Window while open: %v", err)
 	}
-	openTotals, _, _ := Fold(before, usage.GroupNone)
+	openTotals, _, _, _ := Fold(before, usage.GroupNone)
 
 	// Roll the minute: the same spend moves from memory to disk.
 	now = at.Add(time.Minute)
@@ -643,7 +643,7 @@ func TestWindow_CountsAMinuteExactlyOnceAcrossTheFlush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Window after the roll: %v", err)
 	}
-	closedTotals, _, _ := Fold(after, usage.GroupNone)
+	closedTotals, _, _, _ := Fold(after, usage.GroupNone)
 
 	// The first minute's 500000 is now on disk and the second minute's 100000 is held.
 	if openTotals.CostMicros != 500_000 {
@@ -698,7 +698,7 @@ func TestWindow_ARestartInTheSameMinuteHidesNothingAlreadyCommitted(t *testing.T
 	if err != nil {
 		t.Fatalf("Window: %v", err)
 	}
-	totals, _, _ := Fold(rows, usage.GroupNone)
+	totals, _, _, _ := Fold(rows, usage.GroupNone)
 	if totals.CostMicros < committed {
 		t.Errorf("Window() = %d micros, BELOW the %d already on disk — a committed row is "+
 			"hidden, and nothing reports it: Dropped() = %d, read caveats = %+v",
@@ -747,7 +747,7 @@ func TestWindow_AFlushRacingTheReadIsCountedExactlyOnce(t *testing.T) {
 	if flushes != 1 {
 		t.Fatalf("the seam fired %d times, want 1 — this test asserts nothing otherwise", flushes)
 	}
-	totals, _, _ := Fold(rows, usage.GroupNone)
+	totals, _, _, _ := Fold(rows, usage.GroupNone)
 	if want := int64(500_000); totals.CostMicros != want {
 		t.Errorf("CostMicros = %d, want %d counted exactly once; 1000000 means the minute "+
 			"was counted from memory AND from disk, which is the failure the reconciliation "+
@@ -813,7 +813,7 @@ func TestWindow_KeepsADiskRowAboveTheHeldMinute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Window: %v", err)
 	}
-	totals, _, _ := Fold(rows, usage.GroupNone)
+	totals, _, _, _ := Fold(rows, usage.GroupNone)
 	if want := int64(1_250_000); totals.CostMicros != want {
 		t.Errorf("CostMicros = %d, want %d; 250000 is the measured loss — a minute above "+
 			"the held one is not the held one and must not be dropped as an overlap",
@@ -879,7 +879,7 @@ func TestFold_ByModelSumsToTotals(t *testing.T) {
 	rows = append(rows, Row{At: base, Endpoint: "gw", Counts: usage.Counts{
 		Requests: 1, InputTokens: 10, CostMicros: 25, PricedRequests: 1, PriceableRequests: 1}})
 
-	totals, series, ungrouped := Fold(rows, usage.GroupModel)
+	totals, series, ungrouped, _ := Fold(rows, usage.GroupModel)
 
 	if totals.CostMicros != 375 {
 		t.Errorf("totals.CostMicros = %d, want 375 (300 + 50 + the 25 with no model)", totals.CostMicros)
@@ -920,7 +920,7 @@ func TestFold_ByEndpoint(t *testing.T) {
 		{At: base, Endpoint: "gw-b", Model: "m", Counts: usage.Counts{Requests: 1, CostMicros: 20}},
 	}
 
-	_, series, _ := Fold(rows, usage.GroupEndpoint)
+	_, series, _, _ := Fold(rows, usage.GroupEndpoint)
 
 	if series["gw-a"].CostMicros != 10 || series["gw-b"].CostMicros != 20 {
 		t.Errorf("series = %+v, want gw-a 10 and gw-b 20", series)
@@ -932,8 +932,8 @@ func TestFold_MethodIsAnAliasForModel(t *testing.T) {
 	base := time.Date(2026, 9, 13, 9, 0, 0, 0, time.Local)
 	rows := []Row{{At: base, Model: "opus", Counts: usage.Counts{Requests: 1, CostMicros: 10}}}
 
-	_, byModel, _ := Fold(rows, usage.GroupModel)
-	_, byMethod, _ := Fold(rows, usage.GroupMethod)
+	_, byModel, _, _ := Fold(rows, usage.GroupModel)
+	_, byMethod, _, _ := Fold(rows, usage.GroupMethod)
 
 	// THE EQUALITY IS VACUOUS ON TWO EMPTY MAPS, and Fold returning nothing for both spellings is
 	// exactly what a broken alias would look like — so what the series CONTAINS is asserted first.
@@ -951,7 +951,7 @@ func TestFold_UnpricedRowsCountButCostNothing(t *testing.T) {
 	base := time.Date(2026, 9, 13, 9, 0, 0, 0, time.Local)
 	rows := []Row{{At: base, Model: "m", Counts: usage.Counts{Requests: 1, PriceableRequests: 1}}}
 
-	totals, _, _ := Fold(rows, usage.GroupModel)
+	totals, _, _, _ := Fold(rows, usage.GroupModel)
 
 	if totals.CostMicros != 0 {
 		t.Errorf("CostMicros = %d, want 0", totals.CostMicros)
@@ -973,7 +973,7 @@ func TestFold_CarriesTheIncompleteCount(t *testing.T) {
 			Requests: 1, CostMicros: 200, PricedRequests: 1, PriceableRequests: 1}},
 	}
 
-	totals, series, _ := Fold(rows, usage.GroupModel)
+	totals, series, _, _ := Fold(rows, usage.GroupModel)
 
 	if totals.IncompleteRequests != 1 {
 		t.Errorf("totals.IncompleteRequests = %d, want 1", totals.IncompleteRequests)
@@ -1006,7 +1006,7 @@ func TestFold_CarriesAvoidedCostWithoutAddingItToSpend(t *testing.T) {
 			Requests: 1, CostMicros: 200, PricedRequests: 1, PriceableRequests: 1}},
 	}
 
-	totals, series, _ := Fold(rows, usage.GroupModel)
+	totals, series, _, _ := Fold(rows, usage.GroupModel)
 
 	if totals.AvoidedMicros != 300 {
 		t.Errorf("totals.AvoidedMicros = %d, want 300", totals.AvoidedMicros)
@@ -1026,7 +1026,7 @@ func TestFold_EmptyLabelIsNeverASeriesKey(t *testing.T) {
 	base := time.Date(2026, 9, 13, 9, 0, 0, 0, time.Local)
 	rows := []Row{{At: base, Model: "", Counts: usage.Counts{Requests: 1, CostMicros: 10}}}
 
-	totals, series, _ := Fold(rows, usage.GroupModel)
+	totals, series, _, _ := Fold(rows, usage.GroupModel)
 
 	if _, ok := series[""]; ok {
 		t.Error(`series has an "" key`)
@@ -1038,7 +1038,7 @@ func TestFold_EmptyLabelIsNeverASeriesKey(t *testing.T) {
 
 func TestFold_GroupNoneReturnsNoSeries(t *testing.T) {
 	base := time.Date(2026, 9, 13, 9, 0, 0, 0, time.Local)
-	totals, series, _ := Fold([]Row{{At: base, Counts: usage.Counts{Requests: 1, CostMicros: 10}}}, usage.GroupNone)
+	totals, series, _, _ := Fold([]Row{{At: base, Counts: usage.Counts{Requests: 1, CostMicros: 10}}}, usage.GroupNone)
 	if totals.CostMicros != 10 {
 		t.Errorf("CostMicros = %d, want 10", totals.CostMicros)
 	}
@@ -1053,7 +1053,7 @@ func TestFold_GroupingsTheLedgerCannotAnswerReturnNoSeries(t *testing.T) {
 	base := time.Date(2026, 9, 13, 9, 0, 0, 0, time.Local)
 	rows := []Row{{At: base, Model: "m", Endpoint: "gw", Counts: usage.Counts{Requests: 1, CostMicros: 10}}}
 	for _, g := range []usage.Group{usage.GroupSession, usage.GroupStatus, usage.GroupPlugin} {
-		totals, series, ungrouped := Fold(rows, g)
+		totals, series, ungrouped, _ := Fold(rows, g)
 		if series != nil {
 			t.Errorf("group=%s produced a series %+v; the ledger holds no such column", g, series)
 		}
@@ -1102,7 +1102,7 @@ func TestFold_GatewayPricedRowWithNoModelIsDisclosedAsUngrouped(t *testing.T) {
 			Requests: 1, CostMicros: 250_000, PricedRequests: 1, PriceableRequests: 1}},
 	}
 
-	totals, series, ungrouped := Fold(rows, usage.GroupModel)
+	totals, series, ungrouped, _ := Fold(rows, usage.GroupModel)
 
 	if totals.CostMicros != 350_000 {
 		t.Fatalf("totals.CostMicros = %d, want 350000 — both rows are real spend", totals.CostMicros)
@@ -1126,7 +1126,7 @@ func TestFold_GatewayPricedRowWithNoModelIsDisclosedAsUngrouped(t *testing.T) {
 	// The same row is fully attributable on the axis it DOES carry, so that grouping has
 	// nothing to disclose. A residual that showed up on every axis regardless would train a
 	// client to ignore it.
-	if _, _, byEndpoint := Fold(rows, usage.GroupEndpoint); byEndpoint.Micros != 0 {
+	if _, _, byEndpoint, _ := Fold(rows, usage.GroupEndpoint); byEndpoint.Micros != 0 {
 		t.Errorf("group=endpoint ungrouped cost = %d, want 0 — both rows carry an endpoint", byEndpoint.Micros)
 	}
 }
@@ -1165,7 +1165,7 @@ func TestFold_ASaturatedResidualIsABoundNotAFabricatedOvershoot(t *testing.T) {
 			Requests: 1, CostMicros: half, PricedRequests: 1, PriceableRequests: 1}},
 	}
 
-	totals, _, ungrouped := Fold(rows, usage.GroupModel)
+	totals, _, ungrouped, _ := Fold(rows, usage.GroupModel)
 
 	if ungrouped.Micros < 0 {
 		t.Fatalf("residual = %d — negative, so the accumulate wrapped. A negative residual is "+
@@ -1205,7 +1205,7 @@ func TestFold_AnUnpricedRowWithNoModelAddsNothingToTheResidual(t *testing.T) {
 	rows := []Row{{At: base, Endpoint: "gw", Model: "", Counts: usage.Counts{
 		Requests: 1, PriceableRequests: 1}}}
 
-	_, _, ungrouped := Fold(rows, usage.GroupModel)
+	_, _, ungrouped, _ := Fold(rows, usage.GroupModel)
 
 	if ungrouped.Micros != 0 {
 		t.Errorf("ungrouped cost = %d over a row that cost nothing, want 0", ungrouped.Micros)
@@ -1222,7 +1222,7 @@ func TestFold_GroupAgentBreaksDownByAgent(t *testing.T) {
 			Counts: usage.Counts{Requests: 1, CostMicros: 200, InputTokens: 20}},
 	}
 
-	totals, series, _ := Fold(rows, usage.GroupAgent)
+	totals, series, _, _ := Fold(rows, usage.GroupAgent)
 
 	if totals.CostMicros != 300 {
 		t.Errorf("totals.CostMicros = %d, want 300", totals.CostMicros)
@@ -1258,7 +1258,7 @@ func TestFold_GroupAgentMapsAbsenceToUnknown(t *testing.T) {
 			Counts: usage.Counts{Requests: 1, CostMicros: 200}},
 	}
 
-	totals, series, _ := Fold(rows, usage.GroupAgent)
+	totals, series, _, _ := Fold(rows, usage.GroupAgent)
 
 	if _, blank := series[""]; blank {
 		t.Error(`series has an "" key; a blank row reads as a bug rather than as unattributed traffic`)

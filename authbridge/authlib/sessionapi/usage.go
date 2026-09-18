@@ -311,7 +311,7 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 	if !costledger.Groupable(group) {
 		applied = usage.GroupNone
 	}
-	totals, series, ungrouped := costledger.Fold(rows, applied)
+	totals, series, ungroupedCost, ungroupedAvoided := costledger.Fold(rows, applied)
 	// Carried onto the totals BEFORE the snapshot is built, not left to
 	// SetUngroupedCost's own assignment below. This response's single bucket is a copy of
 	// totals, so setting the flag afterwards would mark Totals as a bound while the bucket
@@ -319,7 +319,10 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 	// never see it. The ring's Snapshot has the opposite shape (many buckets, one
 	// cross-bucket residual), which is why the setter flags Totals there and this flags
 	// both here.
-	if ungrouped.Saturated {
+	// Either residual having clamped makes every money figure in this response a bound, so
+	// both are consulted: the flag means "read them all as bounds", and checking only one
+	// would let a clamped avoided residual arrive beside a total claiming exactness.
+	if ungroupedCost.Saturated || ungroupedAvoided.Saturated {
 		totals.Saturated = true
 	}
 	// FROM THE READ THAT PRODUCED THEM, which is why they come back from Window rather
@@ -392,7 +395,12 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 	// and cannot be a group=model key. Set through the setter so a window with nothing to
 	// disclose serialises no field at all, exactly like Degraded; see
 	// usage.Snapshot.UngroupedCostMicros for what a client does with it.
-	snap.SetUngroupedCost(ungrouped)
+	snap.SetUngroupedCost(ungroupedCost)
+	// And the same for the saving, which is MORE likely to be unattributable than the cost:
+	// Writer.Record admits a row whose only figure is an applied saving even when the
+	// response carried no inference extension, so under group=model that row has no label at
+	// all. See usage.Snapshot.UngroupedAvoidedMicros.
+	snap.SetUngroupedAvoided(ungroupedAvoided)
 	return snap, nil
 }
 

@@ -87,6 +87,60 @@ func TestRecord_ARefusedCostFigureIsRecordedAsACoverageGap(t *testing.T) {
 	}
 }
 
+// A SAVING on a record with no inference extension must still reach the ledger.
+//
+// The guard's sibling test below establishes that an unpriced, unrefused record over
+// non-inference traffic stays out. This is the one exception, and it exists because
+// costevent.Record's own doc names "a saving on a request that could not be priced" as the
+// case it was split out from Decode to serve. Without it the durable file dropped exactly
+// that subset — silently, and only from disk, while session.sumCost counted it, so the two
+// money surfaces disagreed on a case neither documented.
+//
+// THE COVERAGE COUNTERS MUST NOT MOVE, which is what the guard is actually protecting.
+// Asserted here rather than assumed: a row admitted on the saving alone carries no model and
+// no tokens, so PriceableRequests stays zero and priced-versus-priceable is untouched. If
+// this row ever set it, a deployment would read a permanent coverage gap it cannot close,
+// which is the "1/10 priced forever" failure the guard was written against.
+func TestRecord_ASavingWithNoInferenceExtensionIsStillARow(t *testing.T) {
+	dir := t.TempDir()
+	w := newTestWriter(t, dir, func() time.Time { return at })
+
+	e := refusedEvent(t, "mcp.example")
+	// Present, unpriced, nothing declined — and a real applied saving.
+	rec, err := json.Marshal(costevent.Event{
+		Source: costevent.SourceUsageFallback, Provenance: "bundled",
+		Avoided: []costevent.Saving{{
+			Component: "tool-prune", TokensAvoided: 1000, USD: 0.10, Provenance: "bundled", Tier: "input",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	e.Plugins[costevent.Key] = rec
+	w.Record("s1", e)
+	if ferr := w.Flush(); ferr != nil {
+		t.Fatalf("Flush: %v", ferr)
+	}
+
+	rows := readAllRows(t, dir)
+	if len(rows) != 1 {
+		t.Fatalf("ledger holds %d rows, want 1: a measured saving is money-not-spent and this "+
+			"file is its durable record", len(rows))
+	}
+	if rows[0].AvoidedMicros != 100_000 {
+		t.Errorf("AvoidedMicros = %d, want 100000", rows[0].AvoidedMicros)
+	}
+	if rows[0].CostMicros != 0 || rows[0].PricedRequests != 0 {
+		t.Errorf("CostMicros = %d, PricedRequests = %d, want both zero: a saving is not spend",
+			rows[0].CostMicros, rows[0].PricedRequests)
+	}
+	if rows[0].PriceableRequests != 0 {
+		t.Errorf("PriceableRequests = %d, want 0 — this row carries no model and no tokens, so "+
+			"counting it as priceable would open a coverage gap nothing can close",
+			rows[0].PriceableRequests)
+	}
+}
+
 // TestRecord_AnUnpricedRecordWithNoRefusalIsStillNotARow keeps the fix narrow.
 //
 // The admission guard's "PRICED, not merely present" rule is there because a record that

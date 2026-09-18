@@ -326,15 +326,19 @@ func dayNoon(y int, m time.Month, d int, loc *time.Location) time.Time {
 // the loop that decides what to skip. A caller deriving it would be re-deriving a
 // number this function already knows exactly, and would get it wrong for any axis whose
 // series is not a partition.
-func Fold(rows []Row, group usage.Group) (usage.Counts, map[string]usage.Counts, usage.CostSum) {
-	var totals usage.Counts
-	var series map[string]usage.Counts
+func Fold(rows []Row, group usage.Group) (totals usage.Counts, series map[string]usage.Counts, ungroupedCost, ungroupedAvoided usage.CostSum) {
 	// A usage.CostSum, not an int64, and returned as one: rows come off DISK, so nothing
 	// between a hand-edited day file and this loop bounds r.CostMicros, and two rows near the
 	// ceiling turn a bare int64 residual negative — which sessionapi hands to
 	// Snapshot.SetUngroupedCost, which reads a negative residual as this process being wrong
 	// about its own arithmetic. See usage.CostSum.
-	var ungrouped usage.CostSum
+	// Named results, and two of them are CostSums of the same type — so the names are what
+	// keep a caller from swapping them. ungroupedAvoided is the residual for the OTHER money
+	// field, added when Counts.AvoidedMicros made a per-label "saved" breakdown possible:
+	// without it that breakdown sums to less than the total with nothing to explain the gap.
+	// Especially reachable here, because Writer.Record admits a saving-only row that has no
+	// model to label. See usage.Snapshot.UngroupedAvoidedMicros.
+	//
 	// BOTH predicates, and the source's one first: a residual is only meaningful where
 	// this source can produce a breakdown to be the residual OF.
 	reconcilable := Groupable(group) && group.Reconcilable()
@@ -343,7 +347,8 @@ func Fold(rows []Row, group usage.Group) (usage.Counts, map[string]usage.Counts,
 		label, ok := labelFor(r, group)
 		if !ok {
 			if reconcilable {
-				ungrouped.Add(r.CostMicros)
+				ungroupedCost.Add(r.CostMicros)
+				ungroupedAvoided.Add(r.AvoidedMicros)
 			}
 			continue
 		}
@@ -364,7 +369,7 @@ func Fold(rows []Row, group usage.Group) (usage.Counts, map[string]usage.Counts,
 	// nothing about what it sums to. usage.CapSeries folds the rest into the same (other) band
 	// the ring produces, so a client renders one band and not two.
 	series = usage.CapSeries(series, usage.MaxSeriesInResponse)
-	return totals, series, ungrouped
+	return totals, series, ungroupedCost, ungroupedAvoided
 }
 
 // Groupable reports whether a LEDGER ROW can carry a value for this axis — that is,

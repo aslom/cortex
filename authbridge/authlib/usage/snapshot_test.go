@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 )
 
 // mergeSeries sums every bucket's Series into one map, so a test can assert on a
@@ -924,5 +926,58 @@ func TestSnapshot_BucketSecondsNeverExceedsTheWindowItReports(t *testing.T) {
 					covered, width)
 			}
 		})
+	}
+}
+
+// The RING half of the same claim for the OTHER money field: a saving the requested axis
+// cannot label has to reach the wire, or a client's per-model "saved" breakdown sums to less
+// than the total beside it with nothing to explain the gap.
+//
+// The unlabellable saving is not a contrived shape. inference-parser reads six
+// chat/completion paths plus Anthropic Messages, so a response it cannot parse arrives with no
+// model — and a saving is attributed to the request whether or not the response could be read.
+// TestFold_AnUnlabellableSavingIsDisclosedAsItsOwnResidual is the ledger half.
+func TestSnapshot_AnUnlabellableSavingIsDisclosedAsItsOwnResidual(t *testing.T) {
+	now := time.Now().Truncate(BucketWidth)
+	a := New(WithClock(func() time.Time { return now }))
+
+	saving := []costevent.Saving{{Component: "tool-prune", TokensAvoided: 400, USD: 0.04, Tier: "input"}}
+	// A model the parser read, priced, with a saving on it.
+	a.Record("s1", withCostRecord(t, respEvent(now, 200, time.Second, "claude-opus-5", 1000),
+		costevent.Event{CostUSD: 0.10, Settled: true, Provenance: "configured", Avoided: saving}))
+	// And a response it could not read: no model, so no group=model key, carrying a saving of
+	// its own that is real either way.
+	a.Record("s1", withCostRecord(t, respEvent(now, 200, time.Second, "", 0),
+		costevent.Event{CostUSD: 0.25, Settled: true, Provenance: "authoritative",
+			Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 600, USD: 0.06, Tier: "input"}}}))
+
+	snap := a.Snapshot(10*BucketWidth, BucketWidth, "s1", GroupModel)
+
+	if snap.Totals.AvoidedMicros != 100_000 {
+		t.Fatalf("Totals.AvoidedMicros = %d, want 100000 — both savings are real", snap.Totals.AvoidedMicros)
+	}
+	series := mergeSeries(snap.Buckets)
+	if snap.UngroupedAvoidedMicros == nil {
+		t.Fatalf("UngroupedAvoidedMicros is absent while the group=model series accounts for only "+
+			"%d of %d micros of saving: a client summing the breakdown is short and nothing in "+
+			"the response says so", seriesAvoided(series).Micros, snap.Totals.AvoidedMicros)
+	}
+	if *snap.UngroupedAvoidedMicros != 60_000 {
+		t.Errorf("UngroupedAvoidedMicros = %d, want 60000", *snap.UngroupedAvoidedMicros)
+	}
+	// The arithmetic the field restores, asserted rather than assumed.
+	if sum := seriesAvoided(series).Micros + *snap.UngroupedAvoidedMicros; sum != snap.Totals.AvoidedMicros {
+		t.Errorf("series (%d) + ungrouped (%d) = %d, want Totals.AvoidedMicros = %d",
+			seriesAvoided(series).Micros, *snap.UngroupedAvoidedMicros, sum, snap.Totals.AvoidedMicros)
+	}
+	// And the two residuals are distinct quantities, not one wired to both fields.
+	if snap.UngroupedCostMicros == nil || *snap.UngroupedCostMicros != 250_000 {
+		t.Errorf("UngroupedCostMicros = %v, want 250000: the cost residual must be the modelless "+
+			"row's DOLLARS, not its saving", snap.UngroupedCostMicros)
+	}
+	// Neither overshoot field may fire on correct data — they are defect reports.
+	if snap.SeriesAvoidedOvershootMicros != nil || snap.SeriesOvershootMicros != nil {
+		t.Errorf("an overshoot was reported for a healthy window: cost=%v avoided=%v",
+			snap.SeriesOvershootMicros, snap.SeriesAvoidedOvershootMicros)
 	}
 }
