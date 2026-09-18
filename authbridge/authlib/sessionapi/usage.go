@@ -100,13 +100,10 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	//     ring's maximum refused requests that were fine: window=7d&resolution=7m came back 400
 	//     because 6h does not divide by 7m, while 7m divides seven days exactly and the code path
 	//     that cared was not going to run.
-	//   - a symbolic window with NO ledger: the ring's maximum really is what gets sliced, so that is
-	//     the bound, and the rejection is restated below because the caller never named that span.
-	resSpan := spec.Dur
-	oneBucket := spec.Symbolic() && s.ledger != nil
-	if spec.Symbolic() {
-		resSpan = usage.MaxWindow
-	}
+	//   - a symbolic window with NO ledger: the ring slices what it HAS, which before 06:00 local is
+	//     shorter than its maximum — so the bound is that span, not the maximum, and the rejection is
+	//     restated below because the caller never named it.
+	resSpan, oneBucket := resolutionSpan(spec, s.ledger != nil)
 	var resolution time.Duration
 	if oneBucket {
 		resolution, err = usage.ParseResolutionUnbounded(r.URL.Query().Get("resolution"))
@@ -146,14 +143,18 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 			switch usage.ResolutionWindowCause(err) {
 			case usage.ResolutionTooCoarseForWindow:
 				err = fmt.Errorf("resolution too coarse for window=%s: with no cost ledger this window "+
-					"is served from the ring's %s maximum, so %s is the coarsest resolution available",
-					spec.Label, usage.MaxWindow, usage.MaxWindow)
+					"is served from the ring, which has %s of it, so %s is the coarsest resolution "+
+					"available",
+					spec.Label, resSpan, resSpan)
 			case usage.ResolutionIndivisibleByWindow:
+				// THE SERVED SPAN, NOT MaxWindow. Before 06:00 local the ring has less of today than
+				// its maximum, and quoting the maximum would send the caller to pick a resolution that
+				// divides six hours when the span they will get is ninety minutes.
 				err = fmt.Errorf("resolution does not divide evenly for window=%s: with no cost ledger "+
-					"this window is served from the ring's %s maximum, and a resolution that does not "+
-					"divide that span leaves the newest bucket narrower than the width reported for it "+
-					"— pick one that divides %s",
-					spec.Label, usage.MaxWindow, usage.MaxWindow)
+					"this window is served from the ring, which has %s of it, and a resolution that "+
+					"does not divide that span leaves the newest bucket narrower than the width "+
+					"reported for it — pick one that divides %s (%s always does)",
+					spec.Label, resSpan, resSpan, usage.BucketWidth)
 			case usage.ResolutionWindowNone:
 				// About the resolution alone. Its own wording is already right.
 			}
@@ -457,5 +458,41 @@ func servedSpan(spec usage.Spec) time.Duration {
 	if span > usage.MaxWindow {
 		return usage.MaxWindow
 	}
-	return span
+	// TRUNCATED TO WHOLE BUCKETS, and that is not cosmetic: this span is now what a resolution is
+	// validated against, and the raw one carries sub-second precision — 1h42m59.241861s at 01:42. A
+	// divisibility check against that rejects EVERY resolution including the 1m default, so before
+	// 06:00 local nothing was answerable at all. Measured, by shipping it: every request 400.
+	//
+	// Truncating also makes the bound exactly what gets served, because Snapshot counts whole buckets
+	// the same way. Two roundings that have to agree, and this is the one that makes them.
+	return span.Truncate(usage.BucketWidth)
+}
+
+// resolutionSpan is the span a resolution must fit, and whether the window is answered as one bucket.
+//
+// THE SPAN ACTUALLY SLICED, WHICH IS NOT ALWAYS THE RING'S MAXIMUM. Validating against MaxWindow let
+// through a resolution that the SERVED span does not divide: at 01:30 local, window=today with no
+// ledger serves 90 minutes, and resolution=1h passed (1h divides 6h) and then produced two buckets —
+// one full hour and a 30-minute remainder — both labelled 3600 seconds. fold puts the remainder LAST,
+// so the newest bar reads double its real rate, which is verbatim the failure ParseResolution's
+// divisibility guard exists to prevent: "the NEWEST bucket is a lie".
+//
+// REJECTED RATHER THAN ROUNDED, which is a real trade and worth recording. Rounding the span down to a
+// whole multiple of the resolution keeps the accepted resolution set stable, but it drops up to one
+// resolution period of the NEWEST data — and the still-filling block is the one an operator is
+// watching (see fold). So it would fix a label by discarding the thing the label is for. The cost of
+// rejecting is that a fixed request is invalid for part of the day, which the message says how to fix.
+//
+// A function so the choice is testable: the handler reads time.Now() directly, and the only
+// interesting spans are before 06:00 local.
+func resolutionSpan(spec usage.Spec, hasLedger bool) (span time.Duration, oneBucket bool) {
+	switch {
+	case !spec.Symbolic():
+		return spec.Dur, false
+	case hasLedger:
+		// One bucket over the whole window; the resolution is never read.
+		return 0, true
+	default:
+		return servedSpan(spec), false
+	}
 }

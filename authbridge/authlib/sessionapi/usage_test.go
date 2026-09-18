@@ -1383,6 +1383,10 @@ func TestServedSpan_DoesNotReachBackPastTheWindow(t *testing.T) {
 		want time.Duration
 	}{
 		{"today, thirty minutes in", midnight, midnight.Add(30 * time.Minute), 30 * time.Minute},
+		// THE SUB-SECOND REMAINDER, which is every real request: the span is now the bound a
+		// resolution is validated against, and an untruncated 30m30.4s divides by nothing — not even
+		// the 1m default — so before 06:00 every request was refused.
+		{"a span with seconds and fractions", midnight, midnight.Add(30*time.Minute + 30*time.Second + 400*time.Millisecond), 30 * time.Minute},
 		{"today, an hour in", midnight, midnight.Add(time.Hour), time.Hour},
 		{"today, past the ring's reach", midnight, midnight.Add(9 * time.Hour), usage.MaxWindow},
 		{"7d is always past it", midnight.AddDate(0, 0, -7), midnight, usage.MaxWindow},
@@ -1454,5 +1458,57 @@ func TestHandleUsage_AWriterDropReachesTheResponse(t *testing.T) {
 	}
 	if snap.Degraded.DroppedRowsTotal == 0 {
 		t.Error("DroppedRowsTotal = 0 while the writer counted losses: the response would pass for the wrong reason on the read error alone")
+	}
+}
+
+// TestResolutionSpan_IsTheSpanActuallySliced pins which span a resolution is judged against, which is
+// the whole of the residual defect: validating against the ring's MAXIMUM let through a resolution the
+// SERVED span does not divide.
+//
+// At 01:30 local, window=today with no ledger serves 90 minutes. resolution=1h passed, because 1h
+// divides 6h — and then produced a full hour plus a 30-minute remainder, both labelled 3600 seconds,
+// with fold putting the remainder last. The newest bar, which is the one being watched, read double its
+// real rate. That is verbatim what ParseResolution's divisibility guard exists to prevent.
+func TestResolutionSpan_IsTheSpanActuallySliced(t *testing.T) {
+	midnight := time.Date(2026, 9, 17, 0, 0, 0, 0, time.Local)
+	todayAt := func(d time.Duration) usage.Spec {
+		return usage.Spec{Label: "today", From: midnight, To: midnight.Add(d)}
+	}
+	for _, tc := range []struct {
+		name          string
+		spec          usage.Spec
+		hasLedger     bool
+		wantSpan      time.Duration
+		wantOneBucket bool
+	}{
+		{
+			// The case that was wrong: 90 minutes served, 6h validated against.
+			name: "today at 01:30, no ledger", spec: todayAt(90 * time.Minute),
+			wantSpan: 90 * time.Minute,
+		},
+		{
+			name: "today after 06:00, no ledger", spec: todayAt(9 * time.Hour),
+			wantSpan: usage.MaxWindow,
+		},
+		{
+			// With a ledger the resolution is not read at all, so there is no span to judge.
+			name: "today with a ledger", spec: todayAt(90 * time.Minute), hasLedger: true,
+			wantOneBucket: true,
+		},
+		{
+			name: "a duration window is its own bound",
+			spec: usage.Spec{Label: "10m", Dur: 10 * time.Minute}, wantSpan: 10 * time.Minute,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			span, oneBucket := resolutionSpan(tc.spec, tc.hasLedger)
+			if oneBucket != tc.wantOneBucket {
+				t.Errorf("oneBucket = %v, want %v", oneBucket, tc.wantOneBucket)
+			}
+			if !tc.wantOneBucket && span != tc.wantSpan {
+				t.Errorf("span = %v, want %v: a resolution judged against a longer span than the one served can leave the newest bucket short",
+					span, tc.wantSpan)
+			}
+		})
 	}
 }

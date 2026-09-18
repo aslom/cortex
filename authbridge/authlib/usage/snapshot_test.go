@@ -888,6 +888,12 @@ func TestSnapshot_BucketSecondsNeverExceedsTheWindowItReports(t *testing.T) {
 		{"resolution equal to the window", 30 * time.Minute, 30 * time.Minute},
 		{"resolution inside the window", 30 * time.Minute, 5 * time.Minute},
 		{"a one-bucket window", BucketWidth, time.Hour},
+		// The shortened spans the API can now produce for window=today before 06:00 local. Each
+		// divides its resolution, because the handler refuses the pairs that do not — see
+		// resolutionSpan for why refusing beats rounding the span down.
+		{"ninety minutes at half an hour", 90 * time.Minute, 30 * time.Minute},
+		{"two and a half hours at half an hour", 150 * time.Minute, 30 * time.Minute},
+		{"ninety minutes at the storage width", 90 * time.Minute, BucketWidth},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := a.Snapshot(tc.window, tc.resolution, "", GroupModel)
@@ -897,12 +903,25 @@ func TestSnapshot_BucketSecondsNeverExceedsTheWindowItReports(t *testing.T) {
 				t.Fatalf("window %q is not a duration: %v", got.Window, err)
 			}
 			width := time.Duration(got.BucketSeconds) * time.Second
+			if width <= 0 {
+				t.Fatalf("bucketSeconds = %d, want a positive width", got.BucketSeconds)
+			}
 			if width > covered {
 				t.Errorf("bucketSeconds = %d (%v) over a window of %v: a client scaling a bar by that width reports %.1fx the spend per unit time",
 					got.BucketSeconds, width, covered, float64(width)/float64(covered))
 			}
-			if width <= 0 {
-				t.Errorf("bucketSeconds = %d, want a positive width", got.BucketSeconds)
+			// THE INVARIANT IS THAT EVERY BUCKET IS THAT WIDE, which is a notch stronger than
+			// width <= window and is where the first version of this test fell short: a 90-minute
+			// span at 1h returns a full hour plus a 30-minute remainder, both labelled 3600, and
+			// 3600 <= 5400 satisfied the weaker form while the newest bar read double its rate.
+			// fold puts the remainder last, so the lie is always on the bar being watched.
+			if want := int(covered / width); len(got.Buckets) != want {
+				t.Errorf("%d buckets of %v do not fill a %v window (want %d): the last one is a remainder wearing a full width",
+					len(got.Buckets), width, covered, want)
+			}
+			if covered%width != 0 {
+				t.Errorf("a %v window does not divide by a %v bucket, so some bucket is narrower than the width reported for it",
+					covered, width)
 			}
 		})
 	}
