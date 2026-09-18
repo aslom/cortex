@@ -26,7 +26,7 @@ func truncatedRespEvent(host, model string, input int) *pipeline.SessionEvent {
 			InputTokens:  input,
 			PromptTokens: input,
 			TotalTokens:  input,
-			PresentKinds: 1 | 8, // KindInput | KindOutput
+			PresentKinds: KindInput | KindOutput,
 		},
 	}
 }
@@ -91,7 +91,7 @@ func TestIncomplete_SurvivesTheFoldWhereTheMaskCannot(t *testing.T) {
 	// Nine complete requests, each reporting output.
 	for i := 0; i < 9; i++ {
 		e := pricedRespEvent("gw.internal", "claude-opus-5", 100, 50)
-		e.Inference.PresentKinds = 1 | 8
+		e.Inference.PresentKinds = KindInput | KindOutput
 		e.Inference.FinishReason = "end_turn"
 		a.Record("s1", withCostRecord(t, e, costevent.Event{
 			CostUSD: 0.001, Source: costevent.SourceUsageFallback,
@@ -159,7 +159,7 @@ func TestIncomplete_CompleteFigureCarriesNoCaveat(t *testing.T) {
 		WithPricing(resolverFor(t, "claude-opus-5", 5.0/1e6, 25.0/1e6)))
 
 	e := pricedRespEvent("gw.internal", "claude-opus-5", 1000, 500)
-	e.Inference.PresentKinds = 1 | 8
+	e.Inference.PresentKinds = KindInput | KindOutput
 	e.Inference.FinishReason = "end_turn"
 	a.Record("s1", e)
 
@@ -314,7 +314,7 @@ func TestIncomplete_ByReasonIsOmittedWhenEveryFigureIsExact(t *testing.T) {
 		WithPricing(resolverFor(t, "claude-opus-5", 5.0/1e6, 25.0/1e6)))
 
 	e := pricedRespEvent("gw.internal", "claude-opus-5", 1000, 500)
-	e.Inference.PresentKinds = 1 | 8
+	e.Inference.PresentKinds = KindInput | KindOutput
 	e.Inference.FinishReason = "end_turn"
 	a.Record("s1", e)
 
