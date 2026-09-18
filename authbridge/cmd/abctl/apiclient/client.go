@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
@@ -19,15 +20,46 @@ import (
 
 // Client is a handle to a session API endpoint. Safe for concurrent use.
 //
-// Two http.Clients share a single Transport: `http` has a 10s timeout for
-// short REST calls, `httpStream` has no timeout for SSE. Sharing the
-// Transport keeps the idle-connection pool warm across reconnects so a
-// long session doesn't leak Transports.
+// Two http.Clients share a single Transport: `http` for short REST calls,
+// `httpStream` for SSE. NEITHER carries an http.Client.Timeout — the CALLER's
+// context deadline is the bound, and getJSON supplies restDefaultTimeout only when
+// the caller passed no deadline at all. Sharing the Transport keeps the
+// idle-connection pool warm across reconnects so a long session doesn't leak
+// Transports.
+//
+// The fixed timeout this used to set was 10s, which SILENTLY PRE-EMPTED any caller
+// that budgeted more: `abctl cost` allows 15s because a symbolic window reads day
+// files off disk, and it could never reach it — http.Client.Timeout and the request
+// context are both hard stops and the shorter one always wins, so a comment
+// explaining the longer budget described behaviour that could not happen. A per-call
+// default that DEFERS to a deadline the caller set keeps the protection for callers
+// with none (the TUI passes its root context to GetPipeline / GetPluginCatalog /
+// ListSessions / GetSession) without overriding one that does.
 type Client struct {
 	endpoint   string
 	http       *http.Client
 	httpStream *http.Client
 }
+
+// restDefaultTimeout bounds a REST call whose caller supplied NO deadline, so a dead
+// endpoint cannot hang a caller forever. 10s, the value the http.Client carried
+// before, because that is the bound those callers have always had — this change is not
+// the place to lengthen their failure time.
+//
+// A FLOOR, never a ceiling: a caller with its own deadline keeps it, shorter or
+// longer.
+//
+// A var rather than a const so a test can shorten it and assert the behaviour in
+// milliseconds. Nothing in production writes it.
+var restDefaultTimeout = 10 * time.Second
+
+// responseHeaderTimeout bounds dial-through-response-headers on every call, buffered or
+// streamed. See New for why it is the transport's job and not the client's.
+//
+// 10s, the reach-the-server protection the deleted http.Client.Timeout used to provide,
+// kept at the same number so no caller's failure time gets longer. A var for the same
+// reason as restDefaultTimeout.
+var responseHeaderTimeout = 10 * time.Second
 
 // New returns a Client pointed at endpoint (e.g. "http://localhost:9094").
 // Trailing slash is tolerated.
@@ -35,11 +67,31 @@ func New(endpoint string) *Client {
 	// Clone the default transport rather than reuse it so tests / multiple
 	// Clients don't share connection pools.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Bounds reaching the SERVER without bounding the transfer, which is the one thing a
+	// Timeout on the http.Client could not express. It covers dial through response
+	// headers and stops there, so a dead or wedged endpoint fails in seconds while a
+	// legitimately slow BODY runs as long as it needs.
+	//
+	// This is what makes removing http.Client.Timeout safe rather than merely convenient.
+	// GetSessionPage streams through getBody and returns an unread body, so it has no
+	// buffered-call deadline to inherit — without this, a proxy that accepted the
+	// connection and then stalled would hang the TUI until the operator quit it. The
+	// deleted Timeout was the only bound that path had.
+	//
+	// It also fixes what that Timeout broke: it applied to the whole request INCLUDING the
+	// body read, which is why a large snapshot failed at 10s and came up empty. A header
+	// timeout cannot do that however big the response is.
+	//
+	// Safe on the shared transport, SSE included: a server sends event-stream headers
+	// immediately and this does not bound the gaps between events afterwards.
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	return &Client{
 		endpoint: trimSlash(endpoint),
+		// No Timeout on either: see the type doc. An http.Client.Timeout applies to
+		// every call this Client will ever make, so it cannot be reconciled with
+		// per-call budgets that legitimately differ by 3x.
 		http: &http.Client{
 			Transport: transport,
-			Timeout:   10 * time.Second,
 		},
 		httpStream: &http.Client{
 			Transport: transport,
@@ -72,8 +124,11 @@ const SummaryView = "summary"
 //
 // RAISED FROM 500 TO THE SERVER'S OWN CEILING, because the reason for the smaller
 // number is gone. 500 was picked when a snapshot carried message bodies: a day-old
-// session was 5000 events and a gigabyte of JSON, 17s against this client's 10s
-// timeout, and the whole request failed with an empty timeline to show for it. With
+// session was 5000 events and a gigabyte of JSON, 17s of transfer against a 10s
+// client-wide timeout, and the whole request failed with an empty timeline to show for
+// it. That timeout is GONE — the bound is on response HEADERS now and does not cap the
+// body read, so the 17s transfer would succeed today; see New. The limit is about what
+// abctl HOLDS IN MEMORY, which was always the better reason for it. With
 // view=summary an event is ~1KB rather than ~209KB, so 2000 events is about 2MB —
 // less than half of what 500 full events cost, fetched in a fraction of the time.
 //
@@ -104,6 +159,18 @@ func (c *Client) GetSessionTail(ctx context.Context, id string, limit int) (*pip
 
 // ErrNotFound is returned when the server responds 404.
 var ErrNotFound = fmt.Errorf("apiclient: not found")
+
+// ErrBadRequest is returned when the server responds 400 — it understood the request
+// and refused it.
+//
+// Distinguished from every other non-200 because it is the one that is the CALLER's
+// fault and the one a caller can act on: an unsupported window, a resolution the
+// storage cannot divide, session= alongside a symbolic window. Without it "unexpected
+// status 400" was indistinguishable from a dial failure, and a CLI would tell a user
+// their proxy was down when the real answer was "that proxy does not know that
+// window". The server's own message is carried through — see getBody for why that is
+// safe.
+var ErrBadRequest = fmt.Errorf("apiclient: bad request")
 
 // PipelineView is the decoded shape of GET /v1/pipeline.
 type PipelineView struct {
@@ -208,6 +275,19 @@ func (c *Client) getBody(ctx context.Context, path string) (io.ReadCloser, error
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("%s: %w", path, ErrNotFound)
 	}
+	if resp.StatusCode == http.StatusBadRequest {
+		// The server's own words, bounded. Every message /v1/* returns for a 400 is a
+		// fixed string authored server-side and interpolates no query input — that is a
+		// stated requirement of writeUsageError, because the endpoint is unauthenticated —
+		// so forwarding it cannot reflect the caller's own bytes back at them. Bounded
+		// anyway, because this client cannot verify what it is talking to.
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		_ = resp.Body.Close()
+		if detail := badRequestDetail(msg); detail != "" {
+			return nil, fmt.Errorf("%s: %w: %s", path, ErrBadRequest, detail)
+		}
+		return nil, fmt.Errorf("%s: %w", path, ErrBadRequest)
+	}
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("%s: unexpected status %d", path, resp.StatusCode)
@@ -215,7 +295,38 @@ func (c *Client) getBody(ctx context.Context, path string) (io.ReadCloser, error
 	return resp.Body, nil
 }
 
+// badRequestDetail pulls the "error" field out of a 400 body.
+//
+// Returns "" for anything it cannot read as the documented shape, so a proxy that
+// answered 400 with HTML or with nothing produces a bare ErrBadRequest rather than a
+// line of markup in a terminal.
+func badRequestDetail(body []byte) string {
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Error)
+}
+
 func (c *Client) getJSON(ctx context.Context, path string, out any) error {
+	// The caller's deadline governs; this only supplies one where there is none.
+	// Checked rather than applied unconditionally, because context.WithTimeout
+	// SHORTENS but never lengthens: applying it to a 15s budget would reinstate the
+	// pre-emption removing http.Client.Timeout was meant to end. See restDefaultTimeout.
+	//
+	// HERE AND NOT IN getBody, which is the shared status-handling path and would look
+	// like the tidier home. getBody RETURNS an unread body — snapshot.go streams a
+	// session that reaches hundreds of megabytes, 17 seconds of transfer — so a
+	// deadline applied there would cancel mid-read and resurrect the empty-timeline
+	// failure that SnapshotEventLimit exists to bound. This function buffers and decodes
+	// before returning, so its deadline covers exactly the work it waits on.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, restDefaultTimeout)
+		defer cancel()
+	}
 	body, err := c.getBody(ctx, path)
 	if err != nil {
 		return err
@@ -245,9 +356,36 @@ func trimSlash(s string) string {
 // binary, or session tracking disabled), which callers should render as
 // "unavailable" rather than as an empty chart.
 func (c *Client) GetUsage(ctx context.Context, window, resolution time.Duration, sessionID string, group usage.Group) (*usage.Snapshot, error) {
+	// Expressed in terms of GetUsageWindow so there is ONE request-building path.
+	// Two would drift on query encoding or on the ErrNotFound behaviour the godoc
+	// above promises, and the drift would show up as a chart that works on one code
+	// path and 404s on the other.
+	return c.GetUsageWindow(ctx, window.String(), resolution, sessionID, group)
+}
+
+// GetUsageWindow fetches a snapshot for a symbolic window the server names —
+// "today", "7d" — which a time.Duration cannot express.
+//
+// A sibling of GetUsage rather than a widened signature: GetUsage has several
+// callers and its duration parameters are the right shape for the chart windows,
+// which really are fixed lengths. "Today" is not a length, it is a boundary.
+//
+// Read Snapshot.Window rather than assuming this one was served. A symbolic window
+// requested where the proxy has no durable cost ledger — Kubernetes, by design —
+// is answered from the in-memory ring's maximum span instead, and the response
+// names the window it actually served. Labelling that figure "today" would report
+// six hours as a day.
+//
+// resolution of 0 omits the parameter, leaving the server's default. The ledger
+// serves a symbolic window as a single bucket and does not read the resolution at
+// all, so there is no meaningful value for a caller to invent — and "0s" would be
+// rejected as finer than the storage bucket.
+func (c *Client) GetUsageWindow(ctx context.Context, window string, resolution time.Duration, sessionID string, group usage.Group) (*usage.Snapshot, error) {
 	q := url.Values{}
-	q.Set("window", window.String())
-	q.Set("resolution", resolution.String())
+	q.Set("window", window)
+	if resolution > 0 {
+		q.Set("resolution", resolution.String())
+	}
 	if sessionID != "" {
 		q.Set("session", sessionID)
 	}

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
@@ -290,5 +292,258 @@ func TestPipelinePluginDecodesCapabilityMetadata(t *testing.T) {
 	}
 	if p.Description != "Rich plugin" {
 		t.Errorf("Description = %q", p.Description)
+	}
+}
+
+func shortenRESTDefault(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := restDefaultTimeout
+	restDefaultTimeout = d
+	t.Cleanup(func() { restDefaultTimeout = prev })
+}
+
+// shortenHeaderTimeout must be called BEFORE New, which reads the value into the
+// transport it clones. A test that sets it afterwards asserts nothing.
+func shortenHeaderTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := responseHeaderTimeout
+	responseHeaderTimeout = d
+	t.Cleanup(func() { responseHeaderTimeout = prev })
+}
+
+// TestGetJSON_CallerDeadlineIsNotPreEmpted is the regression this file exists for
+// twice over: a bound the CLIENT imposes must never cut a call short of the budget
+// its CALLER set.
+//
+// The shape is `abctl cost` scaled down. That command allows 15s, because a symbolic
+// window is answered by reading day files off disk, and the client carried a fixed 10s
+// http.Client.Timeout, so every call died at 10s and the 15s could not be reached.
+// Both are hard stops and the shorter always wins, which made the comment stating the
+// 15s describe behaviour that could not happen.
+//
+// Written against the default rather than the old constant, so it catches a
+// context.WithTimeout applied in getJSON UNCONDITIONALLY — WithTimeout shortens and never
+// lengthens, so an unconditional one is the same defect under a different spelling.
+//
+// It does NOT catch the other spelling. A 10s Timeout restored on the http.Client passes
+// this test, because these timings are two orders of magnitude below it and scaling them up
+// would put ten seconds of sleep in the suite. That mutation is caught structurally by
+// TestNew_NeitherClientCarriesAWholeRequestTimeout, and the pair is the guard — this one
+// alone would have let it back in.
+func TestGetJSON_CallerDeadlineIsNotPreEmpted(t *testing.T) {
+	shortenRESTDefault(t, 50*time.Millisecond)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Slower than the client's default and well inside the caller's budget: the
+		// window between the two is exactly where the pre-emption showed up.
+		time.Sleep(250 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(struct {
+			Sessions []session.SessionSummary `json:"sessions"`
+		}{Sessions: []session.SessionSummary{{ID: "abc"}}})
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := New(ts.URL).ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions: %v — the caller budgeted 5s and the answer took 250ms, so this "+
+			"error is a bound the client imposed on top of the caller's own; a client-side "+
+			"timeout that pre-empts the caller's makes the caller's stated budget unreachable", err)
+	}
+	if len(got) != 1 || got[0].ID != "abc" {
+		t.Errorf("got %+v, want the one session the server sent", got)
+	}
+}
+
+// TestGetJSON_DeadlinelessCallerIsStillBounded is the other half, and the reason the
+// default was not simply deleted. The TUI hands its ROOT context to GetPipeline,
+// GetPluginCatalog, ListSessions and GetSession, so for those four the client's
+// default is the only thing between a dead endpoint and a fetch that never returns.
+//
+// Asserted through a server that answers eventually: without the default the call
+// SUCCEEDS after the sleep, so this fails on the missing error rather than by
+// hanging, and a mutation that drops the default is reported rather than timing out
+// the package.
+func TestGetJSON_DeadlinelessCallerIsStillBounded(t *testing.T) {
+	shortenRESTDefault(t, 50*time.Millisecond)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(400 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(struct {
+			Sessions []session.SessionSummary `json:"sessions"`
+		}{Sessions: []session.SessionSummary{{ID: "abc"}}})
+	}))
+	defer ts.Close()
+
+	// No deadline, exactly as the TUI's root context has none.
+	_, err := New(ts.URL).ListSessions(context.Background())
+	if err == nil {
+		t.Fatal("ListSessions returned nil error for a caller with no deadline against a server " +
+			"that answered after 400ms; the 50ms default was not applied, so a dead endpoint " +
+			"would hang the TUI's pipeline and session fetches forever")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want context.DeadlineExceeded: the bound must be the default deadline, "+
+			"not some other failure that happens to look like one", err)
+	}
+}
+
+// TestGetBody_StreamingCallerIsBoundedBeforeTheHeaders covers the path getJSON's default
+// CANNOT reach. GetSessionPage streams: getBody returns an unread body, so there is
+// nothing for a buffered-call deadline to wrap, and removing http.Client.Timeout left
+// that path with no bound at all until the transport got a header timeout.
+//
+// A server that accepts the connection and then never answers is the realistic failure —
+// a wedged proxy, not a refused dial — and before the header timeout it hung the TUI
+// until the operator quit.
+func TestGetBody_StreamingCallerIsBoundedBeforeTheHeaders(t *testing.T) {
+	shortenHeaderTimeout(t, 50*time.Millisecond)
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // wedged: connected, no headers
+	}))
+	defer func() { close(release); ts.Close() }()
+
+	_, err := New(ts.URL).GetSessionPage(context.Background(), "s1", 0, 10)
+	if err == nil {
+		t.Fatal("GetSessionPage returned nil error against a server that never sent headers: " +
+			"the streaming path has no deadline of its own, so without the transport's header " +
+			"timeout this call hangs forever")
+	}
+}
+
+// TestGetBody_ASlowBodyIsNotCutOff is why the bound above is a HEADER timeout and not a
+// timeout on the whole request.
+//
+// The deleted http.Client.Timeout covered the body read, which is exactly how a large
+// snapshot — 5000 events, 17 seconds of transfer — failed at 10s and left the timeline
+// empty. SnapshotEventLimit's own doc records that failure. A header timeout cannot
+// reproduce it however long the body takes, and this asserts that difference rather than
+// trusting the mechanism's name.
+//
+// Headers first, then a stall LONGER than the header timeout, then the real body: under a
+// whole-request timeout this fails, under a header timeout it succeeds.
+func TestGetBody_ASlowBodyIsNotCutOff(t *testing.T) {
+	shortenHeaderTimeout(t, 50*time.Millisecond)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(200 * time.Millisecond) // 4x the header timeout, mid-body
+		_ = json.NewEncoder(w).Encode(pipeline.SessionView{ID: "s1"})
+	}))
+	defer ts.Close()
+
+	view, err := New(ts.URL).GetSessionPage(context.Background(), "s1", 0, 10)
+	if err != nil {
+		t.Fatalf("GetSessionPage: %v — the headers arrived inside the header timeout and only "+
+			"the BODY was slow, so this is a bound on the transfer; that bound is what made a "+
+			"large session snapshot come up empty", err)
+	}
+	if view.ID != "s1" {
+		t.Errorf("ID = %q, want s1", view.ID)
+	}
+}
+
+// A 400 must be distinguishable from a dial failure, and the server's own explanation must
+// survive to the caller: "that proxy does not know that window" is actionable where
+// "unexpected status 400" sends an operator to check whether the proxy is running.
+//
+// Asserted on GetUsageWindow because the unsupported-window 400 is the reachable case:
+// the server refuses a symbolic window it cannot serve.
+func TestGetUsageWindow_BadRequestCarriesTheServersReason(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "unsupported window"})
+	}))
+	defer ts.Close()
+
+	_, err := New(ts.URL).GetUsageWindow(context.Background(), "yesterday", 0, "", "")
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("error = %v, want ErrBadRequest: a refusal the caller can act on must not "+
+			"look like a transport failure", err)
+	}
+	if !strings.Contains(err.Error(), "unsupported window") {
+		t.Errorf("error = %v, want the server's own message carried through", err)
+	}
+}
+
+// A 400 body that is not the documented shape must produce a bare ErrBadRequest, never a
+// line of someone else's markup in a terminal. Reachable: the endpoint is unauthenticated,
+// so the thing answering may not be our proxy at all.
+func TestGetUsageWindow_BadRequestWithAnUnreadableBodyStaysBare(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("<html><body>Bad Request</body></html>"))
+	}))
+	defer ts.Close()
+
+	_, err := New(ts.URL).GetUsageWindow(context.Background(), "today", 0, "", "")
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("error = %v, want ErrBadRequest", err)
+	}
+	if strings.Contains(err.Error(), "html") {
+		t.Errorf("error = %v: markup from an unrecognised responder reached the message", err)
+	}
+}
+
+// GetUsageWindow sends the window VERBATIM and omits resolution when zero, which is the
+// one-bucket path a symbolic window is served on. Asserted on the wire, because a
+// stringified duration here ("0s", or "24h0m0s" for "today") is refused by the server and
+// the failure would look like an unsupported window.
+func TestGetUsageWindow_SendsTheWindowVerbatimAndOmitsAZeroResolution(t *testing.T) {
+	var got string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{"window": "today"})
+	}))
+	defer ts.Close()
+
+	if _, err := New(ts.URL).GetUsageWindow(context.Background(), "today", 0, "", ""); err != nil {
+		t.Fatalf("GetUsageWindow: %v", err)
+	}
+	if got != "window=today" {
+		t.Errorf("query = %q, want exactly %q: a resolution sent alongside a symbolic window is "+
+			"refused, and the server serves it as one bucket", got, "window=today")
+	}
+}
+
+// TestNew_NeitherClientCarriesAWholeRequestTimeout pins the two structural facts the
+// behavioural tests above cannot reach cheaply: no whole-request timeout on either
+// http.Client, and a header timeout on the transport they share.
+//
+// STRUCTURAL ON PURPOSE. Catching a restored http.Client.Timeout behaviourally needs a test
+// that sleeps past it, and the value is 10s — the suite is not the place for that. Reading
+// the field costs nothing and fails on the exact edit.
+//
+// The two are asserted together because each alone permits a broken client: no timeout and
+// no header timeout is an unbounded hang on the streaming path, and a whole-request timeout
+// with a header timeout is the transfer cap that emptied the timeline. Only the pair is
+// correct — see New.
+func TestNew_NeitherClientCarriesAWholeRequestTimeout(t *testing.T) {
+	c := New("http://127.0.0.1:1")
+	if c.http.Timeout != 0 {
+		t.Errorf("http.Timeout = %v, want 0: a Timeout here applies to every call this Client "+
+			"will ever make, so it pre-empts any caller that budgeted more and it bounds the "+
+			"body read as well as the wait", c.http.Timeout)
+	}
+	if c.httpStream.Timeout != 0 {
+		t.Errorf("httpStream.Timeout = %v, want 0: this one carries SSE, which is unbounded by "+
+			"definition", c.httpStream.Timeout)
+	}
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Transport is %T, want *http.Transport", c.http.Transport)
+	}
+	if tr.ResponseHeaderTimeout != responseHeaderTimeout {
+		t.Errorf("ResponseHeaderTimeout = %v, want %v: it is the only bound the streaming path "+
+			"has, and dropping it lets a wedged proxy hang the TUI until the operator quits",
+			tr.ResponseHeaderTimeout, responseHeaderTimeout)
+	}
+	// Both clients must share the transport, or the header timeout covers only one of them
+	// and the idle-connection pool is duplicated.
+	if c.httpStream.Transport != c.http.Transport {
+		t.Error("the two clients do not share a Transport: the header timeout and the connection " +
+			"pool would both apply to only one of them")
 	}
 }
