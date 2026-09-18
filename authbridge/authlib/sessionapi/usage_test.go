@@ -1390,7 +1390,13 @@ func TestServedSpan_DoesNotReachBackPastTheWindow(t *testing.T) {
 		{"today, an hour in", midnight, midnight.Add(time.Hour), time.Hour},
 		{"today, past the ring's reach", midnight, midnight.Add(9 * time.Hour), usage.MaxWindow},
 		{"7d is always past it", midnight.AddDate(0, 0, -7), midnight, usage.MaxWindow},
-		{"the first instant of the day", midnight, midnight, 0},
+		// FLOORED, NOT ZERO. The handler validates a resolution against this span, and a zero bound
+		// refuses every resolution including the default — a 400 on the path whose whole job is to
+		// degrade rather than fail. Snapshot serves at least one bucket anyway, and at 00:00:30 that
+		// bucket is today's in-progress minute rather than any of yesterday.
+		{"the first instant of the day", midnight, midnight, usage.BucketWidth},
+		{"half a minute in", midnight, midnight.Add(30 * time.Second), usage.BucketWidth},
+		{"fifty-nine seconds in", midnight, midnight.Add(59 * time.Second), usage.BucketWidth},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := servedSpan(usage.Spec{From: tc.from, To: tc.to}); got != tc.want {
@@ -1508,6 +1514,36 @@ func TestResolutionSpan_IsTheSpanActuallySliced(t *testing.T) {
 			if !tc.wantOneBucket && span != tc.wantSpan {
 				t.Errorf("span = %v, want %v: a resolution judged against a longer span than the one served can leave the newest bucket short",
 					span, tc.wantSpan)
+			}
+		})
+	}
+}
+
+// TestResolutionSpan_TheDefaultResolutionIsAlwaysAccepted is the composition nothing asserted.
+//
+// servedSpan's own test pinned that it returns zero at midnight, so the zero was deliberate at that
+// layer — and the layer above it turns a zero span into "resolution 1m0s exceeds the 0s window" for
+// every request in the first minute of the local day, including requests that name no resolution. Two
+// tested-in-isolation halves composing into a 400 on the one path that exists to avoid one.
+//
+// Sweeping offsets across the boundary rather than asserting servedSpan alone: what has to hold is that
+// the default resolution survives whatever span this produces, at any hour.
+func TestResolutionSpan_TheDefaultResolutionIsAlwaysAccepted(t *testing.T) {
+	midnight := time.Date(2026, 9, 17, 0, 0, 0, 0, time.Local)
+	for _, offset := range []time.Duration{
+		0, time.Second, 30 * time.Second, 59 * time.Second, time.Minute,
+		90 * time.Second, 30 * time.Minute, 6 * time.Hour, 9 * time.Hour,
+	} {
+		t.Run(offset.String(), func(t *testing.T) {
+			spec := usage.Spec{Label: "today", From: midnight, To: midnight.Add(offset)}
+			span, oneBucket := resolutionSpan(spec, false)
+			if oneBucket {
+				t.Fatal("a window with no ledger is not answered as one bucket")
+			}
+			// "" is the default resolution — the parameter a client omits.
+			if _, err := usage.ParseResolution("", span); err != nil {
+				t.Errorf("the default resolution is refused %v into the day (span %v): %v — this path returns 400 where it is meant to degrade",
+					offset, span, err)
 			}
 		})
 	}

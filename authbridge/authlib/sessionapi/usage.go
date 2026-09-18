@@ -465,6 +465,16 @@ func servedSpan(spec usage.Spec) time.Duration {
 	//
 	// Truncating also makes the bound exactly what gets served, because Snapshot counts whole buckets
 	// the same way. Two roundings that have to agree, and this is the one that makes them.
+	//
+	// FLOORED AT ONE BUCKET, because truncation reaches zero in the first 60 seconds of the local day
+	// and a zero bound refuses EVERY resolution — including the 1m default, so ?window=today returned
+	// 400 for a full minute each day with no resolution parameter at all. That is a 400 on the one path
+	// whose entire purpose is to degrade instead of failing. Snapshot clamps its bucket count to at
+	// least one regardless, so a minute is what gets served either way; saying so here is what keeps
+	// the bound and the service agreeing at the boundary rather than only away from it.
+	if span < usage.BucketWidth {
+		return usage.BucketWidth
+	}
 	return span.Truncate(usage.BucketWidth)
 }
 
