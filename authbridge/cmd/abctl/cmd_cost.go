@@ -22,13 +22,12 @@ import (
 // a real case rather than a hypothetical one, because a symbolic window is served by
 // reading day files off disk instead of a ring out of memory.
 //
-// IT IS ALSO THE BOUND THE REQUEST ACTUALLY GETS, which took two fixes to become true and is
-// asserted rather than asserted-in-prose: apiclient sets no timeout of its own, supplies a
-// default only for a caller that passed no deadline, and keeps its transport-level
-// HeaderTimeout well above this figure. That last one matters because the ledger scan happens
-// INSIDE the wait for headers — the server computes before it writes any — so a header bound
-// at this figure's scale would cap the very read this budget exists for.
-// TestCallerBudgets_FitUnderTheHeaderBackstop is what fails if that relationship inverts.
+// IT IS ALSO THE BOUND THE REQUEST ACTUALLY GETS, asserted rather than claimed in prose:
+// apiclient sets no timeout of its own, supplies a default only for a caller that passed no
+// deadline, and keeps its transport-level HeaderTimeout well above this figure. That last one
+// matters because the ledger scan happens INSIDE the wait for headers — the server computes
+// before it writes any — so a header bound at this figure's scale would cap the very read this
+// budget exists for. TestCallerBudgets_FitUnderTheHeaderBackstop fails if that inverts.
 //
 // Do not lengthen it much further: a CLI that appears to hang is its own kind of wrong answer.
 const costFetchTimeout = 15 * time.Second
@@ -170,7 +169,7 @@ Flags:
 // consumer, the one nobody eyeballs, was the only reader that could not tell a modelled
 // total from a billed one, could not name a coverage gap it was told the size of, and could
 // not tell "at least $X" from "roughly $X". All three are omitempty on the wire, so a
-// response that carries none of them is byte-identical to what this printed before.
+// response that carries none of them serialises no key for them at all.
 //
 // Degraded is on this struct for exactly that argument taken one step further: it is the
 // only field here that says the totals are INCOMPLETE rather than merely qualified, and a
@@ -295,6 +294,15 @@ type costJSON struct {
 	SeriesAvoidedOvershootMicros *int64 `json:"seriesAvoidedOvershootMicros,omitempty"`
 }
 
+// NO FLAG FOR A NEGATIVE TOTAL, deliberately: it is DERIVABLE as `priced && costMicros < 0`,
+// where every field above is here precisely because it cannot be derived from Totals. The
+// figure ships as the server sent it.
+//
+// The obligation does not ship with it. writeCostSummary refuses to print a negative — it is
+// not a total, and "$-5.00" reads as a refund nobody issued — and a consumer must make the
+// same refusal. Said here because a reader who finds three disclosures on this struct will
+// assume a fourth would be here if it mattered.
+
 func writeCostJSON(snap *usage.Snapshot, stdout, stderr io.Writer) int {
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
@@ -323,18 +331,10 @@ func writeCostJSON(snap *usage.Snapshot, stdout, stderr io.Writer) int {
 // Token-kind bits, matching pipeline.InferenceExtension.PresentKinds and
 // parsercommon.Kind. Declared here rather than imported because abctl decodes a
 // wire shape; the bit layout is what the JSON contract pins.
-const (
-	kindInput uint8 = 1 << iota
-	kindCacheRead
-	kindCacheWrite
-	kindOutput
-	kindReasoning
-)
-
 // writeCostSummary renders the human answer: a headline, a split, and only the
 // caveats that actually apply.
 //
-// Three rules it must obey, all established elsewhere on this branch:
+// Three rules it must obey, all shared with the other money surfaces in this repo:
 //
 //   - Print the window the SERVER reported, never the one requested. A "today"
 //     label over six hours of data is the one output that is worse than no output.
@@ -347,7 +347,7 @@ const (
 // says the answer's SERIES summed to more than its total — a defect report about a breakdown,
 // and this command prints no breakdown at all: it asks for group=none and prints one figure. A
 // sentence telling a reader not to trust rows that are not on screen qualifies nothing, which is
-// the misattribution every caveat on this branch is placed to avoid. It cannot arrive here
+// the misattribution every caveat here is placed to avoid. It cannot arrive here
 // either — both producers compute it only where usage.Group.Reconcilable is true — so the pane
 // that draws the breakdown is its consumer (tui.costOvershootNote), costJSON carries it for the
 // reader that can act on a fact with nothing on screen to attach it to, and
@@ -718,12 +718,12 @@ func tokenSplit(t usage.Counts) string {
 		}
 		parts = append(parts, label+" "+compactTokens(v))
 	}
-	add(kindInput, "input", t.InputTokens)
-	add(kindCacheRead, "cache-read", t.CacheReadTokens)
-	add(kindCacheWrite, "cache-write", t.CacheWriteTokens)
-	add(kindOutput, "output", t.OutputTokens)
+	add(usage.KindInput, "input", t.InputTokens)
+	add(usage.KindCacheRead, "cache-read", t.CacheReadTokens)
+	add(usage.KindCacheWrite, "cache-write", t.CacheWriteTokens)
+	add(usage.KindOutput, "output", t.OutputTokens)
 	// Reasoning is a SUBSET of output, not a sibling: the provider reports how much
 	// of what it generated was reasoning. Labelled so nobody adds the two.
-	add(kindReasoning, "reasoning (of output)", t.ReasoningTokens)
+	add(usage.KindReasoning, "reasoning (of output)", t.ReasoningTokens)
 	return strings.Join(parts, " · ")
 }
