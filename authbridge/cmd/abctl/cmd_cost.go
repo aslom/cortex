@@ -277,6 +277,20 @@ type costJSON struct {
 	// healthy answer serialises nothing, so absence keeps meaning "nothing overshot" rather than
 	// becoming a zero that means both that and "not checked".
 	SeriesOvershootMicros *int64 `json:"seriesOvershootMicros,omitempty"`
+	// SeriesAvoidedOvershootMicros is the same defect report for the SAVINGS breakdown, and it
+	// is here on every argument above rather than as a matter of symmetry: absence has one
+	// reading on every axis, a script is the only reader that can act on it, and nothing else
+	// tells it.
+	//
+	// NOT REDUNDANT with the field above, which is the question to ask of a second defect
+	// report. A double-counted row moves both residuals and would set both — but a row carrying
+	// a saving and NO COST moves only this one, leaving the cost residual at zero, which reads
+	// as "the breakdown accounts for everything". See usage.Snapshot.SeriesAvoidedOvershootMicros.
+	//
+	// Its positive twin is absent for the same reason UngroupedCostMicros is: this command asks
+	// for group=none, where a missing residual cannot be told apart from "no breakdown was
+	// asked for".
+	SeriesAvoidedOvershootMicros *int64 `json:"seriesAvoidedOvershootMicros,omitempty"`
 }
 
 func writeCostJSON(snap *usage.Snapshot, stdout, stderr io.Writer) int {
@@ -294,7 +308,8 @@ func writeCostJSON(snap *usage.Snapshot, stdout, stderr io.Writer) int {
 		// is usage.Counts embedded verbatim, so both travel with their own field names and their
 		// own omitempty. That is the whole point of not re-keying the struct — a disclosure added
 		// to Counts reaches a script the day the server sends it.
-		SeriesOvershootMicros: snap.SeriesOvershootMicros,
+		SeriesOvershootMicros:        snap.SeriesOvershootMicros,
+		SeriesAvoidedOvershootMicros: snap.SeriesAvoidedOvershootMicros,
 	}
 	if err := enc.Encode(out); err != nil {
 		fmt.Fprintf(stderr, "abctl cost: writing JSON: %v\n", err)
