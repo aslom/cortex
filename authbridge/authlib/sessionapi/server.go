@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/costledger"
@@ -55,6 +56,11 @@ type Server struct {
 	// one — handleUsage degrades to the ring's maximum rather than erroring, so an
 	// abctl cost view shows what is available there instead of failing.
 	ledger *costledger.Writer
+	// loggedDropped is the highest writer-drop total this server has already logged, so the write-side
+	// warning fires on a CHANGE rather than on every request. See the usage handler: the drop count is
+	// process-cumulative, so logging it per read turned one lost row into a warning on every poll for
+	// the life of the process.
+	loggedDropped atomic.Int64
 }
 
 // CatalogEntry is the wire shape for one plugin in /v1/plugins. Mirrors

@@ -1051,9 +1051,20 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 	// "6h0m0s" is the example it gives. Whole buckets rather than the raw duration for the same
 	// reason BucketSeconds is rounded: a 90s request is answered with one bucket, so it covers 1m.
 	covered := time.Duration(n) * BucketWidth
+	// AND THE BUCKET WIDTH CANNOT EXCEED THE WINDOW IT SITS IN. BucketSeconds was the requested
+	// resolution verbatim while Window is derived, so the pair could contradict each other on a
+	// SHORTENED span: window=today at 00:30 with resolution=1h came back window "30m0s" with
+	// bucketSeconds 3600 — fold packs the thirty one-minute buckets into one partial group covering
+	// half an hour and labels it six times its width, which is the mislabel Window's own derivation
+	// three lines above exists to prevent. The divisibility check cannot catch it, because 1h divides
+	// the 6h span the resolution is validated against; only the served span is shorter.
+	bucketWidth := resolution
+	if bucketWidth > covered {
+		bucketWidth = covered
+	}
 	out := Snapshot{
 		Window:        covered.String(),
-		BucketSeconds: int(resolution / time.Second),
+		BucketSeconds: int(bucketWidth / time.Second),
 		Session:       sessionID,
 		Group:         group,
 		Buckets:       make([]Bucket, 0, n),

@@ -1,9 +1,11 @@
 package sessionapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1268,6 +1270,104 @@ func TestBucketSecondsFor_IsNeverZero(t *testing.T) {
 	}
 }
 
+// breakAndRestore makes the writer really lose a row, then leaves the ledger READABLE again.
+//
+// The drop is induced by replacing the ledger's directory with a regular FILE: every append then fails
+// with ENOTDIR, which root cannot bypass where a chmod could, and no test-only setter has to exist on
+// the Writer for it.
+//
+// THE RESTORE IS THE LOAD-BEARING HALF. A broken directory also fails the READ, so without putting the
+// day file back, `degraded` appears because of UnreadableDays and a test about the write-side count
+// passes whether or not that count is disclosed at all.
+func breakAndRestore(t *testing.T, dir string, led *costledger.Writer, at time.Time) {
+	t.Helper()
+
+	saved := map[string][]byte{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		b, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if rerr != nil {
+			t.Fatalf("stash %s: %v", e.Name(), rerr)
+		}
+		saved[e.Name()] = b
+	}
+	if len(saved) == 0 {
+		t.Fatal("no day file to stash, so the restore cannot make the read clean")
+	}
+
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("clear the ledger dir: %v", err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatalf("put a file where the ledger dir was: %v", err)
+	}
+	recordCostedMinute(t, led, at.Add(time.Minute), "gw.example", "m", 2.0)
+	_ = led.Flush() // expected to fail; the point is the counter it moves
+	if led.Dropped() == 0 {
+		t.Fatal("the fixture induced no drop, so nothing it is meant to expose is observable")
+	}
+
+	if err := os.Remove(dir); err != nil {
+		t.Fatalf("remove the blocking file: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("restore the ledger dir: %v", err)
+	}
+	for name, b := range saved {
+		if werr := os.WriteFile(filepath.Join(dir, name), b, 0o600); werr != nil {
+			t.Fatalf("restore %s: %v", name, werr)
+		}
+	}
+}
+
+// TestHandleUsage_TheWriterDropWarningFiresOnChangeNotPerRead is the log volume the disclosure bought.
+//
+// Dropped() is process-cumulative, so folding it into the per-read warning made one lost row at 03:00
+// print "cost ledger read was incomplete" on EVERY request for the life of the process — roughly 86,000
+// lines a day at a chart's poll rate, on an endpoint anyone who can reach the port can drive, and
+// asserting something false about reads that were clean. The field stays on every response; the log
+// fires when the number moves.
+func TestHandleUsage_TheWriterDropWarningFiresOnChangeNotPerRead(t *testing.T) {
+	at := insideToday(t, 3*time.Hour)
+	dir := t.TempDir()
+	led, err := costledger.New(dir, costledger.WithClock(func() time.Time { return at }))
+	if err != nil {
+		t.Fatalf("costledger.New: %v", err)
+	}
+	t.Cleanup(func() { _ = led.Close() })
+	recordCostedMinute(t, led, at, "gw.example", "m", 1.0)
+	if ferr := led.Flush(); ferr != nil {
+		t.Fatalf("Flush: %v", ferr)
+	}
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	ts, _ := newTestServer(t, WithUsage(usage.New()), WithCostLedger(led))
+
+	// A drop, then three clean reads.
+	breakAndRestore(t, dir, led, at)
+	for i := 0; i < 3; i++ {
+		if status, body := fetchUsage(t, ts.URL, "?window=today"); status != http.StatusOK {
+			t.Fatalf("read %d: status %d: %s", i, status, body)
+		}
+	}
+
+	n := strings.Count(logs.String(), "the cost ledger writer has lost rows")
+	if n != 1 {
+		t.Errorf("the write-side warning fired %d times across three reads, want 1: it is a cumulative counter, so per-read logging never stops",
+			n)
+	}
+	if strings.Contains(logs.String(), "cost ledger read was incomplete") {
+		t.Errorf("a clean read logged \"read was incomplete\": %s", logs.String())
+	}
+}
+
 // TestServedSpan_DoesNotReachBackPastTheWindow is 00:30 local, which is the only interesting hour.
 //
 // The no-ledger degrade served the ring's maximum unconditionally, so window=today just after midnight
@@ -1338,45 +1438,7 @@ func TestHandleUsage_AWriterDropReachesTheResponse(t *testing.T) {
 	// broken directory also fails the read, `degraded` appears because of UnreadableDays, and this test
 	// passes whether or not the write-side count is disclosed at all — which is exactly what it is here
 	// to check. Verified: with the restore, removing `|| dropped > 0` from the emission fails this test.
-	saved := map[string][]byte{}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
-	for _, e := range entries {
-		b, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
-		if rerr != nil {
-			t.Fatalf("stash %s: %v", e.Name(), rerr)
-		}
-		saved[e.Name()] = b
-	}
-	if len(saved) == 0 {
-		t.Fatal("no day file to stash, so the restore below cannot make the read clean")
-	}
-
-	if err := os.RemoveAll(dir); err != nil {
-		t.Fatalf("clear the ledger dir: %v", err)
-	}
-	if err := os.WriteFile(dir, []byte("not a directory\n"), 0o600); err != nil {
-		t.Fatalf("put a file where the ledger dir was: %v", err)
-	}
-	recordCostedMinute(t, led, at.Add(time.Minute), "gw.example", "m", 2.0)
-	_ = led.Flush() // expected to fail; the point is the counter it moves
-	if led.Dropped() == 0 {
-		t.Fatal("the fixture induced no drop, so this test cannot see the field it is about")
-	}
-
-	if err := os.Remove(dir); err != nil {
-		t.Fatalf("remove the blocking file: %v", err)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("restore the ledger dir: %v", err)
-	}
-	for name, b := range saved {
-		if werr := os.WriteFile(filepath.Join(dir, name), b, 0o600); werr != nil {
-			t.Fatalf("restore %s: %v", name, werr)
-		}
-	}
+	breakAndRestore(t, dir, led, at)
 
 	_, body = fetchUsage(t, ts.URL, "?window=today")
 	var snap usage.Snapshot

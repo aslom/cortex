@@ -868,3 +868,42 @@ func keysOf(m map[string]bool) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestSnapshot_BucketSecondsNeverExceedsTheWindowItReports is the pair Window's derivation left half
+// done.
+//
+// Window is derived from the bucket count; BucketSeconds was the requested resolution verbatim. On a
+// span SHORTER than the resolution the two then contradicted each other: fold emits one partial group
+// covering the whole (short) window and labels it the full requested width, so a client reading
+// BucketSeconds scales that bar by six and reports six times the spend per unit time. The divisibility
+// check cannot catch it — the resolution is validated against a longer span than the one served.
+func TestSnapshot_BucketSecondsNeverExceedsTheWindowItReports(t *testing.T) {
+	a := New()
+	for _, tc := range []struct {
+		name       string
+		window     time.Duration
+		resolution time.Duration
+	}{
+		{"resolution wider than the window", 30 * time.Minute, time.Hour},
+		{"resolution equal to the window", 30 * time.Minute, 30 * time.Minute},
+		{"resolution inside the window", 30 * time.Minute, 5 * time.Minute},
+		{"a one-bucket window", BucketWidth, time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := a.Snapshot(tc.window, tc.resolution, "", GroupModel)
+
+			covered, err := time.ParseDuration(got.Window)
+			if err != nil {
+				t.Fatalf("window %q is not a duration: %v", got.Window, err)
+			}
+			width := time.Duration(got.BucketSeconds) * time.Second
+			if width > covered {
+				t.Errorf("bucketSeconds = %d (%v) over a window of %v: a client scaling a bar by that width reports %.1fx the spend per unit time",
+					got.BucketSeconds, width, covered, float64(width)/float64(covered))
+			}
+			if width <= 0 {
+				t.Errorf("bucketSeconds = %d, want a positive width", got.BucketSeconds)
+			}
+		})
+	}
+}

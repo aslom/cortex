@@ -349,13 +349,27 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 		// otherwise reintroduce exactly this.
 		degraded = degradedFrom(caveats)
 		degraded.DroppedRowsTotal = dropped
-		// At Warn, and unconditionally: a client may not render the field, and an operator
-		// with a corrupt day file wants to hear about it once per read rather than never.
+	}
+	// THE READ-SIDE WARNING IS PER READ; THE WRITE-SIDE ONE IS PER CHANGE. Logging both together made
+	// one dropped row at 03:00 print "cost ledger read was incomplete" on every request for the life of
+	// the process — around 86,000 lines a day at a chart's poll rate, on an endpoint anyone who can
+	// reach the port can drive, and saying the READ was incomplete when the read was clean. The total
+	// being short is true; the claim about this read is not.
+	if !caveats.Clean() {
+		// At Warn, and on every such read: a client may not render the field, and an operator with a
+		// corrupt day file wants to hear about it once per read rather than never.
 		slog.Warn("sessionapi: cost ledger read was incomplete — the total is short",
 			"window", spec.Label, "skippedLines", caveats.SkippedLines,
 			"truncatedDays", caveats.TruncatedDays,
-			"unreadableDays", caveats.UnreadableDays,
-			"droppedRowsTotal", dropped)
+			"unreadableDays", caveats.UnreadableDays)
+	}
+	// Monotonic, so Swap gives the previous high-water mark and only an INCREASE logs. A race between
+	// two reads lets exactly one of them log, which is the property that matters.
+	if prev := s.loggedDropped.Swap(dropped); dropped > prev {
+		slog.Warn("sessionapi: the cost ledger writer has lost rows; every total from it is short",
+			"droppedRowsTotal", dropped, "newlyDropped", dropped-prev,
+			"cause", "an append failed, or the queue filled while the filesystem stalled",
+			"effect", "reported cost is a floor; the figure is disclosed on every response as degraded.droppedRowsTotal")
 	}
 	snap := usage.Snapshot{
 		Window:        spec.Label,
