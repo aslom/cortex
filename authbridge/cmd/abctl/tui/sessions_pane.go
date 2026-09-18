@@ -78,6 +78,12 @@ func (m *model) rebuildSessionsTable() {
 	// did nothing for this, because the columns were still set somewhere else. Derived once
 	// here now, and used for both, so the two cannot be produced by separate decisions at all.
 	showMoney := sessionsShowMoney(m.width)
+	// The header this rebuild will install, computed first because the money cells are rendered
+	// against their column's FITTED width — the fitter shrinks columns on a narrow terminal, so
+	// the declared 10 is a ceiling rather than the budget.
+	want := fitTableColumns(sessionsColumnsFor(m.width), m.width)
+	costW := sessionsColumnWidth(want, "COST")
+	savedW := sessionsColumnWidth(want, "SAVED")
 	rows := make([]table.Row, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		if m.filter != "" && !strings.Contains(s.ID, m.filter) {
@@ -101,8 +107,8 @@ func (m *model) rebuildSessionsTable() {
 		}
 		if showMoney {
 			row = append(row,
-				sessionMoneyCell(s.CostMicros, false, s.Saturated),
-				sessionMoneyCell(s.AvoidedMicros, true, s.Saturated))
+				sessionMoneyCell(s.CostMicros, false, s.Saturated, costW),
+				sessionMoneyCell(s.AvoidedMicros, true, s.Saturated, savedW))
 		}
 		row = append(row, active)
 		rows = append(rows, row)
@@ -141,7 +147,7 @@ func (m *model) rebuildSessionsTable() {
 	// When it does change, the rows go first: SetColumns renders whatever rows are loaded, so
 	// there must be none it could misread. A scroll reset is unavoidable there — the rows are
 	// being rebuilt against a different header — and a resize is already a re-layout.
-	if want := fitTableColumns(sessionsColumnsFor(m.width), m.width); !sameColumns(m.sessionsTbl.Columns(), want) {
+	if !sameColumns(m.sessionsTbl.Columns(), want) {
 		m.sessionsTbl.SetRows(nil)
 		m.sessionsTbl.SetColumns(want)
 	}
@@ -278,18 +284,66 @@ const emptyCell = "—"
 // ten-column cell has no room to say which. The strip has room for a note and distinguishes
 // them there. A marker that rides ON the figure is the point: a cell can be truncated to
 // nothing but while the number is on screen its caveat is too.
-func sessionMoneyCell(micros int64, avoided, saturated bool) string {
+// budget is the column's FITTED width, and the figure is rendered less precisely rather than
+// wider when four decimals will not fit.
+//
+// A bubbles table does not re-flow an overflowing cell, it truncates — and truncating a money
+// figure produces a smaller figure that reads as real, which is the one thing every surface here
+// refuses. The cell used to be unbounded: "~$936.5777+" is eleven columns against a ten-column
+// header, so a session past about $937 overflowed, and the saturated case was the worst of all
+// ("~$9223372036854.7754+", twenty-one) because the marker that says "this is a floor" is
+// appended to the longest value there is.
+//
+// PRECISION IS WHAT YIELDS, in order: four decimals, two, none, then humanizeCount's compact
+// form, which is itself width-bounded and clamps at ">999T". Four decimals are worth having on a
+// cent-scale figure and are noise on a four-figure one, so the ladder costs nothing where it
+// matters. The last candidate always fits a sane column, and is returned unconditionally so this
+// cannot fall through to an unbounded string.
+func sessionMoneyCell(micros int64, avoided, saturated bool, budget int) string {
 	if micros == 0 || negativeCost(micros) {
 		return emptyCell
 	}
-	cell := formatUSDCell(float64(micros) / 1e6)
-	if avoided {
-		cell = inexactMarker + cell
+	decorate := func(amount string) string {
+		if avoided {
+			amount = inexactMarker + amount
+		}
+		if saturated {
+			amount += partialMarker
+		}
+		return amount
 	}
-	if saturated {
-		cell += partialMarker
+	usd := float64(micros) / 1e6
+	compact := "$" + humanizeCount(int64(usd))
+	for _, amount := range []string{
+		formatUSDCell(usd),
+		"$" + fmt.Sprintf("%.2f", usd),
+		"$" + fmt.Sprintf("%.0f", usd),
+		compact,
+	} {
+		if cell := decorate(amount); len([]rune(cell)) <= budget {
+			return cell
+		}
 	}
-	return cell
+	// NOTHING FITS, so nothing is shown. Reachable at the narrowest width these columns survive
+	// at: the compact form plus both markers is seven columns, and the fitter can squeeze them to
+	// six before it drops them entirely.
+	//
+	// The em dash rather than a truncation, and rather than dropping the markers to buy two
+	// columns: a clipped figure is a smaller figure that reads as real, and the markers are the
+	// figure's meaning — "~" says estimated and "+" says floor, so a bare number in their place
+	// is a different claim. If it cannot be said correctly it is not said, which is the rule the
+	// spend strip's ladder follows for the same reason.
+	return emptyCell
+}
+
+// sessionsColumnWidth is the fitted width of one named column, or 0 when it is not present.
+func sessionsColumnWidth(cols []table.Column, title string) int {
+	for _, c := range cols {
+		if c.Title == title {
+			return c.Width
+		}
+	}
+	return 0
 }
 
 // sessionTokensCellMin is the narrowest TOKENS cell that can hold every value it renders:

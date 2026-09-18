@@ -299,6 +299,48 @@ func TestPaneView_DrawsTheDrawerUnderTheStripAndKeepsTheBody(t *testing.T) {
 	}
 }
 
+// THE VIEW MUST FIT THE TERMINAL, open or closed.
+//
+// The check this test file was missing, and the defect it let through: layout() reserved a row
+// for the strip and nothing for the drawer, so pressing `$` rendered spendDrawerLines lines more
+// than the terminal has — measured at 45 lines in a 40-row terminal — and the footer went off the
+// bottom on every pane. Substring presence and ordering, which is all the test above checks, is
+// blind to it: every line it looks for was present, just not on screen.
+//
+// Both states and several heights, because the reservation is height-gated: below
+// spendDrawerMinHeight the drawer must not draw AND must not reserve, and the floor itself is
+// where an off-by-one would show.
+func TestPaneView_FitsTheTerminalWithTheDrawerOpen(t *testing.T) {
+	for _, h := range []int{spendDrawerMinHeight - 1, spendDrawerMinHeight, 40, 60} {
+		for _, open := range []bool{false, true} {
+			m := &model{width: 160, height: h, endpoint: "http://x"}
+			m.pane = paneSessions
+			m.sessionsTbl = newSessionsTable()
+			m.spend.snap = drawerSnap()
+			m.spend.expanded = open
+			m.layout()
+
+			lines := strings.Count(m.paneView(), "\n") + 1
+			if lines > m.height {
+				t.Errorf("height %d, drawer open=%v: the view is %d lines — %d too tall, so the "+
+					"footer is off the bottom", h, open, lines, lines-m.height)
+			}
+		}
+	}
+}
+
+// And the reservation has to be the size the renderer actually emits, or the fit above holds by
+// luck. Asserted against renderSpendDrawer's own output rather than against the number 5.
+func TestSpendDrawerLines_MatchesWhatTheRendererEmits(t *testing.T) {
+	// A snapshot with more series than the drawer keeps, so every row it can produce is produced:
+	// spendDrawerSeries named rows, the "(other)" band, and the hint line.
+	got := len(renderSpendDrawer(drawerSnap(), usage.GroupModel, "1h", 200))
+	if got != spendDrawerLines {
+		t.Errorf("renderSpendDrawer emits %d lines but layout() reserves %d: whichever is smaller, "+
+			"the difference is either wasted rows or a footer off the bottom", got, spendDrawerLines)
+	}
+}
+
 func rowLabels(rows []drawerRow) []string {
 	out := make([]string, 0, len(rows))
 	for _, r := range rows {

@@ -539,7 +539,11 @@ func (m *model) applyAges(out *spendSummary) {
 		if at.IsZero() {
 			continue
 		}
-		if age := time.Since(at); age > oldest {
+		// NEGATIVE AGES DISCARDED. time.Since goes negative if the wall clock steps backwards
+		// between the fetch and this read — an NTP correction is the realistic cause — and
+		// formatSpendAge would render that as "polled -5s ago". Cosmetic and unlikely, and a
+		// nonsense figure on an always-on line is the kind a reader stops trusting the rest of.
+		if age := time.Since(at); age > oldest && age > 0 {
 			oldest = age
 		}
 	}

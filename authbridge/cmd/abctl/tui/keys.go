@@ -194,6 +194,8 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// should find it as the operator left it.
 			if m.spendDrawerVisible() {
 				m.spend.expanded = false
+				// Same reason toggleSpendDrawer re-lays out: the reserved rows have to go back.
+				m.layout()
 				return nil
 			}
 		}
@@ -1078,6 +1080,13 @@ func (m *model) layout() {
 	// stated from the other side.
 	if m.spendStripReservesRow() {
 		bodyH--
+	}
+	// And the drawer's rows when it is open. Reserving nothing for them made the view
+	// spendDrawerLines taller than the terminal the moment `$` was pressed, pushing the footer
+	// off the bottom on every pane — the failure the strip's own reservation exists to prevent,
+	// five rows at a time instead of one. See spendDrawerReservesRows.
+	if m.spendDrawerReservesRows() {
+		bodyH -= spendDrawerLines
 	}
 	// And one more while the filter is open: View() prepends filterInput above the body, so
 	// the line exists on screen whether or not the budget admits it. Unreserved, the view came

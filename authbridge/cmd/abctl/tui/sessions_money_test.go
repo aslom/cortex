@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestSessionMoneyCell_NeverAssertsFreeOrARefund(t *testing.T) {
 		{name: "sub-floor cost", micros: 20, want: "<$0.0001"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sessionMoneyCell(tc.micros, tc.avoided, false); got != tc.want {
+			if got := sessionMoneyCell(tc.micros, tc.avoided, false, sessionsMoneyWidth); got != tc.want {
 				t.Errorf("sessionMoneyCell(%d, %v, false) = %q, want %q", tc.micros, tc.avoided, got, tc.want)
 			}
 		})
@@ -139,8 +140,8 @@ func titles(cols []table.Column) []string {
 // the flag and this cell ignoring it would be the same defect one layer up: the honest number
 // is there and the screen still lies.
 func TestSessionMoneyCell_AClampedFigureIsMarkedAsAFloor(t *testing.T) {
-	plain := sessionMoneyCell(36_577_700, false, false)
-	clamped := sessionMoneyCell(36_577_700, false, true)
+	plain := sessionMoneyCell(36_577_700, false, false, sessionsMoneyWidth)
+	clamped := sessionMoneyCell(36_577_700, false, true, sessionsMoneyWidth)
 	if plain == clamped {
 		t.Fatalf("a clamped figure renders identically to a measured one (%q): the flag reached "+
 			"the client and the cell dropped it", plain)
@@ -151,7 +152,7 @@ func TestSessionMoneyCell_AClampedFigureIsMarkedAsAFloor(t *testing.T) {
 	}
 	// The saving keeps its own marker as well: the two say different things and one must not
 	// displace the other.
-	saved := sessionMoneyCell(366_100, true, true)
+	saved := sessionMoneyCell(366_100, true, true, sessionsMoneyWidth)
 	if !strings.HasPrefix(saved, inexactMarker) || !strings.HasSuffix(saved, partialMarker) {
 		t.Errorf("clamped saving = %q, want both %q (estimated) and %q (a floor)",
 			saved, inexactMarker, partialMarker)
@@ -232,5 +233,56 @@ func TestSessionsPicker_ResizingAcrossTheMoneyBoundaryNeitherPanicsNorMisaligns(
 		if last := cols[len(cols)-1].Title; last != "ACTIVE" {
 			t.Errorf("width %d: last column is %q, want ACTIVE — the header itself is wrong", w, last)
 		}
+	}
+}
+
+// sessionsMoneyWidth is the declared width of the COST and SAVED columns, which is the budget a
+// terminal wide enough to show them gives. Read from the column set rather than written as 10, so
+// these tests follow a change to it.
+var sessionsMoneyWidth = sessionsColumnWidth(sessionsColumns(), "COST")
+
+// NO MONEY CELL MAY EXCEED ITS COLUMN. A bubbles table truncates rather than re-flowing, and a
+// truncated money figure is a smaller figure that reads as real — "$936.5777" clipped to
+// "$936.57" is a plausible number that is simply wrong.
+//
+// The cell was unbounded: "~$936.5777+" is eleven columns against ten, so a session past about
+// $937 overflowed, and the saturated case was twenty-one because the marker meaning "this is a
+// floor" is appended to the longest value there is. Markers are the reason the boundary is that
+// low — they cost two of the ten columns.
+//
+// Every magnitude, both markers, and the narrow fitted widths too, since the fitter shrinks these
+// columns before it drops them.
+func TestSessionMoneyCell_NeverExceedsItsColumn(t *testing.T) {
+	for _, budget := range []int{sessionsMoneyWidth, 8, 6} {
+		for _, micros := range []int64{
+			1,              // sub-floor, renders "<$0.0001"
+			20,             // likewise
+			36_577_700,     // $36.5777 — the ordinary case
+			936_577_700,    // $936.5777 — where the overflow started
+			99_999_990_000, // $99,999.99
+			math.MaxInt64,  // the saturated clamp, the longest value there is
+		} {
+			for _, avoided := range []bool{false, true} {
+				for _, saturated := range []bool{false, true} {
+					got := sessionMoneyCell(micros, avoided, saturated, budget)
+					if n := len([]rune(got)); n > budget {
+						t.Errorf("micros=%d avoided=%v saturated=%v budget=%d: cell %q is %d "+
+							"columns — the table truncates it into a smaller figure that reads "+
+							"as real", micros, avoided, saturated, budget, got, n)
+					}
+					// And it always says SOMETHING — a coarse figure where one fits, the em dash
+					// where none does. A blank cell would read as a rendering fault.
+					if got == "" {
+						t.Errorf("micros=%d budget=%d: blank cell", micros, budget)
+					}
+				}
+			}
+		}
+	}
+	// Precision is what yields, and only when it has to: at the declared width an ordinary
+	// figure keeps all four decimals.
+	if got := sessionMoneyCell(36_577_700, false, false, sessionsMoneyWidth); got != "$36.5777" {
+		t.Errorf("cell = %q at the declared width, want the full $36.5777 — the ladder is giving "+
+			"up precision it does not need to", got)
 	}
 }

@@ -46,6 +46,16 @@ const (
 	// two visible rows": the drawer exists to be read ALONGSIDE the data, and a drawer that
 	// squeezes the data out has defeated its own reason for not being a pane.
 	spendDrawerMinHeight = 26
+
+	// spendDrawerLines is how many rows the drawer adds to the view, and therefore how many
+	// layout() must hold back for it.
+	//
+	// spendDrawerSeries named rows, plus the "(other)" band, plus the hint line. Derived rather
+	// than written as 5 so the two cannot drift: renderSpendDrawer emits exactly this many at
+	// full height, and layout() reserving fewer is not a cosmetic slip — the view comes out
+	// taller than the terminal and the footer goes off the bottom, which is the failure
+	// spendStripReservesRow's own doc describes for one row.
+	spendDrawerLines = spendDrawerSeries + 2
 )
 
 // spendDrawerAxes are the breakdown axes `g` cycles through.
@@ -154,6 +164,23 @@ func (m *model) spendDrawerHost() (bool, string) {
 	return true, ""
 }
 
+// spendDrawerReservesRows reports whether layout() must hold spendDrawerLines back.
+//
+// THE FLAG AND THE HEIGHT, deliberately blind to the pane — the same asymmetry
+// spendStripReservesRow has, for the same reason: layout() is called from the WindowSizeMsg
+// handler, and no pane transition re-runs it. There is no setPane choke point to hook (the pane
+// is assigned in twenty-odd places), so a pane-aware reservation would go stale on the next
+// transition — and stale in the dangerous direction, because a drawer that DRAWS against an
+// unreserved body overflows the terminal.
+//
+// The cost is larger than the strip's: while the drawer is open, a pane that cannot host it
+// renders spendDrawerLines shorter than it could. That is a visible loss where the strip's was
+// one invisible row, and it is still the right trade — the alternative is a footer pushed off
+// the bottom, and the state is transient and user-initiated.
+func (m *model) spendDrawerReservesRows() bool {
+	return m.spend.expanded && m.height >= spendDrawerMinHeight
+}
+
 // spendDrawerVisible reports whether the drawer draws its rows.
 //
 // Requires the strip: the drawer is an expansion OF it, and a breakdown floating under a
@@ -178,6 +205,8 @@ func (m *model) spendDrawerVisible() bool {
 func (m *model) toggleSpendDrawer() {
 	if m.spend.expanded {
 		m.spend.expanded = false
+		// Give the rows back, for the reason the open path takes them.
+		m.layout()
 		return
 	}
 	// The PANE first, because its refusal has nothing to do with height and a height message
@@ -196,6 +225,10 @@ func (m *model) toggleSpendDrawer() {
 		return
 	}
 	m.spend.expanded = true
+	// The reservation is made by layout(), which otherwise only runs on a resize — so without
+	// this the drawer draws into a body sized for a closed one and the footer goes off the
+	// bottom until the terminal happens to change size.
+	m.layout()
 }
 
 // cycleSpendAxis handles `a` while the drawer is open, and refetches.
