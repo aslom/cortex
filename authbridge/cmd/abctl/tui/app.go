@@ -339,6 +339,11 @@ type model struct {
 	// usage is the Usage pane's view state (metric, window, scope, snapshot).
 	usage usageState
 
+	// spend backs the always-on spend strip. Separate from usage on purpose —
+	// see spendState, which records why sharing one poll chain would blank the
+	// strip every time the Usage pane's window changed.
+	spend spendState
+
 	// eventColumns is which events-table columns are shown. Keyed by a stable id
 	// rather than an index, so a future column inserted in the middle does not
 	// silently change what an existing selection means.
@@ -621,6 +626,12 @@ func (m *model) initSessionView() tea.Cmd {
 		streamPump(m.streamCh),
 		tickCmd(),
 		refreshTickCmd(),
+		// The spend strip's chain starts HERE rather than in Init, so it also starts when
+		// the user backs out to the pod picker and enters a DIFFERENT pod: Init runs once,
+		// but m.client is replaced on every re-entry, and a chain armed against the old one
+		// would report the previous pod's spend. startSpendPolling bumps the generation, so
+		// re-entry replaces the chain rather than adding a second one.
+		m.startSpendPolling(),
 	)
 }
 
@@ -670,6 +681,12 @@ func (m *model) backToPodsPane() {
 	// as if it described the new one.
 	m.usage.reqSeq++
 	m.usage.tickGen++
+	// Same for the spend strip, and for the same reason. Not optional just because the
+	// strip is always on: a strip left showing the previous pod's dollars while the
+	// operator picks a new one is a figure attributed to the wrong workload, which is
+	// worse than a blank strip. invalidate bumps both generations, so a reply already in
+	// flight against the old pod is dropped rather than applied.
+	m.spend.invalidate()
 	m.eventCt = 0
 	m.lastCt = 0
 	m.rate = 0
@@ -1034,6 +1051,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Re-pump the same channel for the next message. A single apiclient
 		// goroutine fills the channel for the duration of ctx.
 		return m, streamPump(m.streamCh)
+
+	case spendLoadedMsg:
+		m.applySpendLoaded(msg)
+		return m, nil
+
+	case spendTickMsg:
+		// ONE guard, not two, and unlike the usage chain: this tick carries no pane or
+		// session scope, so generation is the only thing that can make it stale. See
+		// spendTickIsCurrent.
+		if !m.spendTickIsCurrent(msg.gen) {
+			return m, nil
+		}
+		return m, tea.Batch(m.fetchSpend(), spendTick(msg.gen))
+
+	case spendTodayLoadedMsg:
+		m.applySpendTodayLoaded(msg)
+		return m, nil
+
+	case spendTodayTickMsg:
+		// The day figure polls on its own, much slower clock — it reads day files off
+		// disk where the window figure reads a ring out of memory.
+		if !m.spendTodayTickIsCurrent(msg.gen) {
+			return m, nil
+		}
+		return m, tea.Batch(m.fetchSpendToday(), spendTodayTick(msg.gen))
 
 	case streamClosedMsg:
 		// In picker mode, ignore the close from the previous session —
@@ -1572,11 +1614,24 @@ func (m *model) paneView() string {
 	if m.filtering {
 		body = m.filterInput.View() + "\n" + body
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		body,
-		m.footerView(),
-	)
+	// A row slice rather than a fixed JoinVertical, so the strip's row can be absent
+	// without needing a second call site. It sits directly under the title because that
+	// is the whole requirement: spend read BEFORE the data rather than navigated to.
+	//
+	// Styled AFTER fitting. renderSpendStrip measures with lipgloss.Width, and styleMuted
+	// only adds a colour escape so the column count is unchanged — but fitting an
+	// already-styled string would measure the escape bytes and silently over-truncate.
+	//
+	// Nothing here touches eventsTbl: the strip holds no cursor, filter or scroll state,
+	// so it cannot perturb the pane it sits above.
+	rows := []string{header}
+	if m.spendStripVisible() {
+		if strip := renderSpendStrip(m.spendSummary(), m.width); strip != "" {
+			rows = append(rows, styleMuted.Render(strip))
+		}
+	}
+	rows = append(rows, body, m.footerView())
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
 // viewTabs renders the top-level tab strip "[Sessions] Pipeline" with the

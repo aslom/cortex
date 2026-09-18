@@ -1004,8 +1004,25 @@ func (m *model) layout() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	// Reserve 3 rows for title + blank + footer lines.
+	// Reserve 3 rows: the title row and the footer's two.
+	//
+	// NOT "title + blank + footer", which is what this said and was never true — there is
+	// no blank row to borrow, and a reader who believes there is one reclaims a row the
+	// footer is standing on.
 	bodyH := m.height - 3
+	// And one for the spend strip, which View() draws directly under the title.
+	//
+	// BY HEIGHT ALONE, deliberately blind to the pane: layout() is called from exactly one
+	// place, the WindowSizeMsg handler, and no pane transition re-runs it. A reservation
+	// that read m.pane would go stale the moment the user moved between a picker and a data
+	// pane, leaving bodyHeight wrong until the next resize — which on a pane the strip DOES
+	// draw means a body one row too tall and a footer pushed off the bottom. The cost is
+	// that the two picker panes render one row shorter than they need, which is invisible
+	// next to that. See spendStripReservesRow and spendStripVisible for the same asymmetry
+	// stated from the other side.
+	if m.spendStripReservesRow() {
+		bodyH--
+	}
 	// And one more while the filter is open: View() prepends filterInput above the body, so
 	// the line exists on screen whether or not the budget admits it. Unreserved, the view came
 	// out one line taller than the terminal at every size, the terminal scrolled, and the
