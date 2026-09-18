@@ -271,8 +271,21 @@ func (m *model) rebuildEventsTable() {
 		m.selectedEventKey = keyOf(m.selectedEventOn(prevRow))
 	}
 
+	// An OPENING, not a refresh: the session under the table changed. This is the
+	// one rebuild that gets to choose an end, because there is no position to
+	// preserve yet — every later one (the poll, a filter, a column toggle) must
+	// leave the operator where they are.
+	opening := m.eventsBuiltFor != m.selectedSess
+	m.eventsBuiltFor = m.selectedSess
+
 	target := prevRow
 	switch {
+	// Where a session opens: the end the operator last jumped to with g/G. Only
+	// while chronological — under a sort the row order is a ranking, so "an end"
+	// means the largest or smallest value rather than the oldest or newest event,
+	// and the selectedEventKey pin below is what carries the cursor there.
+	case opening && m.sortCol == "":
+		target = openAtRow(len(rows), Settings.Events.OpenAtOldest)
 	// Tail-follow only while the table is chronological. "Stay at the bottom" means
 	// "follow the newest event" ONLY because the last row is the newest one; under a
 	// DURATION or COST sort the last row is the smallest value, so following it would

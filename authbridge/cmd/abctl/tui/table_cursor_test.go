@@ -47,6 +47,10 @@ func cursorRowsFixture(n int) []pipeline.SessionEvent {
 
 func cursorModel(t *testing.T, n int) *model {
 	t.Helper()
+	// "Opens at the newest event" is part of this fixture's contract, and that is now
+	// a persisted preference (EventSettings.OpenAtOldest) living on a package global —
+	// so without this a test elsewhere that pressed `g` decides where this one starts.
+	resetSettingsForTest(t)
 	m := &model{
 		pane: paneEvents, selectedSess: "s", bodyHeight: 12, width: 200,
 		events: map[string][]pipeline.SessionEvent{"s": cursorRowsFixture(n)},
@@ -877,6 +881,7 @@ func sortCursorFixture(n int) []pipeline.SessionEvent {
 
 func sortCursorModel(t *testing.T, n int) *model {
 	t.Helper()
+	resetSettingsForTest(t) // same reasoning as cursorModel
 	m := &model{
 		pane: paneEvents, selectedSess: "s", bodyHeight: 12, width: 200,
 		events: map[string][]pipeline.SessionEvent{"s": sortCursorFixture(n)},

@@ -753,6 +753,9 @@ func (m *model) goTop() {
 	case paneEvents:
 		setCursorVisible(&m.eventsTbl, 0)
 		m.selectedEventKey = keyOf(m.selectedEvent())
+		// `g` is an explicit "take me to the oldest end", so it also becomes where
+		// the next session opens — see EventSettings.OpenAtOldest.
+		m.setOpenAtOldest(true)
 	case panePipeline:
 		setCursorVisible(&m.pipelineTbl, 0)
 	case paneDetail, panePluginDetail:
@@ -767,6 +770,9 @@ func (m *model) goBottom() {
 	case paneEvents:
 		setCursorVisible(&m.eventsTbl, len(m.eventsTbl.Rows())-1)
 		m.selectedEventKey = keyOf(m.selectedEvent())
+		// The mirror of `g` above: back to the tail, and that is where the next
+		// session opens.
+		m.setOpenAtOldest(false)
 	case panePipeline:
 		setCursorVisible(&m.pipelineTbl, len(m.pipelineTbl.Rows())-1)
 	case paneCatalog:

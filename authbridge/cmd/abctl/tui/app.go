@@ -524,6 +524,13 @@ type model struct {
 	// Set in newPickerModel to edit.DefaultRunner; tests inject a stub.
 	editRunner edit.Runner
 
+	// eventsBuiltFor is the session the events table was last built for. When it
+	// differs from selectedSess the next rebuild is an OPENING, which is the only
+	// moment the OpenAtOldest preference applies — every later rebuild (the
+	// two-second poll, a filter, a column toggle) must preserve where the operator
+	// is, not re-anchor them to an end.
+	eventsBuiltFor string
+
 	// serverProjects records that this proxy honours view=summary, learned from its
 	// echo on any snapshot. It decides whether the detail pane has to fetch the row
 	// it opens: a proxy that predates the projection already sent whole events, and
