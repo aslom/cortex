@@ -94,7 +94,9 @@ func (m *model) rebuildSessionsTable() {
 			sessionTokens(s.TotalTokens, m.events[s.ID]),
 		}
 		if showMoney {
-			row = append(row, sessionMoneyCell(s.CostMicros, false), sessionMoneyCell(s.AvoidedMicros, true))
+			row = append(row,
+				sessionMoneyCell(s.CostMicros, false, s.Saturated),
+				sessionMoneyCell(s.AvoidedMicros, true, s.Saturated))
 		}
 		row = append(row, active)
 		rows = append(rows, row)
@@ -247,13 +249,27 @@ const emptyCell = "—"
 // and gross of the prompt-cache re-warm — see usage.Counts.AvoidedMicros — and the per-request
 // flags that record which caveats applied do not survive summation, so the marker cannot be
 // conditional on them without claiming an exactness nothing here can verify.
-func sessionMoneyCell(micros int64, avoided bool) string {
+// saturated marks the figure as a FLOOR: the session's total reached the int64 ceiling and
+// was clamped, so the real number is larger by an amount nothing can state. It arrives from
+// session.SessionSummary.Saturated, which exists because MaxInt64 micros is about
+// $9.2 trillion — a well-formed dollar amount indistinguishable from a measured one.
+//
+// partialMarker, the glyph that already means "and more" on the spend strip. Two causes share
+// it in this cell — a clamped total and, if this column ever renders one, a partially covered
+// one — because both mean exactly "the real figure is larger than the number shown" and a
+// ten-column cell has no room to say which. The strip has room for a note and distinguishes
+// them there. A marker that rides ON the figure is the point: a cell can be truncated to
+// nothing but while the number is on screen its caveat is too.
+func sessionMoneyCell(micros int64, avoided, saturated bool) string {
 	if micros == 0 || negativeCost(micros) {
 		return emptyCell
 	}
 	cell := formatUSDCell(float64(micros) / 1e6)
 	if avoided {
 		cell = inexactMarker + cell
+	}
+	if saturated {
+		cell += partialMarker
 	}
 	return cell
 }

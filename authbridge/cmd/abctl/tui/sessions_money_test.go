@@ -64,8 +64,8 @@ func TestSessionMoneyCell_NeverAssertsFreeOrARefund(t *testing.T) {
 		{name: "sub-floor cost", micros: 20, want: "<$0.0001"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sessionMoneyCell(tc.micros, tc.avoided); got != tc.want {
-				t.Errorf("sessionMoneyCell(%d, %v) = %q, want %q", tc.micros, tc.avoided, got, tc.want)
+			if got := sessionMoneyCell(tc.micros, tc.avoided, false); got != tc.want {
+				t.Errorf("sessionMoneyCell(%d, %v, false) = %q, want %q", tc.micros, tc.avoided, got, tc.want)
 			}
 		})
 	}
@@ -130,4 +130,30 @@ func titles(cols []table.Column) []string {
 		out = append(out, c.Title)
 	}
 	return out
+}
+
+// A CLAMPED total must not render as a measured one.
+//
+// session.SessionSummary.Saturated exists because MaxInt64 micros is about $9.2 trillion — a
+// well-formed dollar amount no reader can tell apart from a real figure. The server publishing
+// the flag and this cell ignoring it would be the same defect one layer up: the honest number
+// is there and the screen still lies.
+func TestSessionMoneyCell_AClampedFigureIsMarkedAsAFloor(t *testing.T) {
+	plain := sessionMoneyCell(36_577_700, false, false)
+	clamped := sessionMoneyCell(36_577_700, false, true)
+	if plain == clamped {
+		t.Fatalf("a clamped figure renders identically to a measured one (%q): the flag reached "+
+			"the client and the cell dropped it", plain)
+	}
+	if !strings.HasSuffix(clamped, partialMarker) {
+		t.Errorf("clamped cell = %q, want the %q suffix that already means \"and more\" on the "+
+			"strip", clamped, partialMarker)
+	}
+	// The saving keeps its own marker as well: the two say different things and one must not
+	// displace the other.
+	saved := sessionMoneyCell(366_100, true, true)
+	if !strings.HasPrefix(saved, inexactMarker) || !strings.HasSuffix(saved, partialMarker) {
+		t.Errorf("clamped saving = %q, want both %q (estimated) and %q (a floor)",
+			saved, inexactMarker, partialMarker)
+	}
 }
