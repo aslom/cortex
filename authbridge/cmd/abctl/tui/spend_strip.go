@@ -118,17 +118,6 @@ type stripFigure struct {
 // plainFigure is a reading with nothing to qualify: both forms are the same string.
 func plainFigure(s string) stripFigure { return stripFigure{full: s, compact: s} }
 
-// plainFigures lifts the fixed strings the non-figure branches render ("cost
-// unavailable", "[u] usage") into the fitter's type. None of them can be partial, so
-// none of them degrades.
-func plainFigures(ss ...string) []stripFigure {
-	out := make([]stripFigure, 0, len(ss))
-	for _, s := range ss {
-		out = append(out, plainFigure(s))
-	}
-	return out
-}
-
 // coverageNote is the one spelling of a coverage gap, shared by every branch so the
 // wording cannot drift between them.
 func coverageNote(unpriced, priceable int64) string {
@@ -297,22 +286,14 @@ func renderSpendStrip(s spendSummary, width int) string {
 		return ""
 	}
 
-	// The poll failed outright, so there are no counters to qualify the answer
-	// with. Say "unavailable" and point at the Usage pane, which already
-	// distinguishes an old proxy from a transport error and can explain WHY.
-	//
-	// Silence is the worst option available here: the row is reserved on height
-	// alone, so returning "" for a persistently failing endpoint buys a permanent
-	// blank line above the footer and no diagnostic anywhere on screen.
-	if s.Failed {
-		return fitStripFigures(stripLabel, plainFigures("cost unavailable", "[u] usage"), width)
-	}
-
 	// No poll has answered yet. THIS silence is honest: it says "we have not looked", which
 	// is true, brief, and self-correcting within one poll interval. It is the only case where
 	// "" is the right answer, and it is checked before anything else so the branches below can
 	// assume there is a snapshot to report figures from.
-	if !s.Priced && !s.HasToday && !s.HasSnapshot {
+	// NOT when the poll FAILED, which is a thing to report rather than an absence: silence for a
+	// persistently failing endpoint buys a permanent blank line above the footer — the row is
+	// reserved on height alone — and no diagnostic anywhere on screen.
+	if !s.Priced && !s.HasToday && !s.HasSnapshot && !s.Failed {
 		return ""
 	}
 
@@ -340,7 +321,14 @@ func renderSpendStrip(s spendSummary, width int) string {
 	// Priced == false permanently, and usage/pricing_test.go pins a saving on an unpriced
 	// request as a supported state.
 	if !s.Priced && !s.HasToday {
-		if s.Priceable > 0 {
+		switch {
+		case s.Failed:
+			// The poll did not answer, so there are no counters to qualify anything with —
+			// which is a DIFFERENT claim from "we looked and nothing was priceable", and
+			// rendering the latter for a broken endpoint sends a reader after a pricing table
+			// when the fix is a proxy.
+			figures = append(figures, plainFigure("cost unavailable"), plainFigure("poll failed"))
+		case s.Priceable > 0:
 			// The note is UNLABELLED, unlike the window-labelled variant below, and what
 			// carries it is ADJACENCY: it is the figure immediately after the money reading it
 			// qualifies, and the labelled form exists precisely for the case where a today
@@ -349,7 +337,7 @@ func renderSpendStrip(s spendSummary, width int) string {
 			// surviving this branch.
 			figures = append(figures, plainFigure("cost unavailable"),
 				plainFigure(coverageNote(s.Unpriced, s.Priceable)))
-		} else {
+		default:
 			// Priceable == 0 WITH a snapshot in hand is a finding, not an absence: we looked,
 			// and there was no inference traffic to price. Say so. An always-on strip that
 			// renders nothing has failed at its only job.
@@ -384,10 +372,21 @@ func renderSpendStrip(s spendSummary, width int) string {
 	// this number. A saving is not spend, so a caveat about how much of the SPEND was
 	// priced would be a misattribution of exactly the kind moneyFigure exists to prevent.
 	if s.HasSaved {
-		figures = append(figures, stripFigure{
-			full:    "saved " + inexactMarker + formatUSDCell(s.SavedUSD),
-			compact: inexactMarker + formatUSDCell(s.SavedUSD),
-		})
+		// NO COMPACT FORM, and that is the point: this figure's label is not an explanation, it
+		// is the figure's IDENTITY.
+		//
+		// The compact form was a bare "~$0.1804", and ~ is inexactMarker — which on a money
+		// figure means "this is a lower bound". An inexact SPEND figure renders "~$4.1700 today"
+		// and keeps its label, so a bare marked figure between two labelled ones reads as spend
+		// whose label the ladder happened to drop. The ladder's rule is that it gives up
+		// explanations before figures, and "saved" is not an explanation of $0.1804 — without it
+		// the number is a different claim, not a terser one.
+		//
+		// Equal forms mean the ladder drops the whole figure instead, which is the same rule it
+		// applies to a number it cannot render in full: if it cannot be said correctly, it is
+		// not said.
+		saved := "saved " + inexactMarker + formatUSDCell(s.SavedUSD)
+		figures = append(figures, plainFigure(saved))
 	}
 	// Guarded on Priced independently of the branch above, which lets !Priced
 	// through whenever HasToday is set. Without this guard that combination — a
@@ -410,6 +409,17 @@ func renderSpendStrip(s spendSummary, width int) string {
 		// window can overflow with no ledger anywhere near it.
 		figures = append(figures, moneyFigure(s.WindowUSD, "/"+s.WindowLabel,
 			s.Unpriced, s.Priceable, s.Incomplete, nil, s.Clamped))
+	} else if s.Failed && s.HasToday {
+		// A FAILED WINDOW BESIDE A GOOD DAY. The day stands on its own chain, so the only thing
+		// missing is the window reading, and this occupies the slot that reading would have —
+		// AFTER the today figure, because today outranks the window and is the reading a reader
+		// came for. Said with the window's LABEL for the reason the coverage note below wears
+		// one: unlabelled, it would be read as qualifying the today figure to its left.
+		note := "poll failed"
+		if s.WindowLabel != "" {
+			note += " /" + s.WindowLabel
+		}
+		figures = append(figures, plainFigure(note))
 	} else if s.HasToday && s.Unpriced > 0 && s.Priceable > 0 {
 		// The window figure is suppressed because nothing in the window was priced, so its
 		// coverage gap has no figure to ride on. It still has to be stated — this is the
@@ -459,7 +469,7 @@ func renderSpendStrip(s spendSummary, width int) string {
 	// readings that ARE known. It is a place to look rather than a reading, so it outranks
 	// nothing: at a narrow width a reader is better served by the token count than by advice.
 	// The Usage pane is what distinguishes an old proxy from a transport error.
-	if !s.Priced && !s.HasToday {
+	if s.Failed || (!s.Priced && !s.HasToday) {
 		figures = append(figures, plainFigure("[u] usage"))
 	}
 	// The age rides last, so it is the first thing a narrow terminal gives up. It

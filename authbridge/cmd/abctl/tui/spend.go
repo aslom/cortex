@@ -34,9 +34,15 @@ const spendTodayPollInterval = 5 * time.Minute
 // The alternative was what the strip did with spendState.lastFetch, which is maintained
 // on every accepted reply and asserted by six tests: nothing rendered it. A poll chain
 // that stops answering therefore looked exactly like a current reading — no error, no
-// staleness, the last good figure sitting there indefinitely. Note that only the WINDOW
-// chain has a timestamp; the today chain's own age is not tracked, so a wedged today poll
-// is still indistinguishable from a fresh one.
+// staleness, the last good figure sitting there indefinitely.
+//
+// BOTH CHAINS ARE TIMED, and the age reported is the OLDER of the two. Only the window chain
+// used to be, which put the gap on the worst possible figure: today outranks the window, polls
+// twelve times more slowly, and is the last thing the fitter drops — so the most prominent
+// reading on the strip was the one that could silently go hours stale while the 1h figure beside
+// it carried a "polled Nm ago". One age for the line rather than one per figure, because this
+// qualifies the freshness of the whole answer, and taking the older of the two is what stops a
+// fresh window poll vouching for a wedged day poll.
 const spendStaleAfter = 2 * spendPollInterval
 
 // spendWindow is the span the strip REQUESTS, and spendResolution asks for it as
@@ -100,6 +106,11 @@ type spendState struct {
 	// would never land at all.
 	todayReqSeq  uint64
 	todayTickGen uint64
+
+	// todayLastFetch is the today chain's own timestamp, for the reason its snapshot and its
+	// error are its own: the two chains answer at different cadences and can wedge
+	// independently, so one timestamp cannot describe both. See spendStaleAfter.
+	todayLastFetch time.Time
 }
 
 // invalidate drops the data this state describes and disowns anything in flight.
@@ -119,6 +130,7 @@ func (s *spendState) invalidate() {
 	s.snap = nil
 	s.err = nil
 	s.lastFetch = time.Time{}
+	s.todayLastFetch = time.Time{}
 	s.reqSeq++
 	s.tickGen++
 	// The today figure is a different pod's day just as much as the window figure is
@@ -347,13 +359,18 @@ func (m *model) spendSummary() spendSummary {
 	// row, leaving a permanent blank line above the footer. Rendering nothing and
 	// having nothing notice is the exact failure this whole strip exists to end.
 	if m.spend.err != nil {
-		// Failed describes the WINDOW poll. The today figure is deliberately NOT carried
-		// here even when its own chain answered: renderSpendStrip returns on Failed
-		// before it reads any figure, so setting one would be an assignment nothing
-		// reads. Showing a good day total beside a failed window poll would be the
-		// better strip, but it is a renderer change — the Failed branch would have to
-		// yield to the figures — and this commit touches the data side only.
-		return spendSummary{Failed: true}
+		// Failed describes the WINDOW poll ONLY, and the today figure is carried through it.
+		//
+		// That is the invariant spendState.todaySnap gives as the reason for splitting the two
+		// chains: "the two can fail independently — an older proxy answers the window fine and
+		// 400s on window=today — and one broken figure must not blank the other." It held in one
+		// direction and not the other, because the renderer returned on Failed before reading
+		// any figure, so a wedged window poll discarded a perfectly good day total. The Failed
+		// branch yields to the figures now, which is what that fix was waiting on.
+		out := spendSummary{Failed: true}
+		m.applyTodayFigure(&out)
+		m.applyAges(&out)
+		return out
 	}
 	snap := m.spend.snap
 	if snap == nil {
@@ -416,14 +433,7 @@ func (m *model) spendSummary() spendSummary {
 	if spanOK {
 		out.WindowLabel = formatWindowLabel(span)
 	}
-	// How old this answer is. Read from the clock here rather than recorded on the
-	// snapshot because staleness is a property of NOW, not of the reply: a figure fetched
-	// once and rendered for ten minutes gets older every frame.
-	if !m.spend.lastFetch.IsZero() {
-		if age := time.Since(m.spend.lastFetch); age > spendStaleAfter {
-			out.Age, out.Stale = age, true
-		}
-	}
+	m.applyAges(&out)
 	m.applyTodayFigure(&out)
 	// out.Priced, not snap.Priced: the negative-total refusal above lives in out, and
 	// reading the wire flag here would hand the renderer a figure the summary has
@@ -460,27 +470,65 @@ func (m *model) spendSummary() spendSummary {
 // — "no prompt tokens" and "nothing reported them" — and only the flags can tell them
 // apart. See usage.Counts.PresentKinds, whose own doc is about exactly this ambiguity.
 //
-// ALL THREE PROMPT TIERS ARE REQUIRED, because the denominator is their SUM and a missing term
-// does not make the ratio approximate — it makes it too HIGH, in the direction that flatters the
-// deployment. KindCacheRead alone would divide by a denominator nobody reported; KindInput alone
-// would report 0% for a gateway that reports input and not cache reads, a claim about caching
-// made from an absence of evidence; and input-plus-cache-read without KindCacheWrite silently
-// takes an unreported cache-write tally as zero, so a prompt that was partly cache writes
-// reports a hit rate computed over less than the whole prompt.
+// TWO BITS ARE REQUIRED, NOT THREE. KindCacheRead alone would divide by a denominator nobody
+// reported; KindInput alone would report 0% for a gateway that reports input and not cache
+// reads, which is a claim about caching made from an absence of evidence. Those are the two
+// terms that must be proven.
 //
-// The cost is a suppressed figure for a provider that genuinely never writes cache — which is
-// indistinguishable from one that does not report it, and that ambiguity is the whole reason
-// this function consults PresentKinds instead of the counters.
+// THE CACHE-WRITE TERM IS ADDED WITHOUT PROOF, and that is safe for a specific reason rather
+// than by indifference: the two parsers in this repo omit the bit exactly when the prompt has no
+// cache-write tokens in it, so adding zero is not an approximation, it is the right answer.
+//
+//   - The OpenAI-compatible path NEVER sets it, because OpenAI bills cache writes as ordinary
+//     input (inferenceparser.toNeutral says so). It reports Input = prompt_tokens − cached and
+//     CacheRead = cached, so input + cacheRead already IS prompt_tokens exactly.
+//   - The Anthropic path sets it whenever cache_creation_input_tokens is on the wire, so an
+//     absent bit there means the response reported no cache creation.
+//
+// REQUIRING IT WAS A REGRESSION, and a total one: with three bits demanded, HasCacheHit was
+// structurally false for every OpenAI-dialect response and the cache figure never rendered on
+// that path at all — over arithmetic that was already correct. It was tightened to close the
+// opposite hole, a producer whose unreported cache writes shrink the denominator and inflate the
+// ratio. That hole is real but no producer here has it, and suppressing a whole parser's figure
+// to guard against a producer that does not exist is the worse trade. A third parser that
+// reports cache writes and forgets the bit would read high; this comment is the warning.
 func cacheHitPct(t usage.Counts) (float64, bool) {
-	const promptKinds = usage.KindInput | usage.KindCacheRead | usage.KindCacheWrite
+	const promptKinds = usage.KindInput | usage.KindCacheRead
 	if t.PresentKinds&promptKinds != promptKinds {
 		return 0, false
 	}
 	prompt := t.InputTokens + t.CacheReadTokens + t.CacheWriteTokens
+	// 0/0 is NaN, and "cache NaN%" is the one output worse than no figure. Reachable: a
+	// response can report the kinds and then carry zero counters.
 	if prompt <= 0 {
 		return 0, false
 	}
 	return float64(t.CacheReadTokens) / float64(prompt) * 100, true
+}
+
+// applyAges sets the one staleness reading on the line, from the OLDER of the two poll chains.
+//
+// Read from the clock here rather than recorded on a snapshot because staleness is a property of
+// NOW, not of the reply: a figure fetched once and rendered for ten minutes gets older every
+// frame.
+//
+// THE OLDER OF THE TWO, which is the whole point — see spendStaleAfter. A chain that has never
+// answered is skipped rather than treated as infinitely old: today is unavailable on a proxy
+// with no ledger, and reporting that absence as staleness would put a permanent age on every
+// Kubernetes deployment's strip.
+func (m *model) applyAges(out *spendSummary) {
+	var oldest time.Duration
+	for _, at := range []time.Time{m.spend.lastFetch, m.spend.todayLastFetch} {
+		if at.IsZero() {
+			continue
+		}
+		if age := time.Since(at); age > oldest {
+			oldest = age
+		}
+	}
+	if oldest > spendStaleAfter {
+		out.Age, out.Stale = oldest, true
+	}
 }
 
 // sessionCost returns what one session cost over the strip's window.
@@ -734,7 +782,7 @@ func (m *model) applySpendTodayLoaded(msg spendTodayLoadedMsg) {
 	if msg.req != m.spend.todayReqSeq {
 		return
 	}
-	m.spend.todaySnap, m.spend.todayErr = msg.snap, msg.err
+	m.spend.todaySnap, m.spend.todayErr, m.spend.todayLastFetch = msg.snap, msg.err, time.Now()
 }
 
 // spendTodayTick schedules the next today poll for the given generation.
