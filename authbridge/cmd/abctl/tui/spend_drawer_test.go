@@ -311,26 +311,73 @@ func TestPaneView_DrawsTheDrawerUnderTheStripAndKeepsTheBody(t *testing.T) {
 // spendDrawerMinHeight the drawer must not draw AND must not reserve, and the floor itself is
 // where an off-by-one would show.
 func TestPaneView_FitsTheTerminalWithTheDrawerOpen(t *testing.T) {
-	for _, h := range []int{spendDrawerMinHeight - 1, spendDrawerMinHeight, 40, 60} {
-		for _, open := range []bool{false, true} {
-			m := &model{width: 160, height: h, endpoint: "http://x"}
-			m.pane = paneSessions
-			m.sessionsTbl = newSessionsTable()
-			m.spend.snap = drawerSnap()
-			m.spend.expanded = open
-			m.layout()
+	// THE SNAPSHOT VARIES TOO, and its absence is the case the first version could not see: it
+	// only ever set drawerSnap(), so "the renderer pads a nil snapshot" was covered while "the
+	// VIEW fills its reservation for one" was not — which reads as coverage. Before the first poll
+	// answers renderSpendStrip returns "" on purpose, and the reservations are height-gated, so
+	// nothing filled them and the footer sat six rows up.
+	for _, snap := range []*usage.Snapshot{drawerSnap(), nil} {
+		for _, h := range []int{spendDrawerMinHeight - 1, spendDrawerMinHeight, 40, 60} {
+			for _, open := range []bool{false, true} {
+				m := &model{width: 160, height: h, endpoint: "http://x"}
+				m.pane = paneSessions
+				m.sessionsTbl = newSessionsTable()
+				m.spend.snap = snap
+				m.spend.expanded = open
+				m.layout()
 
-			lines := strings.Count(m.paneView(), "\n") + 1
-			// EXACTLY the terminal height, not merely within it. "> height" is blind to the
-			// other direction, and that direction shipped: layout() reserves spendDrawerLines
-			// unconditionally while the drawer emitted one line per row it happened to have, so
-			// a deployment using one model left the footer three rows above the bottom and a
-			// fresh session six. Both are the footer in the wrong place.
-			if lines != m.height {
-				t.Errorf("height %d, drawer open=%v: the view is %d lines (%+d) — the footer is "+
-					"not at the bottom of the terminal", h, open, lines, lines-m.height)
+				lines := strings.Count(m.paneView(), "\n") + 1
+				// EXACTLY the terminal height, not merely within it. "> height" is blind to the
+				// other direction, and that direction shipped twice: the reservation is
+				// unconditional while the render emitted only what it had, so one model left the
+				// footer three rows above the bottom and no snapshot at all left it six.
+				if lines != m.height {
+					t.Errorf("height %d, open=%v, snapshot=%v: the view is %d lines (%+d) — the "+
+						"footer is not at the bottom of the terminal",
+						h, open, snap != nil, lines, lines-m.height)
+				}
 			}
 		}
+	}
+}
+
+// The hint line describes the DATA, not the next request. m.spend.axis() and .window() are what
+// the next poll will ask for, so reading them at render time repainted the label the instant `a`
+// or `w` was pressed — one poll ahead of rows still grouped and spanned the old way.
+//
+// The strip already follows this rule for its window figure ("print the window the SERVER
+// reported"), and a label describing something other than the figures beside it is the mislabel
+// the whole surface is written against.
+func TestDrawerLabels_DescribeTheSnapshotNotTheNextRequest(t *testing.T) {
+	m := &model{width: 200, height: 60}
+	m.pane = paneSessions
+	// The snapshot in hand was grouped by model over an hour.
+	m.spend.snap = drawerSnap()
+	m.spend.snap.Window = "1h0m0s"
+	m.spend.snap.Group = usage.GroupModel
+
+	// The operator presses `a` and `w`: the NEXT poll will ask for endpoint over 6h.
+	m.spend.groupIdx, m.spend.windowStep = 1, 1
+	if m.spend.axis() == usage.GroupModel {
+		t.Fatal("setup: the requested axis did not move")
+	}
+
+	axis, window := m.drawerLabels()
+	if axis != usage.GroupModel {
+		t.Errorf("axis label = %q while the rows on screen are grouped by %q: the label leads the "+
+			"data by one poll", axis, usage.GroupModel)
+	}
+	if window != "1h" {
+		t.Errorf("window label = %q, want 1h — the span the answer covers, not the one queued",
+			window)
+	}
+
+	// With no snapshot there is nothing to describe, so the requested values are the honest
+	// fallback: a blank axis would read as a rendering fault.
+	m.spend.snap = nil
+	if axis, window := m.drawerLabels(); axis == "" || window == "" {
+		t.Errorf("labels = %q/%q with no snapshot; want the requested values rather than blanks",
+			axis, window)
 	}
 }
 

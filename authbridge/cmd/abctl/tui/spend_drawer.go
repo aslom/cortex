@@ -276,6 +276,39 @@ func plainFigures(ss ...string) []stripFigure {
 	return out
 }
 
+// drawerLabels are the axis and span the drawer's hint line reports.
+//
+// FROM THE SNAPSHOT, not from what was last requested. m.spend.axis() and .window() are what the
+// NEXT poll will ask for, so reading them at render time repainted the label the instant `a` or
+// `w` was pressed — one poll ahead of the rows underneath it, which were still grouped and spanned
+// the old way. A label that describes something other than the data beside it is the mislabel this
+// whole surface is written against, and the strip already follows the rule: print the window the
+// SERVER reported, never the one requested.
+//
+// The exposure was one poll, not indefinite — applySpendLoaded stores msg.snap on success and nil
+// on error, so a failed fetch clears the snapshot rather than leaving a stale one — and one frame
+// of a wrong label is still a wrong label.
+//
+// FALLING BACK to the requested values when the snapshot cannot say: no snapshot yet, or a server
+// that echoed no group. The alternative is a hint line with a blank axis, which reads as a
+// rendering fault rather than as an answer in flight.
+func (m *model) drawerLabels() (usage.Group, string) {
+	axis, window := m.spend.axis(), formatWindowLabel(m.spend.window())
+	snap := m.spend.snap
+	if snap == nil {
+		return axis, window
+	}
+	if snap.Group != "" {
+		axis = snap.Group
+	}
+	// The strip's own label, derived from the answer by spendSummary through the same parse; empty
+	// when the server sent a span this client cannot parse into a duration.
+	if l := m.spendSummary().WindowLabel; l != "" {
+		window = l
+	}
+	return axis, window
+}
+
 // drawerRow is one rendered series line.
 type drawerRow struct {
 	label  string
