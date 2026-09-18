@@ -160,6 +160,7 @@ func New(addr string, store *session.Store, opts ...Option) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/sessions", s.handleList)
 	mux.HandleFunc("GET /v1/sessions/{id}", s.handleGet)
+	mux.HandleFunc("GET /v1/sessions/{id}/events/{seq}", s.handleGetEvent)
 	mux.HandleFunc("GET /v1/events", s.handleStream)
 	mux.HandleFunc("GET /v1/pipeline", s.handlePipeline)
 	mux.HandleFunc("GET /v1/plugins", s.handlePluginCatalog)
@@ -199,7 +200,10 @@ func (s *Server) Shutdown(ctx context.Context) error { return s.server.Shutdown(
 const indexBody = `Cortex / AuthBridge Session API
 
   GET /v1/sessions        list active sessions
-  GET /v1/sessions/{id}   recent events (?limit=N max 2000, ?before=<seq>)
+  GET /v1/sessions/{id}   recent events (?limit=N max 2000, ?before=<seq>,
+                          ?view=summary omits bodies, ~200x smaller)
+  GET /v1/sessions/{id}/events/{seq}
+                          one event in full, payloads included
   GET /v1/events          SSE stream of new events (?session=<id> to filter)
   GET /v1/pipeline        active plugin pipeline
   GET /v1/plugins         catalog of registered plugins
@@ -407,8 +411,57 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	// Streamed per event rather than Encoded whole: see writeSessionView for the heap
 	// this one response used to cost.
-	if err := writeSessionView(w, view); err != nil {
+	if err := writeSessionViewProjected(w, view, eventProjection(r)); err != nil {
 		slog.Debug("sessionapi: get encode failed", "error", err, "sessionID", id)
+	}
+}
+
+// summaryView is the only recognised value of the `view` query parameter.
+const summaryView = "summary"
+
+// eventProjection returns the per-event transform the request asked for, or nil
+// for the full events.
+//
+// Exact match, and anything else — absent, empty, misspelled, differently cased —
+// means full. This is the version-skew direction that matters: abctl and the proxy
+// install separately, so a NEW abctl asking an OLD proxy for `view=summary` gets
+// full events from a server that never heard of the parameter. Making an
+// unrecognised value fall back the same way means the two skew directions behave
+// identically, and neither returns a silently emptied timeline.
+func eventProjection(r *http.Request) func(*pipeline.SessionEvent) *pipeline.SessionEvent {
+	if r.URL.Query().Get("view") == summaryView {
+		return summarizeEvent
+	}
+	return nil
+}
+
+// handleGetEvent serves one event in full, by sequence number.
+//
+// The other half of `view=summary`: once the timeline stops carrying message
+// bodies, the detail pane needs a way to get them for the row under the cursor.
+//
+// Served from ViewPage rather than a new store method — `before = seq+1, limit 1`
+// is the newest event below seq+1, which is seq itself when it is still held. The
+// returned Seq is then CHECKED, because that query answers with a neighbour when
+// seq has been evicted, and a detail pane confidently showing the wrong event is
+// worse than one reporting the event is gone.
+func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	seq, err := strconv.ParseUint(r.PathValue("seq"), 10, 64)
+	if err != nil || seq == 0 {
+		// Seq numbering starts at 1, so 0 is never a real event and an
+		// unparseable value is not either. Both are "no such event".
+		http.NotFound(w, r)
+		return
+	}
+	view := s.store.ViewPage(id, seq+1, 1)
+	if view == nil || len(view.Events) != 1 || view.Events[0].Seq != seq {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(&view.Events[0]); err != nil {
+		slog.Debug("sessionapi: event encode failed", "error", err, "sessionID", id, "seq", seq)
 	}
 }
 

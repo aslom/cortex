@@ -53,6 +53,26 @@ const snapshotWriteBuffer = 32 << 10
 // first place. It is written down because it is a real difference in failure behavior and
 // the rest of this file accounts for its tradeoffs.
 func writeSessionView(w io.Writer, view *pipeline.SessionView) error {
+	return writeSessionViewProjected(w, view, nil)
+}
+
+// writeSessionViewProjected is writeSessionView with an optional per-event
+// transform applied on the way out.
+//
+// A nil project is the identity, and that is the path the byte-compatibility test
+// above pins — so the contract is asserted against exactly the code the full
+// response still uses. Non-nil is `view=summary` (see summarizeEvent): the
+// projected copy is what gets marshalled, and the stored event is left alone.
+//
+// Projected per event rather than over the whole slice first, for the same reason
+// this function exists at all — a projected copy of every event would be a second
+// allocation proportional to the response, which is the cost the streaming was
+// added to remove.
+func writeSessionViewProjected(
+	w io.Writer,
+	view *pipeline.SessionView,
+	project func(*pipeline.SessionEvent) *pipeline.SessionEvent,
+) error {
 	id, err := json.Marshal(view.ID)
 	if err != nil {
 		return err
@@ -79,7 +99,11 @@ func writeSessionView(w io.Writer, view *pipeline.SessionView) error {
 			// Marshal per event, not Encode: Encode appends a newline to each value,
 			// which would land inside the array and break byte-compatibility. The peak
 			// buffer is this one event.
-			b, err := json.Marshal(&view.Events[i])
+			ev := &view.Events[i]
+			if project != nil {
+				ev = project(ev)
+			}
+			b, err := json.Marshal(ev)
 			if err != nil {
 				// Flush before returning, deliberately. The document is already
 				// truncated either way, so the choice is only whether the client's cut
