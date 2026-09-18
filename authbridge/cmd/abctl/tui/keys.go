@@ -1040,7 +1040,10 @@ func (m *model) layout() {
 	// than an 80-column terminal, wrapping every row. Applied from the constructors' own
 	// definitions each time rather than to the live columns, so widening the terminal back up
 	// restores what a narrower one took away.
-	m.sessionsTbl.SetColumns(fitTableColumns(sessionsColumns(), m.width))
+	// sessionsColumnsFor, not sessionsColumns: the money columns are dropped outright on a
+	// terminal too narrow to hold them without truncating TOKENS. rebuildSessionsTable makes
+	// the same call so the rows match.
+	m.sessionsTbl.SetColumns(fitTableColumns(sessionsColumnsFor(m.width), m.width))
 	m.pipelineTbl.SetColumns(fitTableColumns(pipelineColumns(), m.width))
 	m.catalogTbl.SetColumns(fitTableColumns(catalogColumns(), m.width))
 

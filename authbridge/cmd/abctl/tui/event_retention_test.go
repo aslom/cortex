@@ -86,8 +86,12 @@ func TestSessionsPicker_ListsCachedOnlySessions(t *testing.T) {
 	if row[2] != "3" {
 		t.Errorf("row event count = %q, want %q", row[2], "3")
 	}
-	if row[4] != "cached" {
-		t.Errorf("row not marked as cached-only: %v", row)
+	// The LAST cell, not a fixed index. ACTIVE is the final column and the marker rides
+	// there; addressing it by number broke the moment COST and SAVED were inserted ahead of
+	// it, reporting a missing marker for a row that had one. What this test is about is the
+	// marker, not the column count.
+	if last := row[len(row)-1]; last != "cached" {
+		t.Errorf("row not marked as cached-only (last cell %q): %v", last, row)
 	}
 }
 
