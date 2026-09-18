@@ -81,6 +81,7 @@ func (s FileStore) Describe() Target {
 		// The path, not a tool: there is no kubectl here, and the operator can
 		// open the file directly.
 		OutOfSyncHint: "check " + s.Path,
+		PollDeadline:  LocalPollDeadline,
 	}
 }
 
@@ -145,15 +146,22 @@ func (s FileStore) Apply(ctx context.Context, payload []byte) (time.Time, error)
 	// sibling of the REAL file, which the atomicity argument needs: a rename
 	// across filesystems fails EXDEV, and an unresolved link can point anywhere.
 	//
-	// This requires the reloader to watch the resolved file's directory too,
-	// which it now does (authlib/reloader.Start). Without that, only macOS
-	// worked: kqueue watches the resolved file and so reports the replacement
-	// against the link, while Linux inotify — which reports directory-entry
-	// changes — sees nothing in the link's directory, no reload fires, and the
-	// editor's poll times out and ROLLS A CORRECT EDIT BACK two minutes later.
-	// Deterministic on the majority platform, and self-reverting rather than
-	// merely unobserved, which is why the fix went into the watcher rather than
-	// being written off here as a platform caveat.
+	// This requires the reloader to watch the resolved file's directory too.
+	// Without that, only macOS worked: kqueue watches the resolved file and so
+	// reports the replacement against the link, while Linux inotify — which
+	// reports directory-entry changes — sees nothing in the link's directory,
+	// no reload fires, and the editor's poll times out and ROLLS A CORRECT EDIT
+	// BACK. Deterministic on the majority platform, and self-reverting rather
+	// than merely unobserved, which is why the fix went into the watcher rather
+	// than being written off here as a platform caveat.
+	//
+	// VERSION DEPENDENCY, and it is a real one: that watcher fix ships in
+	// authbridge-proxy, which installs separately from abctl and is long-lived.
+	// A proxy started before it was added still has the old single watch, so a
+	// symlinked config on Linux behaves as described above no matter how new
+	// abctl is. `abctl service restart` after upgrading the proxy is what closes
+	// it. abctl cannot detect this — nothing in /config or /reload/status
+	// reports the watcher's shape — so it is documented rather than guarded.
 	target := resolvedPath(s.Path)
 	dir := filepath.Dir(target)
 

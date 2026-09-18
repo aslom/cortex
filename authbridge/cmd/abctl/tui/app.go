@@ -1215,7 +1215,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editState.phase = editPhaseWaiting
 		return m, withGen(m.editState.generation, edit.PollCmd(
 			m.ctx, m.editState.statusURL, msg.ApplyTime,
-			describeTarget(m.editState.store).UnreachableHint))
+			describeTarget(m.editState.store)))
 
 	case genPolledMsg:
 		// Drop stale (different gen), fully-aborted (phase=Done), or
@@ -1253,9 +1253,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// change detected" path is a future option.
 			reason := msg.Result.LastError
 			if msg.Result.Status == edit.PollTimeout {
-				// The real constant, not a literal: a hardcoded "120s" would
-				// start lying the moment edit.PollDeadline moved.
-				reason = "reload not observed in " + edit.PollDeadline.String()
+				// The deadline this store actually waited, not a literal: a
+				// hardcoded "120s" was already wrong for a local edit, which
+				// gives up after LocalPollDeadline. Same Target PollCmd was
+				// given, so the number reported is the number waited.
+				reason = "reload not observed in " +
+					describeTarget(m.editState.store).Deadline().String()
 			}
 			origManifest, mErr := m.editState.store.Build(
 				m.editState.fetched,

@@ -69,7 +69,7 @@ func TestPollCmd_Success(t *testing.T) {
 		_, _ = w.Write([]byte(`{"last_success":"` + ts + `"}`))
 	}))
 	defer srv.Close()
-	cmd := PollCmd(context.Background(), srv.URL, applyTime, "")
+	cmd := PollCmd(context.Background(), srv.URL, applyTime, Target{})
 	msg := cmd().(PolledMsg)
 	if msg.Result.Status != PollSuccess {
 		t.Fatalf("status: %v", msg.Result.Status)

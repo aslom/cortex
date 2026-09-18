@@ -15,6 +15,34 @@ func TestEditOverlayRender_Fetching(t *testing.T) {
 	}
 }
 
+// One 120s ceiling sized for a kubelet ConfigMap sync made a local edit — which
+// lands in about a second — take two minutes to admit it had failed, precisely
+// when something was already wrong. A ceiling, not a wait: the poll returns as
+// soon as last_success moves, so only the failure path is affected.
+func TestTarget_DeadlineIsPerStore(t *testing.T) {
+	cluster := edit.ConfigMapStore{}.Describe().Deadline()
+	local := edit.FileStore{Path: "/x/config.yaml"}.Describe().Deadline()
+
+	if cluster != edit.ClusterPollDeadline {
+		t.Errorf("cluster deadline = %v, want %v", cluster, edit.ClusterPollDeadline)
+	}
+	if local != edit.LocalPollDeadline {
+		t.Errorf("local deadline = %v, want %v", local, edit.LocalPollDeadline)
+	}
+	if local >= cluster {
+		t.Errorf("local deadline %v should be shorter than the cluster's %v", local, cluster)
+	}
+	// A zero Target must not mean "give up immediately" — that would report a
+	// timeout that never happened. It floors to the conservative ceiling.
+	if got := (edit.Target{}).Deadline(); got != edit.ClusterPollDeadline {
+		t.Errorf("zero Target deadline = %v, want the cluster ceiling %v", got, edit.ClusterPollDeadline)
+	}
+	// And the nil-store path the overlay uses gets the same floor.
+	if got := describeTarget(nil).Deadline(); got != edit.ClusterPollDeadline {
+		t.Errorf("nil-store deadline = %v, want the cluster ceiling", got)
+	}
+}
+
 // The rollback messages are built in the genPolledMsg / genRolledBackMsg
 // handlers, not the overlay renderer, so they were missed the first time and
 // went on sending a local operator to kubectl about a ConfigMap that does not

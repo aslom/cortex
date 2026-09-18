@@ -30,6 +30,15 @@ type Target struct {
 	// to go look at something themselves, so it names what — a tool for the
 	// cluster, the actual file path locally.
 	OutOfSyncHint string
+	// PollDeadline bounds how long to wait for the reload before declaring it
+	// stuck and rolling back. A ceiling, not an expectation: the poll returns
+	// the instant last_success moves, so this only sets how long a FAILED
+	// reload takes to be called.
+	//
+	// Per-store because one 120s constant sized for a kubelet ConfigMap sync
+	// made a local edit — which lands in about a second — take two minutes to
+	// admit it had failed, exactly when something was already wrong.
+	PollDeadline time.Duration
 }
 
 // Store is where a pipeline lives: the editor fetches the runtime YAML from
@@ -106,6 +115,7 @@ func (s ConfigMapStore) Describe() Target {
 		WaitHint:        "this can take up to 120s while kubelet syncs the ConfigMap",
 		UnreachableHint: "port-forward dropped or framework down?",
 		OutOfSyncHint:   "check kubectl",
+		PollDeadline:    ClusterPollDeadline,
 	}
 }
 

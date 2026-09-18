@@ -635,6 +635,14 @@ silently kept the old pipeline, with nothing in `git status` to show it.
 Resolving also keeps the temporary file a sibling of the real one, which the
 atomicity guarantee needs: a rename across filesystems fails `EXDEV`.
 
+That relies on the proxy watching the resolved file's directory, which the
+reloader does — but the reloader ships in `authbridge-proxy`, and that installs
+separately from abctl. **A proxy started before that change still has the old
+single watch**, so on Linux a symlinked config will not observe the write: the
+poll times out and rolls the edit back. Run `abctl service restart` after
+upgrading the proxy. abctl cannot detect the mismatch — nothing the proxy
+exposes describes its watcher — so this is a note rather than a check.
+
 **A concurrent write aborts the apply.** This file has other writers — `abctl
 tools scan --write`, `abctl config migrate`, a second abctl session — and
 `$EDITOR` can be open for minutes. The apply re-reads the file first and refuses
@@ -670,9 +678,9 @@ cannot finish.
 
 After save, abctl runs the same Requires/RequiresAny/After/Claims
 checks the framework runs at reload-time, against the cached
-`/v1/plugins` catalog. Issues land as a red banner above the diff
-in ~50ms instead of waiting through the kubelet sync (~60s) to
-discover them at hot-reload:
+`/v1/plugins` catalog. Issues land as a red banner above the diff in ~50ms
+instead of at hot-reload — which means after the kubelet sync (~60s) in a
+cluster, or about a second later locally:
 
 ```text
 ⚠ 1 validation issue — framework reload will reject:
@@ -774,10 +782,12 @@ The poller terminates with one of:
   and the local proxy's `stats.address` otherwise, so the message asks the
   question that fits: a dropped port-forward or crashed framework in the cluster,
   or simply whether the local proxy is still running.
-- **Timeout** — none of the above within 120s. Triggers an auto-rollback so the
-  stored config — the ConfigMap, or the local file — doesn't drift from the
-  running pipeline. The ceiling is the same in both; a local reload just
-  reaches a verdict long before it.
+- **Timeout** — none of the above within the target's deadline: 120s for a
+  ConfigMap, sized for the kubelet sync, and 30s for a local file, which lands
+  in about a second. Triggers an auto-rollback so the stored config doesn't
+  drift from the running pipeline. A ceiling, not a wait — the poll returns the
+  moment `last_success` moves, so this only bounds how long a *failed* reload
+  takes to be declared.
 
 ## Plugin dependencies
 

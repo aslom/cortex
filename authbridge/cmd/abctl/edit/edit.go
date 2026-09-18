@@ -173,27 +173,51 @@ type PolledMsg struct {
 	Result PollResult
 }
 
-// PollDeadline bounds how long PollCmd waits for a reload to reach a terminal
-// state. Picked to outlast the worst-case kubelet ConfigMap sync (~60s) plus
-// the framework's drain window (30s) plus jitter, while still surfacing a stuck
-// reload in a reasonable time. A local file reload lands far sooner, but the
-// deadline is a ceiling, not a wait.
+// ClusterPollDeadline bounds a ConfigMap edit's wait: the worst-case kubelet
+// sync (~60s) plus the framework's drain window (30s) plus jitter.
 //
-// Exported so the "reload not observed in …" message can name the real value.
-// It was a hardcoded "120s" in the TUI, which would have quietly started lying
-// the moment this constant moved.
-const PollDeadline = 120 * time.Second
+// The drain does NOT actually delay the verdict — the reloader records success
+// synchronously right after the Holder swap and drains the old pipelines in a
+// goroutine — so this is generous rather than tight. Kept at 120s regardless,
+// because for a cluster the kubelet sync is the real variable and it is not
+// worth shaving.
+const ClusterPollDeadline = 120 * time.Second
+
+// LocalPollDeadline bounds a local file edit's wait. The proxy is already
+// watching the file, so the path is fsnotify → a 250ms debounce → build and
+// start the pipelines → swap → record success, and it lands in about a second.
+//
+// 30s is ~30x that, which leaves generous room for plugin Start doing real work
+// (a JWKS fetch, say) while not making a failure take two minutes to report.
+// Only the failure path is affected: the poll returns the moment last_success
+// advances, so a healthy reload never waits on this at all.
+const LocalPollDeadline = 30 * time.Second
 
 // PollCmd returns a tea.Cmd that polls /reload/status until the framework
-// reload completes (success or failure) or PollDeadline elapses. Emits
-// PolledMsg. The deadline is enforced internally; the caller's ctx is
+// reload completes (success or failure) or the target's deadline elapses.
+// Emits PolledMsg. The deadline is enforced internally; the caller's ctx is
 // only used for parent-cancellation (e.g. process shutdown).
 //
-// unreachableHint comes from the Store's Target — see PollUntilReloaded.
-func PollCmd(ctx context.Context, statusURL string, applyTime time.Time, unreachableHint string) tea.Cmd {
+// Takes the whole Target rather than a growing list of scalars — the deadline
+// and the unreachable wording both come from it, and passing it entire keeps
+// them from being sourced from different stores.
+func PollCmd(ctx context.Context, statusURL string, applyTime time.Time, tg Target) tea.Cmd {
 	return func() tea.Msg {
-		c, cancel := context.WithTimeout(ctx, PollDeadline)
+		c, cancel := context.WithTimeout(ctx, tg.Deadline())
 		defer cancel()
-		return PolledMsg{Result: PollUntilReloaded(c, statusURL, applyTime, unreachableHint)}
+		return PolledMsg{Result: PollUntilReloaded(c, statusURL, applyTime, tg.UnreachableHint)}
 	}
+}
+
+// Deadline is PollDeadline with a floor, so a zero-valued Target (a test, or a
+// nil store) waits the conservative cluster ceiling rather than returning
+// instantly and reporting a timeout that never happened.
+//
+// Exported because the TUI reports the value it waited in the timeout message,
+// and that has to be the same number PollCmd used.
+func (t Target) Deadline() time.Duration {
+	if t.PollDeadline <= 0 {
+		return ClusterPollDeadline
+	}
+	return t.PollDeadline
 }

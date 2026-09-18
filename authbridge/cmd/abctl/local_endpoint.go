@@ -54,23 +54,61 @@ func localCortexConfig() (*config.Config, string, error) {
 
 // localEditTargets returns the config file a local pipeline edit writes and the
 // base URL whose /reload/status confirms the proxy picked it up. Both empty when
-// this machine has no usable local Cortex config.
+// this machine has no usable local Cortex config, or when nothing answers where
+// the config says the stats server is.
 //
-// The stats address comes from the same file the edit rewrites, which is the
-// only bootstrap available — asking the running proxy where it serves
-// /reload/status would require already knowing that address. A stale value here
-// is not silently wrong: the poll's unreachable threshold fails it fast and
-// visibly, rather than reporting success for an edit nothing reloaded.
+// The address has to be bootstrapped from the file — asking the running proxy
+// where it serves /reload/status would require already knowing that address —
+// but the value is then PROVEN by probing it, for a reason worth spelling out.
+// config.Load defaults an absent stats.address to ":9093" (an in-cluster
+// default), while a local install serves 47602. So a hand-written or
+// pre-pinning config with no stats: block yields http://localhost:9093, where
+// nothing is listening. That is not a harmless wrong guess: the poll would take
+// 5 transport errors to a PollFailure, and RollbackCmd would then REVERT an
+// edit that had already applied and hot-reloaded correctly, while reporting "is
+// the local proxy still running?" about a perfectly healthy proxy.
+//
+// Returning empty instead means `e` declines with a message about there being
+// no local target, which is a far better outcome than undoing the operator's
+// work and blaming the proxy. Mirrors localSessionAPIUp, which probes for the
+// same class of reason.
 func localEditTargets() (configPath, statsURL string) {
 	cfg, path, err := localCortexConfig()
 	if err != nil {
 		return "", ""
 	}
 	statsURL = dialURL(cfg.Stats.StatsAddress)
-	if statsURL == "" {
+	if statsURL == "" || !localStatsUp(statsURL) {
 		return "", ""
 	}
 	return path, statsURL
+}
+
+// localStatsUp reports whether a reload-status endpoint is answering at base.
+//
+// Probes /reload/status specifically, not just the port: that is the endpoint
+// the edit flow depends on, and it is absent unless the stats server was built
+// WithReloadStatus. A 200 from something else holding the port would be just as
+// wrong as nothing at all.
+func localStatsUp(base string) bool {
+	c := &http.Client{Timeout: localProbeTimeout}
+	resp, err := c.Get(base + "/reload/status") //nolint:noctx // bounded by Timeout
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	// Decode it: the poll parses this same shape, so a body it cannot read is a
+	// dead end however healthy the status code looked.
+	var probe struct {
+		ReloadsOK *int64 `json:"reloads_ok"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&probe); err != nil {
+		return false
+	}
+	return probe.ReloadsOK != nil
 }
 
 // dialURL turns a bind address from the config into a URL a client can connect
