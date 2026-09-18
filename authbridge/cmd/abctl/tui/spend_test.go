@@ -984,3 +984,50 @@ func TestSessionCost_ANegativeSessionTotalIsUnpriced(t *testing.T) {
 		t.Errorf("usd = %v, want 0", usd)
 	}
 }
+
+// "cache 0%" and "nobody reported caching" are different answers, and only one of them is
+// a claim about the traffic. usage.Counts.PresentKinds is what tells them apart, and this
+// is the case where testing the denominator alone is not enough.
+//
+// A provider that reports input tokens and no cache counters leaves a NON-ZERO prompt with
+// zero cache reads, so the arithmetic succeeds and yields 0% — a statement that this
+// traffic missed the cache every time, made from the fact that nothing measured it. For an
+// agent behind a prompt cache that is the most misleading figure the strip could print,
+// because the true value is usually above 80%.
+func TestCacheHitPct_AnUnreportedBreakdownIsNotAZeroHitRate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		kinds uint8
+		ok    bool
+	}{
+		// The realistic gateway: input counted, caching not reported at all.
+		{name: "input only", kinds: kindInput},
+		// The mirror: cache reads reported with no input, so the denominator is short by
+		// an unreported term and the ratio would read HIGH rather than low.
+		{name: "cache-read only", kinds: kindCacheRead},
+		// Nothing reported — a gateway that sends only total_tokens.
+		{name: "no kinds", kinds: 0},
+		// Both present is the only case with a denominator worth dividing by.
+		{name: "input and cache-read", kinds: kindInput | kindCacheRead, ok: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Counters deliberately populated in every case, so the ONLY thing that varies
+			// is what the provider said it was reporting. A test whose fixtures zeroed the
+			// tokens would pass on the `prompt <= 0` guard and prove nothing about kinds.
+			got, ok := cacheHitPct(usage.Counts{
+				Tokens:          9_890_000,
+				InputTokens:     1_000_000,
+				CacheReadTokens: 8_100_000,
+				PresentKinds:    tc.kinds,
+			})
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v (kinds = %05b): a ratio is only meaningful when the "+
+					"provider reported both terms", ok, tc.ok, tc.kinds)
+			}
+			if !ok && got != 0 {
+				t.Errorf("pct = %v alongside ok=false; a suppressed figure must carry no value "+
+					"for a caller to render by mistake", got)
+			}
+		})
+	}
+}
