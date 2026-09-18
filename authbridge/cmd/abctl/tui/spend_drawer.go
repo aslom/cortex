@@ -97,13 +97,9 @@ func (s *spendState) window() time.Duration {
 	return spendDrawerWindows[s.windowStepIndex()]
 }
 
-// windowStepIndex resolves windowStep to a slice index, wrapping and flooring a negative.
+// windowStepIndex resolves windowStep to a slice index, through the same wrap axis() uses.
 func (s *spendState) windowStepIndex() int {
-	i := (spendDrawerWindowDefault + s.windowStep) % len(spendDrawerWindows)
-	if i < 0 {
-		i += len(spendDrawerWindows)
-	}
-	return i
+	return wrapIndex(spendDrawerWindowDefault+s.windowStep, len(spendDrawerWindows))
 }
 
 // axis is the breakdown the strip asks the server to fold for.
@@ -113,10 +109,26 @@ func (s *spendState) windowStepIndex() int {
 // poll interval. It costs nothing to carry: usage.Snapshot sums Totals from the raw buckets
 // BEFORE folding, so every figure on the strip is byte-identical under any axis.
 func (s *spendState) axis() usage.Group {
-	if s.groupIdx < 0 || s.groupIdx >= len(spendDrawerAxes) {
-		return usage.GroupModel
+	return spendDrawerAxes[wrapIndex(s.groupIdx, len(spendDrawerAxes))]
+}
+
+// wrapIndex reduces a monotonically incremented counter to a slice index.
+//
+// WRAPS RATHER THAN CLAMPS, which is the difference that matters. axis() used to return
+// GroupModel for anything out of range, so an index that ran past the end collapsed to the FIRST
+// axis and stayed there — indistinguishable from a correct wrap on the step right after the end,
+// and wrong on every step after that. Both cyclers keep the counter in range anyway, so this is
+// defence in depth: it means a future change to either one cannot produce a resolution that
+// silently answers "model" forever.
+//
+// Negative is floored into range for the same reason: a resolution that cannot be out of range
+// has no silent failure to hide.
+func wrapIndex(i, n int) int {
+	i %= n
+	if i < 0 {
+		i += n
 	}
-	return spendDrawerAxes[s.groupIdx]
+	return i
 }
 
 // spendDrawerHost reports whether the current pane can host the drawer, and says why not when

@@ -1,11 +1,11 @@
 package tui
 
 import (
-	"strings"
-	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"strings"
+	"testing"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
@@ -181,34 +181,42 @@ func TestSpendState_ZeroValueRequestsThePreDrawerDefaults(t *testing.T) {
 // would trap the user away from it.
 func TestSpendDrawer_CyclesWrapThroughEveryDistinctStop(t *testing.T) {
 	// THROUGH THE REAL CYCLERS, not a copy of their arithmetic. Re-implementing
-	// `(step + 1) % len(...)` inline left this green when the modulus was dropped from either
-	// cycler — the test asserted that its own expression wraps. fetchSpend returns nil on a nil
-	// client, so the returned tea.Cmd can be discarded here.
+	// `(step + 1) % len(...)` inline meant the test asserted that its own expression wraps.
+	// fetchSpend returns nil on a nil client, so the returned tea.Cmd can be discarded here.
+	//
+	// TWO FULL LAPS, and the exact sequence at each step. One lap is where this was blind:
+	// with the counter incremented without bound, a resolution that CLAMPED out-of-range to the
+	// first entry gave the right answer on the step immediately after the end — the only step a
+	// single lap checks — and the wrong one on every step after that. Both resolutions wrap now
+	// (see wrapIndex), and two laps is what proves it.
+	// The expected sequence WRITTEN OUT, not derived from wrapIndex — deriving it from the
+	// helper under test would make the assertion agree with whatever that helper does. It starts
+	// at the DEFAULT rather than at the slice's first entry, which is the point of windowStep
+	// being an offset: a fresh model requests the span the strip has always requested.
+	wantSpans := []time.Duration{spendWindow, 6 * time.Hour, 15 * time.Minute}
 	m := &model{}
-	seenSpans := map[time.Duration]bool{}
-	for range spendDrawerWindows {
-		seenSpans[m.spend.window()] = true
-		_ = m.cycleSpendWindow()
-	}
-	if len(seenSpans) != len(spendDrawerWindows) {
-		t.Errorf("the span cycle visited %d distinct spans, want %d", len(seenSpans),
-			len(spendDrawerWindows))
+	for lap := 0; lap < 2; lap++ {
+		for i, want := range wantSpans {
+			if got := m.spend.window(); got != want {
+				t.Errorf("lap %d step %d: window() = %v, want %v", lap, i, got, want)
+			}
+			_ = m.cycleSpendWindow()
+		}
 	}
 	if got := m.spend.window(); got != spendWindow {
-		t.Errorf("after a full cycle window() = %v, want back at %v", got, spendWindow)
+		t.Errorf("after two full laps window() = %v, want back at %v", got, spendWindow)
 	}
 
-	seenAxes := map[usage.Group]bool{}
-	for range spendDrawerAxes {
-		seenAxes[m.spend.axis()] = true
-		_ = m.cycleSpendAxis()
-	}
-	if len(seenAxes) != len(spendDrawerAxes) {
-		t.Errorf("the axis cycle visited %d distinct axes, want %d", len(seenAxes),
-			len(spendDrawerAxes))
+	for lap := 0; lap < 2; lap++ {
+		for i, want := range spendDrawerAxes {
+			if got := m.spend.axis(); got != want {
+				t.Errorf("lap %d step %d: axis() = %q, want %q", lap, i, got, want)
+			}
+			_ = m.cycleSpendAxis()
+		}
 	}
 	if got := m.spend.axis(); got != usage.GroupModel {
-		t.Errorf("after a full cycle axis() = %q, want back at %q", got, usage.GroupModel)
+		t.Errorf("after two full laps axis() = %q, want back at %q", got, usage.GroupModel)
 	}
 }
 
