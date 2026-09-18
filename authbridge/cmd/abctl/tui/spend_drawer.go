@@ -347,6 +347,17 @@ func renderSpendDrawer(snap *usage.Snapshot, axis usage.Group, windowLabel strin
 func drawerFigures(r drawerRow) []stripFigure {
 	figs := []stripFigure{{full: r.label, compact: r.label}}
 	switch {
+	case negativeCost(r.counts.CostMicros):
+		// AN IMPOSSIBLE FIGURE IS NOT A FIGURE, and this row is where that guard was missing.
+		// The gate below admits anything with PricedRequests > 0, so a series summing negative
+		// reached formatUSDCell and printed "$-5.0000" — a credit nobody issued, in a column of
+		// costs. Every other money surface in this package refuses it through this same
+		// predicate; the drawer is the newest one and the only one that did not inherit it.
+		//
+		// NO COVERAGE NOTE beside it, unlike the unpriced branch below: the gap may well be zero
+		// here — every request priced, and the sum still impossible — so coverage is not what is
+		// wrong and naming it would point a reader at the rate table.
+		figs = append(figs, plainFigure("cost unavailable"))
 	case r.counts.PricedRequests > 0 || r.counts.CostMicros > 0:
 		figs = append(figs, moneyFigure(float64(r.counts.CostMicros)/1e6, "",
 			gapOf(r.counts), r.counts.PriceableRequests, r.counts.IncompleteRequests, nil,
@@ -400,7 +411,7 @@ func gapOf(c usage.Counts) int64 {
 }
 
 // axisHint spells the axis cycle with the current one bracketed, so the line says both what
-// `g` will do and where it currently is.
+// `a` will do and where it currently is.
 func axisHint(axis usage.Group) string {
 	out := ""
 	for i, a := range spendDrawerAxes {

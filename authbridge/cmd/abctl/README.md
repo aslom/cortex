@@ -490,7 +490,7 @@ Layered on top of all of them:
 | `y` | detail | yank event JSON to `~/.cortex/abctl-events` (path stays until the next keypress) |
 | `g` / `G` | lists | jump to top / bottom. In the events timeline this also sets where the *next* session opens — see [Where a session opens](#where-a-session-opens) |
 | `u` | sessions, events, detail | open the usage charts (sessions: all sessions; events/detail: the selected session) |
-| `$` | any session view | expand the spend strip into a per-model breakdown, in place — the table stays on screen. Needs 26 rows; refuses on the pickers and on the usage pane, which is already a breakdown |
+| `$` | every pane except the two pickers and usage | expand the spend strip into a per-model breakdown, in place — the table stays on screen. Needs 26 rows; refuses on the two pickers (nothing is connected yet) and on the usage pane, which is already a breakdown with its own cycles |
 | `a` | while the breakdown is open | cycle the axis: model / endpoint / agent. Not `g`, which is the global "jump to top" |
 | `w` | while the breakdown is open | cycle the span: 15m / 1h / 6h |
 | `m` | usage | cycle metric: tokens / requests / errors / latency |

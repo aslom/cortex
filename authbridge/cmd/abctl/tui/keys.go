@@ -143,7 +143,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 
-	// The spend drawer's three keys, handled where `u` is and gated the same way: not
+	// The spend drawer's four keys, handled where `u` is and gated the same way: not
 	// while filtering (they are characters the user is typing), not under the column
 	// picker, not mid-edit.
 	//
@@ -181,7 +181,18 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// a user pressing esc is closing — and esc's other meanings (leave a pane, go
 			// back) are still one more press away, which is the behaviour every overlay in
 			// this package already has.
-			if m.spend.expanded {
+			//
+			// GATED ON WHAT IS ON SCREEN, not on the flag. m.spend.expanded survives a move to
+			// a pane that cannot host the drawer and a resize below its height floor, so gating
+			// on the flag swallowed esc for a drawer nobody could see: open it on Sessions,
+			// press `u`, press esc — and the Usage pane did not exit until a second press. That
+			// is the "a key that silently does nothing reads as a broken key" failure
+			// toggleSpendDrawer's own doc argues against, arriving through the other door.
+			//
+			// The flag is left ALONE when the drawer is off screen, deliberately: it is a
+			// strip expansion and the strip is global, so returning to a pane that can host it
+			// should find it as the operator left it.
+			if m.spendDrawerVisible() {
 				m.spend.expanded = false
 				return nil
 			}
