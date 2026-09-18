@@ -1007,8 +1007,14 @@ func TestCacheHitPct_AnUnreportedBreakdownIsNotAZeroHitRate(t *testing.T) {
 		{name: "cache-read only", kinds: usage.KindCacheRead},
 		// Nothing reported — a gateway that sends only total_tokens.
 		{name: "no kinds", kinds: 0},
-		// Both present is the only case with a denominator worth dividing by.
-		{name: "input and cache-read", kinds: usage.KindInput | usage.KindCacheRead, ok: true},
+		// THE MIRROR ONE LEVEL DOWN, and the case the table missed: input and cache-read
+		// reported, cache-write NOT. The arithmetic succeeds over a denominator short by an
+		// unreported term, so the hit rate reads HIGH — the same shape as the cache-read-only
+		// case above, one tier further in, and in the direction that flatters the deployment.
+		{name: "input and cache-read, no cache-write", kinds: usage.KindInput | usage.KindCacheRead},
+		// All three prompt tiers: the only case with a whole denominator to divide by.
+		{name: "every prompt tier", ok: true,
+			kinds: usage.KindInput | usage.KindCacheRead | usage.KindCacheWrite},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Counters deliberately populated in every case, so the ONLY thing that varies

@@ -460,11 +460,20 @@ func (m *model) spendSummary() spendSummary {
 // — "no prompt tokens" and "nothing reported them" — and only the flags can tell them
 // apart. See usage.Counts.PresentKinds, whose own doc is about exactly this ambiguity.
 //
-// Both bits are required. KindCacheRead alone would divide by a denominator nobody reported;
-// KindInput alone would report 0% for a gateway that reports input and not cache reads, which
-// is a claim about caching made from an absence of evidence.
+// ALL THREE PROMPT TIERS ARE REQUIRED, because the denominator is their SUM and a missing term
+// does not make the ratio approximate — it makes it too HIGH, in the direction that flatters the
+// deployment. KindCacheRead alone would divide by a denominator nobody reported; KindInput alone
+// would report 0% for a gateway that reports input and not cache reads, a claim about caching
+// made from an absence of evidence; and input-plus-cache-read without KindCacheWrite silently
+// takes an unreported cache-write tally as zero, so a prompt that was partly cache writes
+// reports a hit rate computed over less than the whole prompt.
+//
+// The cost is a suppressed figure for a provider that genuinely never writes cache — which is
+// indistinguishable from one that does not report it, and that ambiguity is the whole reason
+// this function consults PresentKinds instead of the counters.
 func cacheHitPct(t usage.Counts) (float64, bool) {
-	if t.PresentKinds&usage.KindCacheRead == 0 || t.PresentKinds&usage.KindInput == 0 {
+	const promptKinds = usage.KindInput | usage.KindCacheRead | usage.KindCacheWrite
+	if t.PresentKinds&promptKinds != promptKinds {
 		return 0, false
 	}
 	prompt := t.InputTokens + t.CacheReadTokens + t.CacheWriteTokens

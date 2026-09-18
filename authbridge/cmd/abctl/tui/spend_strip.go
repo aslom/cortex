@@ -308,31 +308,11 @@ func renderSpendStrip(s spendSummary, width int) string {
 		return fitStripFigures(stripLabel, plainFigures("cost unavailable", "[u] usage"), width)
 	}
 
-	// Nothing was priced: say so rather than assert a zero. usage_render.go
-	// establishes the rule — a zero cost and an unknown cost are different
-	// answers, and only one of them means the traffic was free.
-	if !s.Priced && !s.HasToday {
-		if s.Priceable > 0 {
-			// No label on the coverage note here, unlike the figures path below: there is
-			// exactly one reading on this line and it is the window's, so there is no second
-			// figure the note could be read as qualifying.
-			return fitStripFigures(stripLabel, plainFigures(
-				"cost unavailable",
-				coverageNote(s.Unpriced, s.Priceable),
-				"[u] usage",
-			), width)
-		}
-		// Priceable == 0 WITH a snapshot in hand is a finding, not an absence: we
-		// looked, and there was no inference traffic to price. Say so. An always-on
-		// strip that renders nothing has failed at its only job, and since the row is
-		// reserved on height alone the alternative is a blank line above the footer,
-		// which reads as a broken UI rather than as an absence of data.
-		if s.HasSnapshot {
-			return fitStripFigures(stripLabel, plainFigures("no priceable traffic yet"), width)
-		}
-		// No poll has answered yet. THIS silence is honest: it says "we have not
-		// looked", which is true, brief, and self-correcting within one poll
-		// interval. It is the only case where "" is the right answer.
+	// No poll has answered yet. THIS silence is honest: it says "we have not looked", which
+	// is true, brief, and self-correcting within one poll interval. It is the only case where
+	// "" is the right answer, and it is checked before anything else so the branches below can
+	// assume there is a snapshot to report figures from.
+	if !s.Priced && !s.HasToday && !s.HasSnapshot {
 		return ""
 	}
 
@@ -343,6 +323,39 @@ func renderSpendStrip(s spendSummary, width int) string {
 	// misattribution — and the figure it silently vouched for was "today", the headline
 	// of this branch and the one the ledger is most likely to leave partial.
 	var figures []stripFigure
+	// NOTHING PRICED ANYWHERE: say so rather than assert a zero — usage_render.go establishes
+	// that a zero cost and an unknown cost are different answers, and only one of them means
+	// the traffic was free.
+	//
+	// A FIGURE, NOT A TERMINAL ANSWER, and that distinction is the bug this replaced. These two
+	// readings used to `return` from here, which threw away every figure below: the token
+	// count, the cache ratio, the error count and the SAVING. spendSummary reads all four
+	// outside its own Priced guard, on the stated grounds that "suppressing them alongside the
+	// money would blank the only readings a deployment with no rate table has" and that "a
+	// window that priced nothing and pruned something reports 'cost unavailable' beside a real
+	// saved figure, and both are true" — and the renderer returned before either could happen,
+	// so four comments described behaviour the next twelve lines defeated.
+	//
+	// Reachable rather than exotic: any endpoint absent from the rate card sits at
+	// Priced == false permanently, and usage/pricing_test.go pins a saving on an unpriced
+	// request as a supported state.
+	if !s.Priced && !s.HasToday {
+		if s.Priceable > 0 {
+			// The note is UNLABELLED, unlike the window-labelled variant below, and what
+			// carries it is ADJACENCY: it is the figure immediately after the money reading it
+			// qualifies, and the labelled form exists precisely for the case where a today
+			// figure sits between them. This used to be justified by there being "exactly one
+			// reading on this line", which stopped being true when the volume figures started
+			// surviving this branch.
+			figures = append(figures, plainFigure("cost unavailable"),
+				plainFigure(coverageNote(s.Unpriced, s.Priceable)))
+		} else {
+			// Priceable == 0 WITH a snapshot in hand is a finding, not an absence: we looked,
+			// and there was no inference traffic to price. Say so. An always-on strip that
+			// renders nothing has failed at its only job.
+			figures = append(figures, plainFigure("no priceable traffic yet"))
+		}
+	}
 	if s.HasToday {
 		// Today outranks the rolling window when it exists: it is the figure an
 		// operator is accountable for, and the window is context for it.
@@ -397,13 +410,17 @@ func renderSpendStrip(s spendSummary, width int) string {
 		// window can overflow with no ledger anywhere near it.
 		figures = append(figures, moneyFigure(s.WindowUSD, "/"+s.WindowLabel,
 			s.Unpriced, s.Priceable, s.Incomplete, nil, s.Clamped))
-	} else if s.Unpriced > 0 && s.Priceable > 0 {
-		// The window figure is suppressed because nothing in the window was priced, so
-		// its coverage gap has no figure to ride on. It still has to be stated — this is
-		// the reachable state where a ledger-backed day sits beside a rolling hour that
-		// priced nothing — and it is stated WEARING THE WINDOW'S LABEL, so it cannot be
-		// read as qualifying the today figure to its left. That misreading is exactly
-		// what the unlabelled tail note used to produce.
+	} else if s.HasToday && s.Unpriced > 0 && s.Priceable > 0 {
+		// The window figure is suppressed because nothing in the window was priced, so its
+		// coverage gap has no figure to ride on. It still has to be stated — this is the
+		// reachable state where a ledger-backed day sits beside a rolling hour that priced
+		// nothing — and it is stated WEARING THE WINDOW'S LABEL, so it cannot be read as
+		// qualifying the today figure to its left. That misreading is exactly what the
+		// unlabelled tail note used to produce.
+		//
+		// GATED ON HasToday, which is the only state it is for. Without that gate it fired
+		// alongside the unlabelled note the no-money branch above already emits, and the same
+		// gap was stated twice on one line — once bare and once labelled.
 		figures = append(figures, plainFigure(coverageNote(s.Unpriced, s.Priceable)+" /"+s.WindowLabel))
 	}
 	// Volume AFTER the money, and in this order: what was spent, what was avoided, the
@@ -437,6 +454,13 @@ func renderSpendStrip(s spendSummary, width int) string {
 			full:    fmt.Sprintf("%d err", s.Errors),
 			compact: fmt.Sprintf("%de", s.Errors),
 		})
+	}
+	// The pane pointer, only when there is no money figure to explain and only after the
+	// readings that ARE known. It is a place to look rather than a reading, so it outranks
+	// nothing: at a narrow width a reader is better served by the token count than by advice.
+	// The Usage pane is what distinguishes an old proxy from a transport error.
+	if !s.Priced && !s.HasToday {
+		figures = append(figures, plainFigure("[u] usage"))
 	}
 	// The age rides last, so it is the first thing a narrow terminal gives up. It
 	// qualifies every figure on the line rather than one of them, and unlike a partiality

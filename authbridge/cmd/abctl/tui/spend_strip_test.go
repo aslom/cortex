@@ -129,7 +129,12 @@ func TestRenderSpendStrip_NarrowKeepsTheHeadlineFigure(t *testing.T) {
 }
 
 func TestRenderSpendStrip_UnpricedSaysSoAndNeverShowsZero(t *testing.T) {
-	s := spendSummary{WindowLabel: "1h", Priced: false, Unpriced: 12, Priceable: 318}
+	// HasSnapshot, because Priceable comes FROM a snapshot: spendSummary reads it off
+	// snap.Totals, so a non-zero count with no snapshot is a state it cannot produce. The
+	// renderer now checks "has a poll answered at all" before anything else, so an
+	// under-specified fixture renders "" — which is right for the state it describes and
+	// wrong for the state this test is about.
+	s := spendSummary{WindowLabel: "1h", Priced: false, Unpriced: 12, Priceable: 318, HasSnapshot: true}
 	got := renderSpendStrip(s, 120)
 	if !strings.Contains(got, "unavailable") {
 		t.Errorf("strip %q does not say cost is unavailable", got)
@@ -1442,6 +1447,129 @@ func TestRenderSpendStrip_TheClampCaveatObeysTheWidthContract(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for w := 1; w <= 200; w++ {
 				assertStripFits(t, tc.s, w)
+			}
+		})
+	}
+}
+
+// An unpriced window must still render every reading it DOES have.
+//
+// This is the boundary no test crossed, which is how four comments in spend.go came to
+// describe behaviour the renderer defeated. spendSummary reads tokens, errors, the cache ratio
+// and the saving OUTSIDE its Priced guard, on the stated grounds that "suppressing them
+// alongside the money would blank the only readings a deployment with no rate table has" and
+// that "a window that priced nothing and pruned something reports 'cost unavailable' beside a
+// real saved figure, and both are true". The renderer returned before reaching any of them.
+//
+// Every unpriced case in this file either set HasToday (which escaped the early return) or
+// left the volume fields zero, so the data-layer tests passed while the renderer threw the
+// values away. This one populates both halves.
+//
+// REACHABLE, not exotic: any endpoint absent from the rate card sits at Priced == false
+// permanently, and usage/pricing_test.go pins a saving on an unpriced request as a supported
+// state.
+func TestRenderSpendStrip_AnUnpricedWindowStillShowsWhatItKnows(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		s    spendSummary
+	}{
+		{
+			// Priceable traffic nothing could price: the coverage note explains the absence.
+			name: "priceable but unpriced",
+			s: spendSummary{
+				WindowLabel: "1h", Priced: false, HasSnapshot: true,
+				Unpriced: 318, Priceable: 318,
+				SavedUSD: 0.1804, HasSaved: true,
+				CacheHitPct: 81, HasCacheHit: true, Tokens: 9_890_000, Errors: 2,
+			},
+		},
+		{
+			// Nothing priceable at all — and a saving is STILL possible, because a pruned
+			// request whose response could not be parsed carries no model and so is not
+			// priceable, while the prompt was pruned all the same.
+			name: "nothing priceable",
+			s: spendSummary{
+				WindowLabel: "1h", Priced: false, HasSnapshot: true,
+				SavedUSD: 0.1804, HasSaved: true,
+				CacheHitPct: 81, HasCacheHit: true, Tokens: 9_890_000, Errors: 2,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderSpendStrip(tc.s, 200)
+
+			// The money reading is still refused, which is the part that already worked.
+			if !strings.Contains(got, "unavailable") && !strings.Contains(got, "no priceable") {
+				t.Errorf("strip %q no longer says the cost is unknown", got)
+			}
+			if strings.Contains(got, "$0.00") {
+				t.Errorf("strip %q renders $0.00 for an unknown cost", got)
+			}
+			// And every reading that IS known survives to the screen.
+			for _, want := range []string{"~$0.1804", "saved", "cache 81%", "9.9M", "2 err"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("strip %q dropped %q: the money is unknown, this reading is not",
+						got, want)
+				}
+			}
+		})
+	}
+}
+
+// The pane pointer is a place to look, not a reading, so it must not outrank one. At a width
+// that cannot hold everything, the token count survives and the advice does not.
+func TestRenderSpendStrip_TheUsageHintYieldsToRealReadings(t *testing.T) {
+	s := spendSummary{
+		WindowLabel: "1h", Priced: false, HasSnapshot: true, Unpriced: 318, Priceable: 318,
+		HasCacheHit: true, CacheHitPct: 81, Tokens: 9_890_000,
+	}
+	wide := renderSpendStrip(s, 200)
+	if !strings.Contains(wide, "[u] usage") {
+		t.Errorf("a 200-column strip %q dropped the pane pointer entirely", wide)
+	}
+	narrow := renderSpendStrip(s, 44)
+	if strings.Contains(narrow, "[u] usage") && !strings.Contains(narrow, "9.9M") {
+		t.Errorf("narrow strip %q kept the advice and dropped the reading", narrow)
+	}
+}
+
+// The coverage gap must be stated ONCE.
+//
+// Two figures can state it: the bare note beside "cost unavailable" when nothing is priced
+// anywhere, and the window-labelled note for a today figure sitting beside a rolling window
+// that priced nothing. Letting the unpriced branch fall through to the figures list put both on
+// the same line — the same gap twice, once bare and once labelled — which is the kind of thing
+// a reader takes as two different findings.
+func TestRenderSpendStrip_TheCoverageGapIsStatedOnce(t *testing.T) {
+	base := spendSummary{
+		WindowLabel: "1h", Priced: false, HasSnapshot: true, Unpriced: 318, Priceable: 318,
+		Tokens: 9_890_000,
+	}
+	for _, tc := range []struct {
+		name  string
+		s     spendSummary
+		label bool // does the surviving note wear the window label?
+	}{
+		// No money reading at all: the note sits beside "cost unavailable" and needs no label,
+		// because adjacency carries it.
+		{name: "nothing priced", s: base},
+		// A today figure separates them, so the note must wear the window's label or it reads
+		// as qualifying the day.
+		{name: "today beside an unpriced window", label: true, s: func() spendSummary {
+			d := base
+			d.HasToday, d.TodayUSD, d.TodayPriceable = true, 30.935, 100
+			return d
+		}()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderSpendStrip(tc.s, 200)
+			if n := strings.Count(got, "318 of 318 unpriced"); n != 1 {
+				t.Errorf("strip %q states the same gap %d times, want once", got, n)
+			}
+			labelled := strings.Contains(got, "318 of 318 unpriced /1h")
+			if labelled != tc.label {
+				t.Errorf("strip %q: window-labelled = %v, want %v — an unlabelled note is only "+
+					"safe immediately after the reading it qualifies", got, labelled, tc.label)
 			}
 		})
 	}
