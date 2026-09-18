@@ -151,6 +151,43 @@ type Counts struct {
 	// priced, which is not the same as "this traffic was free" — the API omits
 	// the field entirely in that case rather than asserting $0.
 	CostMicros int64 `json:"costMicros,omitempty"`
+	// AvoidedMicros is cost that was NOT INCURRED — tool-prune's removed prompt tokens
+	// priced at the tier they would have landed in — in the same unit as CostMicros.
+	//
+	// A COUNTERFACTUAL SITTING BESIDE A MEASUREMENT, and the adjacency is deliberate: the
+	// invariant on costevent.Event.Avoided forbids adding any of this to spend, to a budget
+	// or to a usage total, and a reader who finds CostMicros finds that rule in the same
+	// glance. Placing it further down the struct would hide the one thing a new consumer
+	// must know. TestAggregator_TotalsAreInvariantToAvoidedCost holds the line.
+	//
+	// APPLIED savings only. costevent.Event.TotalAvoidedUSD skips the projected ones and
+	// this counter inherits that: observe-mode figures are money that WAS spent, and a
+	// total mixing them would claim a saving for every byte still on the wire.
+	//
+	// INDEPENDENT OF PRICEDNESS, which is why it does not travel with the cost figure. A
+	// request whose response could not be priced still had tokens removed from its prompt,
+	// and costevent.Record's own doc names that as the interesting case; deriving this from
+	// the priced record would silently drop it.
+	//
+	// ESTIMATED, usually. Saving.Estimated marks a figure derived from a bytes-to-tokens
+	// ratio rather than a tokenizer, and the per-request flag does not survive summation —
+	// so a client must present this as approximate unconditionally rather than inferring
+	// exactness from its absence here.
+	//
+	// GROSS, NOT NET, which is the caveat most likely to be dropped on the way to a screen.
+	// tool-prune's own doc is explicit: changing the remove list re-writes the cached prompt
+	// prefix at the cache-WRITE rate while the recurring saving accrues at the cache-READ
+	// rate, tens of requests apart, and nothing subtracts the re-warm from these dollars. A
+	// short window just after a config change therefore reads optimistically; a long steady
+	// one converges. See docs/tool-prune-plugin.md, "The figure is gross, not net".
+	//
+	// SUMMABLE BECAUSE IT IS DOLLARS. The same doc refuses to publish one "tokens saved"
+	// figure, because prompt tiers differ by up to 12.5x and a single token count invites
+	// multiplying by one rate. That objection does not apply here and its absence is the
+	// reason this field is money rather than tokens: each saving was priced at the tier it
+	// actually came out of BEFORE reaching this counter, so the sum is tier-correct by
+	// construction. A tokens-avoided aggregate would not be, and is deliberately not offered.
+	AvoidedMicros int64 `json:"avoidedMicros,omitempty"`
 	// PricedRequests counts the requests that actually produced a cost. Coverage
 	// is a counter rather than a flag because buckets are summed when a client
 	// asks for a coarser resolution, and because a deployment can price some of
@@ -262,6 +299,10 @@ func (c *Counts) Add(o Counts) {
 	c.addInto(&c.Errors, o.Errors)
 	c.addInto(&c.Tokens, o.Tokens)
 	c.addInto(&c.CostMicros, o.CostMicros)
+	// Its own accumulate, never folded into the line above. Both are money-shaped and only
+	// one is money; see the field. Checked like the rest because a saving is modelled from
+	// the same table as a cost and inherits its range.
+	c.addInto(&c.AvoidedMicros, o.AvoidedMicros)
 	c.addInto(&c.PricedRequests, o.PricedRequests)
 	// Summed alongside PricedRequests, never out of it: it is a subset disclosure, not a
 	// deduction. See the field's own comment for why the aggregate discloses rather than
@@ -615,8 +656,13 @@ type eventCost struct {
 //
 // Runs outside the aggregator's lock: resolution is a read of an immutable table
 // and must not hold up the hot path.
-func (a *Aggregator) costOf(e *pipeline.SessionEvent) eventCost {
-	if ce, ok := costevent.Decode(e); ok {
+// ce is the event's cost record and haveRec whether it had one, decoded by the caller.
+// Passed in rather than read here because the caller needs the same record for its avoided
+// figure, and costevent.Record is a JSON unmarshal — see Record's call site. The pricedness
+// rule is applied here, which is the only thing costevent.Decode did that Record does not,
+// so this arm still means exactly "a priced record was published".
+func (a *Aggregator) costOf(e *pipeline.SessionEvent, ce costevent.Event, haveRec bool) eventCost {
+	if haveRec && ce.Priced() {
 		prov := ce.Provenance
 		if prov == "" {
 			// An event from a producer predating the field. It is a settled figure,
@@ -896,8 +942,20 @@ func (a *Aggregator) Record(sessionID string, e *pipeline.SessionEvent) {
 	// would find nothing anyway — but not calling it at all beats calling it and
 	// relying on that.
 	var ec eventCost
+	// avoided rides BESIDE ec rather than inside it, so the counterfactual and the measured
+	// figure travel on separate wires and no expression can add one to the other by
+	// resembling it. See Counts.AvoidedMicros.
+	var avoided int64
 	if e.Phase != pipeline.SessionRequest {
-		ec = a.costOf(e)
+		// ONE unmarshal, feeding both. costOf wants the record only when it priced
+		// something and this wants it either way, so each calling costevent for itself
+		// would decode the same JSON twice per event — and foldInto runs twice, which is
+		// what hoisting this out of it was for.
+		rec, haveRec := costevent.Record(e)
+		ec = a.costOf(e, rec, haveRec)
+		if haveRec {
+			avoided = rec.TotalAvoidedMicros()
+		}
 	}
 
 	a.mu.Lock()
@@ -921,11 +979,11 @@ func (a *Aggregator) Record(sessionID string, e *pipeline.SessionEvent) {
 	}
 
 	t := at.Truncate(BucketWidth)
-	a.foldInto(a.all, t, sessionID, e, requestPlugins, ec)
+	a.foldInto(a.all, t, sessionID, e, requestPlugins, ec, avoided)
 
 	if ring, ok := a.sessions[sessionID]; ok {
 		ring.lastSeen = at
-		a.foldInto(ring.buckets, t, sessionID, e, requestPlugins, ec)
+		a.foldInto(ring.buckets, t, sessionID, e, requestPlugins, ec, avoided)
 		return
 	}
 	// maxSess == 0 means no per-session rings at all — see WithMaxSessions. The
@@ -943,7 +1001,7 @@ func (a *Aggregator) Record(sessionID string, e *pipeline.SessionEvent) {
 	}
 	ring := &sessionRing{buckets: make([]bucket, NumBuckets), lastSeen: at}
 	a.sessions[sessionID] = ring
-	a.foldInto(ring.buckets, t, sessionID, e, requestPlugins, ec)
+	a.foldInto(ring.buckets, t, sessionID, e, requestPlugins, ec, avoided)
 }
 
 // holdRequestPluginsLocked stashes a request event's plugin names until its
@@ -1046,7 +1104,7 @@ func (a *Aggregator) evictColdestLocked() {
 // which session it belongs to: a.all is shared and a sessionRing holds only
 // buckets. Both call sites pass the same id, which is what lets the bySession
 // label be recorded uniformly instead of only on the all-sessions ring.
-func (a *Aggregator) foldInto(ring []bucket, t time.Time, sessionID string, e *pipeline.SessionEvent, requestPlugins []string, ec eventCost) {
+func (a *Aggregator) foldInto(ring []bucket, t time.Time, sessionID string, e *pipeline.SessionEvent, requestPlugins []string, ec eventCost, avoided int64) {
 	b := &ring[slot(t)]
 	if !b.start.Equal(t) {
 		*b = bucket{start: t} // stale lap: reset rather than accumulate onto old data
@@ -1087,6 +1145,7 @@ func (a *Aggregator) foldInto(ring []bucket, t time.Time, sessionID string, e *p
 		Requests:             1,
 		Tokens:               tokens,
 		CostMicros:           ec.micros,
+		AvoidedMicros:        avoided,
 		PricedRequests:       ec.priced,
 		IncompleteRequests:   ec.incomplete,
 		PriceableRequests:    ec.priceable,

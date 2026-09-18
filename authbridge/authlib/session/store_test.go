@@ -1,10 +1,13 @@
 package session
 
 import (
+	"encoding/json"
+	"math"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
@@ -631,6 +634,211 @@ func TestSumTokens(t *testing.T) {
 	}
 	if sumTokens([]pipeline.SessionEvent{}) != 0 {
 		t.Error("sumTokens([]) should be 0")
+	}
+}
+
+// costRecord builds the plugin map one session event carries its cost record in.
+func costRecord(t *testing.T, ev costevent.Event) map[string]json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]json.RawMessage{costevent.Key: raw}
+}
+
+// TestSumCost covers the four rules sumCost applies, which sumTokens beside it does not have
+// to: pricedness gates the money and not the saving, and a denial can carry either.
+//
+// One event list rather than four, because the rules interact — the point is what a session
+// holding a realistic mixture reports, and a per-rule fixture would pass while the sum over
+// all of them was wrong.
+func TestSumCost(t *testing.T) {
+	evs := []pipeline.SessionEvent{
+		// An ordinary priced response with a saving on it. Both figures counted.
+		{
+			Phase: pipeline.SessionResponse,
+			Plugins: costRecord(t, costevent.Event{CostUSD: 0.25, Settled: true, Provenance: "configured",
+				Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 100, USD: 0.01, Tier: "input"}}}),
+		},
+		// UNPRICED, and carrying a saving. No dollars, and the saving still counts: the
+		// prompt was pruned whether or not anything managed to price the response.
+		{
+			Phase: pipeline.SessionResponse,
+			Plugins: costRecord(t, costevent.Event{Source: costevent.SourceUsageFallback,
+				Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 200, USD: 0.02, Tier: "input"}}}),
+		},
+		// A DENIAL carrying a settled figure — the proxy charges for a response whose body
+		// never arrived. Counted, which is why this is not restricted to SessionResponse.
+		{
+			Phase:   pipeline.SessionDenied,
+			Plugins: costRecord(t, costevent.Event{CostUSD: 0.05, Settled: true, Provenance: "authoritative"}),
+		},
+		// A REQUEST-phase record. Skipped: the cost is settled on the response pass, and
+		// counting both halves would double-charge every request that has one.
+		{
+			Phase:   pipeline.SessionRequest,
+			Plugins: costRecord(t, costevent.Event{CostUSD: 99, Settled: true, Provenance: "configured"}),
+		},
+		// A PROJECTED saving: observe mode left every byte on the wire, so this is money
+		// that WAS spent and must not be reported as avoided.
+		{
+			Phase: pipeline.SessionResponse,
+			Plugins: costRecord(t, costevent.Event{Source: costevent.SourceUsageFallback,
+				Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 5000, USD: 5, Tier: "input", Projected: true}}}),
+		},
+		// A response with no cost record at all — the common case for non-inference traffic.
+		{Phase: pipeline.SessionResponse, MCP: &pipeline.MCPExtension{Method: "tools/call"}},
+	}
+
+	cost, avoided := sumCost(evs)
+	// 0.25 + 0.05. The request event's $99 is the discriminator: 99_300_000 means the
+	// request half was counted too.
+	if want := int64(300_000); cost.Micros != want {
+		t.Errorf("cost = %d, want %d", cost.Micros, want)
+	}
+	// 0.01 + 0.02, the priced and the unpriced request alike. 30_000 with the $5 projected
+	// entry excluded — 5_030_000 would mean observe-mode figures are being reported as
+	// savings.
+	if want := int64(30_000); avoided.Micros != want {
+		t.Errorf("avoided = %d, want %d", avoided.Micros, want)
+	}
+	// Nothing here is anywhere near the ceiling, so neither figure may claim to be a bound.
+	if cost.Saturated || avoided.Saturated {
+		t.Errorf("Saturated set on ordinary figures (%d, %d): every row would render as a floor",
+			cost.Micros, avoided.Micros)
+	}
+
+	if c, a := sumCost(nil); c.Micros != 0 || a.Micros != 0 {
+		t.Errorf("sumCost(nil) = %d, %d; want 0, 0", c.Micros, a.Micros)
+	}
+}
+
+// A lifetime total must not WRAP, which is the one failure mode that turns a cost column into
+// a negative number an operator cannot explain. A gateway's own figure is bounded per request
+// and nothing bounds how many requests a session holds, so the ceiling is reachable in
+// principle and the clamp is what makes the column safe.
+//
+// Two maximal figures, which is the smallest case that overflows.
+func TestSumCost_SaturatesRatherThanWrapping(t *testing.T) {
+	// Just under pricing.MaxCostMicros in dollars, so each record prices at close to the
+	// largest figure costevent will represent. Two of them exceed int64 nowhere near, so the
+	// list is padded to reach the ceiling.
+	big := costevent.Event{CostUSD: 9e9, Settled: true, Provenance: "authoritative"}
+	one := costRecord(t, big)
+	evs := make([]pipeline.SessionEvent, 4096)
+	for i := range evs {
+		evs[i] = pipeline.SessionEvent{Phase: pipeline.SessionResponse, Plugins: one}
+	}
+
+	cost, _ := sumCost(evs)
+	if cost.Micros < 0 {
+		t.Errorf("cost = %d: a lifetime total wrapped negative, which is the one answer a "+
+			"cost column must never print", cost.Micros)
+	}
+	if cost.Micros != math.MaxInt64 {
+		t.Errorf("cost = %d, want the int64 ceiling: the sum should clamp there", cost.Micros)
+	}
+	// THE CLAMP IS NOT ENOUGH ON ITS OWN, and this is the assertion that says so. MaxInt64
+	// micros is about $9.2 trillion — a well-formed dollar amount no consumer can tell apart
+	// from a measured one. pricing.MicrosFromUSD refuses an out-of-range figure rather than
+	// clamping it for exactly this reason; a sum cannot refuse (the money was really spent),
+	// so it clamps AND says it clamped.
+	if !cost.Saturated {
+		t.Error("the clamped total is not labelled: $9.2 trillion would render as a measured " +
+			"figure, which is a wrong number wearing a right label")
+	}
+}
+
+// The running totals Append maintains must equal what a full walk computes, after appends,
+// after a trim, and after a trim that pins an intent event.
+//
+// THIS IS THE INVARIANT THAT MAKES THE INCREMENT SAFE. ListSessions stopped decoding every
+// event on every poll — that was an unbounded json.Unmarshal loop under the read lock, on
+// abctl's two-second timer — and reads two integers instead. An incremental total is only as
+// good as the recomputation it claims to equal, and the trim is where they can part company:
+// trimEventsPinIntent does not drop a plain prefix when it pins an intent, so a caller
+// re-deriving the dropped set would subtract the wrong events.
+func TestAppend_RunningTotalsMatchAFullRecomputation(t *testing.T) {
+	priced := costRecord(t, costevent.Event{CostUSD: 0.25, Settled: true, Provenance: "configured",
+		Avoided: []costevent.Saving{{Component: "tool-prune", TokensAvoided: 100, USD: 0.01, Tier: "input"}}})
+
+	for _, tc := range []struct {
+		name      string
+		maxEvents int
+		appends   int
+		// intentFirst puts an inbound A2A request at the front, which trimEventsPinIntent
+		// pins in place rather than evicting — the branch that does not drop a prefix.
+		intentFirst bool
+	}{
+		{name: "uncapped", maxEvents: 0, appends: 40},
+		{name: "trimmed", maxEvents: 5, appends: 40},
+		{name: "trimmed with a pinned intent", maxEvents: 5, appends: 40, intentFirst: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := New(5*time.Minute, tc.maxEvents, 0)
+			defer st.Close()
+			if tc.intentFirst {
+				st.Append("s1", pipeline.SessionEvent{
+					Direction: pipeline.Inbound, Phase: pipeline.SessionRequest,
+					A2A: &pipeline.A2AExtension{Method: "message/send"},
+				})
+			}
+			for i := 0; i < tc.appends; i++ {
+				st.Append("s1", pipeline.SessionEvent{Phase: pipeline.SessionResponse, Plugins: priced})
+			}
+
+			st.mu.RLock()
+			sess := st.sessions["s1"]
+			wantCost, wantAvoided := sumCost(sess.Events)
+			gotCost, gotAvoided := sess.cost, sess.avoided
+			held := len(sess.Events)
+			moneyLen := len(sess.money)
+			// Per-position, not just per-total: a money slice reshaped by a different rule
+			// from Events could still sum correctly while attributing every figure to the
+			// wrong event, and the next trim would then subtract the wrong ones.
+			perEvent := make([]eventMoney, 0, held)
+			for i := range sess.Events {
+				perEvent = append(perEvent, moneyOf(&sess.Events[i]))
+			}
+			st.mu.RUnlock()
+
+			// THE PARALLEL-SLICE INVARIANT. entry.money exists so a trim needs no decode, and
+			// it is only safe while it stays in lockstep with Events — same length, same
+			// order. Nothing but Append and applyTrim may touch either, and this is what
+			// fails if something else ever does.
+			if moneyLen != held {
+				t.Fatalf("entry.money holds %d figures for %d events: the parallel slice has "+
+					"drifted, so every subtraction after this trim is attributed wrongly",
+					moneyLen, held)
+			}
+			if len(perEvent) == moneyLen {
+				st.mu.RLock()
+				for i := range perEvent {
+					if sess.money[i] != perEvent[i] {
+						t.Errorf("entry.money[%d] = %+v, but event %d decodes to %+v — the two "+
+							"slices are the same length in a different order",
+							i, sess.money[i], i, perEvent[i])
+					}
+				}
+				st.mu.RUnlock()
+			}
+
+			if gotCost.Micros != wantCost.Micros {
+				t.Errorf("running cost = %d over %d held events, full walk says %d — the "+
+					"increment and the events have parted company",
+					gotCost.Micros, held, wantCost.Micros)
+			}
+			if gotAvoided.Micros != wantAvoided.Micros {
+				t.Errorf("running avoided = %d, full walk says %d",
+					gotAvoided.Micros, wantAvoided.Micros)
+			}
+			// And the fixture really did trim, or the trimming cases prove nothing.
+			if tc.maxEvents > 0 && held != tc.maxEvents {
+				t.Fatalf("session holds %d events with maxEvents %d; no trim happened, so the "+
+					"subtraction path was never exercised", held, tc.maxEvents)
+			}
+		})
 	}
 }
 

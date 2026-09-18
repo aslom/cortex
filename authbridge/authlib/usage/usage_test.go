@@ -1052,13 +1052,21 @@ func TestFoldInto_CarriesEveryCountsField(t *testing.T) {
 	// Every field at once, which takes one carefully built event: a 5xx (Errors) that
 	// nonetheless carries a full token split (the five token fields, PresentKinds, Tokens)
 	// and a published cost record that is settled, priced and disclosed inexact (CostMicros,
-	// PricedRequests, PriceableRequests, IncompleteRequests). Nothing here is decorative.
+	// PricedRequests, PriceableRequests, IncompleteRequests) with an applied saving on it
+	// (AvoidedMicros). Nothing here is decorative.
 	e := inferenceEvent("claude-opus-5", 100, 2000, 50, 30, 12, 0b11111)
 	e.At = now
 	e.StatusCode = 500
 	raw, err := json.Marshal(costevent.Event{
 		CostUSD: 0.005, Source: costevent.SourceUsageFallback, Provenance: "configured",
 		Settled: true, Incomplete: true, IncompleteReason: pricing.ReasonOutputUncounted,
+		// APPLIED, not projected: TotalAvoidedMicros skips a projected saving, so an
+		// observe-mode entry here would leave AvoidedMicros zero and this test would fail
+		// for a reason that has nothing to do with the fold carrying the field.
+		Avoided: []costevent.Saving{{
+			Component: "tool-prune", TokensAvoided: 400, USD: 0.0012,
+			Tier: "input", Provenance: "configured", Estimated: true,
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)

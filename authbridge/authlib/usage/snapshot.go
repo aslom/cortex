@@ -307,6 +307,39 @@ type Snapshot struct {
 	// should never appear in a healthy deployment, and a zero would have to mean both "checked
 	// and fine" and "not checked".
 	SeriesOvershootMicros *int64 `json:"seriesOvershootMicros,omitempty"`
+	// UngroupedAvoidedMicros is UngroupedCostMicros for the OTHER money field: the part of
+	// Totals.AvoidedMicros that no entry in this response's series carries.
+	//
+	// It exists because Counts.AvoidedMicros ships per label automatically — Series is a map
+	// of Counts and Counts.Add carries the field — so the moment a client renders a per-model
+	// "saved" breakdown, that breakdown can sum to LESS than the total beside it. Without
+	// this field there is nothing to explain the gap, which is the exact failure
+	// UngroupedCostMicros exists to prevent, arriving through a field added later.
+	//
+	// REACHABLE, and by a route the cost residual mostly is not: a row can carry a saving
+	// with no model at all. costledger.Writer.Record admits a cost record whose only figure
+	// is an applied saving even when the response had no inference extension to read a model
+	// from — deliberately, because a saving on a request nothing could price is the case
+	// costevent.Record was split out to serve. Under group=model that row has no label, so
+	// its saving lands here and nowhere else.
+	//
+	// Same absent-not-zero rule as its twin: a zero would have to mean both "checked, the
+	// breakdown is complete" and "nothing computed a residual on this path".
+	UngroupedAvoidedMicros *int64 `json:"ungroupedAvoidedMicros,omitempty"`
+	// SeriesAvoidedOvershootMicros is SeriesOvershootMicros for avoided cost: the amount by
+	// which this response's series summed to MORE than Totals.AvoidedMicros.
+	//
+	// A SEPARATE FIELD FROM SeriesOvershootMicros, and not redundant with it, which is the
+	// question to ask of any second defect-report field. The shared cause — a reconcilable
+	// group whose series double-counts — moves both residuals and would fire both. But a row
+	// carrying a saving and NO COST double-counted moves only this one: the cost residual
+	// stays at zero, which reads as "the breakdown accounts for everything". So the cost
+	// field alone cannot report an avoided overshoot, and collapsing them would make a real
+	// defect invisible in exactly the case this PR made reachable.
+	//
+	// Nothing should render it. See SeriesOvershootMicros: this is "do not trust the
+	// breakdown in this response, and file a bug".
+	SeriesAvoidedOvershootMicros *int64 `json:"seriesAvoidedOvershootMicros,omitempty"`
 	// Degraded reports that this answer is known to be MISSING ROWS, and is absent
 	// whenever it is not.
 	//
@@ -453,23 +486,71 @@ func (s *Snapshot) SetUngroupedCost(sum CostSum) {
 	if sum.Saturated {
 		s.Totals.Saturated = true
 	}
+	// The sign split lives in residualOf, shared with SetUngroupedAvoided; the FIELDS are
+	// named here, in the setter that owns them. See residualOf for why that direction.
+	s.UngroupedCostMicros, s.SeriesOvershootMicros = residualOf(sum)
+}
+
+// SetUngroupedAvoided is SetUngroupedCost for avoided cost.
+//
+// Split from it rather than folded into one two-argument call because the two are published
+// on different fields and a caller may legitimately have only one to report — the ledger path
+// computes both, the ring path computes both, and a future source that breaks down only spend
+// should not be forced to pass a zero that this method cannot distinguish from a real one.
+// The SHARED half — saturation, the sign split, the MinInt64 guard — lives in setResidual so
+// the two cannot drift.
+//
+// NOT SPEND, and this method changes nothing about that: it publishes a residual for a
+// counterfactual so a breakdown of it reconciles, on the same rule that forbids adding it to
+// any dollar total. See Counts.AvoidedMicros.
+func (s *Snapshot) SetUngroupedAvoided(sum CostSum) {
+	if sum.Saturated {
+		s.Totals.Saturated = true
+	}
+	s.UngroupedAvoidedMicros, s.SeriesAvoidedOvershootMicros = residualOf(sum)
+}
+
+// residualOf splits a residual into the two fields that publish it: shortfall for a positive
+// one, overshoot for the magnitude of a negative one. At most one is non-nil.
+//
+// RETURNS THEM RATHER THAN WRITING THROUGH **int64 OUT-PARAMS, which is what it did first and
+// is a hazard worth naming. Two `**int64` parameters are type-identical and positionally
+// interchangeable, so `setResidual(sum, &s.UngroupedAvoidedMicros, &s.SeriesOvershootMicros,
+// …)` — the avoided shortfall wired to the COST overshoot — compiled and passed the entire
+// suite. Returning the pair puts the destination field names on the left of an assignment
+// inside the setter that owns them, where a cross-field write has to be written out to happen
+// and the positive tests for both fields catch it.
+//
+// Extracted rather than duplicated because the MinInt64 sign trap below is the one piece of
+// arithmetic here that must be obviously right, and a copy is a second place to get it wrong.
+func residualOf(sum CostSum) (shortfall, overshoot *int64) {
 	micros := sum.Micros
 	switch {
 	case micros > 0:
-		s.UngroupedCostMicros = &micros
+		return &micros, nil
 	case micros < 0:
-		// Negated into a magnitude, so the field reads as "the series overshot by this much"
-		// rather than making a client interpret a sign it did not ask for.
-		//
-		// math.MinInt64 has no positive counterpart, so negating it blindly returns the same
-		// negative number and publishes exactly the sign confusion this field exists to avoid.
-		// Reachable only from a saturated total, which is itself already disclosed.
+		// Negated into a magnitude, with the MinInt64 case guarded: negating it blindly
+		// returns the same negative number and publishes the sign confusion the overshoot
+		// field exists to avoid. Reachable only from a saturated total, itself disclosed.
 		over := int64(math.MaxInt64)
 		if micros != math.MinInt64 {
 			over = -micros
 		}
-		s.SeriesOvershootMicros = &over
+		return nil, &over
 	}
+	return nil, nil
+}
+
+// seriesAvoided is the avoided cost a label breakdown accounts for.
+//
+// Reads Counts.AvoidedMicros per entry for the reason seriesCost reads CostMicros: the series
+// is what a client sums, and this has to be exactly that arithmetic.
+func seriesAvoided(series map[string]Counts) CostSum {
+	var total CostSum
+	for _, v := range series {
+		total.Add(v.AvoidedMicros)
+	}
+	return total
 }
 
 // seriesCost is the dollars a label breakdown accounts for.
@@ -1077,6 +1158,9 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 	// A CostSum, not an int64: this is money, and a wrapped residual is read downstream as
 	// the series overshooting its own total. See CostSum.
 	var ungrouped CostSum
+	// Its own accumulator, never folded into the line above: the two are different
+	// quantities and only one of them is money. See Snapshot.UngroupedAvoidedMicros.
+	var ungroupedAvoided CostSum
 	// Raised by addCoverageInto, and read after the totals are assigned below — Totals is derived
 	// post-loop, so setting the flag inside the loop would be overwritten.
 	var coverageSaturated bool
@@ -1112,6 +1196,15 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 			ungrouped.Sub(sc.Micros)
 			if sc.Saturated {
 				ungrouped.Saturated = true
+			}
+			// The same three saturating steps for the other money field, for the same
+			// reason: a per-label "saved" breakdown a client renders must reconcile against
+			// the total beside it. See Snapshot.UngroupedAvoidedMicros.
+			sa := seriesAvoided(b.Series)
+			ungroupedAvoided.Add(b.AvoidedMicros)
+			ungroupedAvoided.Sub(sa.Micros)
+			if sa.Saturated {
+				ungroupedAvoided.Saturated = true
 			}
 		}
 		if ring != nil {
@@ -1173,6 +1266,7 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 	// Absent unless there is something to disclose, which is the whole convention: see
 	// SetUngroupedCost.
 	out.SetUngroupedCost(ungrouped)
+	out.SetUngroupedAvoided(ungroupedAvoided)
 
 	// Fold last: totals are summed from the raw buckets above and are unaffected
 	// by grouping width, so a client's summary line agrees with its chart no

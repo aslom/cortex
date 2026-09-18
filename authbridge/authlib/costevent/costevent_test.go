@@ -154,6 +154,42 @@ func TestEventJSONTagsArePinned_EveryField(t *testing.T) {
 	}
 }
 
+// TestTotalAvoidedMicros_ReadsWhatTheProducerActuallyWrites decodes bytes taken verbatim off
+// a running proxy — tool-prune in enforce mode behind Claude Code — and asserts the aggregate
+// reads them.
+//
+// The test above pins the ENCODE direction from a struct literal, which cannot fail if a tag
+// and the literal are wrong in the same way. This one starts from production bytes instead, so
+// it is the only assertion here that would catch the aggregate summing a field the producer
+// spells differently. Note `usd` and `tokensAvoided` in one record: the mixed casing is real,
+// and a "tidy-up" that regularised either would silently zero every saving.
+//
+// cache_read is not incidental. The tool manifest sits inside the cached prefix, so the
+// recurring saving comes out of the ~0.1x tier — the tier that makes the figure small and
+// worth reporting anyway, since it recurs on every turn.
+func TestTotalAvoidedMicros_ReadsWhatTheProducerActuallyWrites(t *testing.T) {
+	const wire = `{"cost_usd":0.0526,"source":"usage-fallback","daily_total_usd":0,` +
+		`"daily_max_usd":0,"provenance":"bundled","settled":true,` +
+		`"avoided":[{"component":"tool-prune","tokensAvoided":10210,"usd":0.00388,` +
+		`"provenance":"bundled","tier":"cache_read","estimated":true}]}`
+
+	var ev Event
+	if err := json.Unmarshal([]byte(wire), &ev); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got, want := ev.TotalAvoidedMicros(), int64(3_880); got != want {
+		t.Errorf("TotalAvoidedMicros = %d, want %d", got, want)
+	}
+	// The record's own cost is untouched by the saving beside it, which is the invariant the
+	// aggregate rests on, asserted here at the record level where it starts.
+	if got, want := ev.Micros(), int64(52_600); got != want {
+		t.Errorf("Micros = %d, want %d — a saving must not move the incurred figure", got, want)
+	}
+	if !ev.Priced() {
+		t.Error("Priced = false: this is a settled figure and both totals depend on it being one")
+	}
+}
+
 // A FIELD ADDED WITHOUT A PINNED TAG FAILS HERE.
 //
 // The two tests above assert the tags of the fields they happen to set; this one asserts that

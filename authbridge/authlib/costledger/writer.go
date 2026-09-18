@@ -345,7 +345,21 @@ func (w *Writer) Record(_ string, e *pipeline.SessionEvent) {
 	// priceable traffic, which an unpriced record with no refusal is not; see the guard
 	// below.
 	refusedCost := hasCost && ev.RejectedReason != ""
-	if e.Inference == nil && !settledCost && !refusedCost {
+	// An APPLIED SAVING on a record that priced nothing and refused nothing. Admitted for
+	// the reason costevent.Record exists at all: its own doc names "a saving on a request
+	// that could not be priced" as the interesting case, and the guard below would
+	// otherwise drop exactly that subset whenever the response carried no inference
+	// extension — silently, and only from the durable file, while session.sumCost counted
+	// it. Two money surfaces diverging on a case neither documents is the shape of defect
+	// this whole file is written against.
+	//
+	// IT CANNOT MOVE THE COVERAGE RATIO, which is what the guard is really protecting. A
+	// row admitted on this clause alone sets neither PricedRequests nor PriceableRequests —
+	// the model-and-tokens test below fails on a nil extension and the priced branch is not
+	// taken — so priced-versus-priceable is untouched and the "1/10 priced forever" failure
+	// stays closed. What it adds is one Requests, for a request that really happened.
+	avoidedCost := hasCost && ev.TotalAvoidedMicros() > 0
+	if e.Inference == nil && !settledCost && !refusedCost && !avoidedCost {
 		// Non-inference traffic the proxy handled — MCP, health checks, tunnels.
 		// Recording it would put every proxied response in the cost denominator, the
 		// mistake that makes a correct deployment read "1/10 priced" forever.
@@ -372,6 +386,11 @@ func (w *Writer) Record(_ string, e *pipeline.SessionEvent) {
 		// reachable with a nil inference extension, so gating it on the extension drops
 		// every one of them. Recorded here as priceable-and-unpriced; see the
 		// PriceableRequests assignment below.
+		//
+		// OR CARRIES A SAVING, the second exception, on the same footing: money not spent
+		// is a figure this file is the durable record of, and the alternative was losing it
+		// for the one traffic shape where it is most interesting. See avoidedCost above for
+		// why it cannot reach the coverage denominator.
 		return
 	}
 
@@ -460,6 +479,23 @@ func (w *Writer) Record(_ string, e *pipeline.SessionEvent) {
 		// of on the arithmetic — one rule for every string this package writes to a durable
 		// file is easier to keep than three plus an exception.
 		r.Provenance = rowLabel(ev.Provenance)
+		// Cost that was not incurred, in the same unit as the cost that was, and OUTSIDE the
+		// pricedness branch below on purpose: tool-prune removed prompt tokens whether or not
+		// anything managed to price the response, and the request that could not be priced is
+		// where a saving is most interesting.
+		//
+		// REACHABLE FOR EVERY SUCH RECORD, which took a fix to the admission guard above to
+		// be true. That guard dropped an unpriced, unrefused record with no inference
+		// extension before this line could run, so this comment held only for the subset
+		// that carried an extension; avoidedCost is what closed the gap. See usage.Counts.AvoidedMicros for the invariant
+		// that keeps it out of every dollar total, and note the row-key fields are unaffected —
+		// a saving is attributed to the same endpoint/model/agent/provenance tuple as the
+		// request that avoided it.
+		//
+		// AFTER the token literal above, which assigns r.Counts wholesale: setting this before
+		// it would be silently overwritten for every inference row, which is all of them that
+		// can carry a saving.
+		r.AvoidedMicros = ev.TotalAvoidedMicros()
 		if ev.Priced() {
 			r.CostMicros = ev.Micros()
 			r.PricedRequests = 1
@@ -506,8 +542,8 @@ func (w *Writer) Record(_ string, e *pipeline.SessionEvent) {
 			// figure, and ev.Micros() returns zero for a refused record anyway.
 			//
 			// A DIVERGENCE FROM THE RING, stated here and in the package doc rather than
-			// discovered: usage.Aggregator.costOf goes through costevent.Decode, which reports
-			// no record at all for an unpriced one, so the ring counts a refusal in Requests
+			// discovered: usage.Aggregator.costOf takes only the arm a priced record satisfies
+			// and has no branch for an unpriced one, so the ring counts a refusal in Requests
 			// and in nothing else, and the ledger's denominator is one larger for the same
 			// traffic. That is the right way round — the ring cannot see the refusal, and this
 			// file is the surface an operator reads tomorrow — and the dollars agree at zero.
