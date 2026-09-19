@@ -737,21 +737,24 @@ func TestHandleKey_TheDrawersBindings(t *testing.T) {
 	})
 
 	// A resize below the floor is the other way the flag and the screen part company.
+	//
+	// ON paneEvents, whose esc backs out to Sessions, so the key's arrival at the pane is
+	// observable without disturbing the handler under test. An open filter looked like the
+	// cheaper signal and was inert: keys.go gates the whole spend block on `!m.filtering`, so
+	// `m.filtering = true` skipped the esc case entirely — which made the flag assertion below
+	// vacuous too, since nothing could have cleared it. The first version of this subtest
+	// asserted less than the one it replaced.
 	t.Run("esc is not swallowed below the height floor", func(t *testing.T) {
-		m := newModel(paneSessions)
+		m := newModel(paneEvents)
 		m.handleKey(runeKey('$'))
 		m.height = spendDrawerMinHeight - 1
 		if m.spendDrawerVisible() {
 			t.Fatal("setup: still visible below the floor")
 		}
-		// An open filter is this pane's own observable use of esc, and it stands in for the
-		// back-out the Usage subtest asserts: if the key reached the pane, the filter cancels.
-		// Without it this subtest could only say the drawer ignored esc, which a handler that
-		// dropped the key on the floor satisfies just as well.
-		m.filtering = true
 		m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
-		if m.filtering {
-			t.Error("esc never reached the pane below the height floor — the filter is still open")
+		if m.pane == paneEvents {
+			t.Error("esc never reached the pane below the height floor — still on Events, so the " +
+				"off-screen drawer swallowed the key rather than passing it on")
 		}
 		if !m.spend.expanded {
 			t.Error("esc closed an off-screen drawer after a resize")
