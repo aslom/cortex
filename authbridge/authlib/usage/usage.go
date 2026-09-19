@@ -660,6 +660,13 @@ type bucket struct {
 // authbridge/docs/superpowers/specs/2026-09-09-pricing-consolidation-design.md.
 type eventCost struct {
 	micros int64
+	// tierMicros is the modelled cost of each rate tier, indexed by pricing.Tier.
+	//
+	// Filled from the published record's Tiers when there is one and from THIS package's own
+	// pricing when there is not. Both sources, because a deployment produces either and a
+	// mix populated on one path only is blank for half the traffic while every test on the
+	// other path stays green.
+	tierMicros [pricing.NumTiers]int64
 	// priced is 1 when a cost was found and 0 otherwise, so it sums into
 	// Counts.PricedRequests as a coverage count rather than needing a separate
 	// branch at every accumulation site.
@@ -719,6 +726,17 @@ func (a *Aggregator) costOf(e *pipeline.SessionEvent, ce costevent.Event, haveRe
 			prov = unlabelledLabel
 		}
 		ec := eventCost{micros: ce.Micros(), priced: 1, priceable: 1, provenance: prov}
+		// Absent Tiers is the normal case for a gateway-priced request on a model with no
+		// rates: no split exists, and leaving the array zero is how that is said. Nil and
+		// zero are different states here — see costevent.Event.Tiers.
+		if tc := ce.Tiers; tc != nil {
+			ec.tierMicros = [pricing.NumTiers]int64{
+				pricing.TierInput:      pricing.MicrosOrZero(tc.Input),
+				pricing.TierCacheWrite: pricing.MicrosOrZero(tc.CacheWrite),
+				pricing.TierCacheRead:  pricing.MicrosOrZero(tc.CacheRead),
+				pricing.TierOutput:     pricing.MicrosOrZero(tc.Output),
+			}
+		}
 		if ce.Incomplete {
 			// Disclosed, not deducted. micros, priced and provenance all stand: the
 			// figure exists, something priced it, and it came from where provenance
@@ -785,7 +803,7 @@ func (a *Aggregator) costOf(e *pipeline.SessionEvent, ce costevent.Event, haveRe
 		// pricing entry, so the one case worth naming.
 		return eventCost{priceable: 1, unpricedKey: key}
 	}
-	micros, ok := pricing.Cost(rates, u)
+	tiers, micros, ok, _ := pricing.CostByTier(rates, u)
 	if !ok {
 		// TWO CAUSES REACH HERE, AND ONLY ONE OF THEM IS A MISSING RATE. Either a rate was
 		// found that does not cover every tier this request used — a gap an operator closes
@@ -806,6 +824,7 @@ func (a *Aggregator) costOf(e *pipeline.SessionEvent, ce costevent.Event, haveRe
 		return eventCost{priceable: 1, unpricedKey: key}
 	}
 	ec := eventCost{micros: micros, priced: 1, priceable: 1, provenance: prov.String()}
+	ec.tierMicros = tiers
 	// The same exactness test the producer applies, on this package's OWN figure. There
 	// are two sources of cost here (see the type doc above) and a truncated stream
 	// reaching this fallback is priced prompt-only exactly as it would have been by the
@@ -1194,6 +1213,10 @@ func (a *Aggregator) foldInto(ring []bucket, t time.Time, sessionID string, e *p
 		Tokens:               tokens,
 		CostMicros:           ec.micros,
 		AvoidedMicros:        avoided,
+		InputCostMicros:      ec.tierMicros[pricing.TierInput],
+		CacheWriteCostMicros: ec.tierMicros[pricing.TierCacheWrite],
+		CacheReadCostMicros:  ec.tierMicros[pricing.TierCacheRead],
+		OutputCostMicros:     ec.tierMicros[pricing.TierOutput],
 		PricedRequests:       ec.priced,
 		IncompleteRequests:   ec.incomplete,
 		PriceableRequests:    ec.priceable,

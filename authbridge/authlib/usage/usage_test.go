@@ -1060,6 +1060,12 @@ func TestFoldInto_CarriesEveryCountsField(t *testing.T) {
 	raw, err := json.Marshal(costevent.Event{
 		CostUSD: 0.005, Source: costevent.SourceUsageFallback, Provenance: "configured",
 		Settled: true, Incomplete: true, IncompleteReason: pricing.ReasonOutputUncounted,
+		// The modelled split, which a real priced record carries: the fold has to move all
+		// four or they are absent from every /v1/usage total. Values differ from each other
+		// so a fold that carried one field into all four would still fail.
+		Tiers: &costevent.TierCost{
+			Input: 0.000007, CacheWrite: 0.000022, CacheRead: 0.0003, Output: 0.00046,
+		},
 		// APPLIED, not projected: TotalAvoidedMicros skips a projected saving, so an
 		// observe-mode entry here would leave AvoidedMicros zero and this test would fail
 		// for a reason that has nothing to do with the fold carrying the field.

@@ -273,6 +273,19 @@ func PlausibleUsage(u Usage) bool {
 	return true
 }
 
+// MicrosOrZero is MicrosFromUSD for a caller with nothing useful to do with a refusal.
+//
+// For figures that are a RATIO rather than a total: an unrepresentable component makes the
+// ratio less complete and nothing else, where the same failure in a total would be a
+// garbage ledger figure. Do not use it for money anyone is charged.
+func MicrosOrZero(usd float64) int64 {
+	m, ok := MicrosFromUSD(usd)
+	if !ok {
+		return 0
+	}
+	return m
+}
+
 // CostByTier is Cost's arithmetic with the per-tier amounts kept instead of summed away.
 //
 // ONE PASS, ONE `eff`. The alternative is what Settle does for its prompt and output
