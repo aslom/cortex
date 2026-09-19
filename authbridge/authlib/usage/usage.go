@@ -151,6 +151,25 @@ type Counts struct {
 	// priced, which is not the same as "this traffic was free" — the API omits
 	// the field entirely in that case rather than asserting $0.
 	CostMicros int64 `json:"costMicros,omitempty"`
+	// The modelled cost of each token tier, summed over the requests in this bucket.
+	//
+	// ADJACENT TO CostMicros, not filed with the token counters they parallel, because the
+	// distinction that matters here is not "tokens versus money" but AUTHORITATIVE VERSUS
+	// MODELLED. CostMicros may be a gateway's own post-discount figure; these four are
+	// always the rate table's, so they need NOT sum to it and a reader who assumes they do
+	// is wrong. Put beside the field they qualify, that is visible in one glance instead of
+	// inferred from a field name.
+	//
+	// USED AS A RATIO, never as a total — see ApportionTiers, which is the only thing that
+	// should read them. All four zero means no modelled split reached this bucket, which is
+	// NOT a claim that the traffic was free.
+	//
+	// Reasoning is deliberately absent: it is a subset of output, not a fifth tier, so a
+	// field here would double-count. It stays in the token counters below.
+	InputCostMicros      int64 `json:"inputCostMicros,omitempty"`
+	CacheWriteCostMicros int64 `json:"cacheWriteCostMicros,omitempty"`
+	CacheReadCostMicros  int64 `json:"cacheReadCostMicros,omitempty"`
+	OutputCostMicros     int64 `json:"outputCostMicros,omitempty"`
 	// AvoidedMicros is cost that was NOT INCURRED — tool-prune's removed prompt tokens
 	// priced at the tier they would have landed in — in the same unit as CostMicros.
 	//
@@ -321,6 +340,13 @@ func (c *Counts) Add(o Counts) {
 	c.addInto(&c.Errors, o.Errors)
 	c.addInto(&c.Tokens, o.Tokens)
 	c.addInto(&c.CostMicros, o.CostMicros)
+	// The tier split, checked like everything else. A saturated tier matters even though the
+	// figures are only ever a ratio: a clamped numerator against an unclamped denominator
+	// silently changes the SHAPE of the split, which is the one thing these fields carry.
+	c.addInto(&c.InputCostMicros, o.InputCostMicros)
+	c.addInto(&c.CacheWriteCostMicros, o.CacheWriteCostMicros)
+	c.addInto(&c.CacheReadCostMicros, o.CacheReadCostMicros)
+	c.addInto(&c.OutputCostMicros, o.OutputCostMicros)
 	// Its own accumulate, never folded into the line above. Both are money-shaped and only
 	// one is money; see the field. Checked like the rest because a saving is modelled from
 	// the same table as a cost and inherits its range.
