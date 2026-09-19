@@ -1625,9 +1625,43 @@ func (m *model) paneView() string {
 	// Nothing here touches eventsTbl: the strip holds no cursor, filter or scroll state,
 	// so it cannot perturb the pane it sits above.
 	rows := []string{header}
-	if m.spendStripVisible() {
-		if strip := renderSpendStrip(m.spendSummary(), m.width); strip != "" {
-			rows = append(rows, styleMuted.Render(strip))
+	// EXACTLY WHAT layout() RESERVED, blank where there is nothing to say. Both reservations are
+	// height-gated and must stay that way — layout() runs only from the WindowSizeMsg handler, so
+	// a content-gated reservation would go stale the moment a poll landed, and stale in the
+	// direction that overflows. So the render fills them rather than the reservation tracking the
+	// render.
+	//
+	// The case that made this necessary: renderSpendStrip returns "" before the first poll answers
+	// (deliberately — "we have not looked" is honest), which left the strip's row and the drawer's
+	// five unfilled and the footer six rows above the bottom of the terminal. The same arithmetic
+	// covers a drawer left open on a pane that cannot host it.
+	if m.spendStripReservesRow() {
+		strip := ""
+		if m.spendStripVisible() {
+			// Styled AFTER fitting. renderSpendStrip measures with lipgloss.Width, and styleMuted
+			// only adds a colour escape so the column count is unchanged — but fitting an
+			// already-styled string would measure the escape bytes and silently over-truncate.
+			strip = renderSpendStrip(m.spendSummary(), m.width)
+		}
+		rows = append(rows, styleMuted.Render(strip))
+
+		if m.spendDrawerReservesRows() {
+			var lines []string
+			// The breakdown goes directly under the figure it breaks down, and ONLY when the
+			// strip itself drew — a headless breakdown would be a pane, which is the one thing
+			// this is not.
+			if strip != "" && m.spendDrawerVisible() {
+				// The axis and span come off the SNAPSHOT, not off what was last requested: see
+				// drawerLabels.
+				axis, window := m.drawerLabels()
+				lines = renderSpendDrawer(m.spend.snap, axis, window, m.width)
+			}
+			for len(lines) < spendDrawerLines {
+				lines = append(lines, "")
+			}
+			for _, line := range lines {
+				rows = append(rows, styleMuted.Render(line))
+			}
 		}
 	}
 	rows = append(rows, body, m.footerView())

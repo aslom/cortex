@@ -410,20 +410,24 @@ func TestSpendSummary_HasSnapshotSeparatesLookedFromNotLooked(t *testing.T) {
 	}
 }
 
-// The one poll has to ask for the per-session breakdown, or the sessions table's
-// COST column is blank against a perfectly healthy proxy.
+// The one poll has to ask for the DRAWER's axis, or the breakdown is empty against a
+// perfectly healthy proxy.
 //
-// Asserted on the WIRE rather than by reading the constant back, because the
-// constant is not the contract: apiclient.GetUsage OMITS the group parameter
-// entirely for GroupNone, so a revert to group=none is invisible in the request
-// except by its absence. Nothing else in the package would notice — the strip reads
-// Totals, which grouping does not affect, so the strip's own tests stay green while
-// every row of the sessions table silently loses its figure.
-func TestFetchSpend_AsksForThePerSessionBreakdown(t *testing.T) {
+// Asserted on the WIRE rather than by reading the constant back, because the constant is not
+// the contract: apiclient.GetUsage OMITS the group parameter entirely for GroupNone, so a
+// revert to group=none is invisible in the request except by its absence. Nothing else in the
+// package would notice — the strip reads Totals, which grouping does not affect, so every
+// strip test stays green while the drawer silently loses every row.
+//
+// This asked for group=session while the sessions table summed its COST column out of this
+// snapshot. That column is now summed server-side over each session's whole LIFE, which is
+// both the honest scope beside a lifetime token count and what freed the axis for the drawer;
+// see sessionsColumns.
+func TestFetchSpend_AsksForTheDrawersAxis(t *testing.T) {
 	var gotQuery string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
-		_, _ = w.Write([]byte(`{"window":"1h","group":"session","buckets":[],"totals":{}}`))
+		_, _ = w.Write([]byte(`{"window":"1h","group":"model","buckets":[],"totals":{}}`))
 	}))
 	defer ts.Close()
 
@@ -446,11 +450,19 @@ func TestFetchSpend_AsksForThePerSessionBreakdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unparseable query %q: %v", gotQuery, err)
 	}
-	if got := q.Get("group"); got != string(usage.GroupSession) {
-		t.Errorf("group = %q, want %q; the sessions table gets no per-row cost without it", got, usage.GroupSession)
+	if got := q.Get("group"); got != string(usage.GroupModel) {
+		t.Errorf("group = %q, want %q; the drawer has no rows without it", got, usage.GroupModel)
 	}
-	// The breakdown is only useful on the ALL-sessions ring, so a session parameter
-	// would collapse it to the one row it scoped to.
+	// The default span too, on the same wire. A zero windowIdx must mean the hour the strip
+	// has always requested, not the first entry of a slice that happens to start at 15m —
+	// which is exactly what a bare index would have given a freshly constructed model.
+	if got := q.Get("window"); got != spendWindow.String() {
+		t.Errorf("window = %q, want %q: a fresh model must request the span the strip's label "+
+			"and every existing test assume", got, spendWindow)
+	}
+	// The breakdown is only useful on the ALL-sessions ring, so a session parameter would
+	// collapse it to the one row it scoped to — and the strip is global, so its figures must
+	// never be scoped to whichever session a pane happens to have selected.
 	if got := q.Get("session"); got != "" {
 		t.Errorf("session = %q; the poll must cover every session", got)
 	}
@@ -950,36 +962,6 @@ func TestApplyTodayFigure_ANegativeDayTotalLeavesHasTodayFalse(t *testing.T) {
 	}
 	if out.TodayUSD != 0 {
 		t.Errorf("TodayUSD = %v, want 0", out.TodayUSD)
-	}
-}
-
-// TestSessionCost_ANegativeSessionTotalIsUnpriced.
-//
-// The sessions table's COST cell renders priced=false as blank, which already means
-// "nobody knows what this cost" in that table. A negative sum has to arrive as that rather
-// than as a figure, or the cell prints "$-5.0000" in a column a reader scans for the
-// expensive row.
-//
-// The SUM is what is refused, not each bucket: a positive bucket and a negative one can
-// cancel to something plausible, and it is the published figure that has to be refusable.
-func TestSessionCost_ANegativeSessionTotalIsUnpriced(t *testing.T) {
-	m := &model{}
-	m.spend.snap = &usage.Snapshot{
-		Window: "1h",
-		Totals: usage.Counts{Requests: 4, CostMicros: 1_000_000, PricedRequests: 4, PriceableRequests: 4},
-		Buckets: []usage.Bucket{
-			{Series: map[string]usage.Counts{"s1": {Requests: 1, CostMicros: 2_000_000, PricedRequests: 1}}},
-			{Series: map[string]usage.Counts{"s1": {Requests: 1, CostMicros: -7_000_000, PricedRequests: 1}}},
-		},
-		Priced: true,
-	}
-
-	usd, priced, _ := m.sessionCost("s1")
-	if priced {
-		t.Errorf("priced = true for a session summing to %v; the cell will print a refund", usd)
-	}
-	if usd != 0 {
-		t.Errorf("usd = %v, want 0", usd)
 	}
 }
 

@@ -143,6 +143,64 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 
+	// The spend drawer's four keys, handled where `u` is and gated the same way: not
+	// while filtering (they are characters the user is typing), not under the column
+	// picker, not mid-edit.
+	//
+	// GLOBAL, unlike every pane binding below, because the strip is global — it draws on
+	// every pane except the two pickers, and a breakdown of it that only opened on one
+	// pane would be a pane's feature wearing the strip's clothes.
+	//
+	// `a` and `w` are live ONLY while the drawer is open. They are ordinary letters, and
+	// claiming them permanently would take them from any future pane binding for the sake of a
+	// surface that is closed most of the time; scoped to the open drawer they are discoverable
+	// from its own hint line and inert otherwise.
+	//
+	// `a`, NOT `g`: `g` is globally "go to top", and the drawer stays open alongside the table,
+	// so it would shadow that motion for most of a session. See cycleSpendAxis.
+	//
+	// `w` IS TAKEN ON paneUsage, whose handler runs above this one and returns — so the drawer
+	// does not open on that pane at all (see spendDrawerHost) and its hint line never advertises
+	// a key that belongs to something else.
+	if !m.filtering && !m.colPicker && m.editState.phase == editPhaseDone {
+		switch msg.String() {
+		case "$":
+			m.toggleSpendDrawer()
+			return nil
+		case "a":
+			if m.spendDrawerVisible() {
+				return m.cycleSpendAxis()
+			}
+		case "w":
+			if m.spendDrawerVisible() {
+				return m.cycleSpendWindow()
+			}
+		case "esc":
+			// Closes the drawer FIRST, before esc reaches whatever else it means on this
+			// pane. The drawer is the most recently opened thing on screen, so it is what
+			// a user pressing esc is closing — and esc's other meanings (leave a pane, go
+			// back) are still one more press away, which is the behaviour every overlay in
+			// this package already has.
+			//
+			// GATED ON WHAT IS ON SCREEN, not on the flag. m.spend.expanded survives a move to
+			// a pane that cannot host the drawer and a resize below its height floor, so gating
+			// on the flag swallowed esc for a drawer nobody could see: open it on Sessions,
+			// press `u`, press esc — and the Usage pane did not exit until a second press. That
+			// is the "a key that silently does nothing reads as a broken key" failure
+			// toggleSpendDrawer's own doc argues against, arriving through the other door.
+			//
+			// The flag is left ALONE when the drawer is off screen, deliberately: it is a
+			// strip expansion and the strip is global, so returning to a pane that can host it
+			// should find it as the operator left it.
+			if m.spendDrawerVisible() {
+				m.spend.expanded = false
+				// Same reason toggleSpendDrawer re-lays out: the reserved rows have to go back.
+				m.layout()
+				return nil
+			}
+		}
+	}
+
 	// The column picker owns the keyboard while it is up, so ↑↓/space cannot also
 	// move the table cursor underneath it. Checked before pane dispatch for the
 	// same reason the help overlay is.
@@ -895,10 +953,15 @@ func (m *model) helpView() string {
 	case panePods:
 		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [r] reload  [?] keys  [q] quit"
 	case paneSessions:
+		// [$] spend BESIDE [u] usage, because the footer is where a key gets discovered. It was
+		// documented in the [?] overlay and in the README's own footer sample and was missing
+		// from the line those two describe — so the drawer existed only for a reader who went
+		// looking for it. Placed after [u] so fitHintLine, which drops from the front, gives up
+		// the navigation keys before either of the two that reach cost.
 		if m.parentCtx != nil {
-			return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [/] filter  [esc] pods  [p] pause  [?] keys  [q] quit"
+			return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [esc] pods  [p] pause  [?] keys  [q] quit"
 		}
-		return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [/] filter  [p] pause  [?] keys  [q] quit"
+		return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit"
 	case paneEvents:
 		skipHint := "[s] hide passthru/skip"
 		if m.hideInactive {
@@ -1023,6 +1086,13 @@ func (m *model) layout() {
 	if m.spendStripReservesRow() {
 		bodyH--
 	}
+	// And the drawer's rows when it is open. Reserving nothing for them made the view
+	// spendDrawerLines taller than the terminal the moment `$` was pressed, pushing the footer
+	// off the bottom on every pane — the failure the strip's own reservation exists to prevent,
+	// five rows at a time instead of one. See spendDrawerReservesRows.
+	if m.spendDrawerReservesRows() {
+		bodyH -= spendDrawerLines
+	}
 	// And one more while the filter is open: View() prepends filterInput above the body, so
 	// the line exists on screen whether or not the budget admits it. Unreserved, the view came
 	// out one line taller than the terminal at every size, the terminal scrolled, and the
@@ -1040,7 +1110,10 @@ func (m *model) layout() {
 	// than an 80-column terminal, wrapping every row. Applied from the constructors' own
 	// definitions each time rather than to the live columns, so widening the terminal back up
 	// restores what a narrower one took away.
-	m.sessionsTbl.SetColumns(fitTableColumns(sessionsColumns(), m.width))
+	// The sessions table is NOT fitted here. Its header and its rows have to change together —
+	// the money columns come and go with the width — and setting columns with the old rows still
+	// loaded panics inside bubbles' SetColumns. rebuildSessionsTable owns both; see its doc. It
+	// is called below, after the heights are set.
 	m.pipelineTbl.SetColumns(fitTableColumns(pipelineColumns(), m.width))
 	m.catalogTbl.SetColumns(fitTableColumns(catalogColumns(), m.width))
 
@@ -1049,6 +1122,9 @@ func (m *model) layout() {
 	// tables are not rebuilt from here, so nothing else would reconcile it.
 	setTableHeight(&m.sessionsTbl, bodyH)
 	m.bodyHeight = bodyH
+	// AFTER the height, so the cursor-visibility maths inside it uses the new window. This is
+	// what fits the sessions header to the new width, rows included.
+	m.rebuildSessionsTable()
 	// Picker tables share the same body area as the session tables so the
 	// terminal real estate stays constant as the user navigates panes.
 	setTableHeight(&m.namespacesTbl, bodyH)

@@ -21,11 +21,15 @@ var sessionTotals = []int{
 // the pane is actually laid out at — not only the declared one.
 //
 // The declared width is 10, but fitTableColumns squeezes columns toward minColumnWidth
-// on a narrow terminal, and TOKENS is one it squeezes: 10 at 60 columns, 8 at 50, 7 at
-// 46, 6 at 40, 5 at 36. So building the table from newSessionsTable() and asserting
-// against 10 — which the first version of this test did — pins the reported case and
-// nothing narrower, while the argument for compacting rather than widening the column is
-// precisely that the fit budget matters.
+// on a narrow terminal, and TOKENS is one it squeezes. So building the table from
+// newSessionsTable() and asserting against 10 — which the first version of this test did —
+// pins the reported case and nothing narrower, while the argument for compacting rather
+// than widening the column is precisely that the fit budget matters.
+//
+// sessionsColumnsFor, not sessionsColumns: the set actually laid out is width-dependent
+// since COST and SAVED arrived. Two more columns cost every other column width, and at 50
+// they took this one to 5 runes and truncated "100.0k" — so they are dropped outright below
+// the width that can hold them, and this test walks the set the pane really gets.
 //
 // 40 columns is the floor this can promise: formatCompact's widest output is six runes
 // ("999.9M"), so a cell of six or more always holds it. Below that the cell is five and
@@ -34,7 +38,7 @@ var sessionTotals = []int{
 func TestSessionTokens_FitsEveryFittedWidth(t *testing.T) {
 	for _, term := range []int{200, 90, 60, 50, 46, 42, 40} {
 		width := 0
-		for _, c := range fitTableColumns(sessionsColumns(), term) {
+		for _, c := range fitTableColumns(sessionsColumnsFor(term), term) {
 			if c.Title == "TOKENS" {
 				width = c.Width
 			}
@@ -56,9 +60,14 @@ func TestSessionTokens_FitsEveryFittedWidth(t *testing.T) {
 // formatCompact's widest output is six, so it truncates. That is the fit budget running
 // out, not the formatter — worth a test so a future change to either is measured against
 // it instead of assumed.
+//
+// Through sessionsColumnsFor, so the floor is the one the PANE has. 36 columns is far below
+// the width that affords COST and SAVED, so they are dropped and the budget is the same five
+// columns this floor was measured against — which is why the number below did not move when
+// they arrived. Against the declared seven it would read 4.
 func TestSessionTokens_BelowFortyColumnsTheCellIsTooNarrow(t *testing.T) {
 	width := 0
-	for _, c := range fitTableColumns(sessionsColumns(), 36) {
+	for _, c := range fitTableColumns(sessionsColumnsFor(36), 36) {
 		if c.Title == "TOKENS" {
 			width = c.Width
 		}
