@@ -1334,3 +1334,64 @@ func TestRunCost_ReportsASavingEvenWhenNothingWasPriced(t *testing.T) {
 			"most:\n%s", got)
 	}
 }
+
+// The JSON carries the APPORTIONED split, and omits it when there is no mix.
+//
+// The raw modelled micros already reach a script for free: costJSON.Totals is usage.Counts
+// embedded verbatim, which is the property the struct's own comment exists to protect. What
+// is added here is the ANSWER rather than the ingredients — a script that apportioned the
+// mix itself would be the second implementation of arithmetic the spec puts in one place,
+// and the two would drift.
+func TestRunCost_JSONCarriesTheApportionedTiers(t *testing.T) {
+	srv := fakeUsageServer(t, `{"window":"1h","priced":true,"totals":{"requests":35,`+
+		`"costMicros":4546200,"pricedRequests":35,"priceableRequests":35,`+
+		`"inputCostMicros":3000,"cacheWriteCostMicros":7500,`+
+		`"cacheReadCostMicros":30000,"outputCostMicros":45000}}`)
+	defer srv.Close()
+
+	var out, errOut strings.Builder
+	if code := runCost([]string{"--endpoint", srv.URL, "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr = %s", code, errOut.String())
+	}
+	var decoded struct {
+		Tiers *struct {
+			Input      int64 `json:"input"`
+			CacheWrite int64 `json:"cacheWrite"`
+			CacheRead  int64 `json:"cacheRead"`
+			Output     int64 `json:"output"`
+		} `json:"tiers"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &decoded); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v\n%s", err, out.String())
+	}
+	if decoded.Tiers == nil {
+		t.Fatalf("no tiers for a window with a modelled mix:\n%s", out.String())
+	}
+	// Apportioned, not the raw mix: the four must sum to the authoritative total, which is
+	// two orders of magnitude above the 85,500-micro mix they were derived from.
+	sum := decoded.Tiers.Input + decoded.Tiers.CacheWrite + decoded.Tiers.CacheRead + decoded.Tiers.Output
+	if sum != 4_546_200 {
+		t.Errorf("tiers sum to %d, want the authoritative 4546200 — these look like the raw "+
+			"mix rather than the apportioned split:\n%s", sum, out.String())
+	}
+	if decoded.Tiers.Output <= decoded.Tiers.CacheRead {
+		t.Errorf("output %d is not above cache-read %d, so the ranking was lost",
+			decoded.Tiers.Output, decoded.Tiers.CacheRead)
+	}
+}
+
+// No mix means the key is ABSENT, not four zeros: a script summing zeros would report the
+// traffic as free, the same lie the human surface refuses with an em-dash.
+func TestRunCost_JSONOmitsTiersWithNoMix(t *testing.T) {
+	srv := fakeUsageServer(t, `{"window":"1h","priced":true,"totals":{"requests":35,`+
+		`"costMicros":4546200,"pricedRequests":35,"priceableRequests":35}}`)
+	defer srv.Close()
+
+	var out, errOut strings.Builder
+	if code := runCost([]string{"--endpoint", srv.URL, "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr = %s", code, errOut.String())
+	}
+	if strings.Contains(out.String(), `"tiers"`) {
+		t.Errorf("tiers emitted for a window with no modelled mix:\n%s", out.String())
+	}
+}
