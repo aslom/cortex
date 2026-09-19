@@ -131,8 +131,11 @@ func TestEventJSONTagsArePinned_EveryField(t *testing.T) {
 		IncompleteReason: "output-uncounted",
 		PromptUSD:        0.2,
 		OutputUSD:        0.05,
-		RejectedReason:   "implausible",
-		UsageRefused:     true,
+		Tiers: &TierCost{
+			Input: 0.007, CacheWrite: 0.022, CacheRead: 0.3, Output: 0.46,
+		},
+		RejectedReason: "implausible",
+		UsageRefused:   true,
 		Avoided: []Saving{{
 			Component:     "tool-prune",
 			TokensAvoided: 1200,
@@ -146,6 +149,7 @@ func TestEventJSONTagsArePinned_EveryField(t *testing.T) {
 	const want = `{"cost_usd":0.25,"source":"gateway-header","daily_total_usd":3.5,` +
 		`"daily_max_usd":10,"provenance":"authoritative","settled":true,"incomplete":true,` +
 		`"incomplete_reason":"output-uncounted","prompt_usd":0.2,"output_usd":0.05,` +
+		`"tiers":{"input":0.007,"cache_write":0.022,"cache_read":0.3,"output":0.46},` +
 		`"usage_refused":true,"rejected_reason":"implausible",` +
 		`"avoided":[{"component":"tool-prune",` +
 		`"tokensAvoided":1200,"usd":0.01,"provenance":"configured"}]}`
@@ -199,7 +203,7 @@ func TestTotalAvoidedMicros_ReadsWhatTheProducerActuallyWrites(t *testing.T) {
 // process.
 func TestEventWireCoversEveryField(t *testing.T) {
 	// Keep in step with the marshal in TestEventJSONTagsArePinned_EveryField.
-	const pinned = 13
+	const pinned = 14
 	if got := reflect.TypeOf(Event{}).NumField(); got != pinned {
 		t.Fatalf("Event has %d fields, %d are pinned on the wire.\n"+
 			"Add the new field to TestEventJSONTagsArePinned_EveryField's marshal AND its "+

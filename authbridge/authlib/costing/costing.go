@@ -381,6 +381,17 @@ type Settled struct {
 	// Neither sums to CostUSD, which may be the gateway's; comparing their sum against a
 	// reported total is a drift measurement, and ModelledUSD is the figure kept for it.
 	OutputUSD float64
+
+	// TierUSD is the modelled cost of each rate tier, indexed by pricing.Tier.
+	//
+	// Modelled with exactly the standing PromptUSD above has, and for the reason given
+	// there: a gateway reports one total and no breakdown. Taken from the WHOLE request's
+	// pricing rather than from the two halves below, which re-price with the other tiers
+	// zeroed and so resolve the table at a different prompt total.
+	TierUSD [pricing.NumTiers]float64
+	// HasTiers says TierUSD holds a split. False leaves every element zero, and zero must
+	// not be read as a free tier — which is why the PUBLISHED field is a pointer.
+	HasTiers  bool
 	HasOutput bool
 }
 
@@ -428,9 +439,16 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	// threshold flattens the same way for all three, so no premium can land on one and
 	// miss another.
 	promptTotal := usage.PromptTotal()
-	micros, prov, ok, refusal := modelledCost(rates, pctx.Host, model, usage, promptTotal)
+	micros, tiers, prov, ok, refusal := modelledCost(rates, pctx.Host, model, usage, promptTotal)
 	if ok {
 		out.ModelledUSD, out.HasModelled, out.ModelledProv = float64(micros)/1e6, true, prov
+		// From the WHOLE request's pricing, under one resolved rate set, so the four
+		// figures are mutually consistent. The halves below cannot serve: each zeroes the
+		// other's tiers, which changes Usage.PromptTotal and so the rates that apply.
+		for i, m := range tiers {
+			out.TierUSD[i] = float64(m) / 1e6
+		}
+		out.HasTiers = true
 	}
 
 	// AN IMPOSSIBLE COUNT REFUSES ALL THREE FIGURES, HERE, BEFORE THE HALVES ARE COMPUTED.
@@ -467,7 +485,7 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	// presented as a whole one is worse than none.
 	promptOnly := usage
 	promptOnly.Output = 0
-	if micros, _, ok, _ := modelledCost(rates, pctx.Host, model, promptOnly, promptTotal); ok {
+	if micros, _, _, ok, _ := modelledCost(rates, pctx.Host, model, promptOnly, promptTotal); ok {
 		out.PromptUSD, out.HasPrompt = float64(micros)/1e6, true
 	}
 
@@ -475,7 +493,7 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	// tiers instead of subtracting the prompt figure from the total.
 	outputOnly := usage
 	outputOnly.Input, outputOnly.CacheWrite, outputOnly.CacheRead = 0, 0, 0
-	if micros, _, ok, _ := modelledCost(rates, pctx.Host, model, outputOnly, promptTotal); ok {
+	if micros, _, _, ok, _ := modelledCost(rates, pctx.Host, model, outputOnly, promptTotal); ok {
 		out.OutputUSD, out.HasOutput = float64(micros)/1e6, true
 	}
 
@@ -517,6 +535,11 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 		out.HasPrompt && out.HasOutput && !pricing.PlausibleRequestCostUSD(out.PromptUSD+out.OutputUSD) {
 		out.PromptUSD, out.HasPrompt = 0, false
 		out.OutputUSD, out.HasOutput = 0, false
+		// SAME REASONING, SAME TABLE. What the ceiling condemns is the RATE TABLE, and the
+		// split is drawn from it at the same prompt total. Unlike the halves it would be
+		// condemned SILENTLY: a ratio carries no magnitude, so a discredited one looks
+		// exactly like a sound one on screen.
+		out.TierUSD, out.HasTiers = [pricing.NumTiers]float64{}, false
 	}
 
 	streamedPlaceholder := state == headerZero && IsEventStream(pctx)
@@ -622,21 +645,23 @@ func withRefusal(out Settled, cost float64, state headerCostState, pctx *pipelin
 // nil interface and calling a method on it panics, where a nil *pricing.Registry would
 // have been safe. tool-prune hit exactly this and its fail-open masked the panic, so
 // pruning silently stopped.
-func modelledCost(rates pricing.Resolver, host, model string, u pricing.Usage, promptTotal int) (int64, pricing.Provenance, bool, pricing.Refusal) {
+func modelledCost(rates pricing.Resolver, host, model string, u pricing.Usage, promptTotal int) (
+	int64, [pricing.NumTiers]int64, pricing.Provenance, bool, pricing.Refusal) {
+	var none [pricing.NumTiers]int64
 	if rates == nil || u == (pricing.Usage{}) {
 		// No resolver is a deployment with no rate table at all, and no counters is unknown
 		// usage. Neither is a refusal of anything: nothing was on the wire to refuse.
-		return 0, pricing.ProvNone, false, pricing.RefusalNoTokens
+		return 0, none, pricing.ProvNone, false, pricing.RefusalNoTokens
 	}
 	r, prov := rates.Resolve(host, model, promptTotal)
 	if prov == pricing.ProvNone {
-		return 0, pricing.ProvNone, false, pricing.RefusalNoRate
+		return 0, none, pricing.ProvNone, false, pricing.RefusalNoRate
 	}
-	micros, ok, refusal := pricing.CostWithReason(r, u)
+	tiers, micros, ok, refusal := pricing.CostByTier(r, u)
 	if !ok {
-		return 0, pricing.ProvNone, false, refusal
+		return 0, none, pricing.ProvNone, false, refusal
 	}
-	return micros, prov, true, pricing.RefusalNone
+	return micros, tiers, prov, true, pricing.RefusalNone
 }
 
 // StateKey is where the full Settled outcome is stashed for the rest of the request.
@@ -709,6 +734,23 @@ func Amend(pctx *pipeline.Context, f func(*costevent.Event)) bool {
 	return true
 }
 
+// tierCostOf publishes the modelled split, or nil when there is none.
+//
+// NIL RATHER THAN AN EMPTY STRUCT: the consumer apportions a real total by these numbers,
+// so "no split" read as four zeros divides by zero and read as a real split reports every
+// request free. See costevent.Event.Tiers.
+func tierCostOf(s Settled) *costevent.TierCost {
+	if !s.HasTiers {
+		return nil
+	}
+	return &costevent.TierCost{
+		Input:      s.TierUSD[pricing.TierInput],
+		CacheWrite: s.TierUSD[pricing.TierCacheWrite],
+		CacheRead:  s.TierUSD[pricing.TierCacheRead],
+		Output:     s.TierUSD[pricing.TierOutput],
+	}
+}
+
 // NewRecord builds the wire record from a settled outcome.
 //
 // Named NewRecord, not Record, because costevent.Record READS a record off a session event
@@ -735,6 +777,7 @@ func NewRecord(s Settled, avoided []costevent.Saving) costevent.Event {
 		UsageRefused: s.UsageRefused,
 		PromptUSD:    s.PromptUSD,
 		OutputUSD:    s.OutputUSD,
+		Tiers:        tierCostOf(s),
 		Avoided:      avoided,
 	}
 }
