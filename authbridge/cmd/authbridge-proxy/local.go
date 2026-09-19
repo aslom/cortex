@@ -269,6 +269,18 @@ cost_ledger:
   enabled: true
   # dir: /absolute/path        # default ~/.cortex/cost; a RELATIVE path is refused
   # retention_days: 30         # minimum 9 -- window=7d can open nine local day files
+# Session bucketing: which request headers are used to group traffic into
+# sessions visible in abctl. Each listed header is tried in order; the first
+# non-empty value wins.
+#
+# X-Claude-Code-Session-Id is set by Claude Code on every inference request.
+# X-Session-Id is set by OpenCode, Pi (Inflection AI), and similar frameworks.
+#
+# An explicit empty list (id_headers: []) disables header-based bucketing.
+session:
+  id_headers:
+    - "X-Claude-Code-Session-Id"
+    - "X-Session-Id"
 pipeline:
   outbound:
     plugins:
