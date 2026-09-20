@@ -433,11 +433,29 @@ type model struct {
 
 	// Panel components.
 	sessionsTbl table.Model
-	eventsTbl   table.Model
-	pipelineTbl table.Model
-	catalogTbl  table.Model
-	detailVp    viewport.Model
-	detailEvent *pipeline.SessionEvent
+	// sessionRowIDs is the FULL session id for each row of sessionsTbl, in the same order.
+	//
+	// It exists because a rendered cell is not a data channel, and this pane used one as if it
+	// were: selectedSessionID read rows[cursor][0], so the moment the SESSION cell began
+	// truncating a 36-character UUID to its column width, the truncated string with an ellipsis
+	// became m.selectedSess. Measured consequences, all from one keypress on a normal session:
+	// no snapshot was fetched (the id missed the live map and took the cached-only branch), the
+	// events pane rendered empty (it missed m.events), the id sent to the server was the
+	// truncated one, and — worst — the release loop's `cached != id` was true for every
+	// full-id key, so opening a session DELETED THE EVENT CACHE FOR EVERY SESSION INCLUDING
+	// ITSELF. That is exactly the unrecoverable loss #870 and the comment above that loop exist
+	// to prevent.
+	//
+	// Kept in lockstep with the rows, built in the same loop, and the only writer is
+	// rebuildSessionsTable. A parallel slice rather than a map because the lookup key is the
+	// cursor's row INDEX, and rather than indexing m.sessions because the rows are filtered and
+	// interleaved with cached-only entries, so position does not map back.
+	sessionRowIDs []string
+	eventsTbl     table.Model
+	pipelineTbl   table.Model
+	catalogTbl    table.Model
+	detailVp      viewport.Model
+	detailEvent   *pipeline.SessionEvent
 	// detailRow is the full events-pane row (event + any folded CONNECT
 	// tunnel) the detail view was opened on. Kept so layout() can re-render
 	// the detail pane on resize without re-deriving the tunnel fold.
