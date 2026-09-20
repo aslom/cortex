@@ -501,14 +501,39 @@ type spendSummary struct {
 
 	// Age is how long ago the window figure was fetched, and Stale reports that it is
 	// old enough to be worth saying — see spendStaleAfter. Age is only meaningful when
-	// Stale is set; a fresh figure reports neither, because the strip must not carry a
+	// Stale is set; a fresh figure reports neither, because the band must not carry a
 	// permanent timestamp.
+	//
+	// THE BAND READS Spans[i].Age INSTEAD. These two describe the hour and day chains only,
+	// and are kept because the summary's other consumers still read them.
 	Age   time.Duration
 	Stale bool
+
+	// Spans is what the band renders: one reading per budget span, indexed by spendSpan.
+	//
+	// CANONICAL FOR THE BAND, and the Window*/Today* fields above are the two named views the
+	// summary's older callers use. There is no risk of the two disagreeing, because one
+	// function fills both from the same chains in the same pass — but Spans is the one that
+	// covers all four spans, so a figure is only on the band if it is here.
+	Spans [numSpendSpans]spanReading
 }
 
 // spendSummary derives the strip's figures from the last snapshot.
+// spendSummary is the whole answer: the per-span readings the band draws, plus the hour and
+// day views the summary's older consumers read.
+//
+// A WRAPPER, so Spans is filled OUTSIDE every branch of the hour-and-day derivation below.
+// That derivation returns early for a failed hour poll and for a snapshot that has not
+// arrived, and both describe the HOUR chain only — the month chain can be perfectly healthy
+// while the hour is erroring. Filling the readings here is what stops the band losing three
+// spans because a fourth failed, which is the independence the chains were split for.
 func (m *model) spendSummary() spendSummary {
+	out := m.spendHourAndDaySummary()
+	out.Spans = m.spanReadings()
+	return out
+}
+
+func (m *model) spendHourAndDaySummary() spendSummary {
 	// An errored poll is an UNKNOWN cost, and the strip must SAY so. Reporting it
 	// as the zero value made the renderer fall through to its "nothing to say"
 	// path, so a broken or absent /v1/usage produced no figure, no explanation and
@@ -960,4 +985,124 @@ func (m *model) applyTodayFigure(out *spendSummary) {
 		out.TodaySavedUSD = float64(av) / 1e6
 		out.HasTodaySaved = true
 	}
+}
+
+// spanReading is one band cell's data: the figure, whether it can be shown at all, and every
+// caveat that rides on it.
+//
+// ONE SHAPE FOR ALL FOUR SPANS, which is the point. The summary's Today*/Window* field pairs
+// exist because the band once had exactly two figures with different provenance; four spans
+// spelled that way would be a field per caveat per span, and the renderer would have to know
+// which prefix belonged to which cell. Here the renderer walks an array and asks the same
+// questions of every entry.
+type spanReading struct {
+	// NO LABEL FIELD. It was here, on the theory that a cell and its heading could not then
+	// come from different places — and that had it exactly backwards: a reading built anywhere
+	// but spanReadings carried an EMPTY label, so the band rendered four nameless columns. The
+	// label is a property of the SPAN, not of one poll's answer, so spendSpanDefs is the only
+	// place it lives and the renderer indexes it by the span it is drawing.
+	USD float64
+	// Priced says a figure exists to show. False means "nothing to say", which the band
+	// renders as an em dash — never $0.00, which would assert the traffic was free.
+	Priced bool
+	// Failed says this span's own poll errored. Per span, because the chains fail
+	// independently: an older proxy answers the hour fine and 400s on window=month.
+	Failed bool
+	// Unanswerable says THIS DEPLOYMENT CANNOT ANSWER THIS SPAN, which is a different thing
+	// from a failure or an empty answer and the one a reader most needs told.
+	//
+	// With no cost ledger — Kubernetes by design — the server serves symbolic windows from the
+	// ring instead, clamped to the window asked for, and reports the window it actually
+	// served. The ring holds six hours. So "month" comes back as a six-hour figure, and
+	// drawing it under a MONTH label would understate the month by a factor of about 120 while
+	// looking entirely well-formed. Detected by comparing what was asked for against what was
+	// served; rendered as an em dash, because a wrong number wearing a right label is the one
+	// thing every money surface here refuses.
+	Unanswerable                    bool
+	Unpriced, Priceable, Incomplete int64
+	Degraded                        *usage.Degraded
+	Clamped                         bool
+	// Age and Stale report that this chain's last answer is old enough to say so. PER SPAN
+	// rather than one age for the band, because the four poll fifteen times apart: an age that
+	// described the whole band would either alarm on a healthy month chain between its own
+	// five-minute polls, or stay quiet while the hour chain wedged.
+	Age   time.Duration
+	Stale bool
+}
+
+// servedAsRequested reports whether the server answered the window that was asked for.
+//
+// NOT A STRING COMPARE, because a duration window comes back stringified: ask for "1h" and the
+// answer says "1h0m0s", which is the same span spelled by Go rather than by the caller. Both
+// sides are parsed when both parse, and compared as text otherwise — which is what makes the
+// symbolic windows strict. "month" does not parse as a duration, so a served "6h0m0s" cannot
+// accidentally equal it, and that mismatch is exactly the no-ledger degradation.
+func servedAsRequested(want, served string) bool {
+	if want == served {
+		return true
+	}
+	wd, wok := parseWindowSpan(want)
+	sd, sok := parseWindowSpan(served)
+	return wok && sok && wd == sd
+}
+
+// spanReadings builds one reading per budget span from the chains.
+//
+// EVERY PATH FILLS EVERY ENTRY, including the ones with nothing to report, so the band always
+// has four cells to lay out and a missing figure is a stated em dash rather than a gap the
+// renderer has to guess at.
+func (m *model) spanReadings() [numSpendSpans]spanReading {
+	now := time.Now()
+	var out [numSpendSpans]spanReading
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		def := spendSpanDefs[span]
+		c := &m.spend.chains[span]
+		var r spanReading
+		// Staleness is read off the chain whatever the answer was: a wedged chain holding a
+		// good old figure is precisely the case worth disclosing.
+		if !c.lastFetch.IsZero() {
+			if age := now.Sub(c.lastFetch); age > spendStaleAfter {
+				r.Age, r.Stale = age, true
+			}
+		}
+		switch {
+		case c.err != nil:
+			r.Failed = true
+		case c.snap == nil:
+			// Nothing has answered yet. Not a failure, and not zero.
+		case !servedAsRequested(def.window, sanitizeLabel(c.snap.Window)):
+			r.Unanswerable = true
+		default:
+			snap := c.snap
+			r.Unpriced, r.Priceable = unpricedGap(snap.Totals)
+			r.Incomplete = snap.Totals.IncompleteRequests
+			r.Degraded = snap.Degraded
+			r.Clamped = snap.Totals.Saturated
+			// A NEGATIVE TOTAL IS REFUSED, not clamped, and not rendered: the aggregator sums
+			// non-negative per-request figures, so a negative can only come from a broken
+			// producer, and "-$5.00" on a spend band reads as a refund nobody issued. Treated
+			// as unpriced, which is the honest reading — we do not know what this span cost.
+			if snap.Priced && !negativeCost(snap.Totals.CostMicros) {
+				r.USD = float64(snap.Totals.CostMicros) / 1e6
+				r.Priced = true
+			}
+		}
+		out[span] = r
+	}
+	return out
+}
+
+// unpricedGap is the coverage gap: how many PRICEABLE requests carry no figure, and the
+// denominator that makes it readable.
+//
+// Priceable rather than Requests, which is the distinction usage.Snapshot.Priced documents:
+// Requests counts every proxied response including MCP calls and health checks, none of which
+// can ever carry a price, so that denominator makes a correctly configured deployment report
+// itself permanently incomplete.
+func unpricedGap(c usage.Counts) (unpriced, priceable int64) {
+	priceable = c.PriceableRequests
+	if gap := priceable - c.PricedRequests; gap > 0 {
+		unpriced = gap
+	}
+	return unpriced, priceable
 }

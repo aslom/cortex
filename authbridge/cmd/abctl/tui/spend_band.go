@@ -28,129 +28,161 @@ func (c bandCell) width() int {
 	return len([]rune(c.label))
 }
 
-// renderSpendBand is the always-on spend band: labels ABOVE values, column-aligned.
+// bandDropOrder is the order cells are given up in as the terminal narrows, FIRST DROPPED
+// FIRST. It is deliberately NOT the visual order.
 //
-// The strip it replaces interleaved the two — "$3.8402 today" — which reads as a CSV line
-// and is why the pane looked unreadable. Stacking costs one row against the strip's single
-// line and is the change that fixes legibility.
+// The band reads left to right in ascending span — the hour, the day, the week, the month —
+// because that is how a reader zooms out from "right now". Dropping in that direction would
+// give up the month first, which is the budget figure and the reason three of these spans
+// exist at all. Dropping in reverse would give up the hour, which is the live one.
 //
-// MARKERS, NOT PROSE. Each money value comes from moneyAmount, so the three disclosure
-// glyphs ride on the figures exactly as they do on the strip; moneyFigure's parenthesised
-// caveats do not fit two lines. That is not a new loss — fitStripFigures already falls back
-// to this same marked form on a narrow terminal, and the marker is the fact while the words
-// are the explanation. The Usage pane and `abctl cost` remain the surfaces with room to
-// spell it out.
+// So the two ends survive and the middle yields: the week goes first, then the hour, leaving
+// TODAY and MONTH — "what have I spent today" and "how much of the budget is gone" — as the
+// last two readings on a narrow terminal. Every cell still drops WHOLE and nothing is ever
+// clipped, which is the rule a truncated money figure breaks.
+var bandDropOrder = [numSpendSpans]spendSpan{span7d, spanHour, spanToday, spanMonth}
+
+// renderSpendBand is the always-on spend band: labels ABOVE values, column-aligned, one cell
+// per budget span.
 //
-// WHOLE CELLS DROP, RIGHT TO LEFT, and nothing is ever clipped: the strip's rule, because a
-// truncated figure is a wrong figure. Today is first and so outlives the rest — it is the
-// figure the band exists to show.
-// GROUPED BY THE SPAN EACH FIGURE COVERS: the day's figures first, then the rolling window's,
-// and every window cell says which window it is.
+// FOUR COST CELLS AND NOTHING ELSE, and the exclusion is the design rather than an omission.
+// The band used to carry TODAY, LAST 1H, SAVED, CACHE HIT and TOKENS, and three of those five
+// had no span on them at all — CACHE HIT and TOKENS were read off the rolling-hour snapshot
+// while sitting in a row that opened with TODAY, so an hour's token count read as a day's, with
+// nothing on screen to tell a reader otherwise.
 //
-// The order used to be TODAY, LAST 1H, SAVED, CACHE HIT, TOKENS — day, window, day, window,
-// window — with only the money cells labelled. An operator reading it left to right had no way
-// to know that TOKENS and CACHE HIT covered the last hour while TODAY covered the day, and the
-// question that produced this change was exactly that: why does TOKENS say 6.4M when the
-// sessions below it each show a hundred times more. They were an hour against a lifetime.
+// IT SUPERSEDES #1074, which fixed the same defect a different way and landed while this was in
+// review. That change kept all five cells and suffixed each label with its span — "TOKENS 1H",
+// "CACHE HIT 1H" — grouping the row into a day run and a window run. It is a smaller change and
+// it does make every cell name its period.
 //
-// Both halves of the fix are needed. Grouping alone still relies on the reader inferring where
-// one span ends; suffixing alone leaves a reader's eye crossing spans twice on its way along
-// the row. Together the row reads as two runs, each labelled.
+// This goes further because the cells were not only mislabelled, they were the wrong cells: an
+// operator reads spend against the hour, the day, the week and the month, and the old five could
+// reach two of those. Suffixing labels makes a heterogeneous row honest; replacing it with four
+// readings of ONE quantity over four periods makes the row comparable, which is what the uniform
+// width and right alignment below are for. #1074's divider survives untouched — it is orthogonal
+// and closes the top block whatever the band holds.
+//
+// THE INVARIANT THAT REPLACES THEM: every cell's label names the period its figure covers.
+// Cost-only satisfies it trivially, because spendSpanDefs gives each span its label; any cell
+// added later has to satisfy it too. The volume readings are not lost — the drawer's tier
+// column says the cache story with more detail, the sessions table carries per-session tokens
+// and savings, and the Usage pane keeps the full metric set.
+//
+// MARKERS, NOT PROSE. Each money value comes from moneyAmount, so the three disclosure glyphs
+// ride on the figures; moneyFigure's parenthesised caveats do not fit two lines. The marker is
+// the fact and the words are the explanation, and `abctl cost` is the surface with room for
+// both.
+//
+// RIGHT-ALIGNED, AT A UNIFORM WIDTH, which is what makes four spans legible. These are four
+// readings of the SAME quantity over different periods, so a reader compares them directly —
+// and left-flushed in cells of their own widths, "$4.04" and "$703.18" put their decimal points
+// four columns apart. One width for every surviving cell with both lines right-aligned puts the
+// figures on a fixed stride with their decimal points in one place. Same rule the tables follow,
+// for the same reason.
 func renderSpendBand(s spendSummary, width int) []string {
-	// THE SUFFIX, COMPUTED ONCE, and EMPTY when there is no label to suffix with.
-	//
-	// spendSummary.WindowLabel is set only when parseWindowSpan could read snap.Window, so an
-	// unreadable window — or the Failed path, which builds a summary with no label at all —
-	// leaves it empty while every other field is populated. renderSpendStrip guards its own use
-	// with `s.WindowLabel != ""` and says an unlabelled group is the honest answer there.
-	//
-	// Concatenated unguarded, each label gained a TRAILING SPACE: "LAST ", "SAVED ", "TOKENS ",
-	// "CACHE HIT ". bandCell.width() is max(label, value), so that space costs a column in
-	// exactly the cells whose LABEL is the wider half — TOKENS (6 against "5.6M") and CACHE HIT
-	// (9 against "93%"). LAST and SAVED concatenated unguarded too, since before the band was
-	// grouped by span, but their money values are wider than their labels and absorbed it. All
-	// four go through one variable so the distinction stops mattering.
-	//
-	// Alignment survived either way — labels and values share the pad — and the final cell's
-	// trailing space is trimmed off the line. That is why this was invisible: the cost is wasted
-	// width, never a misplaced figure.
-	suffix := ""
-	if s.WindowLabel != "" {
-		suffix = " " + strings.ToUpper(s.WindowLabel)
-	}
-	var cells []bandCell
-	if s.HasToday {
-		cells = append(cells, bandCell{"TODAY", moneyAmount(s.TodayUSD,
-			s.TodayUnpriced, s.TodayPriceable, s.TodayIncomplete, s.TodayDegraded, s.TodayClamped)})
-	}
-	// THE SAVING MUST MATCH THE SPAN OF THE FIGURE IT SITS BESIDE, which is the whole point of
-	// spendSummary.TodaySavedUSD. Reading the WINDOW's avoided spend into a cell beside TODAY
-	// made the two a pair that spanned two spans — measured on a local proxy at "$64.1765
-	// today" beside "~$1.0291" for a day that had really avoided $2.1891, understating the
-	// figure next to it by 2.1x.
-	//
-	// So the day's saving joins the day's group HERE, and the window's fallback is appended
-	// below with the window's — its span decides where it sits, not its name. The fallback
-	// exists for a deployment with no durable ledger (Kubernetes, by design).
-	//
-	// The marker is part of the value, and the value never joins the spend figures:
-	// usage.Counts.AvoidedMicros forbids any consumer adding it, in either direction.
-	if s.HasTodaySaved {
-		cells = append(cells, bandCell{"SAVED", inexactMarker + formatUSDCell(s.TodaySavedUSD)})
-	}
-	// Gated on Priced, matching the strip: the window figure exists when the snapshot could
-	// price something, and there is no separate HasWindow to consult.
-	if s.Priced {
-		cells = append(cells, bandCell{
-			"LAST" + suffix,
-			moneyAmount(s.WindowUSD, s.Unpriced, s.Priceable, s.Incomplete, nil, s.Clamped),
-		})
-	}
-	if !s.HasTodaySaved && s.HasSaved {
-		cells = append(cells, bandCell{
-			"SAVED" + suffix,
-			inexactMarker + formatUSDCell(s.SavedUSD),
-		})
-	}
-	// TOKENS before CACHE HIT, so the two widest window cells are not adjacent at the end where
-	// the drop loop reaches first: the volume is what a reader checks the money against, and the
-	// hit rate is the one figure here that can be inferred from the tiers in the drawer.
-	if s.Tokens > 0 {
-		cells = append(cells, bandCell{"TOKENS" + suffix, humanizeCount(s.Tokens)})
-	}
-	if s.HasCacheHit {
-		cells = append(cells, bandCell{"CACHE HIT" + suffix, fmt.Sprintf("%.0f%%", s.CacheHitPct)})
+	// Cells in VISUAL order, every span present. A span with nothing to say still gets a cell:
+	// an em dash under MONTH says "not known here", where a missing column says nothing at all.
+	var cells [numSpendSpans]bandCell
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		cells[span] = bandSpanCell(spendSpanDefs[span].label, s.Spans[span])
 	}
 
-	// Drop from the right until what remains fits. The LAST cell's gutter is trimmed off the
-	// rendered line, so it is not counted against the budget — otherwise a cell that exactly
-	// fills the terminal would be dropped for trailing space nobody sees.
-	keep := len(cells)
-	for keep > 0 {
-		total := -bandGutter
-		for _, c := range cells[:keep] {
-			total += c.width() + bandGutter
-		}
-		if total <= width {
-			break
-		}
-		keep--
+	// DROP BY PRIORITY, RENDER IN VISUAL ORDER. Walk bandDropOrder marking cells gone until
+	// what remains fits, then emit the survivors left to right. Dropping from either END is
+	// what would cost the month or the hour first; see bandDropOrder.
+	var dropped [numSpendSpans]bool
+	for i := spendSpan(0); i < numSpendSpans && bandWidth(cells, dropped) > width; i++ {
+		dropped[bandDropOrder[i]] = true
 	}
-	cells = cells[:keep]
+
+	// ONE WIDTH FOR EVERY SURVIVOR, measured after the drops: a cell that is gone must not go
+	// on widening the ones that remain.
+	cw := 0
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if !dropped[span] {
+			if w := cells[span].width(); w > cw {
+				cw = w
+			}
+		}
+	}
 
 	var labels, values strings.Builder
-	for i, c := range cells {
-		pad := c.width()
-		if i < len(cells)-1 {
-			pad += bandGutter
+	first := true
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if dropped[span] {
+			continue
 		}
-		fmt.Fprintf(&labels, "%-*s", pad, c.label)
-		fmt.Fprintf(&values, "%-*s", pad, c.value)
+		if !first {
+			labels.WriteString(strings.Repeat(" ", bandGutter))
+			values.WriteString(strings.Repeat(" ", bandGutter))
+		}
+		first = false
+		fmt.Fprintf(&labels, "%*s", cw, cells[span].label)
+		fmt.Fprintf(&values, "%*s", cw, cells[span].value)
 	}
 	// Two lines whatever happened, including when nothing survived: an empty band is two
 	// blank lines, never zero. See spendBandLines.
 	return []string{
 		strings.TrimRight(labels.String(), " "),
 		strings.TrimRight(values.String(), " "),
+	}
+}
+
+// bandWidth is what these cells render at, at a uniform width, skipping the dropped ones.
+//
+// The last cell's gutter is not charged, because the rendered line trims it — otherwise a set
+// that exactly filled the terminal would lose a cell to trailing space nobody sees.
+func bandWidth(cells [numSpendSpans]bandCell, dropped [numSpendSpans]bool) int {
+	cw, n := 0, 0
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if dropped[span] {
+			continue
+		}
+		n++
+		if w := cells[span].width(); w > cw {
+			cw = w
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return n*cw + (n-1)*bandGutter
+}
+
+// bandSpanCell is one span's cell: its label, and its figure or an em dash.
+//
+// THE LABEL CARRIES THE STALENESS, when there is any. A wedged chain holding a good old figure
+// is otherwise indistinguishable from a current reading — the failure spendStaleAfter exists to
+// name, and one this band could not report at all between the strip's deletion and this change:
+// spendSummary computed Age and Stale and no renderer read either.
+//
+// ON THE LABEL RATHER THAN THE VALUE, and not as a fourth marker glyph. The value's markers all
+// qualify the FIGURE — it is a floor, it is inexact, it is short — while an age qualifies the
+// ANSWER, and it is a duration rather than a claim. A word beside the period it belongs to says
+// that better than a symbol: "TODAY 7m" reads as a day figure polled seven minutes ago, which is
+// exactly what it is.
+//
+// PER SPAN, because the four poll fifteen times apart. One age for the whole band would either
+// alarm on a healthy month chain between its own five-minute polls, or stay silent while the
+// hour chain wedged.
+// The label comes from spendSpanDefs via the caller rather than from the reading, because it
+// belongs to the span and not to one poll's answer — a reading built anywhere else would
+// otherwise render a nameless column.
+func bandSpanCell(label string, r spanReading) bandCell {
+	if r.Stale {
+		label += " " + formatSpendAge(r.Age)
+	}
+	if r.Unanswerable || r.Failed || !r.Priced {
+		// ONE RENDERING FOR THREE CAUSES, deliberately. "this deployment cannot answer this
+		// span", "the poll failed" and "nothing here was priced" differ in WHY and not at all
+		// in what a reader may conclude: the figure is not known. A cell seven columns wide has
+		// no room to distinguish them, and the only alternative to an em dash is a number that
+		// is not one. The drawer and `abctl cost` are the surfaces with room to say which.
+		return bandCell{label: label, value: emptyCell}
+	}
+	return bandCell{
+		label: label,
+		value: moneyAmount(r.USD, r.Unpriced, r.Priceable, r.Incomplete, r.Degraded, r.Clamped),
 	}
 }
