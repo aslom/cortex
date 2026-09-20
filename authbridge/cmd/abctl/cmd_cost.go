@@ -234,6 +234,17 @@ type costJSON struct {
 	// omitempty for that reason as much as for tidiness: a response carrying no reasons is
 	// byte-identical to what this printed before.
 	IncompleteBy map[string]int64 `json:"incompleteBy,omitempty"`
+	// Tiers is the apportioned per-tier split, or nil when no modelled mix reached this
+	// window.
+	//
+	// OMITTED RATHER THAN ZEROED: a consumer summing four zeros would report the traffic as
+	// free, which is the lie the human surface refuses with an em-dash.
+	//
+	// The raw modelled micros already reach a script through Totals above — Counts embedded
+	// verbatim, which is the property this struct's own comment protects — so what this adds
+	// is the ANSWER rather than the ingredients. A script apportioning the mix itself would
+	// be a second implementation of usage.ApportionTiers, and the two would drift.
+	Tiers *costTiersJSON `json:"tiers,omitempty"`
 	// Degraded says the totals above are MISSING ROWS — a day file that lost lines, or one
 	// whose scan was abandoned part-way — so CostMicros is short by an amount nothing in
 	// this document can state. See costDegradedText for the claim in full and for why it is
@@ -303,6 +314,32 @@ type costJSON struct {
 // same refusal. Said here because a reader who finds three disclosures on this struct will
 // assume a fourth would be here if it mattered.
 
+// costTiersJSON is the apportioned per-tier split, in micros to match every other money
+// field in this document.
+//
+// No "inexact" flag per reading: the split is modelled by construction, which costJSON.Tiers
+// says once rather than four times.
+type costTiersJSON struct {
+	Input      int64 `json:"input"`
+	CacheWrite int64 `json:"cacheWrite"`
+	CacheRead  int64 `json:"cacheRead"`
+	Output     int64 `json:"output"`
+}
+
+// tiersJSONOf apportions the totals, or returns nil when there is no mix to apportion by.
+func tiersJSONOf(t usage.Counts) *costTiersJSON {
+	tiers, ok := t.ApportionTiers()
+	if !ok {
+		return nil
+	}
+	return &costTiersJSON{
+		Input:      tiers[pricing.TierInput],
+		CacheWrite: tiers[pricing.TierCacheWrite],
+		CacheRead:  tiers[pricing.TierCacheRead],
+		Output:     tiers[pricing.TierOutput],
+	}
+}
+
 func writeCostJSON(snap *usage.Snapshot, stdout, stderr io.Writer) int {
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
@@ -310,6 +347,7 @@ func writeCostJSON(snap *usage.Snapshot, stdout, stderr io.Writer) int {
 		Window:       snap.Window,
 		Priced:       snap.Priced,
 		Totals:       snap.Totals,
+		Tiers:        tiersJSONOf(snap.Totals),
 		PricedBy:     snap.PricedBy,
 		UnpricedBy:   snap.UnpricedBy,
 		IncompleteBy: snap.IncompleteBy,
