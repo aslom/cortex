@@ -22,7 +22,11 @@ import (
 // why they are fitted rather than used as-is — see fitTableColumns.
 func sessionsColumns() []table.Column {
 	return []table.Column{
-		{Title: "ID", Width: 40},
+		// SESSION, and 14 wide rather than 40. A session id is a 36-character UUID whose
+		// first characters identify it to a human as well as all of them do, and the 26
+		// columns it was spending are the ones the money columns need. `/` filters on the
+		// FULL id, so nothing is lost for finding a session — only for reading one.
+		{Title: "SESSION", Width: 14},
 		{Title: "UPDATED", Width: 14},
 		{Title: "EVENTS", Width: 8},
 		{Title: "TOKENS", Width: 10},
@@ -85,6 +89,13 @@ func (m *model) rebuildSessionsTable() {
 	want := fitTableColumns(sessionsColumnsFor(m.width), m.width)
 	costW := sessionsColumnWidth(want, "COST")
 	savedW := sessionsColumnWidth(want, "SAVED")
+	// The other cells are fitted too: padLeft right-aligns into the FITTED width, so digits
+	// line up at whatever width the fitter settled on. Left-aligned numbers were the main
+	// reason this table read as ragged — "5" and "105" began at the same column and ended
+	// two apart, so no two rows could be compared by eye.
+	idW := sessionsColumnWidth(want, "SESSION")
+	eventsW := sessionsColumnWidth(want, "EVENTS")
+	tokensW := sessionsColumnWidth(want, "TOKENS")
 	rows := make([]table.Row, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		if m.filter != "" && !strings.Contains(s.ID, m.filter) {
@@ -95,7 +106,7 @@ func (m *model) rebuildSessionsTable() {
 			active = "●"
 		}
 		row := table.Row{
-			s.ID,
+			trunc(s.ID, idW),
 			relTime(now, s.UpdatedAt),
 			// The server's count, and only ever the server's: it is the complete one.
 			// abctl's own cache holds what it snapshotted plus what it has streamed
@@ -103,13 +114,13 @@ func (m *model) rebuildSessionsTable() {
 			// smaller number — and when handleStreamEvent also wrote this field, the
 			// cell flipped between the two on live traffic. The cached-only rows below
 			// use len(cached) because the server does not list those at all.
-			fmt.Sprintf("%d", s.EventCount),
-			sessionTokens(s.TotalTokens, m.events[s.ID]),
+			padLeft(fmt.Sprintf("%d", s.EventCount), eventsW),
+			padLeft(sessionTokens(s.TotalTokens, m.events[s.ID]), tokensW),
 		}
 		if showMoney {
 			row = append(row,
-				sessionMoneyCell(s.CostMicros, false, s.Saturated, costW),
-				sessionMoneyCell(s.AvoidedMicros, true, s.Saturated, savedW))
+				padLeft(sessionMoneyCell(s.CostMicros, false, s.Saturated, costW), costW),
+				padLeft(sessionMoneyCell(s.AvoidedMicros, true, s.Saturated, savedW), savedW))
 		}
 		row = append(row, active)
 		rows = append(rows, row)
@@ -124,10 +135,10 @@ func (m *model) rebuildSessionsTable() {
 		}
 		cached := m.events[id]
 		row := table.Row{
-			id,
+			trunc(id, idW),
 			emptyCell,
-			fmt.Sprintf("%d", len(cached)),
-			sessionTokens(0, cached),
+			padLeft(fmt.Sprintf("%d", len(cached)), eventsW),
+			padLeft(sessionTokens(0, cached), tokensW),
 		}
 		if showMoney {
 			// No figures for a session the server no longer lists. abctl holds these
