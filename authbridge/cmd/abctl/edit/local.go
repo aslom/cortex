@@ -90,10 +90,10 @@ func (s FileStore) Describe() Target {
 // The window is not theoretical and it is not small: the operator sits in
 // $EDITOR for as long as they like, and this exact file has other writers —
 // toolscan/patch.go, which the config's own comments tell you to run
-// (`abctl tools scan --write <this file>`), plus `abctl config migrate` and a
-// second abctl session. Apply renames a whole file built from the Fetch-time
-// bytes, so without this a concurrent write is lost silently and completely,
-// including the parts outside the pipeline subtree.
+// (`abctl tools scan --write <this file>`), plus the config migration that runs
+// from `abctl service install`, and a second abctl session. Apply renames a whole
+// file built from the Fetch-time bytes, so without this a concurrent write is lost
+// silently and completely, including the parts outside the pipeline subtree.
 //
 // A compare rather than a lock. It is not airtight — a writer landing between
 // this read and the rename still wins — but it converts the realistic case,
