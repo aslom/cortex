@@ -504,17 +504,32 @@ type spendSummary struct {
 	// Stale is set; a fresh figure reports neither, because the band must not carry a
 	// permanent timestamp.
 	//
-	// THE BAND READS Spans[i].Age INSTEAD. These two describe the hour and day chains only,
-	// and are kept because the summary's other consumers still read them.
+	// THE BAND READS Spans[i].Age INSTEAD, per span and against that span's own cadence.
+	//
+	// AND NOTHING READS THESE TWO. That is not a caveat, it is a defect this struct is full of:
+	// spendSummary has ONE non-test caller (paneView -> renderSpendBand) and that renderer reads
+	// only Spans, so every other field here is write-only in production. An earlier revision of
+	// this comment claimed "the summary's other consumers still read them" — there are no other
+	// consumers, and the claim was simply false.
+	//
+	// It is the same defect the per-span readings were introduced to fix. Age and Stale were
+	// computed and rendered nowhere, so a wedged chain looked current; now they are computed,
+	// rendered nowhere, AND duplicated by Spans. The fields below them are worse, because the
+	// features they describe (the savings aggregate, the cache-hit rate, the token and error
+	// counts) left the band with the four-span change and have no surface at all.
+	//
+	// DELETING THEM IS A SEPARATE CHANGE, deliberately, and tracked rather than done here: it
+	// removes spendHourAndDaySummary, applyTodayFigure, applyAges and cacheHitPct along with
+	// roughly thirty of this package's tests, which is a thousand-line no-behaviour-change diff
+	// on top of a feature PR. What is NOT deferred is saying so accurately.
 	Age   time.Duration
 	Stale bool
 
 	// Spans is what the band renders: one reading per budget span, indexed by spendSpan.
 	//
-	// CANONICAL FOR THE BAND, and the Window*/Today* fields above are the two named views the
-	// summary's older callers use. There is no risk of the two disagreeing, because one
-	// function fills both from the same chains in the same pass — but Spans is the one that
-	// covers all four spans, so a figure is only on the band if it is here.
+	// THE ONLY FIELD WITH A READER. renderSpendBand takes this and nothing else, so a figure is
+	// on the band if and only if it is here. The Window*/Today* fields above are dead — see
+	// Age/Stale for why they are still present and what removing them costs.
 	Spans [numSpendSpans]spanReading
 }
 
