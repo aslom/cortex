@@ -405,6 +405,17 @@ type Degraded struct {
 	// was added to end, on the half nobody wired up. Compare across polls for a rate; a non-zero
 	// value at all means some total below is short.
 	DroppedRowsTotal int64 `json:"droppedRowsTotal,omitempty"`
+	// DaysBeforeRetention is how many days of the requested window fall outside what the
+	// durable ledger retains and had no file on disk. Their spend was pruned, so the totals
+	// beside this are SHORT by whatever those days held, and by an amount nothing can state.
+	//
+	// A CONFIGURATION SHORTFALL RATHER THAN A FAULT, which is what makes it different from
+	// every other counter here: nothing is broken, the deployment simply keeps less history
+	// than the window asked for. It still has to be disclosed, because the alternative is a
+	// figure labelled with a span it does not cover — window=month against ten days of
+	// retention answering priced:true and three weeks short. See
+	// costledger.Caveats.DaysBeforeRetention for why absence alone is not evidence of it.
+	DaysBeforeRetention int64 `json:"daysBeforeRetention,omitempty"`
 	// UnreadableDays is how many day files could not be opened or scanned at all — a
 	// permission change, a vanished mount, an IO error on the first read.
 	//

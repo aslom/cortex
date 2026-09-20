@@ -430,9 +430,10 @@ func writeUsageError(w http.ResponseWriter, err error) {
 // field by field through reflection, so a fourth counter fails here rather than shipping silently.
 func degradedFrom(c costledger.Caveats) *usage.Degraded {
 	return &usage.Degraded{
-		SkippedLines:   c.SkippedLines,
-		TruncatedDays:  c.TruncatedDays,
-		UnreadableDays: c.UnreadableDays,
+		SkippedLines:        c.SkippedLines,
+		TruncatedDays:       c.TruncatedDays,
+		UnreadableDays:      c.UnreadableDays,
+		DaysBeforeRetention: c.DaysBeforeRetention,
 	}
 }
 
