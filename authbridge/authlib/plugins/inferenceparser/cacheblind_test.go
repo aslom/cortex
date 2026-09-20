@@ -38,7 +38,7 @@ func blindParser(t *testing.T, buf *bytes.Buffer) *InferenceParser {
 	t.Helper()
 	p := NewInferenceParser()
 	p.SetPricingResolver(bodylessRates(t))
-	p.SetCacheBlindLogger(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	p.setCacheBlindLogger(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	return p
 }
 

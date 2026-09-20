@@ -42,13 +42,11 @@ import (
 // So "-original" is the cost the gateway ACTUALLY CHARGED, not a pre-discount list price,
 // and falling back to it compares like with like.
 //
-// WHAT THAT MEASUREMENT DID NOT ESTABLISH, and the omission cost a week: the probe carried
-// 16 input and 4 output tokens and NO CACHE TOKENS, so it could only test the two tiers an
-// agent barely uses. On cache-bearing requests this gateway's header prices the uncached
-// tiers and stops — 114 of 322 sampled responses, understating them 17.8x — which is what
-// Settled.HeaderOmittedCache and the guard in headerOmitsCache exist to catch. A header
-// validation with no cache tokens in it validates the arithmetic on 4% of the money. Any
-// re-measurement here must include a cache-read-heavy pair.
+// WHAT THAT MEASUREMENT DID NOT ESTABLISH: the probe carried 16 input and 4 output tokens and
+// NO CACHE TOKENS, so it tested the two tiers an agent barely uses. On cache-bearing requests
+// this gateway's header prices the uncached tiers and stops — 114 of 322 sampled responses,
+// understating them 17.8x — which is what headerOmitsCache exists to catch. Any re-measurement
+// here must include a cache-read-heavy pair.
 //
 // "Original" refers to LiteLLM's OWN discount/margin layer, reported alongside in
 // X-Litellm-Response-Cost-{Discount,Margin}-Amount: original is the figure before that
@@ -329,13 +327,11 @@ type Settled struct {
 	// cache tiers carried real cost, so the modelled figure was charged instead of it.
 	//
 	// NOT a disagreement this package is guessing at — it is a figure about a different
-	// quantity. Measured against ete-litellm over four days: of 322 non-streamed responses
-	// carrying a usable header, 208 matched the rate table EXACTLY and 114 matched the
-	// input+output cost alone, with nothing in between at a 5% tolerance. Many of the 114
-	// reported the identical $0.000205 — 90 input + 9 output tokens at sonnet-5's rates —
-	// while carrying 55k-416k cache tokens worth up to $0.77 apiece. Preferring the header
-	// understated those requests 17.8x, and the gateway's own spend records bill them in full,
-	// so the header disagrees with its own gateway rather than reporting a discount.
+	// quantity. Measured against ete-litellm, 322 non-streamed responses split cleanly at a 5%
+	// tolerance: 208 matched the rate table exactly, 114 matched the input+output cost alone
+	// and understated their requests 17.8x, and none landed in between. The gateway's own spend
+	// records bill the 114 in full, so the header disagrees with its own gateway rather than
+	// reporting a discount. cacheblind_test.go carries the shape of those rows.
 	//
 	// ReportedUSD still holds the header figure when this is set: refusing it as the CHARGED
 	// figure and discarding it are different acts, and the drift reporter needs the pair.
@@ -423,8 +419,9 @@ type Settled struct {
 }
 
 // cacheBlindTolerance is how close a header figure must sit to the uncached tiers before it is
-// read as having priced only those — and how much of the request's cost the cache tiers must
-// carry before the question is worth asking at all.
+// read as having priced only those. It also sets the cache share below which the question cannot
+// be asked at all, because headerOmitsCache derives that floor from it rather than from a second
+// constant — see the disjointness condition there.
 //
 // The same 5% the drift reporter uses, for the same reason: it absorbs rounding and the micro
 // quantization while still separating the two populations cleanly. Measured on 322 real
@@ -441,14 +438,24 @@ const cacheBlindTolerance = 0.05
 //   - A modelled figure with a tier split must exist. Without it there is nothing to charge
 //     instead, and firing would trade a low figure for no figure — which is worse, and is what
 //     a guard keyed on the header alone would do for a model that has no rates.
-//   - The cache tiers must carry more than the tolerance of the total. On a CACHE-FREE request
+//   - The two candidate readings must be TELLABLE APART at this tolerance: the match window
+//     around the uncached figure must not reach the discounted whole. On a cache-free request
 //     the uncached figure IS the whole figure, so "the header equals the uncached tiers" is true
-//     of every perfectly correct header ever sent; this is the condition that tells the two
-//     apart, and without it the guard would reprice all ordinary traffic from the table.
+//     of every perfectly correct header ever sent — and a materiality floor alone does not fix
+//     that, it only moves it. At a 6% cache share the window around $0.0185 uncached is
+//     [0.017575, 0.019425], and 4% off the $0.019682 whole lands at $0.0188947, inside it: one
+//     interval meaning two things, which drift.go would call agreement at the same 5%. Refusing
+//     it is this bug inverted — charging a figure the gateway never said. The windows are
+//     disjoint when uncached*(1+t) < total*(1-t), i.e. above a cache share of 2t/(1+t) ~= 9.5%,
+//     so the tolerance sets its own floor instead of a second constant doing it.
 //   - The header must MATCH the uncached figure, not merely fall below it. A header that is low
 //     for some other reason is a disagreement this package cannot adjudicate — it may be a
 //     deeper discount than the table models — so it stands, and the drift reporter says so.
 //     Substituting there would be the "your table must be wrong" mistake written into code.
+//
+// The 9.5% floor costs no coverage that matters: the observed rows sit near a 99% cache share,
+// 90 input tokens against 55k-416k cached ones. What it gives up is the low-cache band, where an
+// omission is worth cents and is genuinely indistinguishable from a discount.
 func headerOmitsCache(out Settled, header float64) bool {
 	if !out.HasModelled || !out.HasTiers {
 		return false
@@ -456,15 +463,15 @@ func headerOmitsCache(out Settled, header float64) bool {
 	uncached := out.TierUSD[pricing.TierInput] + out.TierUSD[pricing.TierOutput]
 	cached := out.TierUSD[pricing.TierCacheWrite] + out.TierUSD[pricing.TierCacheRead]
 	total := uncached + cached
-	if total <= 0 || cached/total <= cacheBlindTolerance {
+	// A zero uncached figure cannot be recognised either — every positive header sits outside a
+	// window of zero width — so this only spares the arithmetic a meaningless comparison.
+	if total <= 0 || uncached <= 0 {
 		return false
 	}
-	// Relative to the uncached figure, which is the quantity being recognised. Against the
-	// TOTAL instead, a request whose cache share barely cleared the bar above would match
-	// almost anything.
-	if uncached <= 0 {
+	if uncached*(1+cacheBlindTolerance) >= total*(1-cacheBlindTolerance) {
 		return false
 	}
+	// Relative to the uncached figure, which is the quantity being recognised.
 	d := header - uncached
 	return d <= uncached*cacheBlindTolerance && d >= -uncached*cacheBlindTolerance
 }
@@ -829,6 +836,18 @@ func tierCostOf(s Settled) *costevent.TierCost {
 	}
 }
 
+// gatewayFigureOf is the gateway's own figure, and only where that figure LOST.
+//
+// Zero elsewhere so omitempty drops it: on the ordinary path the gateway's figure is CostUSD
+// and Source says as much, and publishing it twice would cost every event bytes to say nothing.
+// See costevent.Event.GatewayUSD for why it is never summed.
+func gatewayFigureOf(s Settled) float64 {
+	if !s.HeaderOmittedCache || !s.HasReported {
+		return 0
+	}
+	return s.ReportedUSD
+}
+
 // NewRecord builds the wire record from a settled outcome.
 //
 // Named NewRecord, not Record, because costevent.Record READS a record off a session event
@@ -841,6 +860,11 @@ func NewRecord(s Settled, avoided []costevent.Saving) costevent.Event {
 		Source:     s.Source,
 		Provenance: s.Provenance.String(),
 		Settled:    s.Priced,
+		// Carried for the reason the whole list below is: a refusal recorded nowhere is
+		// indistinguishable from a response that never had a figure. The gateway's number rides
+		// along ONLY here, where it is not already CostUSD — see costevent.Event.GatewayUSD.
+		HeaderOmittedCache: s.HeaderOmittedCache,
+		GatewayUSD:         gatewayFigureOf(s),
 		// Carried, not derived. A Settled.Incomplete that NewRecord dropped would be
 		// knowledge that reaches nothing — which is exactly the state this fix found the
 		// parser's "token counts will be incomplete" log line in.

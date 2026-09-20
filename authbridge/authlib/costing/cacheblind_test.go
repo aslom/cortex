@@ -130,6 +130,26 @@ func TestSettle_CacheBlindHeaderLosesToTheTable(t *testing.T) {
 		wantCost:  0.1,
 		wantSrc:   costevent.SourceGatewayHeader,
 		wantBlind: false,
+	}, {
+		// A DISCOUNTED FULL-TIER HEADER JUST ABOVE A 5% CACHE SHARE, which the first version of
+		// this guard refused — the fixed bug inverted, charging a figure the gateway never said.
+		//
+		// 394 cache reads is $0.001182 against $0.0185 uncached: a 6.0% cache share, clear of a
+		// 5% materiality floor. This header prices all four tiers and takes 4% off, landing at
+		// $0.0188947 — inside a match window of [0.017575, 0.019425] derived from the uncached
+		// figure. At that cache share "the uncached tiers" and "the whole thing, discounted" are
+		// the SAME interval, so no comparison against the uncached figure can separate them, and
+		// drift.go would call the identical pair agreement at the identical 5%.
+		//
+		// So the floor is not materiality but DISJOINTNESS — see headerOmitsCache. It costs no
+		// real coverage: the 114 observed rows sit near a 99% cache share, 90 input tokens
+		// against 55k-416k cached ones.
+		name:   "a discounted full-tier header at a low cache share is not read as cache-blind",
+		header: "0.0188947",
+		input:  blindInput, output: blindOutput, cacheRead: 394,
+		wantCost:  0.0188947,
+		wantSrc:   costevent.SourceGatewayHeader,
+		wantBlind: false,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			pctx := cacheTierCtx(map[string]string{
@@ -156,6 +176,42 @@ func TestSettle_CacheBlindHeaderLosesToTheTable(t *testing.T) {
 				t.Error("the gateway's figure was discarded; drift has nothing to compare")
 			}
 		})
+	}
+}
+
+// THE SUBSTITUTION HAS TO REACH THE RECORD, or it is knowledge held in memory and lost on disk.
+//
+// Settled carries both figures so the drift reporter can compare them, and the parser's warning
+// fires once per endpoint and model — neither of which lets anyone audit a ledger afterwards. On
+// the wire a substituted row would otherwise be Source: usage-fallback and nothing else, which
+// is also what a stream that never had a header looks like: the per-request analysis that found
+// this defect could not have been repeated on a ledger written after the fix.
+func TestNewRecord_CarriesTheRefusedGatewayFigure(t *testing.T) {
+	const json = "application/json"
+	blind := Settle(cacheTierCtx(map[string]string{
+		"Content-Type": json, ResponseCostHeader: "0.0185",
+	}, blindInput, blindOutput, blindCacheWr, blindCacheRd), rates(t))
+	rec := NewRecord(blind, nil)
+
+	if !rec.HeaderOmittedCache {
+		t.Error("the record does not say the gateway's figure was refused")
+	}
+	if rec.GatewayUSD != 0.0185 {
+		t.Errorf("GatewayUSD = %v, want the refused header's 0.0185", rec.GatewayUSD)
+	}
+	if rec.CostUSD != uncachedUSD()+cachedUSD() {
+		t.Errorf("CostUSD = %v, want the modelled figure", rec.CostUSD)
+	}
+
+	// And NOT duplicated on the ordinary path: where the header wins it IS CostUSD, and Source
+	// says so, so a second copy would be bytes on every event saying nothing.
+	won := Settle(cacheTierCtx(map[string]string{
+		"Content-Type": json, ResponseCostHeader: "0.3405",
+	}, blindInput, blindOutput, blindCacheWr, blindCacheRd), rates(t))
+	rec = NewRecord(won, nil)
+	if rec.HeaderOmittedCache || rec.GatewayUSD != 0 {
+		t.Errorf("a header that won is republished as a refusal: omitted=%v gateway=%v",
+			rec.HeaderOmittedCache, rec.GatewayUSD)
 	}
 }
 

@@ -43,8 +43,8 @@ func (c *cacheBlindReporter) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// SetCacheBlindLogger overrides the logger used for these warnings. For tests.
-func (p *InferenceParser) SetCacheBlindLogger(l *slog.Logger) {
+// setCacheBlindLogger overrides the logger used for these warnings. For tests.
+func (p *InferenceParser) setCacheBlindLogger(l *slog.Logger) {
 	p.blind.mu.Lock()
 	p.blind.log = l
 	p.blind.mu.Unlock()
