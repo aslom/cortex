@@ -47,7 +47,7 @@ func runCost(args []string, stdout, stderr io.Writer) int {
 			"figure is inexact and any incomplete-read disclosure as JSON, with "+
 			"usage.Counts' own field names")
 	window := fs.String("window", usage.WindowToday,
-		"window to report: today, 7d, or a duration such as 1h or 6h")
+		"window to report: today, month, 7d, or a duration such as 1h or 6h")
 	endpoint := fs.String("endpoint", "",
 		"session API URL of the proxy (default: the Cortex installed on this machine)")
 	fs.Usage = func() {
@@ -55,18 +55,26 @@ func runCost(args []string, stdout, stderr io.Writer) int {
 
 Usage:
   abctl cost                     today's spend, from local midnight
+  abctl cost --window month      this month's spend, from the 1st — where a budget resets
   abctl cost --window 7d         the last seven days
   abctl cost --window 1h         a rolling hour, from the in-memory ring
   abctl cost --json              the totals as JSON, for a script
   abctl cost --endpoint URL      ask a specific proxy rather than the local one
 
-"today" and "7d" are served from Cortex's durable cost ledger, which is on for a
-local install and off in Kubernetes. Where it is off, the proxy answers with the
+"today", "month" and "7d" are served from Cortex's durable cost ledger, which is on
+for a local install and off in Kubernetes. Where it is off, the proxy answers with the
 longest window it does hold and this command prints THAT window, never the one you
-asked for — a six-hour figure labelled "today" would be a wrong number wearing a
-right label.
+asked for — a six-hour figure labelled "today" would be a wrong number wearing a right
+label. That gap is widest for "month", where the ring holds six hours against a window
+of up to thirty-one days.
 
-A duration window (1h, 6h) comes from a different place than "today" and "7d", and
+"today" and "month" are BOUNDARIES rather than lengths: they run from the start of the
+local day and the start of the local month to now, so each is narrow at the beginning
+of its period and widens through it. "7d" is a rolling seven times twenty-four hours,
+which makes it the one window here not aligned to a calendar edge — worth knowing
+before comparing it against "month".
+
+A duration window (1h, 6h) comes from a different place than the ledger windows, and
 the two can disagree slightly about the same traffic: the in-memory ring prices a
 request nothing else priced, from the rate table, while the ledger reports it as
 unpriced instead. Where a request arrives with a settled cost — which is every
@@ -134,7 +142,7 @@ Flags:
 			// that has nothing wrong with it. An older proxy predating window=today, or a
 			// --window this one does not accept, are the two real causes.
 			fmt.Fprintf(stderr, "  this proxy does not accept --window %q\n", *window)
-			fmt.Fprintln(stderr, "  it may predate the today/7d windows; try --window 1h, or a duration it does hold")
+			fmt.Fprintln(stderr, "  it may predate the today/month/7d windows; try --window 1h, or a duration it does hold")
 		default:
 			// A user whose proxy is down needs the next command, not a bare dial error.
 			fmt.Fprintln(stderr, "  is Cortex running? `abctl service status`")
@@ -671,7 +679,7 @@ var costIncompleteReasons = []struct {
 // when there are no reasons.
 //
 // Nothing, not a line saying so. Absence is the normal case on this command's own default
-// window — "today" and "7d" are ledger-backed and a persisted row has no reason column — and
+// window — "today", "month" and "7d" are ledger-backed and a persisted row has no reason column — and
 // usage.Snapshot.IncompleteBy's doc is explicit that absence is NOT a claim of exactness.
 // The count line above states the inexactness on both window kinds; this only ever adds
 // which way, and where that is unknown it adds nothing rather than guessing a direction.

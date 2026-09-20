@@ -20,9 +20,22 @@ const dayLayout = "2006-01-02"
 // defaultRetentionDays is how many day files are kept.
 //
 // An active 8h day writes roughly 480 minutes x a few label combinations, about
-// 350 KB, so 30 days is on the order of 10 MB — small enough that nobody has to
-// think about it, long enough to answer "what did last month cost".
-const defaultRetentionDays = 30
+// 350 KB, so a month of them is on the order of 10 MB — small enough that nobody has to
+// think about it, long enough to answer "what did this month cost".
+//
+// THIRTY-ONE, AND IT HAS TO BE. This was 30, under a doc claiming it was "long enough to
+// answer what did last month cost" — and it was one day short of doing so. prune keeps the
+// window [ref-(retainDays-1), ref], so N retention days is exactly N distinct dates, and
+// answering window=month on the 31st of a 31-day month needs day files for the 1st through
+// the 31st. At 30 the first of the month was pruned on the morning of the 31st and a
+// month-to-date total silently lost its first day: no error, no caveat, a figure too small,
+// and a budget that looked further from its limit than it was.
+//
+// Derived from usage.WindowMonthLocalDays rather than chosen, and pinned to it by
+// TestDefaultRetention_CoversEveryDayTheMonthWindowTouches. Written as a literal for the
+// reason config.minCostLedgerRetentionDays is: this package does not import usage, so the
+// agreement is enforced from the test side, where that import is free.
+const defaultRetentionDays = 31
 
 // expiredSuffix marks a day file that prune has CONDEMNED but not yet deleted.
 //

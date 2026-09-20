@@ -712,21 +712,78 @@ func StartOfLocalDay(t time.Time) time.Time {
 	return first
 }
 
-// WindowToday and Window7d are the symbolic windows the API accepts.
+// StartOfLocalMonth is the earliest instant that EXISTS in t's local calendar month, in t's
+// own zone. It is the lower bound of "month to date".
 //
-// Symbolic because neither is a LENGTH: "today" is a boundary, and while "7d" has a
-// fixed span it is longer than the ring retains, so both can only be answered from
-// the durable cost ledger. time.ParseDuration reads neither string, which is why
+// IT IS StartOfLocalDay ASKED ABOUT THE FIRST, not a second sweep, and that is deliberate:
+// the earliest instant in a month is the earliest instant on its first date, so there is one
+// definition of "where a local period begins" in this package rather than two that agree
+// until a zone makes them disagree. StartOfLocalDay's own doc records what a duplicated
+// boundary cost the layer above it.
+//
+// THE FIRST IS ANCHORED AT NOON before being handed over, for the reason dayAnchorHour
+// exists: no DST transition can move midday onto a different date, so the anchor identifies
+// the month's first date without depending on midnight existing on it.
+//
+// AND IT HAS TO, because a month bound can be wrong in a way a day bound cannot. Paraguay
+// moved its clocks forward AT 00:00 ON 1 OCTOBER in 2017 and 2023, so midnight on that date
+// does not exist and time.Date(y, 10, 1, 0, 0, 0, 0, loc) resolves BACKWARDS to 23:00 on 30
+// September — an hour before the previous month ended. A month-to-date total on that bound
+// folds September's last hour into October and reports a budget closer to its limit than it
+// is. See TestStartOfLocalMonth_TheNaiveFirstOfMonthExpressionIsStillWrong, which is the
+// negative control, and note that the day-level cases StartOfLocalDay documents are all
+// mid-month: this shape needed its own fixture to be found at all.
+//
+// A ZONE THAT SKIPS THE FIRST resolves correctly by construction. Pacific/Apia dropped
+// 2011-12-30 entirely when it crossed the date line; were a zone ever to drop a first of the
+// month, the noon anchor normalises onto the next date and the sweep returns the start of
+// THAT date — which is then genuinely the earliest instant in the month.
+func StartOfLocalMonth(t time.Time) time.Time {
+	y, m, _ := t.Date()
+	return StartOfLocalDay(time.Date(y, m, 1, dayAnchorHour, 0, 0, 0, t.Location()))
+}
+
+// WindowToday, Window7d and WindowMonth are the symbolic windows the API accepts.
+//
+// Symbolic because none is a LENGTH: "today" and "month" are boundaries, and while "7d" has
+// a fixed span it is longer than the ring retains, so all three can only be answered from
+// the durable cost ledger. time.ParseDuration reads none of these strings, which is why
 // ParseWindow already rejects them and why they need their own parse.
+//
+// "month" RATHER THAN "mtd", because "today" is already a boundary word rather than a length
+// and this joins that family. "mtd" is less ambiguous read cold, at the cost of a second
+// naming convention on the same small enum; the label is echoed back on the wire either way,
+// so a client always learns which window it got. It means month-TO-DATE — since the first of
+// the local month, not a rolling thirty days — which is what a budget that resets on the
+// first is measured against.
 const (
 	WindowToday = "today"
 	Window7d    = "7d"
+	WindowMonth = "month"
 )
 
 // Window7dSpan is what "7d" MEANS: a rolling seven times twenty-four hours back from
 // now. Stated once, and read by ParseWindowSpec, so nothing that has to reason about
 // the span can spell it differently.
 const Window7dSpan = 7 * 24 * time.Hour
+
+// WindowMonthLocalDays is the MOST distinct LOCAL DATES a month-to-date window can touch:
+// THIRTY-ONE, the length of the longest calendar month.
+//
+// NO +1, unlike Window7dLocalDays, and the asymmetry is the whole difference between a
+// boundary window and a rolling one. 7d needs two increments because it starts part-way
+// through a date and because a spring-forward week is 167 hours, so it reaches an hour
+// further back than a calendar week does. This window's From IS a date boundary —
+// StartOfLocalMonth returns the first instant of the first — so it begins exactly where a day
+// file begins and cannot spill onto an earlier date. A DST transition inside the month moves
+// which instants the window covers but not the set of DATES, and a date is what a day file is
+// named by.
+//
+// It is therefore the number of day files a durable ledger must hold to answer this window on
+// the 31st of a 31-day month, which is why costledger's default retention is derived from this
+// rather than written as its own number — the lesson Window7dLocalDays records about two
+// constants that had to agree and did not.
+const WindowMonthLocalDays = 31
 
 // Window7dLocalDays is the MOST distinct LOCAL DATES a 7d window can touch: NINE.
 //
@@ -829,6 +886,19 @@ func ParseWindowSpec(s string, now time.Time) (Spec, error) {
 		// floor is derived from the same constant, and a span defined twice is how the two
 		// came to disagree. See Window7dLocalDays.
 		return Spec{Label: Window7d, From: now.Add(-Window7dSpan), To: now}, nil
+	case WindowMonth:
+		// THE START OF THE LOCAL MONTH to now, so this is month-TO-DATE and grows through the
+		// month rather than being a fixed span. On the first it is minutes wide, which is the
+		// point of a boundary: a budget that resets on the first has spent nothing yet.
+		//
+		// StartOfLocalMonth for the same reason "today" uses StartOfLocalDay rather than
+		// midnight — see there, and note that this window reaches a shape the day window
+		// cannot, a zone shifting at 00:00 on a first of the month.
+		return Spec{
+			Label: WindowMonth,
+			From:  StartOfLocalMonth(now),
+			To:    now,
+		}, nil
 	}
 	d, err := ParseWindow(s)
 	if err != nil {

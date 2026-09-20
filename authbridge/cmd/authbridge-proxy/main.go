@@ -270,7 +270,7 @@ func warnCostLedgerNeedsSessions(cfg *config.Config, defaultOn bool, logger *slo
 		"cost_ledger.enabled", "unset, defaulted to on",
 		"session.enabled", false,
 		"reason", "the ledger records through the session store (registered as a Recorder on it), so with the store off nothing reaches it",
-		"effect", "no durable cost history; window=today and window=7d have nothing to read",
+		"effect", "no durable cost history; window=today, window=month and window=7d have nothing to read",
 		"fix", "set session.enabled: true, or cost_ledger.enabled: false to say the ledger is not wanted")
 }
 
@@ -615,7 +615,7 @@ func main() {
 						}
 					}
 					sessions.AddRecorder(costLedger)
-					slog.Info("cost ledger enabled — durable cost history for window=today and window=7d",
+					slog.Info("cost ledger enabled — durable cost history for window=today, window=month and window=7d",
 						"dir", dir, "retentionDays", retention,
 						// WHY it is on, because the default is now derived rather than
 						// keyed on a flag: an operator reading this line can tell an
@@ -628,7 +628,7 @@ func main() {
 			// Said out loud, at the same level as "session tracking disabled", because the
 			// absence is what makes window=today degrade to the ring's 6 hours — and a
 			// degraded answer with no log line behind it reads as a bug in abctl.
-			slog.Info("cost ledger disabled — window=today and window=7d will be served from the 6h in-memory ring",
+			slog.Info("cost ledger disabled — window=today, window=month and window=7d will be served from the 6h in-memory ring",
 				// The DERIVED reason, not a guess about the deployment. It used to say
 				// "not a local install", which was the old localMode default describing
 				// itself — and it was wrong on the machine where it mattered most, since an
