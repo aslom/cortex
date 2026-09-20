@@ -798,13 +798,25 @@ func (m *model) applySpendLoaded(msg spendLoadedMsg) {
 // any future path that starts a chain gets it without having to remember. The doubled reqSeq++
 // (here and in fetchSpendSpan) is harmless — the sequence only has to be monotonic.
 //
-// A LOOP OVER THE TABLE, so adding a span cannot leave it unpolled. The drawer's chain is
-// deliberately absent: it starts when the drawer opens and stops when it closes.
+// A LOOP OVER THE TABLE, so adding a span cannot leave it unpolled.
+//
+// AND THE DRAWER'S CHAIN TOO, WHEN IT IS OPEN, which it did not used to be. invalidate() walks
+// every chain including the drawer's — a different pod is a different breakdown just as much as
+// it is a different total — so leaving the drawer out of the restart meant: open the drawer,
+// esc to the pods picker, pick another pod, and the drawer came back expanded with snap == nil
+// and nothing scheduled to fill it. Headers and blank rows, indefinitely, revivable only by
+// closing and reopening.
+//
+// CONDITIONAL on expanded, so a closed drawer still costs nothing: the chain starts with the
+// drawer and this only re-arms one that was already running.
 func (m *model) startSpendPolling() tea.Cmd {
 	m.spend.invalidate()
-	cmds := make([]tea.Cmd, 0, 2*numSpendSpans)
+	cmds := make([]tea.Cmd, 0, 2*numSpendSpans+2)
 	for span := spendSpan(0); span < numSpendSpans; span++ {
 		cmds = append(cmds, m.fetchSpendSpan(span), spendTick(span, m.spend.chains[span].tickGen))
+	}
+	if m.spend.expanded {
+		cmds = append(cmds, m.fetchSpendDrawer(), spendDrawerTick(m.spend.drawer.tickGen))
 	}
 	return tea.Batch(cmds...)
 }
@@ -1063,8 +1075,23 @@ func (m *model) spanReadings() [numSpendSpans]spanReading {
 		var r spanReading
 		// Staleness is read off the chain whatever the answer was: a wedged chain holding a
 		// good old figure is precisely the case worth disclosing.
+		//
+		// AGAINST THIS SPAN'S OWN CADENCE, not one threshold for the band. The four poll
+		// fifteen times apart, so a single figure cannot describe all of them: measured against
+		// the hour's forty seconds, the week and the month — which answer every five minutes —
+		// were dated for about 87% of every healthy cycle. "MONTH 3m" on a chain that answered
+		// three minutes ago and is not due for another two reads as wedged when nothing is
+		// wrong, which is how a real signal gets ignored.
+		//
+		// It cost width as well as credibility. The age rides on the label and the band is one
+		// uniform cell width, so two permanently-dated cells pushed the band from 34 columns to
+		// 42 and dropped 7 DAYS at a width where all four had fitted.
+		//
+		// TWICE THE INTERVAL, which is what spendStaleAfter means for the hour: one dropped or
+		// slow reply is not an alarm and a wedged chain is. Derived per span rather than shared,
+		// so a retuned cadence carries its own threshold with it.
 		if !c.lastFetch.IsZero() {
-			if age := now.Sub(c.lastFetch); age > spendStaleAfter {
+			if age := now.Sub(c.lastFetch); age > 2*def.interval {
 				r.Age, r.Stale = age, true
 			}
 		}

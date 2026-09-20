@@ -1092,10 +1092,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spendDrawerTickMsg:
-		// The drawer's own chain, and it stops when the drawer closes rather than running
-		// for the session: its span can be a ledger window, so refreshing forever would
-		// walk day files to redraw rows nobody is looking at.
-		if !m.spendDrawerTickIsCurrent(msg.gen) || !m.spendDrawerVisible() {
+		// The drawer's own chain, and it stops when the drawer is CLOSED rather than running
+		// for the session: its span can be a ledger window, so refreshing forever would walk
+		// day files to redraw rows nobody is looking at.
+		//
+		// GATED ON expanded, NOT ON spendDrawerVisible(). Those are different questions and
+		// conflating them killed the chain for good. m.spend.expanded deliberately survives a
+		// move to a pane that cannot host the drawer and a resize below spendDrawerMinHeight —
+		// see the esc handler, which leaves the flag alone precisely so returning finds the
+		// drawer as the operator left it — while spendDrawerVisible() reports whether it is on
+		// screen RIGHT NOW. Stopping on "not visible" meant: open it on Sessions, press `u`, and
+		// the next tick returned without rescheduling. Nothing re-arms the chain but `$` itself,
+		// so coming back to Sessions rendered the pre-switch snapshot forever — a stale money
+		// figure with no age indicator and no disclosure anywhere, which is the failure
+		// applySpendLoaded's own doc forbids for the band.
+		//
+		// The tick still FETCHES nothing it does not need: an off-screen drawer keeps its chain
+		// alive on a five-minute cadence, which is one request per five minutes to have the rows
+		// current the moment the operator comes back.
+		if !m.spendDrawerTickIsCurrent(msg.gen) || !m.spend.expanded {
 			return m, nil
 		}
 		return m, tea.Batch(m.fetchSpendDrawer(), spendDrawerTick(msg.gen))
@@ -1708,7 +1723,7 @@ func (m *model) paneView() string {
 				// The axis and span come off the SNAPSHOT, not off what was last requested: see
 				// drawerLabels.
 				axis, window := m.drawerLabels()
-				lines = renderSpendDrawer(m.spend.drawer.snap, axis, window, m.width)
+				lines = renderSpendDrawer(m.spend.drawer.snap, m.spend.drawer.err, axis, window, m.width)
 			}
 			for len(lines) < spendDrawerLines {
 				lines = append(lines, "")

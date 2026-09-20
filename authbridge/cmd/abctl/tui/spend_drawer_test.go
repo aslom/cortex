@@ -1,13 +1,18 @@
 package tui
 
 import (
+	"context"
 	"math"
+	"net/http"
+	"net/http/httptest"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
 )
 
 // drawerSnap is four series whose cost ORDER differs from their request order, which is the
@@ -98,7 +103,7 @@ func TestSpendDrawerRows_TheOtherBandStaysLastEvenWhenItOutweighsANamedRow(t *te
 // moneyFigure exists to prevent — and here the window is fully priced except for that one
 // series, so the two answers differ.
 func TestRenderSpendDrawer_EachRowCarriesItsOwnCoverage(t *testing.T) {
-	lines := renderSpendDrawer(drawerSnap(), usage.GroupModel, "1h", 200)
+	lines := renderSpendDrawer(drawerSnap(), nil, usage.GroupModel, "1h", 200)
 	joined := strings.Join(lines, "\n")
 
 	// gpt-4o's gap folds into the band, which is where the caveat must appear.
@@ -115,7 +120,7 @@ func TestRenderSpendDrawer_EachRowCarriesItsOwnCoverage(t *testing.T) {
 
 // The saving rides on the row that earned it, wearing its marker, and never joins the cost.
 func TestRenderSpendDrawer_ShowsAPerSeriesSavingWithoutAddingItToCost(t *testing.T) {
-	lines := renderSpendDrawer(drawerSnap(), usage.GroupModel, "1h", 200)
+	lines := renderSpendDrawer(drawerSnap(), nil, usage.GroupModel, "1h", 200)
 	var opus string
 	for _, l := range lines {
 		if strings.Contains(l, "claude-opus-5") {
@@ -141,7 +146,7 @@ func TestRenderSpendDrawer_ShowsAPerSeriesSavingWithoutAddingItToCost(t *testing
 // either is written down. A drawer whose controls are undiscoverable is a drawer nobody
 // changes the axis of.
 func TestRenderSpendDrawer_HintLineNamesTheKeysAndTheCurrentAxis(t *testing.T) {
-	lines := renderSpendDrawer(drawerSnap(), usage.GroupEndpoint, "6h", 200)
+	lines := renderSpendDrawer(drawerSnap(), nil, usage.GroupEndpoint, "6h", 200)
 	hint := lines[len(lines)-1]
 	// "[a]", not "[g]": g is globally "go to top" and the drawer stays open alongside the table,
 	// so it must not shadow that motion. See cycleSpendAxis.
@@ -477,7 +482,7 @@ func TestSpendDrawerLines_MatchesWhatTheRendererEmits(t *testing.T) {
 		{name: "no snapshot", snap: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := len(renderSpendDrawer(tc.snap, usage.GroupModel, "1h", 200)); got != spendDrawerLines {
+			if got := len(renderSpendDrawer(tc.snap, nil, usage.GroupModel, "1h", 200)); got != spendDrawerLines {
 				t.Errorf("renderSpendDrawer emits %d lines but layout() reserves %d: the difference "+
 					"is either a footer off the bottom or a footer floating above it",
 					got, spendDrawerLines)
@@ -615,7 +620,7 @@ func TestRenderSpendDrawer_AFullyUnpricedSeriesSaysItsCostIsUnknown(t *testing.T
 		}}},
 	}
 	var row string
-	for _, l := range renderSpendDrawer(snap, usage.GroupModel, "1h", 200) {
+	for _, l := range renderSpendDrawer(snap, nil, usage.GroupModel, "1h", 200) {
 		if strings.Contains(l, "mystery-model") {
 			row = l
 		}
@@ -635,7 +640,7 @@ func TestRenderSpendDrawer_AFullyUnpricedSeriesSaysItsCostIsUnknown(t *testing.T
 		t.Errorf("row %q renders $0.00 for a cost nobody produced", row)
 	}
 	// And a priced row in the same drawer is NOT annotated, or the caveat means nothing.
-	for _, l := range renderSpendDrawer(snap, usage.GroupModel, "1h", 200) {
+	for _, l := range renderSpendDrawer(snap, nil, usage.GroupModel, "1h", 200) {
 		if strings.Contains(l, "claude-opus-5") && strings.Contains(l, "unavailable") {
 			t.Errorf("a fully priced row carries the unknown-cost caveat: %q", l)
 		}
@@ -662,7 +667,7 @@ func TestRenderSpendDrawer_ANegativeSeriesTotalIsUnpricedNotARefund(t *testing.T
 				PricedRequests: 17, PriceableRequests: 17},
 		}}},
 	}
-	lines := renderSpendDrawer(snap, usage.GroupModel, "1h", 200)
+	lines := renderSpendDrawer(snap, nil, usage.GroupModel, "1h", 200)
 	joined := strings.Join(lines, "\n")
 
 	if strings.Contains(joined, "$-5") || strings.Contains(joined, "-$5") {
@@ -962,7 +967,7 @@ func TestDrawerFigures_NamesTrafficThatCannotBePriced(t *testing.T) {
 		}}},
 	}
 	var row string
-	for _, line := range renderSpendDrawer(snap, usage.GroupEndpoint, "1h", 200) {
+	for _, line := range renderSpendDrawer(snap, nil, usage.GroupEndpoint, "1h", 200) {
 		if strings.Contains(line, "mcp-tools.svc") {
 			row = line
 		}
@@ -979,7 +984,7 @@ func TestDrawerFigures_NamesTrafficThatCannotBePriced(t *testing.T) {
 	}
 	// The priced row beside it is untouched: this branch is reached only when nothing priced
 	// AND nothing could have.
-	for _, line := range renderSpendDrawer(snap, usage.GroupEndpoint, "1h", 200) {
+	for _, line := range renderSpendDrawer(snap, nil, usage.GroupEndpoint, "1h", 200) {
 		if strings.Contains(line, "inference.svc") && strings.Contains(line, "not priceable") {
 			t.Errorf("priced row %q picked up the unpriceable caveat", line)
 		}
@@ -999,7 +1004,7 @@ func tierSnap() *usage.Snapshot {
 
 // Two columns, headed, tiers left and series right.
 func TestRenderSpendDrawer_ShowsBothColumnsWithHeaders(t *testing.T) {
-	lines := renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", 100)
+	lines := renderSpendDrawer(tierSnap(), nil, usage.GroupModel, "1h", 100)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{"WHERE IT WENT", "BY MODEL", "cache-read", "claude-opus-5"} {
 		if !strings.Contains(joined, want) {
@@ -1008,7 +1013,7 @@ func TestRenderSpendDrawer_ShowsBothColumnsWithHeaders(t *testing.T) {
 	}
 	// The header names the CURRENT axis, which is what the dropped tree glyphs were
 	// gesturing at and what the hint line otherwise says only in brackets.
-	endpoint := strings.Join(renderSpendDrawer(tierSnap(), usage.GroupEndpoint, "1h", 100), "\n")
+	endpoint := strings.Join(renderSpendDrawer(tierSnap(), nil, usage.GroupEndpoint, "1h", 100), "\n")
 	if !strings.Contains(endpoint, "BY ENDPOINT") {
 		t.Errorf("the header does not follow the axis:\n%s", endpoint)
 	}
@@ -1021,7 +1026,7 @@ func TestRenderSpendDrawer_ShowsBothColumnsWithHeaders(t *testing.T) {
 // against "claude-opus-5" at 39. A header over the wrong column is worse than none.
 func TestRenderSpendDrawer_TheSeriesHeaderSitsOverItsColumn(t *testing.T) {
 	for _, width := range []int{80, 100, 160, 200} {
-		lines := renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", width)
+		lines := renderSpendDrawer(tierSnap(), nil, usage.GroupModel, "1h", width)
 		hdr, row := lines[0], lines[1]
 		hi, ri := strings.Index(hdr, "BY MODEL"), strings.Index(row, "claude-opus-5")
 		if hi < 0 || ri < 0 {
@@ -1052,7 +1057,7 @@ func TestRenderSpendDrawer_DoesNotRestateTheBandsFigures(t *testing.T) {
 				PricedRequests: 35, PriceableRequests: 35},
 		}}},
 	}
-	joined := strings.Join(renderSpendDrawer(snap, usage.GroupModel, "1h", 100), "\n")
+	joined := strings.Join(renderSpendDrawer(snap, nil, usage.GroupModel, "1h", 100), "\n")
 	// The window total appears once — on the model row that earned it — and the tier column
 	// carries shares of it rather than the figure again.
 	if n := strings.Count(joined, "$4.55"); n > 1 {
@@ -1062,7 +1067,7 @@ func TestRenderSpendDrawer_DoesNotRestateTheBandsFigures(t *testing.T) {
 
 // The tree glyphs are gone: they implied a parent row that does not exist.
 func TestRenderSpendDrawer_HasNoOrphanTreeGlyph(t *testing.T) {
-	joined := strings.Join(renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", 100), "\n")
+	joined := strings.Join(renderSpendDrawer(tierSnap(), nil, usage.GroupModel, "1h", 100), "\n")
 	for _, glyph := range []string{"└", "├"} {
 		if strings.Contains(joined, glyph) {
 			t.Errorf("the panel still draws %q, which implies a parent row:\n%s", glyph, joined)
@@ -1075,11 +1080,166 @@ func TestRenderSpendDrawer_HasNoOrphanTreeGlyph(t *testing.T) {
 // existing contract, never the reverse.
 func TestRenderSpendDrawer_NarrowDropsTheTierColumnNotTheModels(t *testing.T) {
 	joined := strings.Join(
-		renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", spendDrawerTwoColumnMin-1), "\n")
+		renderSpendDrawer(tierSnap(), nil, usage.GroupModel, "1h", spendDrawerTwoColumnMin-1), "\n")
 	if !strings.Contains(joined, "claude-opus-5") {
 		t.Errorf("the model column dropped below the two-column width:\n%s", joined)
 	}
 	if strings.Contains(joined, "cache-read") {
 		t.Errorf("both columns drawn below the two-column width:\n%s", joined)
+	}
+}
+
+// THE DRAWER'S CHAIN MUST OUTLIVE GOING OFF SCREEN, because m.spend.expanded does.
+//
+// The tick handler used to stop on !spendDrawerVisible(), conflating "closed" with "not on
+// screen right now". They are different questions: expanded deliberately survives a move to a
+// pane that cannot host the drawer and a resize below spendDrawerMinHeight — see the esc
+// handler, which leaves the flag alone so returning finds the drawer as the operator left it.
+//
+// So: open on Sessions, press `u`, and the next tick returned without rescheduling. Nothing
+// re-arms the chain but `$` itself, so coming back rendered the pre-switch snapshot forever —
+// and the drawer has no age indicator, so it was silent.
+func TestSpendDrawerTick_SurvivesGoingOffScreen(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		break_ func(*model)
+	}{
+		{"moved to a pane that cannot host it", func(m *model) { m.pane = paneUsage }},
+		{"resized below the drawer's height floor", func(m *model) { m.height = spendDrawerMinHeight - 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{width: 200, height: 60, pane: paneSessions}
+			m.spend.expanded = true
+			gen := m.spend.drawer.tickGen
+			tc.break_(m)
+
+			if m.spendDrawerVisible() {
+				t.Fatal("the drawer is still visible, so this fixture asserts nothing")
+			}
+			if !m.spend.expanded {
+				t.Fatal("expanded was cleared, so the chain SHOULD stop; fixture is wrong")
+			}
+			// The tick must still be accepted and rescheduled: it is the flag that says the
+			// drawer is open, not whether it happens to be drawable this frame.
+			_, cmd := m.Update(spendDrawerTickMsg{gen: gen})
+			if cmd == nil {
+				t.Error("the drawer's poll chain stopped and nothing re-arms it but `$`, so " +
+					"returning to a hosting pane renders the pre-switch snapshot forever")
+			}
+		})
+	}
+	// And it DOES stop once the drawer is actually closed, or the off-screen case would keep a
+	// ledger walk alive for the session.
+	m := &model{width: 200, height: 60, pane: paneSessions}
+	m.spend.expanded = false
+	if _, cmd := m.Update(spendDrawerTickMsg{gen: m.spend.drawer.tickGen}); cmd != nil {
+		t.Error("a closed drawer kept polling; its span can be a month of day files")
+	}
+}
+
+// A POD SWITCH MUST NOT LEAVE AN EXPANDED DRAWER WITH NOTHING TO SHOW AND NOTHING COMING.
+//
+// startSpendPolling calls invalidate(), which walks every chain INCLUDING the drawer's — a
+// different pod is a different breakdown just as much as a different total — and then restarted
+// only the band's. So: open the drawer, esc to the pods picker, pick another pod, and the drawer
+// came back expanded with snap == nil and nothing scheduled to fill it. Headers over blank rows,
+// revivable only by closing and reopening.
+func TestStartSpendPolling_ReArmsAnOpenDrawer(t *testing.T) {
+	// THROUGH THE RETURNED BATCH, not by fabricating a tick. A hand-made spendDrawerTickMsg is
+	// accepted and rescheduled by the handler whether or not anything ever scheduled one — so
+	// asserting on it passed with the re-arm removed, which is the mutation this test exists to
+	// catch. What has to be true is that startSpendPolling ITSELF issues the drawer's fetch.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"window":"1h","group":"model","buckets":[],"totals":{}}`))
+	}))
+	defer ts.Close()
+
+	drawerFetched := func(m *model) bool {
+		t.Helper()
+		cmd := m.startSpendPolling()
+		if cmd == nil {
+			t.Fatal("startSpendPolling returned no command at all")
+		}
+		batch, ok := cmd().(tea.BatchMsg)
+		if !ok {
+			t.Fatalf("startSpendPolling produced %T, want a tea.BatchMsg", cmd())
+		}
+		// Every command at once, then ONE deadline. The batch holds fetches and tea.Tick
+		// closures; the fetches answer against a loopback server in milliseconds while the
+		// ticks block for their whole interval, so anything that has not answered by the
+		// deadline is a tick and not the fetch under test. Fired concurrently rather than in
+		// sequence because waiting out each tick in turn took sixteen seconds.
+		msgs := make(chan tea.Msg, len(batch))
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			go func(c tea.Cmd) {
+				defer func() { _ = recover() }()
+				msgs <- c()
+			}(c)
+		}
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case msg := <-msgs:
+				if _, isDrawer := msg.(spendDrawerLoadedMsg); isDrawer {
+					return true
+				}
+			case <-deadline:
+				return false
+			}
+		}
+	}
+
+	open := &model{width: 200, height: 60, pane: paneSessions, client: apiclient.New(ts.URL)}
+	open.spend.expanded = true
+	open.spend.drawer.snap = drawerSnap()
+	if !drawerFetched(open) {
+		t.Error("startSpendPolling issued no drawer fetch for an OPEN drawer: invalidate() has " +
+			"already cleared drawer.snap, so the drawer renders headers over blank rows " +
+			"indefinitely and only `$` twice revives it")
+	}
+	// invalidate cleared the previous pod's breakdown, which is correct — it belonged to the
+	// pod we just left.
+	if open.spend.drawer.snap != nil {
+		t.Error("the previous pod's breakdown survived the switch")
+	}
+
+	// A CLOSED drawer is not armed, or every session would pay for a chain nobody opened.
+	closed := &model{width: 200, height: 60, pane: paneSessions, client: apiclient.New(ts.URL)}
+	if drawerFetched(closed) {
+		t.Error("startSpendPolling fetched a breakdown for a drawer nobody opened")
+	}
+}
+
+// A FAILED DRAWER FETCH MUST NOT RENDER AS SILENCE, which is the rule the band already follows.
+//
+// applySpendDrawerLoaded clears snap on failure — deliberately, since a stale breakdown drawn as
+// a current one is the worse error — so without an error path the drawer showed headers over
+// blank rows and said nothing about why. drawer.err was written and had no reader at all.
+func TestRenderSpendDrawer_AFailedFetchSaysSo(t *testing.T) {
+	lines := renderSpendDrawer(nil, context.DeadlineExceeded, usage.GroupModel, "MONTH", 100)
+	if len(lines) != spendDrawerLines {
+		t.Fatalf("%d lines, want %d: the reservation has to be filled either way",
+			len(lines), spendDrawerLines)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "unavailable") {
+		t.Errorf("a failed drawer fetch renders no diagnostic:\n%s", joined)
+	}
+	if !strings.Contains(joined, "MONTH") {
+		t.Errorf("the diagnostic does not name the span that failed:\n%s", joined)
+	}
+	// The keys still work, so they are still advertised: a failed span is when an operator most
+	// wants to try another.
+	if !strings.Contains(joined, "[w]") || !strings.Contains(joined, "esc") {
+		t.Errorf("the hint line is gone, so the keys that recover from this are undiscoverable:\n%s",
+			joined)
+	}
+	// And an empty drawer before the first poll is NOT the same state: no diagnostic there.
+	fresh := strings.Join(renderSpendDrawer(nil, nil, usage.GroupModel, "MONTH", 100), "\n")
+	if strings.Contains(fresh, "unavailable") {
+		t.Errorf("a drawer awaiting its first answer reports a failure:\n%s", fresh)
 	}
 }

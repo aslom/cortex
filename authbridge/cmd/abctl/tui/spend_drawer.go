@@ -529,7 +529,29 @@ func drawerHeaders(axis usage.Group, twoCol bool, width int) string {
 // windowLabel is the span in the strip's own vocabulary — "1h", not time.Duration's
 // "1h0m0s". Passed in already formatted rather than formatted here, so the drawer's hint and
 // the strip's own figure label are produced by one function and cannot drift apart.
-func renderSpendDrawer(snap *usage.Snapshot, axis usage.Group, windowLabel string, width int) []string {
+// err is the drawer chain's own failure, and it is a PARAMETER rather than something this
+// function infers from a nil snapshot, because the two are different states that must not read
+// the same. A nil snapshot before the first poll is "no answer yet"; a nil snapshot after a
+// failed one is "we asked and could not find out", and drawing the second as the first is
+// exactly the silence applySpendLoaded's doc forbids for the band — the chain clears snap on
+// failure, so without this a broken endpoint rendered as headers over blank rows forever.
+func renderSpendDrawer(snap *usage.Snapshot, err error, axis usage.Group, windowLabel string, width int) []string {
+	if err != nil {
+		// The reservation still has to be filled, so this is spendDrawerLines rows with the
+		// diagnostic on the first and the hint line last — the hints stay because `w` and `esc`
+		// still work, and a failed span is the moment an operator most wants to try another.
+		out := make([]string, 0, spendDrawerLines)
+		out = append(out, clipRow("  breakdown unavailable for "+windowLabel+": "+
+			sanitizeLabel(err.Error()), width))
+		for len(out) < spendDrawerLines-1 {
+			out = append(out, "")
+		}
+		return append(out, fitStripFigures(" ", plainFigures(
+			"[a] "+axisHint(axis),
+			"[w] "+windowLabel,
+			"esc closes",
+		), width))
+	}
 	rows := spendDrawerRows(snap, spendDrawerSeries)
 	// TWO COLUMNS: what the money was spent ON, and who spent it. They answer different
 	// questions, and with a single model in the window the series column alone restated the

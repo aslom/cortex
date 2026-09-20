@@ -374,3 +374,113 @@ func TestServedAsRequested(t *testing.T) {
 		}
 	}
 }
+
+// TestSpanReadings_StalenessIsMeasuredAgainstEachSpansOwnCadence.
+//
+// THE THRESHOLD HAS TO BE PER SPAN, exactly like the readings are, and the plumbing landed
+// without it: spanReadings compared every chain's age to the global spendStaleAfter, which is
+// twice the HOUR's twenty-second cadence — forty seconds. The month and the week poll every
+// five minutes, so for about 87% of every healthy polling cycle they were dated "MONTH 3m",
+// which reads as a wedged chain on a chain that answered three minutes ago and is not due for
+// another two.
+//
+// It also cost width. The age widens the label, the band is one uniform cell width, so two
+// permanently-dated cells pushed the whole band from 34 columns to 42 — dropping 7 DAYS at a
+// width where all four had fit.
+//
+// bandSpanCell's own doc already argued for this ("PER SPAN, because the four poll fifteen
+// times apart. One age for the whole band would … alarm on a healthy month chain between its
+// own five-minute polls"). This is that rationale made true.
+func TestSpanReadings_StalenessIsMeasuredAgainstEachSpansOwnCadence(t *testing.T) {
+	now := time.Now()
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		def := spendSpanDefs[span]
+		t.Run(def.label, func(t *testing.T) {
+			// One interval old: a chain answering on schedule, never stale.
+			m := &model{}
+			m.spend.chains[span].snap = &usage.Snapshot{
+				Window: def.window,
+				Totals: usage.Counts{Requests: 1, CostMicros: 1_000_000, PricedRequests: 1, PriceableRequests: 1},
+				Priced: true,
+			}
+			m.spend.chains[span].lastFetch = now.Add(-def.interval)
+			if got := m.spanReadings()[span]; got.Stale {
+				t.Errorf("%s: stale after one poll interval (%v) — a chain answering on its own "+
+					"cadence is healthy, and dating it reads as wedged", def.label, def.interval)
+			}
+			// Just inside twice its own interval: still healthy, so one dropped reply is not
+			// an alarm.
+			m.spend.chains[span].lastFetch = now.Add(-2*def.interval + time.Second)
+			if got := m.spanReadings()[span]; got.Stale {
+				t.Errorf("%s: stale just inside 2x its %v interval; one missed reply must not "+
+					"alarm", def.label, def.interval)
+			}
+			// Past twice its own interval: now it is worth saying.
+			m.spend.chains[span].lastFetch = now.Add(-2*def.interval - time.Second)
+			got := m.spanReadings()[span]
+			if !got.Stale {
+				t.Errorf("%s: not stale past 2x its %v interval — a wedged chain is "+
+					"indistinguishable from a current reading without this", def.label, def.interval)
+			}
+			if got.Age < 2*def.interval {
+				t.Errorf("%s: Age = %v, want at least 2x the %v interval", def.label, got.Age, def.interval)
+			}
+		})
+	}
+}
+
+// And the consequence the global threshold had on the band: a healthy month and week must not
+// widen it, because the age rides on the label and the cells share one width.
+func TestRenderSpendBand_HealthySlowSpansDoNotWidenTheBand(t *testing.T) {
+	now := time.Now()
+	m := &model{}
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		def := spendSpanDefs[span]
+		m.spend.chains[span].snap = &usage.Snapshot{
+			Window: def.window,
+			Totals: usage.Counts{Requests: 1, CostMicros: 4_040_000, PricedRequests: 1, PriceableRequests: 1},
+			Priced: true,
+		}
+		// Three minutes since each answered: overdue for the hour and today, well inside the
+		// five-minute cadence of the week and the month.
+		m.spend.chains[span].lastFetch = now.Add(-3 * time.Minute)
+	}
+	got := m.spanReadings()
+	if !got[spanHour].Stale {
+		t.Error("the hour is not dated three minutes after a 20s-cadence poll; it IS wedged")
+	}
+	for _, span := range []spendSpan{span7d, spanMonth} {
+		if got[span].Stale {
+			t.Errorf("%s is dated three minutes after its own five-minute-cadence poll, which "+
+				"reads as wedged on a chain that is not even due yet", spendSpanDefs[span].label)
+		}
+	}
+	// AND THE WIDTH CONSEQUENCE, on a band where nothing is wedged. The fixture above dates the
+	// hour and the day legitimately — three minutes IS overdue on a 20s and a 60s cadence — and
+	// two genuinely stale cells SHOULD widen the band. What must not widen it is the pair that
+	// answered on schedule, so here every chain is inside its own interval.
+	healthy := &model{}
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		def := spendSpanDefs[span]
+		healthy.spend.chains[span].snap = &usage.Snapshot{
+			Window: def.window,
+			Totals: usage.Counts{Requests: 1, CostMicros: 4_040_000, PricedRequests: 1, PriceableRequests: 1},
+			Priced: true,
+		}
+		healthy.spend.chains[span].lastFetch = now.Add(-def.interval)
+	}
+	spans := healthy.spanReadings()
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if spans[span].Stale {
+			t.Fatalf("%s is dated one interval after its own poll, so this width check is "+
+				"measuring the wrong thing", spendSpanDefs[span].label)
+		}
+	}
+	lines := renderSpendBand(spendSummary{Spans: spans}, 40)
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if !strings.Contains(lines[0], spendSpanDefs[span].label) {
+			t.Errorf("at width 40, %s was dropped from a band where every chain answered on "+
+				"schedule:\n%s", spendSpanDefs[span].label, strings.Join(lines, "\n"))
+		}
+	}
+}
