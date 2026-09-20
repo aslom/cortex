@@ -76,6 +76,12 @@ func (p *InferenceParser) settleCost(pctx *pipeline.Context) {
 	// response pass did not run" and nothing about the traffic's shape; see Load.
 	costing.Store(pctx, settled)
 
+	// Before the publish gate too, and for a related reason: a gateway whose header omits
+	// cache cost is a fact about the endpoint, not about whether this particular response had
+	// anything worth publishing. The reporter owns its own preconditions and dedups per
+	// endpoint and model, so calling it unconditionally costs one branch per response.
+	p.reportCacheBlind(pctx, settled)
+
 	// Published when there is ANYTHING to say — a settled cost, or a saving another
 	// component achieved. Gating on the cost alone would drop the saving for a model the
 	// rate table cannot price, and the unpriced-model tally is precisely what tells an

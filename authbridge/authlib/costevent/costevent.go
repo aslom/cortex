@@ -113,6 +113,30 @@ type Event struct {
 	// than how much to trust the rates.
 	Provenance string `json:"provenance,omitempty"`
 
+	// HeaderOmittedCache says the gateway reported a figure that priced only the uncached
+	// tiers, so the rate table was charged instead of it. See costing.Settled.
+	//
+	// ON THE WIRE BECAUSE THE IN-PROCESS FLAG REACHES NOTHING. costing.Settled keeps both
+	// figures so the drift reporter can compare them, and the warning that reporter emits
+	// fires once per endpoint and model — right for a log line, useless for an audit. Without
+	// this field a substituted row is distinguishable only as Source: usage-fallback, which is
+	// also what a stream that never had a header looks like, and the four-day per-request
+	// analysis that found this defect could not be repeated on a ledger recorded after the fix.
+	// Same argument as the Incomplete and RejectedReason fields NewRecord carries.
+	HeaderOmittedCache bool `json:"header_omitted_cache,omitempty"`
+
+	// GatewayUSD is the gateway's own figure when it was NOT the one charged.
+	//
+	// Set only alongside HeaderOmittedCache, because that is the only case where it says
+	// something CostUSD does not: where the header wins, CostUSD IS that figure and Source
+	// names it, so a second copy would be duplication every event pays for.
+	//
+	// DIAGNOSTIC, NEVER SUMMED. It is not a discount and not an adjustment — it is a figure
+	// this process declined, kept so an operator can see by how much the gateway
+	// under-reported. The aggregate ledger cannot carry a per-request flag and distinguishes
+	// these rows by provenance instead ("bundled" where it would have said "authoritative").
+	GatewayUSD float64 `json:"gateway_usd,omitempty"`
+
 	// Settled marks a figure the producer settled deliberately, INCLUDING zero.
 	//
 	// A COST OF ZERO MUST NOT READ AS "NO FIGURE". Gate a producer on cost > 0 — as
