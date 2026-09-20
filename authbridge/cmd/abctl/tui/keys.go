@@ -953,23 +953,20 @@ func (m *model) helpView() string {
 	case panePods:
 		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [r] reload  [?] keys  [q] quit"
 	case paneSessions:
-		// "cost/saved: lifetime" FIRST, so fitHintLine drops it before any key. It scopes the
-		// two money columns, which are per-session totals for all time while the band above
-		// reads TODAY and LAST 1H — a session's lifetime $5.83 under a today of $3.84 reads
-		// as a bug until something on screen says the larger number is the older scope.
-		//
-		// A notice rather than a column header: "COST (LIFETIME)" does not fit a 10-wide
-		// column, and the words belong where this pane describes itself.
-		const lifetime = "cost/saved: lifetime   "
+		// THE LIFETIME SCOPE IS NOT SAID HERE. It was, as a leading notice — and the pane's
+		// TITLE now carries it instead (see sessionsScopeNote), which is the better place for
+		// the same words: adjacent to the table they describe, and width-fitted so it drops
+		// rather than wraps. A notice here would have been the third copy on one screen, after
+		// the title and the [?] overlay, which is the redundancy "name the span once" forbids.
 		// [$] spend BESIDE [u] usage, because the footer is where a key gets discovered. It was
 		// documented in the [?] overlay and in the README's own footer sample and was missing
 		// from the line those two describe — so the drawer existed only for a reader who went
 		// looking for it. Placed after [u] so fitHintLine, which drops from the front, gives up
 		// the navigation keys before either of the two that reach cost.
 		if m.parentCtx != nil {
-			return lifetime + "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [esc] pods  [p] pause  [?] keys  [q] quit"
+			return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [esc] pods  [p] pause  [?] keys  [q] quit"
 		}
-		return lifetime + "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit"
+		return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit"
 	case paneEvents:
 		skipHint := "[s] hide passthru/skip"
 		if m.hideInactive {

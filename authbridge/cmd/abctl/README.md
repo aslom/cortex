@@ -230,14 +230,19 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   event count, tokens, cost, saved, active marker. Numerics are right-aligned
   so the digits line up between rows.
 
-  The two money columns are **per-session lifetime** totals, while the band
-  above reads today and the poll window — a session's lifetime cost sitting
-  under a smaller "today" is the older scope, not a fault. They are dropped
-  entirely on a terminal too narrow to show a sub-cent charge honestly — below
-  72 columns — rather than rounded to `$0.00` or blanked.
+  **Every figure in this table is a lifetime total for its session** — which is
+  what the title says, and why the TOKENS column does not sum to the token count
+  in the band above it: that one covers the rolling window its `LAST 1H` label
+  names. Both are right; neither is a check on the other. The same goes for a
+  session's lifetime cost sitting under a smaller `TODAY` — that is the older
+  scope, not a fault.
+
+  The two money columns are dropped entirely on a terminal too narrow to show a
+  sub-cent charge honestly — below 72 columns — rather than rounded to `$0.00`
+  or blanked.
 
   ```
-  abctl · http://localhost:9094 · [Sessions] Pipeline
+  abctl · http://localhost:9094 · [Sessions] Pipeline · lifetime totals
   TODAY      LAST 1H   SAVED      CACHE HIT  TOKENS
   $30.9350   $2.9100   ~$0.1804   81%        9.9M
 
@@ -275,6 +280,25 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   The selected row is reverse-video rather than marked with a glyph, so it is
   the one thing these listings cannot show.
+
+  **Reading the SPEND line: figures are grouped by the span they cover, and each
+  group names its span once.** Everything before `1h:` is the day — `$30.9350
+  today` is spend since local midnight from the durable cost ledger, and
+  `saved ~$0.1804` beside it is the same day's avoided spend, so the pair is
+  "what it cost" and "what it would have cost" over one span. Everything from
+  `1h:` onward is the rolling window the `[w]` key cycles: its cost, then the
+  cache hit rate and token count that window covers. A span's label rides on the
+  first figure of its group, so it survives every width at which that figure
+  does. Two trailing readings belong to neither group and appear last: `[u] usage`
+  and a `polled 3m ago` staleness note, which is built from whichever of the two
+  poll chains is further behind.
+
+  On a deployment with no durable cost ledger — Kubernetes, by design — there is
+  no day figure, so the line opens with the window group instead
+  (`SPEND  1h: $2.9100   saved ~$0.1804   …`) and the saving shown is that
+  window's. `~` on a money figure means it is a lower bound, never an exact
+  total; the saving always wears one, because it is estimated from a
+  bytes-to-tokens ratio rather than measured by a tokenizer.
 - **Events**: per-session event table. `c` opens a column picker — a popup with
   a checkbox and a one-line description per column, since twelve abbreviated
   headers are not self-describing.

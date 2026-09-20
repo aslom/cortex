@@ -58,10 +58,26 @@ func renderSpendBand(s spendSummary, width int) []string {
 			moneyAmount(s.WindowUSD, s.Unpriced, s.Priceable, s.Incomplete, nil, s.Clamped),
 		})
 	}
-	if s.HasSaved {
-		// The marker is part of the value, and the value never joins the spend figures:
-		// usage.Counts.AvoidedMicros forbids any consumer adding it, in either direction.
-		cells = append(cells, bandCell{"SAVED", inexactMarker + formatUSDCell(s.SavedUSD)})
+	// THE SAVING MUST MATCH THE SPAN OF THE FIGURE IT SITS BESIDE, which is the whole point of
+	// spendSummary.TodaySavedUSD. SAVED renders next to TODAY here, so reading the WINDOW's
+	// avoided spend into it made the two a pair that spanned two spans — measured on a local
+	// proxy at "$64.1765 today" beside "~$1.0291" for a day that had really avoided $2.1891,
+	// understating the figure next to it by 2.1x.
+	//
+	// The window's saving is the FALLBACK, for a deployment with no durable ledger — Kubernetes
+	// by design — and it says so in its own label rather than borrowing the day's. An unlabelled
+	// fallback here is the original defect with a different number in it.
+	//
+	// The marker is part of the value, and the value never joins the spend figures:
+	// usage.Counts.AvoidedMicros forbids any consumer adding it, in either direction.
+	switch {
+	case s.HasTodaySaved:
+		cells = append(cells, bandCell{"SAVED", inexactMarker + formatUSDCell(s.TodaySavedUSD)})
+	case s.HasSaved:
+		cells = append(cells, bandCell{
+			"SAVED " + strings.ToUpper(s.WindowLabel),
+			inexactMarker + formatUSDCell(s.SavedUSD),
+		})
 	}
 	if s.HasCacheHit {
 		cells = append(cells, bandCell{"CACHE HIT", fmt.Sprintf("%.0f%%", s.CacheHitPct)})
