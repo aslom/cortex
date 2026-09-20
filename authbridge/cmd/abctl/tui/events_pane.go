@@ -187,14 +187,17 @@ func (m *model) rebuildEventsTable() {
 		}
 		row := make(table.Row, 0, len(cols))
 		for _, c := range cols {
-			cc.width = c.width
-			row = append(row, c.cell(cc))
+			// render, not cell: it sets cc.width from the column AND applies the
+			// column's declared alignment, which is the same field tableColumns pads
+			// the heading with. A cell that aligned itself could not tell the header,
+			// and for the numeric columns it never did.
+			row = append(row, c.render(cc))
 		}
 		rows = append(rows, row)
 		m.visibleRows = append(m.visibleRows, er)
 		// Keyed from the SAME cellContext that just rendered the row, so the value
-		// sorted on and the value displayed cannot come apart. cc.width is whatever
-		// the last column left it at; no sortKey reads it.
+		// sorted on and the value displayed cannot come apart. cc.width stays zero
+		// here — render takes its own copy — and no sortKey reads it.
 		if sortCol != nil {
 			keys = append(keys, sortCol.sortKey(cc))
 		}

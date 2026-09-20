@@ -47,11 +47,53 @@ func sessionsColumns() []table.Column {
 	}
 }
 
+// sessionsRightAligned names the columns whose cells rebuildSessionsTable right-aligns with
+// padLeft, and whose HEADINGS therefore have to be right-aligned too.
+//
+// One list, read by alignSessionsHeaders below and by the header/cell agreement test, so a
+// column cannot be padded in its cells while its heading stays on the far side of the column —
+// which is what all four of these did until now. There is no eventColumn-style struct to hang
+// the flag on here: the sessions table is a []table.Column whose cells are built inline against
+// each column's fitted width, so the set is named instead.
+//
+// ACTIVE is deliberately absent. Its ● and "cached" are marks rather than figures, nothing is
+// compared down the column, and the left edge is where a reader looks for them.
+var sessionsRightAligned = map[string]bool{
+	"EVENTS": true,
+	"TOKENS": true,
+	"COST":   true,
+	"SAVED":  true,
+}
+
+// alignSessionsHeaders right-aligns the headings of the numeric columns, against the widths
+// they were FITTED to rather than the widths they declare — see rightAlignHeader.
+//
+// A copy, never the caller's slice, for the same reason fitTableColumns takes one: the input
+// comes from a package-level constructor, and writing through it would make the result
+// permanent for every later caller instead of per-rebuild.
+//
+// Idempotent, because each heading is re-derived from headerTitle rather than padded again:
+// re-aligning an already-aligned set is a no-op rather than a heading pushed off its column.
+func alignSessionsHeaders(cols []table.Column) []table.Column {
+	out := make([]table.Column, len(cols))
+	copy(out, cols)
+	for i, c := range out {
+		if sessionsRightAligned[headerTitle(c)] {
+			out[i].Title = rightAlignHeader(headerTitle(c), c.Width)
+		}
+	}
+	return out
+}
+
 // newSessionsTable builds an empty sessions table. Columns are fitted to the terminal by
 // layout(), which is called on every WindowSizeMsg.
+//
+// The headings are aligned here too, even though these widths are the unfitted ones: an
+// unaligned header would otherwise be what a pane that has not seen a WindowSizeMsg yet
+// renders.
 func newSessionsTable() table.Model {
 	t := table.New(
-		table.WithColumns(sessionsColumns()),
+		table.WithColumns(alignSessionsHeaders(sessionsColumns())),
 		table.WithFocused(true),
 	)
 	t.SetStyles(tableStyles())
@@ -90,7 +132,11 @@ func (m *model) rebuildSessionsTable() {
 	// The header this rebuild will install, computed first because the money cells are rendered
 	// against their column's FITTED width — the fitter shrinks columns on a narrow terminal, so
 	// the declared 10 is a ceiling rather than the budget.
-	want := fitTableColumns(sessionsColumnsFor(m.width), m.width)
+	//
+	// Fitted, THEN aligned, and in that order: the alignment pads each heading to the width the
+	// fitter settled on, so padding first would pad to a width the column no longer has. Every
+	// lookup below still finds its column, because they go through headerTitle.
+	want := alignSessionsHeaders(fitTableColumns(sessionsColumnsFor(m.width), m.width))
 	costW := sessionsColumnWidth(want, "COST")
 	savedW := sessionsColumnWidth(want, "SAVED")
 	// The other cells are fitted too: padLeft right-aligns into the FITTED width, so digits
@@ -414,9 +460,14 @@ func sessionMoneyCell(micros int64, avoided, saturated bool, budget int) string 
 const sessionsScopeNote = " · lifetime totals"
 
 // sessionsColumnWidth is the fitted width of one named column, or 0 when it is not present.
+//
+// By headerTitle rather than by the raw Title, so it finds a column whose heading carries
+// alignment padding. Against the raw string, a right-aligned COST reads as absent and its cells
+// get rendered against a zero budget — which sessionMoneyCell renders as "not known here" for
+// every charge.
 func sessionsColumnWidth(cols []table.Column, title string) int {
 	for _, c := range cols {
-		if c.Title == title {
+		if headerTitle(c) == title {
 			return c.Width
 		}
 	}
@@ -479,7 +530,7 @@ func sessionsShowMoney(termWidth int) bool {
 	}
 	fitted := fitTableColumns(sessionsColumns(), termWidth)
 	for _, c := range fitted {
-		if c.Title == "TOKENS" && c.Width < sessionTokensCellMin {
+		if headerTitle(c) == "TOKENS" && c.Width < sessionTokensCellMin {
 			return false
 		}
 	}
@@ -500,7 +551,7 @@ func sessionsColumnsFor(termWidth int) []table.Column {
 	}
 	out := make([]table.Column, 0, len(cols))
 	for _, c := range cols {
-		if c.Title == "COST" || c.Title == "SAVED" {
+		if t := headerTitle(c); t == "COST" || t == "SAVED" {
 			continue
 		}
 		out = append(out, c)
@@ -514,6 +565,10 @@ func sessionsColumnsFor(termWidth int) []table.Column {
 // fitter squeezing the same columns for a narrower terminal — either one means the loaded rows
 // were measured against a different header, and only a change justifies the scroll reset that
 // reinstalling them costs.
+//
+// The RAW titles, alignment padding included, because both sides are post-alignment header sets
+// and that padding is derived from the width this compares anyway — so it can neither miss a
+// change nor invent one.
 func sameColumns(a, b []table.Column) bool {
 	if len(a) != len(b) {
 		return false
