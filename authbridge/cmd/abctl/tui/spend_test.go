@@ -1076,6 +1076,22 @@ func TestSpendSpanDefs_EverySpanIsComplete(t *testing.T) {
 			t.Errorf("span %d (%q) has no poll interval, so its chain would never reschedule",
 				span, def.window)
 		}
+		// NO SURROUNDING WHITESPACE ON A LABEL, which is a width rule and not tidiness.
+		//
+		// bandCell.width() is max(label, value), so a stray space costs a whole column in exactly
+		// the cells whose LABEL is the wider half — and the band is one uniform width, so it costs
+		// it in every cell at once and can drop a span at a width where all four had fitted.
+		//
+		// INHERITED FROM #1074, whose band this one replaced. That change built labels by
+		// concatenating a span suffix and found the bug the hard way: unguarded concatenation gave
+		// "LAST ", "SAVED ", "TOKENS ", "CACHE HIT " a trailing space each. Its guard went with its
+		// band, and the rule outlived it — these labels are literals now, so the bug takes a typo
+		// rather than a concatenation, which is exactly the kind nothing else would catch.
+		// Verified by mutation: adding one space to "LAST 1H" failed nothing before this.
+		if def.label != strings.TrimSpace(def.label) {
+			t.Errorf("span %d label %q carries surrounding whitespace: bandCell.width() charges it "+
+				"a column, and the band's uniform width charges every cell", span, def.label)
+		}
 	}
 }
 
