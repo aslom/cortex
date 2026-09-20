@@ -22,7 +22,11 @@ import (
 // why they are fitted rather than used as-is — see fitTableColumns.
 func sessionsColumns() []table.Column {
 	return []table.Column{
-		{Title: "ID", Width: 40},
+		// SESSION, and 14 wide rather than 40. A session id is a 36-character UUID whose
+		// first characters identify it to a human as well as all of them do, and the 26
+		// columns it was spending are the ones the money columns need. `/` filters on the
+		// FULL id, so nothing is lost for finding a session — only for reading one.
+		{Title: "SESSION", Width: 14},
 		{Title: "UPDATED", Width: 14},
 		{Title: "EVENTS", Width: 8},
 		{Title: "TOKENS", Width: 10},
@@ -58,9 +62,13 @@ func newSessionsTable() table.Model {
 // filter, and keeps the cursor on the previously-selected session if still
 // present.
 func (m *model) rebuildSessionsTable() {
+	// The FULL id of the previously-selected row, read out of band. Taken from the rendered
+	// cell it was a truncated string compared against other truncated strings, which happened
+	// to work and would have stopped working the moment two ids shared a prefix — at 72
+	// columns the SESSION cell fits eight runes.
 	prev := ""
-	if rows := m.sessionsTbl.Rows(); len(rows) > 0 {
-		prev = rows[m.sessionsTbl.Cursor()][0]
+	if c := m.sessionsTbl.Cursor(); c >= 0 && c < len(m.sessionRowIDs) {
+		prev = m.sessionRowIDs[c]
 	}
 	now := time.Now()
 	// ONE FUNCTION SETS THE HEADER AND THE ROWS, and it is this one. They have to change
@@ -85,7 +93,15 @@ func (m *model) rebuildSessionsTable() {
 	want := fitTableColumns(sessionsColumnsFor(m.width), m.width)
 	costW := sessionsColumnWidth(want, "COST")
 	savedW := sessionsColumnWidth(want, "SAVED")
+	// The other cells are fitted too: padLeft right-aligns into the FITTED width, so digits
+	// line up at whatever width the fitter settled on. Left-aligned numbers were the main
+	// reason this table read as ragged — "5" and "105" began at the same column and ended
+	// two apart, so no two rows could be compared by eye.
+	idW := sessionsColumnWidth(want, "SESSION")
+	eventsW := sessionsColumnWidth(want, "EVENTS")
+	tokensW := sessionsColumnWidth(want, "TOKENS")
 	rows := make([]table.Row, 0, len(m.sessions))
+	ids := make([]string, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		if m.filter != "" && !strings.Contains(s.ID, m.filter) {
 			continue
@@ -95,7 +111,7 @@ func (m *model) rebuildSessionsTable() {
 			active = "●"
 		}
 		row := table.Row{
-			s.ID,
+			trunc(s.ID, idW),
 			relTime(now, s.UpdatedAt),
 			// The server's count, and only ever the server's: it is the complete one.
 			// abctl's own cache holds what it snapshotted plus what it has streamed
@@ -103,16 +119,19 @@ func (m *model) rebuildSessionsTable() {
 			// smaller number — and when handleStreamEvent also wrote this field, the
 			// cell flipped between the two on live traffic. The cached-only rows below
 			// use len(cached) because the server does not list those at all.
-			fmt.Sprintf("%d", s.EventCount),
-			sessionTokens(s.TotalTokens, m.events[s.ID]),
+			padLeft(fmt.Sprintf("%d", s.EventCount), eventsW),
+			padLeft(sessionTokens(s.TotalTokens, m.events[s.ID]), tokensW),
 		}
 		if showMoney {
 			row = append(row,
-				sessionMoneyCell(s.CostMicros, false, s.Saturated, costW),
-				sessionMoneyCell(s.AvoidedMicros, true, s.Saturated, savedW))
+				padLeft(sessionMoneyCell(s.CostMicros, false, s.Saturated, costW), costW),
+				padLeft(sessionMoneyCell(s.AvoidedMicros, true, s.Saturated, savedW), savedW))
 		}
 		row = append(row, active)
 		rows = append(rows, row)
+		// APPENDED IN LOCKSTEP, one line apart, so the two cannot drift: the row carries what
+		// a reader sees and this carries what the code acts on.
+		ids = append(ids, s.ID)
 	}
 	// Sessions whose events abctl still holds but the server no longer lists.
 	// Retaining the events (#870) is only half a fix if there is no row to
@@ -124,10 +143,10 @@ func (m *model) rebuildSessionsTable() {
 		}
 		cached := m.events[id]
 		row := table.Row{
-			id,
+			trunc(id, idW),
 			emptyCell,
-			fmt.Sprintf("%d", len(cached)),
-			sessionTokens(0, cached),
+			padLeft(fmt.Sprintf("%d", len(cached)), eventsW),
+			padLeft(sessionTokens(0, cached), tokensW),
 		}
 		if showMoney {
 			// No figures for a session the server no longer lists. abctl holds these
@@ -139,6 +158,7 @@ func (m *model) rebuildSessionsTable() {
 		}
 		row = append(row, "cached")
 		rows = append(rows, row)
+		ids = append(ids, id)
 	}
 	// ONLY WHEN THE HEADER ACTUALLY CHANGES, which is a resize and nothing else. SetRows(nil)
 	// resets the viewport's offset, and this function runs on every poll — clearing
@@ -153,13 +173,15 @@ func (m *model) rebuildSessionsTable() {
 		m.sessionsTbl.SetColumns(want)
 	}
 	m.sessionsTbl.SetRows(rows)
+	// Published with the rows it describes, never separately.
+	m.sessionRowIDs = ids
 
 	// Restore cursor position if possible. Through setCursorVisible: a restored row
 	// past the first screenful would otherwise land one line below the rendered
 	// window, leaving the pane with no highlight — see setCursorVisible.
 	if prev != "" {
-		for i, r := range rows {
-			if r[0] == prev {
+		for i, id := range ids {
+			if id == prev {
 				setCursorVisible(&m.sessionsTbl, i)
 				return
 			}
@@ -244,11 +266,13 @@ func sessionTokens(serverTotal int, cached []pipeline.SessionEvent) string {
 
 // selectedSessionID returns the cursor row's session ID, or "".
 func (m *model) selectedSessionID() string {
-	rows := m.sessionsTbl.Rows()
-	if len(rows) == 0 {
+	// OUT OF BAND, never the rendered cell: see model.sessionRowIDs for what reading the cell
+	// cost when the SESSION column began truncating.
+	c := m.sessionsTbl.Cursor()
+	if c < 0 || c >= len(m.sessionRowIDs) {
 		return ""
 	}
-	return rows[m.sessionsTbl.Cursor()][0]
+	return m.sessionRowIDs[c]
 }
 
 // emptyCell is what a table cell shows for a figure that is NOT KNOWN, as opposed to one

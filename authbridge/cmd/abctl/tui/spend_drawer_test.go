@@ -282,16 +282,18 @@ func TestPaneView_DrawsTheDrawerUnderTheStripAndKeepsTheBody(t *testing.T) {
 	m.layout()
 
 	out := m.paneView()
-	stripAt := strings.Index(out, stripLabel)
+	// The band's label row, which is where the strip's "SPEND" used to be: the column labels
+	// are the region's identity now.
+	bandAt := strings.Index(out, "LAST 1H")
 	rowAt := strings.Index(out, "claude-opus-5")
-	if stripAt < 0 {
-		t.Fatalf("no strip in the view:\n%s", out)
+	if bandAt < 0 {
+		t.Fatalf("no band in the view:\n%s", out)
 	}
 	if rowAt < 0 {
 		t.Fatalf("no drawer row in the view:\n%s", out)
 	}
-	if rowAt < stripAt {
-		t.Errorf("the drawer renders above the strip it expands")
+	if rowAt < bandAt {
+		t.Errorf("the drawer renders above the band it expands")
 	}
 	// The body survives: the header row of the sessions table must still be there.
 	if !strings.Contains(out, "UPDATED") {
@@ -941,5 +943,103 @@ func TestDrawerFigures_NamesTrafficThatCannotBePriced(t *testing.T) {
 		if strings.Contains(line, "inference.svc") && strings.Contains(line, "not priceable") {
 			t.Errorf("priced row %q picked up the unpriceable caveat", line)
 		}
+	}
+}
+
+// tierSnap is drawerSnap with a modelled mix on the totals, so the tier column has something
+// to say.
+func tierSnap() *usage.Snapshot {
+	s := drawerSnap()
+	s.Totals.InputCostMicros = 3000
+	s.Totals.CacheWriteCostMicros = 7500
+	s.Totals.CacheReadCostMicros = 30000
+	s.Totals.OutputCostMicros = 45000
+	return s
+}
+
+// Two columns, headed, tiers left and series right.
+func TestRenderSpendDrawer_ShowsBothColumnsWithHeaders(t *testing.T) {
+	lines := renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", 100)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{"WHERE IT WENT", "BY MODEL", "cache-read", "claude-opus-5"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the panel is missing %q:\n%s", want, joined)
+		}
+	}
+	// The header names the CURRENT axis, which is what the dropped tree glyphs were
+	// gesturing at and what the hint line otherwise says only in brackets.
+	endpoint := strings.Join(renderSpendDrawer(tierSnap(), usage.GroupEndpoint, "1h", 100), "\n")
+	if !strings.Contains(endpoint, "BY ENDPOINT") {
+		t.Errorf("the header does not follow the axis:\n%s", endpoint)
+	}
+}
+
+// The right column's header sits in the right column.
+//
+// Measured, not eyeballed: fitStripFigures prepends its own `label + "  "` indent, so the
+// series text sat three columns right of the header naming it — "BY MODEL" at column 36
+// against "claude-opus-5" at 39. A header over the wrong column is worse than none.
+func TestRenderSpendDrawer_TheSeriesHeaderSitsOverItsColumn(t *testing.T) {
+	for _, width := range []int{80, 100, 160, 200} {
+		lines := renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", width)
+		hdr, row := lines[0], lines[1]
+		hi, ri := strings.Index(hdr, "BY MODEL"), strings.Index(row, "claude-opus-5")
+		if hi < 0 || ri < 0 {
+			t.Fatalf("width %d: header or first row missing:\n%s", width, strings.Join(lines, "\n"))
+		}
+		hcol := len([]rune(hdr[:hi]))
+		rcol := len([]rune(row[:ri]))
+		if hcol != rcol {
+			t.Errorf("width %d: header starts at column %d, its column starts at %d:\n%s",
+				width, hcol, rcol, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// The figures the band already shows are not repeated here.
+//
+// With one model in the window the old drawer restated the window total and the saving
+// verbatim, which is what made it useless on a single-model deployment — the common case.
+func TestRenderSpendDrawer_DoesNotRestateTheBandsFigures(t *testing.T) {
+	snap := &usage.Snapshot{
+		Window: "1h", Group: usage.GroupModel, Priced: true,
+		Totals: usage.Counts{
+			Requests: 35, CostMicros: 4_546_200, AvoidedMicros: 209_100,
+			InputCostMicros: 3000, OutputCostMicros: 45000,
+		},
+		Buckets: []usage.Bucket{{Series: map[string]usage.Counts{
+			"claude-opus-5": {Requests: 35, CostMicros: 4_546_200, AvoidedMicros: 209_100,
+				PricedRequests: 35, PriceableRequests: 35},
+		}}},
+	}
+	joined := strings.Join(renderSpendDrawer(snap, usage.GroupModel, "1h", 100), "\n")
+	// The window total appears once — on the model row that earned it — and the tier column
+	// carries shares of it rather than the figure again.
+	if n := strings.Count(joined, "$4.5462"); n > 1 {
+		t.Errorf("the window total appears %d times in the panel:\n%s", n, joined)
+	}
+}
+
+// The tree glyphs are gone: they implied a parent row that does not exist.
+func TestRenderSpendDrawer_HasNoOrphanTreeGlyph(t *testing.T) {
+	joined := strings.Join(renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", 100), "\n")
+	for _, glyph := range []string{"└", "├"} {
+		if strings.Contains(joined, glyph) {
+			t.Errorf("the panel still draws %q, which implies a parent row:\n%s", glyph, joined)
+		}
+	}
+}
+
+// Too narrow for two columns and the TIER column yields, so the panel degrades to exactly
+// the per-model drawer that shipped before this feature. The addition gives way to the
+// existing contract, never the reverse.
+func TestRenderSpendDrawer_NarrowDropsTheTierColumnNotTheModels(t *testing.T) {
+	joined := strings.Join(
+		renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", spendDrawerTwoColumnMin-1), "\n")
+	if !strings.Contains(joined, "claude-opus-5") {
+		t.Errorf("the model column dropped below the two-column width:\n%s", joined)
+	}
+	if strings.Contains(joined, "cache-read") {
+		t.Errorf("both columns drawn below the two-column width:\n%s", joined)
 	}
 }

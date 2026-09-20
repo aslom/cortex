@@ -226,24 +226,52 @@ trust to a bundle with no bridge CA in it.
 The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
 - **Sessions** (default): table of active sessions in the store, most
-  recently updated first. Columns: ID, updated (relative), event count,
-  tokens, cost, saved, active marker. The two money columns are lifetime
-  totals for the session and are dropped entirely on a terminal too narrow to
-  show a sub-cent charge honestly — below 72 columns — rather than rounded to
-  `$0.00` or blanked.
+  recently updated first. Columns: session (truncated), updated (relative),
+  event count, tokens, cost, saved, active marker. Numerics are right-aligned
+  so the digits line up between rows.
+
+  The two money columns are **per-session lifetime** totals, while the band
+  above reads today and the poll window — a session's lifetime cost sitting
+  under a smaller "today" is the older scope, not a fault. They are dropped
+  entirely on a terminal too narrow to show a sub-cent charge honestly — below
+  72 columns — rather than rounded to `$0.00` or blanked.
 
   ```
   abctl · http://localhost:9094 · [Sessions] Pipeline
-  SPEND  $30.9350 today   saved ~$0.1804   $2.9100 /1h   cache 81%   9.9M tokens
+  TODAY      LAST 1H   SAVED      CACHE HIT  TOKENS
+  $30.9350   $2.9100   ~$0.1804   81%        9.9M
 
-   ID                                        UPDATED    EVENTS   TOKENS      COST     SAVED  ACTIVE
-   ctx-abc-1234…                             3s ago     42       48.2k    $0.1214  ~$0.0038  ●
-   ctx-def-5678…                             18m ago    15       1.2k     $0.0031         —
-   default                                   1h ago     8            —          —         —
+   SESSION         UPDATED    EVENTS   TOKENS      COST      SAVED  ACTIVE
+   ctx-abc-1234…   3s ago         42     48.2k   $0.1214   ~$0.0038  ●
+   ctx-def-5678…   18m ago        15      1.2k   $0.0031          —
+   default         1h ago          8         —         —          —
 
   ● connected   2.1 ev/s   drops: 0
-  [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
+  cost/saved: lifetime   [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
   ```
+
+  Labels sit above their values rather than beside them: `$30.9350 today`
+  reads as a list, `TODAY` over `$30.9350` reads as a figure.
+
+  `$` expands the band into two columns — where the money went, by rate tier,
+  and who spent it, by model, endpoint or agent:
+
+  ```
+    WHERE IT WENT                     BY MODEL
+  output      ██████ ~$2.7048         claude-opus-5   $4.5462   35 req   5.6M tokens
+  cache-read  ███▌   ~$1.6229
+  input       ▍      ~$0.2185
+  cache-write —
+     [a] [model] · endpoint · agent   [w] 1h   esc closes
+  ```
+
+  The tier figures wear `~` because the SPLIT is modelled from the rate table
+  even when the total beside it is a gateway's own authoritative figure: a
+  gateway reports one number per call and never breaks it down. They are
+  apportioned so the column sums to the window total exactly, and a tier the
+  rate table says nothing about shows `—` rather than `$0.0000`, which would
+  claim the tier was free. Below 72 columns the tier column drops and the
+  panel degrades to the by-model breakdown alone.
 
   The selected row is reverse-video rather than marked with a glyph, so it is
   the one thing these listings cannot show.

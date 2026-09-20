@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -45,7 +46,7 @@ const (
 	// table more than a couple of rows. Below that the answer is "no", not "a table with
 	// two visible rows": the drawer exists to be read ALONGSIDE the data, and a drawer that
 	// squeezes the data out has defeated its own reason for not being a pane.
-	spendDrawerMinHeight = 26
+	spendDrawerMinHeight = 27
 
 	// spendDrawerLines is how many rows the drawer adds to the view, and therefore how many
 	// layout() must hold back for it.
@@ -55,7 +56,11 @@ const (
 	// full height, and layout() reserving fewer is not a cosmetic slip — the view comes out
 	// taller than the terminal and the footer goes off the bottom, which is the failure
 	// spendStripReservesRow's own doc describes for one row.
-	spendDrawerLines = spendDrawerSeries + 2
+	// Now: one HEADER row, the taller of the two columns, and the hint line. Both columns
+	// are four rows — numTierRows on the left, spendDrawerSeries ranked series plus the
+	// "(other)" band on the right — so the arithmetic is numTierRows + 2 and the two
+	// columns are the same height by construction rather than by coincidence.
+	spendDrawerLines = numTierRows + 2
 )
 
 // spendDrawerAxes are the breakdown axes `g` cycles through.
@@ -408,6 +413,43 @@ func hasSeries(ranked []seriesKey, label string) bool {
 	return false
 }
 
+// spendDrawerTwoColumnMin is the width below which the panel shows one column.
+//
+// THE TIER COLUMN IS THE ONE THAT YIELDS, so the panel degrades to exactly the per-model
+// drawer that shipped before this feature: an addition gives way to the existing contract,
+// never the reverse. Measured from the parts — tierColumnWidth plus its gutter plus enough
+// for a model label and two figures — rather than chosen, so it moves with them.
+const spendDrawerTwoColumnMin = tierColumnWidth + 2 + 36
+
+// tierColumnWidth is the left column's share. Fixed rather than proportional so the model
+// labels to its right do not reflow every time a tier figure changes width.
+const tierColumnWidth = 34
+
+// drawerTotals is snap.Totals with a nil snapshot answered rather than dereferenced. The
+// caller may hold nil before the first poll answers, exactly as spendDrawerRows may.
+func drawerTotals(snap *usage.Snapshot) usage.Counts {
+	if snap == nil {
+		return usage.Counts{}
+	}
+	return snap.Totals
+}
+
+// drawerHeaders names the two columns.
+//
+// The right one names the CURRENT AXIS — "BY MODEL", "BY ENDPOINT", "BY AGENT" — which is
+// what the tree glyphs were gesturing at before they were dropped, and which the hint line
+// otherwise says only in brackets. The left one is constant because tiers are always tiers:
+// that asymmetry is the point, since one column answers "on what" and the other "by whom".
+func drawerHeaders(axis usage.Group, twoCol bool, width int) string {
+	right := "BY " + strings.ToUpper(string(axis))
+	if !twoCol {
+		// THREE SPACES, matching what fitStripFigures(" ", ...) puts in front of the rows
+		// below — `label + "  "`. Two would leave the header one column left of its column.
+		return clipRow("   "+right, width)
+	}
+	return clipRow(fmt.Sprintf("  %-*s%s", tierColumnWidth, "WHERE IT WENT", right), width)
+}
+
 // renderSpendDrawer returns the drawer's rows, ready to join under the strip.
 //
 // Rows rather than one string, so the caller composes them with the strip and the body in
@@ -421,13 +463,38 @@ func hasSeries(ranked []seriesKey, label string) bool {
 // the strip's own figure label are produced by one function and cannot drift apart.
 func renderSpendDrawer(snap *usage.Snapshot, axis usage.Group, windowLabel string, width int) []string {
 	rows := spendDrawerRows(snap, spendDrawerSeries)
-	out := make([]string, 0, len(rows)+1)
-	for i, r := range rows {
-		branch := "├"
-		if i == len(rows)-1 {
-			branch = "└"
+	// TWO COLUMNS: what the money was spent ON, and who spent it. They answer different
+	// questions, and with a single model in the window the series column alone restated the
+	// band's own window total and saving verbatim — a breakdown of one thing is not a
+	// breakdown. The tier column says something in that case, which is the common one.
+	twoCol := width >= spendDrawerTwoColumnMin
+	seriesWidth := width
+	var tiers []string
+	if twoCol {
+		tiers = renderTierRows(drawerTotals(snap), tierColumnWidth)
+		seriesWidth = width - tierColumnWidth - 2
+	}
+
+	out := make([]string, 0, spendDrawerLines)
+	out = append(out, drawerHeaders(axis, twoCol, width))
+	for i := 0; i < numTierRows; i++ {
+		// NO BRANCH GLYPHS. "├" and "└" implied a parent row that does not exist — there is no
+		// node above these — and the column header now names the grouping the glyphs were
+		// gesturing at.
+		series := ""
+		if i < len(rows) {
+			series = fitStripFigures(" ", drawerFigures(rows[i]), seriesWidth)
 		}
-		out = append(out, fitStripFigures(branch, drawerFigures(r), width))
+		if !twoCol {
+			out = append(out, series)
+			continue
+		}
+		// TRIMMED, because fitStripFigures emits its own `label + "  "` indent and the
+		// outer column owns the placement here. Left in, the series text sat three columns
+		// right of the header naming it — measured, not guessed: "BY MODEL" at column 36
+		// against "claude-opus-5" at 39.
+		out = append(out, fmt.Sprintf("%-*s%s",
+			tierColumnWidth+2, tiers[i], strings.TrimLeft(series, " ")))
 	}
 	// The hint line is LAST and always present: it is the only place the two keys and the
 	// current axis are written down, and a drawer whose controls are undiscoverable is a

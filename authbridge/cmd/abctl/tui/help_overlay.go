@@ -38,7 +38,13 @@ var globalKeys = keyGroup{
 		// The strip is global, so its expansion is too — and this overlay advertises itself as
 		// listing every binding, which is the only reason a reader would find `$` at all. The
 		// drawer's own hint line only helps someone who already pressed it.
-		{"$", "expand the spend strip into a breakdown (not on usage)"},
+		{"$", "expand the spend band into tiers and a breakdown (not on usage)"},
+		// The scope, stated where there is always room for it. The sessions footer carries
+		// the same note, but it is a notice and fitHintLine drops notices before keys — so at
+		// 110 columns it is already gone, and this is the surface that cannot run out of
+		// width. A session's lifetime COST sitting under a band reading TODAY is the one
+		// figure on screen a reader is likely to call a bug.
+		{"", "the band is today and the window; the table's COST and SAVED are per-session lifetime"},
 		{"a · w", "while it is open: cycle the axis · the span"},
 		{"q · ctrl+c", "quit"},
 	},

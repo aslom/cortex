@@ -475,3 +475,94 @@ func TestSessionsMoneyCells_NeverOutgrowTheirColumn(t *testing.T) {
 		t.Fatal("no width kept the money columns, so the loop asserted nothing")
 	}
 }
+
+// Numerics are right-aligned, so the digits line up and a column reads as a column.
+//
+// Left-aligned numbers were the main reason the table read as ragged: "105" and "3" started
+// at the same column and ended three apart, so no two rows could be compared by eye.
+func TestSessionsRows_RightAlignNumericCells(t *testing.T) {
+	m := &model{width: 200}
+	m.sessionsTbl = newSessionsTable()
+	m.sessions = []session.SessionSummary{
+		{ID: "aaa", UpdatedAt: time.Now(), EventCount: 5, TotalTokens: 1_000, CostMicros: 1_000_000},
+		{ID: "bbb", UpdatedAt: time.Now(), EventCount: 105, TotalTokens: 7_000_000, CostMicros: 5_834_400},
+	}
+	m.rebuildSessionsTable()
+
+	cols := m.sessionsTbl.Columns()
+	rows := m.sessionsTbl.Rows()
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	for ci, col := range cols {
+		switch col.Title {
+		case "EVENTS", "TOKENS", "COST", "SAVED":
+		default:
+			continue
+		}
+		// Every non-empty cell in a numeric column ends at the same column, which is what
+		// right-alignment means and what left-alignment cannot give.
+		var seen int
+		for ri, row := range rows {
+			cell := row[ci]
+			if strings.TrimSpace(cell) == "" {
+				continue
+			}
+			seen++
+			if got := len([]rune(cell)); got != col.Width {
+				t.Errorf("row %d %s cell %q is %d runes in a %d-wide column — not right-aligned",
+					ri, col.Title, cell, got, col.Width)
+			}
+			if strings.HasSuffix(cell, " ") {
+				t.Errorf("row %d %s cell %q is padded on the right, so it is left-aligned",
+					ri, col.Title, cell)
+			}
+		}
+		if seen == 0 {
+			t.Errorf("%s column had no non-empty cell, so this asserted nothing", col.Title)
+		}
+	}
+}
+
+// A 36-character UUID is truncated: it is the least readable thing on the row and was taking
+// 40 columns to say less than its first twelve do.
+func TestSessionsRows_TruncateTheSessionID(t *testing.T) {
+	m := &model{width: 100}
+	m.sessionsTbl = newSessionsTable()
+	const full = "ecb7387f-bffd-4172-adc4-8da23e992e9a"
+	m.sessions = []session.SessionSummary{{ID: full, UpdatedAt: time.Now(), EventCount: 1}}
+	m.rebuildSessionsTable()
+
+	cell := m.sessionsTbl.Rows()[0][0]
+	if cell == full {
+		t.Errorf("the full UUID is in the cell: %q", cell)
+	}
+	if !strings.HasPrefix(cell, "ecb7387f") {
+		t.Errorf("cell %q lost the identifying prefix", cell)
+	}
+	idW := sessionsColumnWidth(m.sessionsTbl.Columns(), "SESSION")
+	if idW == 0 {
+		t.Fatal("no SESSION column")
+	}
+	if n := len([]rune(cell)); n > idW {
+		t.Errorf("cell %q is %d runes in a %d-wide column", cell, n, idW)
+	}
+	// A short id is untouched: truncation is for the ones that need it.
+	m.sessions = []session.SessionSummary{{ID: "default", UpdatedAt: time.Now()}}
+	m.rebuildSessionsTable()
+	if got := m.sessionsTbl.Rows()[0][0]; got != "default" {
+		t.Errorf("short id rendered as %q, want %q untouched", got, "default")
+	}
+}
+
+// The footer says the money columns are LIFETIME totals.
+//
+// Without it a session's lifetime $5.83 sitting under the band's "TODAY $3.84" reads as a
+// bug — the larger number is the older scope, and nothing on screen said so.
+func TestSessionsFooter_SaysTheMoneyColumnsAreLifetime(t *testing.T) {
+	m := &model{width: 200}
+	m.pane = paneSessions
+	if got := m.helpView(); !strings.Contains(got, "lifetime") {
+		t.Errorf("the sessions footer does not scope its money columns:\n  %s", got)
+	}
+}

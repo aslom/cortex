@@ -83,8 +83,12 @@ func TestSessionsPicker_ListsCachedOnlySessions(t *testing.T) {
 		t.Fatal("no picker row for a session whose events are still cached — " +
 			"the retained history is unreachable")
 	}
-	if row[2] != "3" {
-		t.Errorf("row event count = %q, want %q", row[2], "3")
+	// TRIMMED, because EVENTS is right-aligned: the cell is padded into its fitted column
+	// width so digits line up between rows, and this test is about the COUNT rather than the
+	// padding. Addressing the value through the padding is the same mistake the comment
+	// below records about addressing ACTIVE by a fixed index.
+	if got := strings.TrimSpace(row[2]); got != "3" {
+		t.Errorf("row event count = %q, want %q", got, "3")
 	}
 	// The LAST cell, not a fixed index. ACTIVE is the final column and the marker rides
 	// there; addressing it by number broke the moment COST and SAVED were inserted ahead of

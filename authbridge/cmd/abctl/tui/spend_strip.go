@@ -168,6 +168,31 @@ func damagedNote(d *usage.Degraded) string {
 // form, exactly as with damagedNote, so width pressure costs the explanation and never the fact.
 const saturatedNote = "clamped, figures are floors"
 
+// moneyAmount is the marked figure alone, without a label or a caveat clause.
+//
+// Extracted from moneyFigure so the KPI band and the strip cannot disagree about which
+// markers a reading earns. THE MARKERS ARE THE COMPACT DISCLOSURE: the band has no room for
+// the parenthesised prose moneyFigure adds, and neither does the strip at a narrow width —
+// fitStripFigures already falls back to this same marked form there. So a surface showing
+// markers only is the established degradation rather than a new loss.
+//
+// Marker order is load-bearing and unchanged: damaged outermost so the leftmost glyph is the
+// most serious claim, inexact next to the amount, partial trailing.
+func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
+	degraded *usage.Degraded, saturated bool) string {
+	amount := formatUSDCell(usd)
+	if incomplete > 0 {
+		amount = inexactMarker + amount
+	}
+	if figureIsShort(degraded, saturated) {
+		amount = damagedMarker + amount
+	}
+	if unpriced > 0 && priceable > 0 {
+		amount += partialMarker
+	}
+	return amount
+}
+
 // moneyFigure builds one dollar reading together with the caveats that belong to IT.
 //
 // label is the figure's own suffix — "today", "/1h" — and it is why this takes one at
@@ -196,22 +221,11 @@ const saturatedNote = "clamped, figures are floors"
 // damaged read is ledger-only. See figureIsShort and damagedMarker.
 func moneyFigure(usd float64, label string, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) stripFigure {
-	amount := formatUSDCell(usd)
-	if incomplete > 0 {
-		amount = inexactMarker + amount
-	}
-	// Outermost, so the leftmost cell is the most serious claim. See damagedMarker for why
-	// it is a third glyph rather than a reuse of either of the other two, and why its two
-	// causes take one cell between them rather than a cell each.
-	if figureIsShort(degraded, saturated) {
-		amount = damagedMarker + amount
-	}
+	amount := moneyAmount(usd, unpriced, priceable, incomplete, degraded, saturated)
 	// A gap is only readable with a denominator, and a denominator of zero is not a
 	// gap at all — it is a window with nothing to price, which the caller handles.
+	// Recomputed here for the caveat list; moneyAmount owns the MARKER.
 	partial := unpriced > 0 && priceable > 0
-	if partial {
-		amount += partialMarker
-	}
 	fig := plainFigure(amount + " " + label)
 	var caveats []string
 	// The clamp leads even the damaged read: it is short in every column of the aggregate, not

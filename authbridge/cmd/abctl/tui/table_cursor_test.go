@@ -806,7 +806,12 @@ func TestViewports_GrowingTheTerminalDoesNotStrandTheOffset(t *testing.T) {
 		if m.detailVp.YOffset == 0 {
 			t.Fatal("fixture is not scrollable")
 		}
-		m.width, m.height = 100, 60
+		// AMPLY past the content, not barely. At height 60 this premise held by one row
+		// until the spend band took a second row from the body, after which the viewport
+		// was one line shorter than the fixture, offset 1 was legitimately not
+		// PastBottom, and the pane opened on its second line — a failure about the
+		// fixture's headroom rather than about stranded offsets.
+		m.width, m.height = 100, 80
 		m.layout()
 		if m.detailVp.PastBottom() {
 			t.Errorf("plugin detail viewport left past the bottom: YOffset %d, height %d",
