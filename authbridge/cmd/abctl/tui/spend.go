@@ -266,7 +266,7 @@ type spendSummary struct {
 	// cmd/abctl, because a Counts is read through short-lived locals with no naming convention
 	// and there is no base hint to key on. A view-model field spelled Saturated would therefore
 	// satisfy the guard for usage.Counts.Saturated ALL BY ITSELF — `s.Saturated` in
-	// renderSpendStrip is a selector of that name — and the guard would go on passing after
+	// renderSpendBand is a selector of that name — and the guard would go on passing after
 	// every genuine read was deleted. MEASURED, not theorised: with all five real reads removed
 	// the guard passed, and renaming this is what makes it fail again. It is the same collision
 	// snapshotBaseHint exists to prevent on the Snapshot half, where `cs.Window` on CostSettings
@@ -369,7 +369,7 @@ type spendSummary struct {
 	// unchanged — it is a different question about a different span, and one figure must never
 	// wear another's qualification.
 	//
-	// IT EXISTS BECAUSE THE STRIP RENDERS THE SAVING AS THE HEADLINE'S PARTNER: renderSpendStrip
+	// IT EXISTS BECAUSE THE STRIP RENDERS THE SAVING AS THE HEADLINE'S PARTNER: renderSpendBand
 	// puts it directly after the today figure on the stated grounds that "the pair is the
 	// reading: what it cost and what it would have cost". The saving was read from the 1h ring,
 	// so the pair spanned two windows and only one of them was labelled — measured on a local
@@ -425,13 +425,15 @@ func (m *model) spendSummary() spendSummary {
 	out := spendSummary{
 		// sanitizeLabel, because snap.Window is server-supplied JSON that reaches the
 		// terminal verbatim whenever parseWindowSpan below cannot read it as a duration.
-		// Sanitised at the boundary rather than guarded at each use: the strip's whole
-		// width guarantee is expressed in lipgloss.Width, and lipgloss.Width("abc\nabcdef")
-		// is 6 — it measures the WIDEST LINE. So a label carrying a newline passes
-		// fitStripFigures' budget check and renderSpendStrip returns a TWO-LINE string,
-		// which costs a row of the table below it: the precise failure the strip's own
-		// godoc opens with. Control characters and DEL become U+FFFD (one column, so the
-		// arithmetic still holds) rather than being dropped, so tampering shows.
+		// Sanitised at the boundary rather than guarded at each use: the band's whole width
+		// guarantee is expressed in rune counts and lipgloss.Width, and
+		// lipgloss.Width("abc\nabcdef") is 6 — it measures the WIDEST LINE. So a label
+		// carrying a newline passes the budget check and then renders as an EXTRA line.
+		// layout() reserves exactly spendBandLines rows and paneView pads to them, so a
+		// third line is not merely untidy: the view comes out taller than the terminal and
+		// the footer goes off the bottom. Control characters and DEL become U+FFFD (one
+		// column, so the arithmetic still holds) rather than being dropped, so tampering
+		// shows.
 		WindowLabel: sanitizeLabel(snap.Window),
 		Priced:      snap.Priced,
 		Priceable:   snap.Totals.PriceableRequests,
@@ -705,7 +707,7 @@ func (m *model) fetchSpend() tea.Cmd {
 // label. This is the one case where the honest answer is to show less: the strip
 // falls back to its rolling-window figure, which is correctly labelled.
 //
-// And the answer must be PRICED. renderSpendStrip guards its window figure on
+// And the answer must be PRICED. renderSpendBand guards its window figure on
 // Priced but renders the today figure whenever HasToday is set, so an unpriced day
 // admitted here would print "$0.0000 today" — a settled zero for a cost nobody
 // knows, the one thing the strip is forbidden to do. Guarded here rather than there

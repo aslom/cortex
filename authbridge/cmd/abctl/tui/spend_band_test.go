@@ -98,8 +98,18 @@ func TestRenderSpendBand_HeightIsConstantAndFiguresDropWhole(t *testing.T) {
 			}
 		}
 		// A figure that survives is never half a figure.
-		if strings.Contains(lines[1], "$3.84") && !strings.Contains(lines[1], "$3.84") {
-			t.Errorf("width %d: today's figure was clipped: %q", w, lines[1])
+		//
+		// PROBE AND WHOLE MUST BE DIFFERENT STRINGS or this asserts nothing, and it briefly
+		// did: the pair was Contains("$3.84") && !Contains("$3.8402"), and retuning the
+		// literals for a two-decimal formatter collapsed both sides onto "$3.84" — making the
+		// condition `x && !x`, permanently false. That is exactly the failure
+		// TestFormatUSDCell_IsPrefixProbeable guards, so the probe now stops just past the "$"
+		// and the whole figure is asked of the formatter rather than written out.
+		whole := formatUSDCell(bandSummary().TodayUSD)
+		probe := whole[:3] // "$3." — any clip into the digits still trips it
+		if strings.Contains(lines[1], probe) && !strings.Contains(lines[1], whole) {
+			t.Errorf("width %d: today's figure was clipped: %q (probe %q, want the whole %q)",
+				w, lines[1], probe, whole)
 		}
 	}
 }

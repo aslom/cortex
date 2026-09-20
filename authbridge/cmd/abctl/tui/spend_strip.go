@@ -124,35 +124,6 @@ func coverageNote(unpriced, priceable int64) string {
 	return fmt.Sprintf("%d of %d unpriced", unpriced, priceable)
 }
 
-// damagedNote is the strip's spelling of a damaged ledger read: the shortest form that
-// still says WHAT was lost, because "incomplete" on its own gives a reader nothing to act
-// on where "1 day file lost" names something to go and look at.
-//
-// One fact at three verbosities, the same relationship coverageNote has with the Cost
-// pane's "covers N of M priceable requests" and cmd_cost.go's line: costDamagedNote spells
-// it out where there is room for a sentence, this is what a strip can afford.
-//
-// It rides in the figure's FULL form only. damagedMarker is what survives into the compact
-// form, so width pressure costs the explanation and never the fact.
-//
-// "lost", not "skipped": the ledger's own verbs describe what IT did, and the reader of a
-// spend line cares what the number is missing.
-func damagedNote(d *usage.Degraded) string {
-	switch {
-	case d.SkippedLines > 0 && d.TruncatedDays > 0:
-		return fmt.Sprintf("%d lines, %d day file%s lost",
-			d.SkippedLines, d.TruncatedDays, plural(int(d.TruncatedDays)))
-	case d.SkippedLines > 0:
-		return fmt.Sprintf("%d line%s lost", d.SkippedLines, plural(int(d.SkippedLines)))
-	case d.TruncatedDays > 0:
-		return fmt.Sprintf("%d day file%s lost", d.TruncatedDays, plural(int(d.TruncatedDays)))
-	default:
-		// A disclosure carrying no counters. Presence is still the claim — see
-		// snapshotDamaged — and this is the least it can say without inventing a number.
-		return "rows lost"
-	}
-}
-
 // saturatedNote is the strip's spelling of a clamped aggregate: the shortest form that still
 // says which way the figure is wrong.
 //
@@ -219,6 +190,35 @@ func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
 // also the only claim on this line that BOTH readings can carry — usage.Counts.Saturated lives
 // on Counts, so the ring's window totals and the ledger's day totals can each clamp, where a
 // damaged read is ledger-only. See figureIsShort and damagedMarker.
+// damagedNote is the strip's spelling of a damaged ledger read: the shortest form that
+// still says WHAT was lost, because "incomplete" on its own gives a reader nothing to act
+// on where "1 day file lost" names something to go and look at.
+//
+// One fact at three verbosities, the same relationship coverageNote has with the Cost
+// pane's "covers N of M priceable requests" and cmd_cost.go's line: costDamagedNote spells
+// it out where there is room for a sentence, this is what a strip can afford.
+//
+// It rides in the figure's FULL form only. damagedMarker is what survives into the compact
+// form, so width pressure costs the explanation and never the fact.
+//
+// "lost", not "skipped": the ledger's own verbs describe what IT did, and the reader of a
+// spend line cares what the number is missing.
+func damagedNote(d *usage.Degraded) string {
+	switch {
+	case d.SkippedLines > 0 && d.TruncatedDays > 0:
+		return fmt.Sprintf("%d lines, %d day file%s lost",
+			d.SkippedLines, d.TruncatedDays, plural(int(d.TruncatedDays)))
+	case d.SkippedLines > 0:
+		return fmt.Sprintf("%d line%s lost", d.SkippedLines, plural(int(d.SkippedLines)))
+	case d.TruncatedDays > 0:
+		return fmt.Sprintf("%d day file%s lost", d.TruncatedDays, plural(int(d.TruncatedDays)))
+	default:
+		// A disclosure carrying no counters. Presence is still the claim — see
+		// snapshotDamaged — and this is the least it can say without inventing a number.
+		return "rows lost"
+	}
+}
+
 func moneyFigure(usd float64, label string, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) stripFigure {
 	amount := moneyAmount(usd, unpriced, priceable, incomplete, degraded, saturated)
@@ -265,344 +265,6 @@ func moneyFigure(usd float64, label string, unpriced, priceable, incomplete int6
 		fig.full = fig.compact + " (" + strings.Join(caveats, ", ") + ")"
 	}
 	return fig
-}
-
-// renderSpendStrip draws the always-on spend line.
-//
-// A pure function of its arguments so it can be table-tested at many widths,
-// which is where its entire risk lives. Chrome that overflows wraps, and a
-// wrapped chrome line costs a row of the table below it.
-//
-// Degradation drops WHOLE FIGURES from the right and never clips a number.
-// #953 asks for "no truncated numbers", and a half-rendered dollar amount is
-// worse than a missing one: "$1.1" reads as a real, smaller figure rather than as
-// an incomplete one. This is the same discipline as fitHintLine, mirrored —
-// helpView orders its hints so the essential ones come last and fitHintLine cuts
-// the front; the strip's essential figure is first, so it cuts the back.
-//
-// Returns "" in exactly two cases, and they are deliberately the only two:
-//
-//  1. No poll has answered yet (!HasSnapshot). "We have not looked" is honest and
-//     self-corrects within one poll interval.
-//  2. The terminal is too narrow for even one WHOLE figure. That threshold is the
-//     width of the FIRST figure's most compact form and nothing more, because
-//     fitStripFigures drops the LABEL, and then the caveat's words, before it drops a
-//     number: "1h: $1.1200" is 11 columns and renders bare from width 11 up, so ""
-//     appears only at 10 or below. (That arithmetic survived the span moving from a suffix to
-//     a group prefix untouched — "$1.1200 /1h" was 11 columns too, which is why labelSpan costs
-//     this threshold nothing.) Each marker a figure carries makes it one column wider,
-//     so a first figure wearing all three (damaged, inexact, partial) moves that threshold
-//     by three — the markers are never what gets dropped. (This note said "about 18" — label plus figure
-//     — which was right before the label-drop fallback below existed and has been wrong
-//     by 7 since.) Accepted rather than
-//     fixed: at that width there is no honest short form, and clipping a number is
-//     forbidden. The row stays reserved, because making the reservation depend on
-//     the rendered result would mean re-running layout() outside WindowSizeMsg and
-//     resizing every table as data came and went, which is worse than a blank line
-//     in a terminal too narrow to show a dollar figure at all.
-//
-// Every OTHER state says something: a failed poll says "cost unavailable", an
-// unpriced window says so with its coverage, and a window with no priceable
-// traffic says that. An always-on strip that renders nothing has failed at its
-// only job.
-//
-// "Today" exists — the durable cost ledger supplies it and spend.go's
-// applyTodayFigure sets HasToday only when the server really served that window and
-// priced it. So does "saved", from usage.Counts.AvoidedMicros, and it comes in two spans:
-// the DAY's when the ledger answered, the window's as a fallback. Neither is inferred from a
-// figure being non-zero — a deployment that does not prune says nothing there rather than
-// "saved $0.00", which would assert that pruning saved nothing.
-//
-// FIGURES ARE GROUPED BY SPAN and each group names its own once. That is what makes the line
-// readable rather than merely correct: see the comment on the three lists inside.
-func renderSpendStrip(s spendSummary, width int) string {
-	if width <= 0 {
-		return ""
-	}
-
-	// No poll has answered yet. THIS silence is honest: it says "we have not looked", which
-	// is true, brief, and self-correcting within one poll interval. It is the only case where
-	// "" is the right answer, and it is checked before anything else so the branches below can
-	// assume there is a snapshot to report figures from.
-	// NOT when the poll FAILED, which is a thing to report rather than an absence: silence for a
-	// persistently failing endpoint buys a permanent blank line above the footer — the row is
-	// reserved on height alone — and no diagnostic anywhere on screen.
-	if !s.Priced && !s.HasToday && !s.HasSnapshot && !s.Failed {
-		return ""
-	}
-
-	// Ordered most to least important; the tail is what a narrow terminal loses.
-	//
-	// EVERY FIGURE CARRIES ITS OWN CAVEAT. A caveat built from one window's counters
-	// and rendered beside another window's figure is not a warning, it is a
-	// misattribution — and the figure it silently vouched for was "today", the headline
-	// of this branch and the one the ledger is most likely to leave partial.
-	//
-	// THREE LISTS, ONE PER SPAN, because the caveats were not the only thing this line could
-	// misattribute: the SPAN was, by the same mechanism. The strip carries readings from two polls
-	// — the ledger's day and the ring's hour — and it labelled only the two money figures, which
-	// left "saved", the cache ratio and the token count unlabelled among them. A reader then has
-	// no rule to apply, because position does not encode the span either: `saved` was the HOUR's
-	// and stood second, between the day's cost and the hour's.
-	//
-	// Measured on a local proxy: an hour holding 84.6M tokens rendered "85M tokens" beside
-	// "$61.7655 today", above a sessions table whose own TOKENS column summed to 123.8M. Three
-	// spans, one of them stated — and the day itself held 122.5M, so the unlabelled figure
-	// matched neither of its neighbours. Every number was right and the line was unreadable.
-	//
-	// So each span's figures are collected together and the span is named ONCE, on the group.
-	// tail is NEITHER span: it holds the readings that qualify the whole answer — the pane
-	// pointer, and the staleness note applyAges builds from the OLDER OF BOTH CHAINS, which
-	// inside either group would claim to be about one of them.
-	var today, window, tail []stripFigure
-	// NOTHING PRICED ANYWHERE: say so rather than assert a zero — usage_render.go establishes
-	// that a zero cost and an unknown cost are different answers, and only one of them means
-	// the traffic was free.
-	//
-	// A FIGURE, NOT A TERMINAL ANSWER, and that distinction is the bug this replaced. These two
-	// readings used to `return` from here, which threw away every figure below: the token
-	// count, the cache ratio, the error count and the SAVING. spendSummary reads all four
-	// outside its own Priced guard, on the stated grounds that "suppressing them alongside the
-	// money would blank the only readings a deployment with no rate table has" and that "a
-	// window that priced nothing and pruned something reports 'cost unavailable' beside a real
-	// saved figure, and both are true" — and the renderer returned before either could happen,
-	// so four comments described behaviour the next twelve lines defeated.
-	//
-	// Reachable rather than exotic: any endpoint absent from the rate card sits at
-	// Priced == false permanently, and usage/pricing_test.go pins a saving on an unpriced
-	// request as a supported state.
-	if !s.Priced && !s.HasToday {
-		switch {
-		case s.Failed:
-			// The poll did not answer, so there are no counters to qualify anything with —
-			// which is a DIFFERENT claim from "we looked and nothing was priceable", and
-			// rendering the latter for a broken endpoint sends a reader after a pricing table
-			// when the fix is a proxy.
-			window = append(window, plainFigure("cost unavailable"), plainFigure("poll failed"))
-		case s.Priceable > 0:
-			// The note carries no span of its own: it is in the WINDOW group, whose label the
-			// group prefix supplies, and it sits immediately after the reading it qualifies.
-			// Adjacency used to be all it had — which broke precisely when a today figure came
-			// between them, and the fix then was a second, hand-labelled copy of the same note
-			// further down. The grouping removes the case that needed two spellings.
-			window = append(window, plainFigure("cost unavailable"),
-				plainFigure(coverageNote(s.Unpriced, s.Priceable)))
-		default:
-			// Priceable == 0 WITH a snapshot in hand is a finding, not an absence: we looked,
-			// and there was no inference traffic to price. Say so. An always-on strip that
-			// renders nothing has failed at its only job.
-			window = append(window, plainFigure("no priceable traffic yet"))
-		}
-	}
-	if s.HasToday {
-		// Today outranks the rolling window when it exists: it is the figure an
-		// operator is accountable for, and the window is context for it.
-		//
-		// TodayDegraded is the ledger's own damage disclosure, and this is the only figure on
-		// the line that can carry one: applyTodayFigure sets it from the window=today reply,
-		// which is the strip's single ledger-backed poll. Without it a day that lost lines
-		// rendered a figure byte-identical to a clean one — the exact failure
-		// usage.Snapshot.Degraded exists to end, on the strip's headline reading.
-		today = append(today, moneyFigure(s.TodayUSD, "today",
-			s.TodayUnpriced, s.TodayPriceable, s.TodayIncomplete, s.TodayDegraded, s.TodayClamped))
-		// SECOND, directly after the spend it belongs to, because the pair is the reading: what
-		// it cost and what it would have cost.
-		//
-		// THE DAY's SAVING, from the day's own poll — and it took a span twin on spendSummary to
-		// make that sentence true. This slot used to hold the HOUR's saving, so "the pair" was a
-		// day beside an hour: $64.1765 today against a saved figure of $1.0291 for a day that had
-		// really avoided $2.1891. See spendSummary.TodaySavedUSD.
-		if s.HasTodaySaved {
-			today = append(today, savedFigure(s.TodaySavedUSD))
-		}
-	}
-	// Guarded on Priced independently of the branch above, which lets !Priced
-	// through whenever HasToday is set. Without this guard that combination — a
-	// ledger-backed today figure over a rolling window that priced nothing —
-	// rendered "$0.0000 /1h", stating a settled zero for a cost nobody knows.
-	//
-	// It was unreachable while nothing set HasToday, which is why it survived two
-	// review rounds. It is REACHABLE now: the today poll lands on its own 5-minute
-	// chain, so a fresh session can hold a priced day total beside a rolling hour that
-	// has priced nothing yet. The guard is what makes that state render honestly.
-	if s.Priced {
-		// nil degraded, and not because nobody looked: this reading comes from the in-memory
-		// ring, which has no lines to fail to decode and no files to abandon, so a duration
-		// window leaves usage.Snapshot.Degraded nil and that absence is the truth. See
-		// snapshotDamaged.
-		//
-		// The CLAMP is not nil-by-construction the same way, and passing false here would be a
-		// second bug of the shape this whole exercise is about: usage.Counts.Saturated is on
-		// Counts, and the ring's Add clamps exactly like the ledger's fold does, so a rolling
-		// window can overflow with no ledger anywhere near it.
-		// NO SPAN SUFFIX. The span is the group's now, applied once below to whichever figure
-		// leads the window group — which is usually this one, and must not be assumed to be:
-		// every branch here is a different occupant of the same slot.
-		window = append(window, moneyFigure(s.WindowUSD, "",
-			s.Unpriced, s.Priceable, s.Incomplete, nil, s.Clamped))
-	} else if s.Failed && s.HasToday {
-		// A FAILED WINDOW BESIDE A GOOD DAY. The day stands on its own chain, so the only thing
-		// missing is the window reading, and this occupies the slot that reading would have —
-		// AFTER the today figure, because today outranks the window and is the reading a reader
-		// came for. It needs the window's label for the reason the coverage note below needed
-		// one, and gets it from the group rather than by appending its own.
-		window = append(window, plainFigure("poll failed"))
-	} else if s.HasToday && s.Unpriced > 0 && s.Priceable > 0 {
-		// The window figure is suppressed because nothing in the window was priced, so its
-		// coverage gap has no figure to ride on. It still has to be stated — this is the
-		// reachable state where a ledger-backed day sits beside a rolling hour that priced
-		// nothing — and being in the window group is what stops it reading as a qualification
-		// of the today figure to its left. That misreading is what the unlabelled tail note
-		// used to produce, and the hand-appended "/1h" here was the narrower fix for it.
-		//
-		// GATED ON HasToday, which is the only state it is for. Without that gate it fired
-		// alongside the note the no-money branch above already emits, and the same gap was
-		// stated twice in one group.
-		window = append(window, plainFigure(coverageNote(s.Unpriced, s.Priceable)))
-	}
-	// THE WINDOW's SAVING IS THE FALLBACK, shown only when the day has none of its own — two
-	// saved figures on one line is how a reader learns to read neither.
-	//
-	// It lands here, after the money reading rather than before it, and that is a demotion with a
-	// reason. The saving used to outrank the window total outright ("a saving is a headline number
-	// for anyone who turned tool-prune on"), which it earned by being the partner of the figure
-	// BEFORE it. In this group its partner is the window's own cost, so following that cost is
-	// what keeps the pair adjacent — and leading the group would put the span prefix on the
-	// saving, labelling the one figure on the line that is not spend.
-	//
-	// Reachable wherever there is no durable cost ledger, which is Kubernetes by design: see
-	// applyTodayFigure, where a ring-served day leaves HasToday unset.
-	if !s.HasTodaySaved && s.HasSaved {
-		window = append(window, savedFigure(s.SavedUSD))
-	}
-	// Volume LAST IN THE GROUP, after the money: what the window cost, what it avoided, then the
-	// readings a reader checks those against. (The line as a whole now reads day-spend, day-saving,
-	// window-spend, window-saving, volume — the money of each span before the volume of either,
-	// which is what grouping by span buys.)
-	//
-	// The cache ratio leads the volume figures because it is the LEADING indicator — a
-	// cache read bills at roughly 0.1x uncached input, so for agent traffic the hit rate
-	// moves before the dollar figure does. No marker: it is a ratio of two counters the
-	// provider reported, exact as reported, and the counters' own caveats ride on the
-	// money figures they qualify.
-	if s.HasCacheHit {
-		window = append(window, stripFigure{
-			full:    fmt.Sprintf("cache %.0f%%", s.CacheHitPct),
-			compact: fmt.Sprintf("%.0f%%", s.CacheHitPct),
-		})
-	}
-	// humanizeCount, not a local formatter: it is the one this package already uses for
-	// token counts and it is width-BOUNDED — its own doc records a version that rendered a
-	// billion tokens as "1000.0M" and silently broke the column. A strip that measures with
-	// lipgloss.Width and drops whole figures cannot afford one of unbounded width.
-	//
-	// IN THE WINDOW GROUP, which is the figure this whole restructuring is for: this count is the
-	// ring's, and unlabelled beside a day's cost it invited exactly the comparison it cannot
-	// answer — against the day, and against the lifetime sum of the sessions table below it.
-	if s.Tokens > 0 {
-		window = append(window, stripFigure{
-			full:    humanizeCount(s.Tokens) + " tokens",
-			compact: humanizeCount(s.Tokens),
-		})
-	}
-	// Errors only when there are some, on this line's standing rule: a permanent "0 err"
-	// is the figure that teaches a reader to stop looking at the strip.
-	if s.Errors > 0 {
-		window = append(window, stripFigure{
-			full:    fmt.Sprintf("%d err", s.Errors),
-			compact: fmt.Sprintf("%de", s.Errors),
-		})
-	}
-	// The pane pointer, only when there is no money figure to explain and only after the
-	// readings that ARE known. It is a place to look rather than a reading, so it outranks
-	// nothing: at a narrow width a reader is better served by the token count than by advice.
-	// The Usage pane is what distinguishes an old proxy from a transport error.
-	//
-	// IN THE TAIL rather than in the window group, because it is not a reading of anything. A
-	// window group whose only member were this would render "1h: [u] usage", offering the span of
-	// a figure that is not there.
-	if s.Failed || (!s.Priced && !s.HasToday) {
-		tail = append(tail, plainFigure("[u] usage"))
-	}
-	// The age rides last, so it is the first thing a narrow terminal gives up. It
-	// qualifies every figure on the line rather than one of them, and unlike a partiality
-	// marker it is recoverable — the next poll either answers or the age keeps growing —
-	// so it is the one caveat that may be dropped outright.
-	//
-	// "EVERY FIGURE ON THE LINE" IS WHY IT IS IN THE TAIL. applyAges takes the older of the two
-	// poll chains precisely so one age describes the whole answer, so this is the one reading that
-	// belongs to neither span — and it can reach the front of the window group, in the state where
-	// a priced day sits over an hour with nothing to report, where the prefix would hand a
-	// both-chains figure the hour's label.
-	if s.Stale {
-		age := formatSpendAge(s.Age)
-		tail = append(tail, stripFigure{full: "polled " + age + " ago", compact: age + " ago"})
-	}
-	// THE SPAN, ONCE, ON THE GROUP. Applied to the first window figure rather than to a chosen one,
-	// because the slot has several possible occupants — the money reading, a "poll failed", a bare
-	// coverage note — and the label belongs to whichever is actually there.
-	//
-	// SAFE AGAINST THE FITTER because it drops whole figures from the RIGHT: the first window
-	// figure outlives every later one, so a prefix baked in here cannot be dropped while the
-	// figures it covers survive. The reverse — labelling the last — would be.
-	//
-	// WIDTH-NEUTRAL against the suffix it replaces: "1h: $1.1200" and "$1.1200 /1h" are both 11
-	// columns, so the documented width at which this function falls silent does not move.
-	//
-	// An EMPTY label means the server's window is unreadable or no snapshot answered (the Failed
-	// path builds a summary with no WindowLabel at all), and an unlabelled group is the honest
-	// answer there — "unknown: $1.12" would be worse than a bare figure.
-	if len(window) > 0 && s.WindowLabel != "" {
-		window[0] = labelSpan(s.WindowLabel, window[0])
-	}
-	figures := make([]stripFigure, 0, len(today)+len(window)+len(tail))
-	figures = append(figures, today...)
-	figures = append(figures, window...)
-	figures = append(figures, tail...)
-	return fitStripFigures(stripLabel, figures, width)
-}
-
-// savedFigure is the avoided-spend reading, in the ONE spelling both spans use.
-//
-// A function because there are now two call sites — the day's saving and the window's fallback —
-// and the argument below is about how the figure must be spelled, not about which span it covers.
-// Two copies of that argument would drift.
-//
-// inexactMarker unconditionally, which is the whole reason it is spelled "saved ~$0.18" and not
-// "saved $0.18". The figure comes from a bytes-to-tokens ratio rather than a tokenizer and is
-// GROSS of the prompt-cache re-warm, so it is never exact — see usage.Counts.AvoidedMicros, which
-// spells out both caveats and says a client must present this as approximate unconditionally
-// rather than inferring exactness from the absence of a per-request flag.
-//
-// NOT a moneyFigure, and that is the point: moneyFigure attaches coverage, exactness, damage and
-// clamp caveats built from a span's counters, and none of them are about this number. A saving is
-// not spend, so a caveat about how much of the SPEND was priced would be a misattribution of
-// exactly the kind moneyFigure exists to prevent.
-//
-// NO COMPACT FORM: this figure's label is not an explanation, it is the figure's IDENTITY.
-// The compact form was a bare "~$0.1804", and ~ is inexactMarker — which on a money figure means
-// "this is a lower bound". An inexact SPEND figure renders "~$4.1700 today" and keeps its label,
-// so a bare marked figure between two labelled ones reads as spend whose label the ladder happened
-// to drop. The ladder's rule is that it gives up explanations before figures, and "saved" is not
-// an explanation of $0.1804 — without it the number is a different claim, not a terser one. Equal
-// forms mean the ladder drops the whole figure instead, which is the same rule it applies to a
-// number it cannot render in full: if it cannot be said correctly, it is not said.
-func savedFigure(usd float64) stripFigure {
-	return plainFigure("saved " + inexactMarker + formatUSDCell(usd))
-}
-
-// labelSpan names the span a group of figures covers, on the figure that leads it.
-//
-// A PREFIX, not a suffix, and that is what makes one label cover several figures: "1h: $36.5723
-// cache 99%  84.6M tokens" reads as three readings of one hour, where "$36.5723 /1h  cache 99%
-// 84.6M tokens" reads as one labelled figure followed by two of unstated span — which is what the
-// line did, and what let an hour's token count be compared against a day's total.
-//
-// ON BOTH FORMS, for the reason the partiality markers ride on both: fitStripFigures may reduce
-// every figure to its compact form, and a span that survives only at full width is a span that
-// disappears exactly when the line is hardest to read.
-func labelSpan(label string, f stripFigure) stripFigure {
-	return stripFigure{full: label + ": " + f.full, compact: label + ": " + f.compact}
 }
 
 // formatSpendAge renders an age the way a strip has room for: "3m", not "3m12.4s".

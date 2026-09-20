@@ -1659,7 +1659,7 @@ func (m *model) paneView() string {
 	// without needing a second call site. It sits directly under the title because that
 	// is the whole requirement: spend read BEFORE the data rather than navigated to.
 	//
-	// Styled AFTER fitting. renderSpendStrip measures with lipgloss.Width, and styleMuted
+	// Styled AFTER fitting. renderSpendBand measures runes, and styleMuted
 	// only adds a colour escape so the column count is unchanged — but fitting an
 	// already-styled string would measure the escape bytes and silently over-truncate.
 	//
@@ -1672,7 +1672,7 @@ func (m *model) paneView() string {
 	// direction that overflows. So the render fills them rather than the reservation tracking the
 	// render.
 	//
-	// The case that made this necessary: renderSpendStrip returns "" before the first poll answers
+	// The case that made this necessary: renderSpendBand returns blank lines before the first poll answers
 	// (deliberately — "we have not looked" is honest), which left the strip's row and the drawer's
 	// five unfilled and the footer six rows above the bottom of the terminal. The same arithmetic
 	// covers a drawer left open on a pane that cannot host it.

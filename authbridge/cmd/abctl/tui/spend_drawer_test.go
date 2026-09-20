@@ -317,7 +317,7 @@ func TestPaneView_FitsTheTerminalWithTheDrawerOpen(t *testing.T) {
 	// THE SNAPSHOT VARIES TOO, and its absence is the case the first version could not see: it
 	// only ever set drawerSnap(), so "the renderer pads a nil snapshot" was covered while "the
 	// VIEW fills its reservation for one" was not — which reads as coverage. Before the first poll
-	// answers renderSpendStrip returns "" on purpose, and the reservations are height-gated, so
+	// answers renderSpendBand returns blank lines on purpose, and the reservations are height-gated, so
 	// nothing filled them and the footer sat six rows up.
 	for _, snap := range []*usage.Snapshot{drawerSnap(), nil} {
 		for _, h := range []int{spendDrawerMinHeight - 1, spendDrawerMinHeight, 40, 60} {

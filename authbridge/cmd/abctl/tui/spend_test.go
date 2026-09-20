@@ -773,7 +773,7 @@ func TestSpendSummary_DegradedTodayWindowLeavesHasTodayFalse(t *testing.T) {
 	}
 }
 
-// An unpriced today must not become a headline. renderSpendStrip renders the today
+// An unpriced today must not become a headline. renderSpendBand renders the today
 // figure whenever HasToday is set, with no Priced guard of its own, so admitting an
 // unpriced day here would print "$0.00 today" — a settled zero for a cost nobody
 // knows.
@@ -1143,13 +1143,17 @@ func TestCacheHitPct_ReportedKindsWithZeroCountersIsNotNaN(t *testing.T) {
 		t.Errorf("pct = %v alongside ok=false; a suppressed figure must carry no value for a "+
 			"caller to render by mistake", got)
 	}
-	// And the figure really is suppressed at the renderer, not merely at the arithmetic.
+	// And the figure really is suppressed at the LIVE renderer, not merely at the arithmetic.
+	// Against renderSpendBand: this used to assert through renderSpendStrip, which paneView
+	// stopped calling when the band replaced it, so the "really is suppressed at the renderer"
+	// half was vouching for a renderer nobody could see.
 	s := spendSummary{WindowLabel: "1h", Priced: true, WindowUSD: 1.12, HasSnapshot: true}
 	s.CacheHitPct, s.HasCacheHit = cacheHitPct(usage.Counts{
 		PresentKinds: usage.KindInput | usage.KindCacheRead | usage.KindCacheWrite,
 	})
-	if out := renderSpendStrip(s, 200); strings.Contains(out, "NaN") || strings.Contains(out, "cache") {
-		t.Errorf("strip %q renders a cache figure derived from a zero prompt", out)
+	out := strings.Join(renderSpendBand(s, 200), "\n")
+	if strings.Contains(out, "NaN") || strings.Contains(out, "CACHE") {
+		t.Errorf("band %q renders a cache figure derived from a zero prompt", out)
 	}
 }
 
@@ -1187,9 +1191,14 @@ func TestSpendSummary_AFailedWindowPollStillCarriesTheDayFigure(t *testing.T) {
 	if got.TodayUSD != 30.935 {
 		t.Errorf("TodayUSD = %v, want 30.935", got.TodayUSD)
 	}
-	// And the renderer really shows it, so the two halves are joined rather than each correct
-	// in isolation.
-	if out := renderSpendStrip(got, 200); !strings.Contains(out, "$30.93 today") {
-		t.Errorf("strip %q lost the day figure the summary carried", out)
+	// And the LIVE renderer really shows it, so the two halves are joined rather than each
+	// correct in isolation. Against renderSpendBand for the reason above: through
+	// renderSpendStrip this half vouched for a renderer paneView no longer called.
+	band := strings.Join(renderSpendBand(got, 200), "\n")
+	if !strings.Contains(band, "$30.93") {
+		t.Errorf("band %q lost the day figure the summary carried", band)
+	}
+	if !strings.Contains(band, "TODAY") {
+		t.Errorf("band %q carries the figure without labelling its span", band)
 	}
 }
