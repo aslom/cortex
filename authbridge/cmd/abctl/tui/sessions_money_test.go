@@ -126,10 +126,16 @@ func TestSessionsPicker_RowArityMatchesTheHeaderAtEveryWidth(t *testing.T) {
 	}
 }
 
+// titles and hasColumn below name columns the way the code does, through headerTitle.
+//
+// Both take any column set, including one off a live table whose numeric headings carry
+// alignment padding — and an unpadded name is what a caller writes. Comparing the raw Title
+// made them silently wrong on exactly those sets: see TestSessionsRows_RightAlignNumericCells,
+// which that mistake reduced to a no-op.
 func titles(cols []table.Column) []string {
 	out := make([]string, 0, len(cols))
 	for _, c := range cols {
-		out = append(out, c.Title)
+		out = append(out, headerTitle(c))
 	}
 	return out
 }
@@ -165,7 +171,7 @@ func TestSessionMoneyCell_AClampedFigureIsMarkedAsAFloor(t *testing.T) {
 // from the width and sets the header itself — so a helper for it would be dead code.
 func hasColumn(cols []table.Column, title string) bool {
 	for _, c := range cols {
-		if c.Title == title {
+		if headerTitle(c) == title {
 			return true
 		}
 	}
@@ -231,7 +237,11 @@ func TestSessionsPicker_ResizingAcrossTheMoneyBoundaryNeitherPanicsNorMisaligns(
 		}
 		// And the last column really is the one the last cell belongs to, which is what
 		// misalignment actually looks like on screen.
-		if last := cols[len(cols)-1].Title; last != "ACTIVE" {
+		//
+		// headerTitle, though ACTIVE is deliberately not in sessionsRightAligned and so arrives
+		// unpadded: this reads a LIVE header set, and the assertion should survive ACTIVE
+		// joining that set rather than start reporting a wrong last column.
+		if last := headerTitle(cols[len(cols)-1]); last != "ACTIVE" {
 			t.Errorf("width %d: last column is %q, want ACTIVE — the header itself is wrong", w, last)
 		}
 	}
@@ -481,6 +491,14 @@ func TestSessionsMoneyCells_NeverOutgrowTheirColumn(t *testing.T) {
 //
 // Left-aligned numbers were the main reason the table read as ragged: "105" and "3" started
 // at the same column and ended three apart, so no two rows could be compared by eye.
+//
+// EVERY LOOKUP HERE IS BY headerTitle, and the count of columns reached is asserted at the
+// bottom. Selecting on the raw Title left this test DEAD the moment the headings grew their
+// alignment padding: " EVENTS" matches no case, every column took the default and continued,
+// and the "asserted nothing" guard was itself inside the skipped block. Measured — with the
+// four cells below switched from padLeft to a right-padding helper, the precise defect this
+// test is named for, it still reported PASS. Hence the outer guard: a per-column guard cannot
+// notice that no column was examined.
 func TestSessionsRows_RightAlignNumericCells(t *testing.T) {
 	m := &model{width: 200}
 	m.sessionsTbl = newSessionsTable()
@@ -495,12 +513,13 @@ func TestSessionsRows_RightAlignNumericCells(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(rows))
 	}
+	checked := 0
 	for ci, col := range cols {
-		switch col.Title {
-		case "EVENTS", "TOKENS", "COST", "SAVED":
-		default:
+		title := headerTitle(col)
+		if !sessionsRightAligned[title] {
 			continue
 		}
+		checked++
 		// Every non-empty cell in a numeric column ends at the same column, which is what
 		// right-alignment means and what left-alignment cannot give.
 		var seen int
@@ -512,16 +531,21 @@ func TestSessionsRows_RightAlignNumericCells(t *testing.T) {
 			seen++
 			if got := len([]rune(cell)); got != col.Width {
 				t.Errorf("row %d %s cell %q is %d runes in a %d-wide column — not right-aligned",
-					ri, col.Title, cell, got, col.Width)
+					ri, title, cell, got, col.Width)
 			}
 			if strings.HasSuffix(cell, " ") {
 				t.Errorf("row %d %s cell %q is padded on the right, so it is left-aligned",
-					ri, col.Title, cell)
+					ri, title, cell)
 			}
 		}
 		if seen == 0 {
-			t.Errorf("%s column had no non-empty cell, so this asserted nothing", col.Title)
+			t.Errorf("%s column had no non-empty cell, so this asserted nothing", title)
 		}
+	}
+	if checked != len(sessionsRightAligned) {
+		t.Fatalf("examined %d of the %d right-aligned columns %v in %v — the rest were not "+
+			"matched at all, so this test asserted nothing about them",
+			checked, len(sessionsRightAligned), sessionsRightAligned, titles(cols))
 	}
 }
 

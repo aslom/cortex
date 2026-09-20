@@ -28,9 +28,12 @@ const minColumnWidth = 4
 //	EVENTS    TOKENS      COST        SAVED       ACTIVE
 //	     4      629.4k     $0.2475    ~$0.0039  ●
 //
-// Applied against the FITTED width, never the declared one: the fitter shrinks columns on a
-// narrow terminal, and a title padded to a width the column no longer has is a title bubbles
-// truncates — which costs the heading its last letter instead of aligning it.
+// Applied against the width the column will RENDER at, which for the sessions table is its
+// fitted width and not its declared one: fitTableColumns shrinks columns on a narrow terminal,
+// and a title padded to a width the column no longer has is a title bubbles truncates — which
+// costs the heading its last letter instead of aligning it. The events table's fitColumns only
+// ever DROPS whole columns, never narrows a surviving one, so there the two widths are the same
+// number and tableColumns passes eventColumn.width directly.
 func rightAlignHeader(title string, width int) string { return padLeft(title, width) }
 
 // headerTitle is a column's NAME, with any alignment padding rightAlignHeader added stripped
