@@ -30,9 +30,27 @@ func TestSessionsPicker_ShowsLifetimeCostAndSaving(t *testing.T) {
 	if !strings.Contains(row, "$36.58") {
 		t.Errorf("row %q is missing the session's lifetime cost", row)
 	}
-	// The saving wears the estimate marker, and is NOT added to the cost beside it.
-	if !strings.Contains(row, inexactMarker+"$0.37") {
-		t.Errorf("row %q is missing the saving, or is missing its %q marker", row, inexactMarker)
+	// The saving is present as a bare figure, and is NOT added to the cost beside it. Its
+	// estimate marker lives on the COLUMN now — asserted just below, against the header.
+	if !strings.Contains(row, "$0.37") {
+		t.Errorf("row %q is missing the saving", row)
+	}
+	if strings.Contains(row, inexactMarker+"$0.37") {
+		t.Errorf("row %q still marks the saving per value; headerMarker carries that on the "+
+			"heading, and both would be the caveat stated twice", row)
+	}
+	// AND THE CAVEAT IS STILL ON SCREEN, which is the half that makes moving it legitimate
+	// rather than a quiet deletion. Asserted here, next to the value losing the marker, so a
+	// change that dropped both cannot pass.
+	var savedHeading string
+	for _, c := range m.sessionsTbl.Columns() {
+		if headerTitle(c) == "SAVED" {
+			savedHeading = c.Title
+		}
+	}
+	if !strings.Contains(savedHeading, inexactMarker) {
+		t.Errorf("SAVED heading = %q, want it to carry %q — the estimate caveat came off the "+
+			"values and has to be somewhere", savedHeading, inexactMarker)
 	}
 	if strings.Contains(row, "$36.94") {
 		t.Errorf("row %q folded the saving into the cost", row)
@@ -59,13 +77,15 @@ func TestSessionMoneyCell_NeverAssertsFreeOrARefund(t *testing.T) {
 		{name: "negative cost", micros: -5_000_000, want: emptyCell},
 		{name: "negative saving", micros: -1, avoided: true, want: emptyCell},
 		{name: "real cost", micros: 36_577_700, want: "$36.58"},
-		{name: "real saving", micros: 366_100, avoided: true, want: inexactMarker + "$0.37"},
+		// A saving renders exactly like a cost now: identical figure, no per-value marker. The
+		// "estimated" caveat is the SAVED column's, carried by its heading.
+		{name: "real saving", micros: 366_100, avoided: true, want: "$0.37"},
 		// Sub-floor but real: formatUSDCell's job, asserted here so a tiny charge cannot
 		// arrive in this column as "$0.00" and read as free.
 		{name: "sub-floor cost", micros: 20, want: "<$0.01"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sessionMoneyCell(tc.micros, tc.avoided, false, sessionsMoneyWidth); got != tc.want {
+			if got := sessionMoneyCell(tc.micros, false, sessionsMoneyWidth); got != tc.want {
 				t.Errorf("sessionMoneyCell(%d, %v, false) = %q, want %q", tc.micros, tc.avoided, got, tc.want)
 			}
 		})
@@ -146,8 +166,8 @@ func titles(cols []table.Column) []string {
 // the flag and this cell ignoring it would be the same defect one layer up: the honest number
 // is there and the screen still lies.
 func TestSessionMoneyCell_AClampedFigureIsMarkedAsAFloor(t *testing.T) {
-	plain := sessionMoneyCell(36_577_700, false, false, sessionsMoneyWidth)
-	clamped := sessionMoneyCell(36_577_700, false, true, sessionsMoneyWidth)
+	plain := sessionMoneyCell(36_577_700, false, sessionsMoneyWidth)
+	clamped := sessionMoneyCell(36_577_700, true, sessionsMoneyWidth)
 	if plain == clamped {
 		t.Fatalf("a clamped figure renders identically to a measured one (%q): the flag reached "+
 			"the client and the cell dropped it", plain)
@@ -156,18 +176,28 @@ func TestSessionMoneyCell_AClampedFigureIsMarkedAsAFloor(t *testing.T) {
 		t.Errorf("clamped cell = %q, want the %q suffix that already means \"and more\" on the "+
 			"strip", clamped, partialMarker)
 	}
-	// The saving keeps its own marker as well: the two say different things and one must not
-	// displace the other.
-	saved := sessionMoneyCell(366_100, true, true, sessionsMoneyWidth)
-	if !strings.HasPrefix(saved, inexactMarker) || !strings.HasSuffix(saved, partialMarker) {
-		t.Errorf("clamped saving = %q, want both %q (estimated) and %q (a floor)",
-			saved, inexactMarker, partialMarker)
+	// A clamped SAVING carries the floor marker too, and ONLY that one: "estimated" is the
+	// column's property and sits in its heading, while "this is a floor" is conditional on this
+	// row's own total and therefore still rides on the figure. That split is the whole rule —
+	// see sessionMoneyCell — so asserting the absence matters as much as the presence.
+	saved := sessionMoneyCell(366_100, true, sessionsMoneyWidth)
+	if !strings.HasSuffix(saved, partialMarker) {
+		t.Errorf("clamped saving = %q, want the %q suffix that says the figure is a floor",
+			saved, partialMarker)
+	}
+	if strings.HasPrefix(saved, inexactMarker) {
+		t.Errorf("clamped saving = %q still carries %q on the value; that caveat is "+
+			"unconditional for this column and belongs on the heading", saved, inexactMarker)
 	}
 }
 
 // hasColumn reports whether a header set carries the named column. Local to the tests: the
 // production side no longer asks that question — rebuildSessionsTable derives the money flag
 // from the width and sets the header itself — so a helper for it would be dead code.
+//
+// By headerTitle rather than the raw Title, so it finds a column whose heading carries
+// headerMarker: against the raw string, "SAVED" matches nothing once the column is named
+// "SAVED ~", and every caller here would report the money columns as absent.
 func hasColumn(cols []table.Column, title string) bool {
 	for _, c := range cols {
 		if headerTitle(c) == title {
@@ -274,7 +304,7 @@ func TestSessionMoneyCell_NeverExceedsItsColumn(t *testing.T) {
 		} {
 			for _, avoided := range []bool{false, true} {
 				for _, saturated := range []bool{false, true} {
-					got := sessionMoneyCell(micros, avoided, saturated, budget)
+					got := sessionMoneyCell(micros, saturated, budget)
 					if n := len([]rune(got)); n > budget {
 						t.Errorf("micros=%d avoided=%v saturated=%v budget=%d: cell %q is %d "+
 							"columns — the table truncates it into a smaller figure that reads "+
@@ -299,7 +329,7 @@ func TestSessionMoneyCell_NeverExceedsItsColumn(t *testing.T) {
 		t.Fatalf("formatUSDCell(36.5777) = %q; this test's premise is that the finest rung is "+
 			"cents, so it needs rewriting alongside the formatter", want)
 	}
-	if got := sessionMoneyCell(36_577_700, false, false, sessionsMoneyWidth); got != formatUSDCell(36.5777) {
+	if got := sessionMoneyCell(36_577_700, false, sessionsMoneyWidth); got != formatUSDCell(36.5777) {
 		t.Errorf("cell = %q at the declared width, want %q — the ladder is giving up precision "+
 			"it does not need to", got, formatUSDCell(36.5777))
 	}
@@ -337,7 +367,7 @@ func TestSessionMoneyCell_NeverRendersAKnownChargeAsZero(t *testing.T) {
 		for _, micros := range []int64{1, 12, 1200, 5_000, 499_000} { // $0.000001 … $0.499
 			for _, avoided := range []bool{false, true} {
 				for _, saturated := range []bool{false, true} {
-					got := sessionMoneyCell(micros, avoided, saturated, budget)
+					got := sessionMoneyCell(micros, saturated, budget)
 					// A zero-valued amount is the defect; the em dash is the honest fallback.
 					// "$0.00" covers the cents rung, "$0"/"$0 " the whole-dollar and compact ones.
 					for _, zero := range []string{"$0.00", "$0 ", "$0"} {
@@ -364,7 +394,7 @@ func TestSessionMoneyCell_NeverRendersAKnownChargeAsZero(t *testing.T) {
 	// the whole answer, so the alternative is gone rather than left in as dead reassurance. What is
 	// still asserted is the part that matters: the cell says SOMETHING about a real charge, and
 	// emptyCell — which means "not known here" — is not an acceptable answer for a charge we know.
-	if got := sessionMoneyCell(1200, false, false, sessionsMoneyWidth); got != "<$0.01" {
+	if got := sessionMoneyCell(1200, false, sessionsMoneyWidth); got != "<$0.01" {
 		t.Errorf("cell = %q at the declared width, want %q — a known sub-cent charge must be "+
 			"disclosed as below the floor, not rendered as unknown", got, "<$0.01")
 	}
@@ -394,7 +424,7 @@ func TestSessionsShowMoney_EveryKeptWidthFitsASubCentCharge(t *testing.T) {
 			avoided bool
 		}{{"COST", false}, {"SAVED", true}} {
 			budget := sessionsColumnWidth(cols, c.title)
-			cell := sessionMoneyCell(subCent, c.avoided, false, budget)
+			cell := sessionMoneyCell(subCent, false, budget)
 			if cell == emptyCell {
 				t.Errorf("width %d: %s has a %d-rune budget, which renders a known $0.0012 as %q "+
 					"— the cell that means \"not known here\"", termWidth, c.title, budget, cell)
@@ -449,13 +479,13 @@ func TestSessionsMoneyCells_UseTheFittedWidthNotTheDeclaredOne(t *testing.T) {
 		}
 		row := strings.Join(rows[0], " ")
 		// What the fitted budget can honestly hold.
-		if want := sessionMoneyCell(bigCost, false, false, budget); !strings.Contains(row, want) {
+		if want := sessionMoneyCell(bigCost, false, budget); !strings.Contains(row, want) {
 			t.Errorf("width %d: row %q does not carry %q, the cell a %d-rune budget allows",
 				termWidth, row, want, budget)
 		}
 		// And emphatically not the wider form the declared width would have allowed, which
 		// bubbles/table would then truncate.
-		if wide := sessionMoneyCell(bigCost, false, false, declared); wide != "" &&
+		if wide := sessionMoneyCell(bigCost, false, declared); wide != "" &&
 			len([]rune(wide)) > budget && strings.Contains(row, wide) {
 			t.Errorf("width %d: row %q carries %q, %d runes in a %d-rune column — the cell was "+
 				"built against the declared width", termWidth, row, wide, len([]rune(wide)), budget)
@@ -598,41 +628,60 @@ func TestSessionsRows_TruncateTheSessionID(t *testing.T) {
 	}
 }
 
-// TestSessionMoneyCellMin_MatchesTheFormatter pins sessionMoneyCellMin to the width the money
-// formatter actually needs, rather than to a digit someone has to remember to change.
+// TestSessionMoneyCellMin_CoversCellAndHeading pins sessionMoneyCellMin to BOTH halves of the
+// column it bounds, rather than to a digit someone has to remember to change.
 //
 // IT EXISTS BECAUSE THE DRIFT IS SILENT IN THE EXPENSIVE DIRECTION. The constant was 9, derived
-// from "~<$0.0001" when money rendered at four decimals. Moving the formatter to cents made the
-// honest floor "~<$0.01" — seven — and left 9 passing every test in this file, because a cell two
-// columns WIDER than necessary still holds an honest figure. Nothing was wrong on screen; the
-// money columns were simply dropped on terminals that could afford them, which no assertion about
-// cell contents can see.
+// from "~<$0.0001" when money rendered at four decimals. Moving the formatter to cents left 9
+// passing every other test in this file, because a column WIDER than necessary still renders an
+// honest figure — nothing looks wrong on screen, the money columns are simply declined on
+// terminals that could have afforded them, and no assertion about cell CONTENTS can see that.
 //
-// The floor form is asked of formatUSDCell with a sub-floor amount, so this tracks the formatter
-// through any future precision change instead of restating its output.
-func TestSessionMoneyCellMin_MatchesTheFormatter(t *testing.T) {
+// BOTH HALVES, because which one binds has now changed twice. The cell needs six runes
+// ("<$0.01", formatUSDCell's floor). The heading needs seven ("SAVED ~", since headerMarker
+// moved the estimate caveat there and bubbles truncates a heading that will not fit). So the
+// answer is seven and the HEADING is what binds — where before the marker moved it was the
+// cell. Deriving from the max of the two means neither change can go unnoticed.
+func TestSessionMoneyCellMin_CoversCellAndHeading(t *testing.T) {
 	// A charge below half the floor, which is what makes formatUSDCell emit its "<$…" form.
 	floorForm := formatUSDCell(usdFloor / 4)
 	if !strings.HasPrefix(floorForm, "<$") {
 		t.Fatalf("formatUSDCell(%v) = %q, want the floor form: this test's premise is that a "+
 			"sub-floor charge is disclosed rather than stated", usdFloor/4, floorForm)
 	}
-	// SAVED wears the estimate marker on top of the floor form, and is therefore the widest
-	// narrowest-honest cell — which is what the constant has to cover.
-	want := len([]rune(inexactMarker + floorForm))
+	// The widest heading among the money columns, off the real column set rather than spelled out.
+	widestHeading := 0
+	for _, c := range sessionsColumns() {
+		if t := headerTitle(c); t != "COST" && t != "SAVED" {
+			continue
+		}
+		if n := len([]rune(c.Title)); n > widestHeading {
+			widestHeading = n
+		}
+	}
+	if widestHeading == 0 {
+		t.Fatal("no money column found in sessionsColumns(); this test asserted nothing")
+	}
+	want := max(len([]rune(floorForm)), widestHeading)
 	if sessionMoneyCellMin != want {
-		t.Errorf("sessionMoneyCellMin = %d, want %d — the narrowest honest SAVED cell is %q. "+
-			"A value too LARGE costs money columns on narrow terminals without failing any "+
-			"other assertion; too small renders real charges as %q.",
-			sessionMoneyCellMin, want, inexactMarker+floorForm, emptyCell)
+		t.Errorf("sessionMoneyCellMin = %d, want %d — the narrowest honest cell is %q (%d runes) "+
+			"and the widest money heading is %d runes. A value too LARGE costs money columns on "+
+			"narrow terminals without failing any other assertion; too small either renders real "+
+			"charges as %q or lets bubbles truncate a heading.",
+			sessionMoneyCellMin, want, floorForm, len([]rune(floorForm)), widestHeading, emptyCell)
 	}
-	// And the constant is actually sufficient: at exactly that budget the cell still renders.
-	if got := sessionMoneyCell(1200, true, false, sessionMoneyCellMin); got != inexactMarker+floorForm {
-		t.Errorf("sessionMoneyCell at the declared minimum = %q, want %q", got, inexactMarker+floorForm)
+	// And the constant is actually sufficient for the CELL: at exactly that budget it renders.
+	if got := sessionMoneyCell(1200, false, sessionMoneyCellMin); got != floorForm {
+		t.Errorf("sessionMoneyCell at the declared minimum = %q, want %q", got, floorForm)
 	}
-	// One column narrower it cannot, which is what makes this a floor rather than a guess.
-	if got := sessionMoneyCell(1200, true, false, sessionMoneyCellMin-1); got != emptyCell {
-		t.Errorf("sessionMoneyCell one column below the minimum = %q, want %q — if a narrower "+
-			"cell still works, the minimum is too high", got, emptyCell)
+	// The cell's own floor is the narrower of the two, so it keeps working below the constant.
+	// Asserted so the comment above cannot quietly become wrong about which half binds.
+	if got := sessionMoneyCell(1200, false, len([]rune(floorForm))); got != floorForm {
+		t.Errorf("sessionMoneyCell at the cell floor %d = %q, want %q",
+			len([]rune(floorForm)), got, floorForm)
+	}
+	// One column below the CELL floor it cannot render, which is what makes that a floor.
+	if got := sessionMoneyCell(1200, false, len([]rune(floorForm))-1); got != emptyCell {
+		t.Errorf("sessionMoneyCell one column below the cell floor = %q, want %q", got, emptyCell)
 	}
 }
