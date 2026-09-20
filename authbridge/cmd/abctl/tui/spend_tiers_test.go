@@ -126,3 +126,38 @@ func TestRenderTierRows_NegativeTotalIsRefused(t *testing.T) {
 		t.Errorf("rendered a negative figure:\n%s", joined)
 	}
 }
+
+// A tier absent from the modelled mix shows the unknown cell, NOT $0.0000.
+//
+// FOUND BY RENDERING, NOT BY A TEST, which is the lesson: tierCounts() populates all four
+// tiers, so every assertion above was blind to a partial mix — and a partial mix is the
+// normal case, since a window of cache-heavy traffic may report no cache WRITES at all.
+// "$0.0000" in a money column asserts the tier was free, which is the lie this package
+// refuses in sessionMoneyCell and in `abctl cost`'s headline.
+func TestRenderTierRows_ATierAbsentFromTheMixIsUnknownNotFree(t *testing.T) {
+	c := usage.Counts{
+		Requests: 35, CostMicros: 4_546_200,
+		InputCostMicros: 3000, OutputCostMicros: 45000, // no cache tiers in the mix
+	}
+	lines := renderTierRows(c, 60)
+	joined := strings.Join(lines, "\n")
+
+	if strings.Contains(joined, "$0.0000") || strings.Contains(joined, "$0.00 ") {
+		t.Errorf("a tier absent from the mix rendered as free:\n%s", joined)
+	}
+	// The two tiers that ARE in the mix keep their figures: this must not blank the column.
+	if !strings.Contains(joined, inexactMarker+"$") {
+		t.Errorf("the tiers that are in the mix lost their figures:\n%s", joined)
+	}
+	// And the absent ones say so.
+	var unknown int
+	for _, line := range lines {
+		if strings.Contains(line, emptyCell) {
+			unknown++
+		}
+	}
+	if unknown != 2 {
+		t.Errorf("%d rows show %q, want 2 (cache-read and cache-write):\n%s",
+			unknown, emptyCell, joined)
+	}
+}

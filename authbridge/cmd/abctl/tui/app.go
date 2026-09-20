@@ -1636,21 +1636,29 @@ func (m *model) paneView() string {
 	// five unfilled and the footer six rows above the bottom of the terminal. The same arithmetic
 	// covers a drawer left open on a pane that cannot host it.
 	if m.spendStripReservesRow() {
-		strip := ""
+		band := make([]string, spendBandLines)
+		drew := false
 		if m.spendStripVisible() {
-			// Styled AFTER fitting. renderSpendStrip measures with lipgloss.Width, and styleMuted
-			// only adds a colour escape so the column count is unchanged — but fitting an
-			// already-styled string would measure the escape bytes and silently over-truncate.
-			strip = renderSpendStrip(m.spendSummary(), m.width)
+			// Styled AFTER fitting. renderSpendBand measures runes, and styleMuted only adds a
+			// colour escape so the column count is unchanged — but fitting an already-styled
+			// string would measure the escape bytes and silently over-truncate.
+			band = renderSpendBand(m.spendSummary(), m.width)
+			drew = strings.TrimSpace(strings.Join(band, "")) != ""
 		}
-		rows = append(rows, styleMuted.Render(strip))
+		for len(band) < spendBandLines {
+			band = append(band, "")
+		}
+		// THE LABEL LINE IS MUTED AND THE VALUE LINE IS NOT: that contrast is the hierarchy the
+		// band buys, and it is applied here rather than inside the renderer so the renderer's
+		// output stays measurable and assertable without escape sequences in the way.
+		rows = append(rows, styleMuted.Render(band[0]), band[1])
 
 		if m.spendDrawerReservesRows() {
 			var lines []string
 			// The breakdown goes directly under the figure it breaks down, and ONLY when the
 			// strip itself drew — a headless breakdown would be a pane, which is the one thing
 			// this is not.
-			if strip != "" && m.spendDrawerVisible() {
+			if drew && m.spendDrawerVisible() {
 				// The axis and span come off the SNAPSHOT, not off what was last requested: see
 				// drawerLabels.
 				axis, window := m.drawerLabels()

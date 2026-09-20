@@ -1084,7 +1084,9 @@ func (m *model) layout() {
 	// next to that. See spendStripReservesRow and spendStripVisible for the same asymmetry
 	// stated from the other side.
 	if m.spendStripReservesRow() {
-		bodyH--
+		// spendBandLines, not one row: the band stacks labels over values. paneView fills
+		// exactly this many, and the two must move together — see paneView.
+		bodyH -= spendBandLines
 	}
 	// And the drawer's rows when it is open. Reserving nothing for them made the view
 	// spendDrawerLines taller than the terminal the moment `$` was pressed, pushing the footer

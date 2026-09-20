@@ -90,15 +90,24 @@ func renderTierRows(c usage.Counts, width int) []string {
 	for i, tier := range order {
 		label := tierLabels[tier]
 		var row string
-		if !ok {
+		switch {
+		case !ok, tiers[tier] == 0:
 			// NOT KNOWN HERE, which is what emptyCell means — never $0.00, and never a figure
 			// apportioned from a mix that does not exist.
+			//
+			// THE ZERO CASE IS THE SAME CASE. A tier carrying real money always apportions to
+			// at least one micro, so zero means this tier is absent from the modelled mix —
+			// and formatUSDCell(0) prints "$0.0000", which asserts the tier was FREE. That is
+			// the "$0.00 for a figure that might be unknown" lie this package refuses in
+			// sessionMoneyCell and in `abctl cost`'s headline, arriving through a third door.
+			// Found by rendering the panel rather than by a test: the fixture populated all
+			// four tiers, so no assertion could see it.
 			row = fmt.Sprintf("%-*s %s", tierLabelWidth, label, emptyCell)
-		} else if budget > 0 {
+		case budget > 0:
 			row = fmt.Sprintf("%-*s %-*s %s%s", tierLabelWidth, label,
 				budget, tierBar(tiers[tier], peak, budget),
 				inexactMarker, formatUSDCell(float64(tiers[tier])/1e6))
-		} else {
+		default:
 			row = fmt.Sprintf("%-*s %s%s", tierLabelWidth, label,
 				inexactMarker, formatUSDCell(float64(tiers[tier])/1e6))
 		}

@@ -382,7 +382,7 @@ func TestSpendStripVisible_FoldsAwayOnAShortTerminal(t *testing.T) {
 	}
 }
 
-func TestLayout_ReservesExactlyOneRowForTheStrip(t *testing.T) {
+func TestLayout_ReservesExactlyTheBandsRowsForTheStrip(t *testing.T) {
 	// Get this wrong and every table renders one row too tall, pushing the footer
 	// off-screen. The row is ADDED to the existing title(1) + footer(2) budget --
 	// layout's old comment said "title + blank + footer" but there was never a
@@ -395,12 +395,13 @@ func TestLayout_ReservesExactlyOneRowForTheStrip(t *testing.T) {
 	short.pane = paneEvents
 	short.layout()
 
-	if want := 40 - 4; tall.bodyHeight != want {
-		t.Errorf("bodyHeight with strip = %d, want %d (height - title - strip - 2 footer rows)",
-			tall.bodyHeight, want)
+	if want := 40 - 3 - spendBandLines; tall.bodyHeight != want {
+		t.Errorf("bodyHeight with the band = %d, want %d (height - title - 2 footer rows - "+
+			"spendBandLines)", tall.bodyHeight, want)
 	}
 	if want := 19 - 3; short.bodyHeight != want {
-		t.Errorf("bodyHeight below the fold = %d, want %d (no strip row)", short.bodyHeight, want)
+		t.Errorf("bodyHeight below the fold = %d, want %d (no band rows at all)",
+			short.bodyHeight, want)
 	}
 }
 
@@ -413,7 +414,7 @@ func TestLayout_PickerPanesStillReserveTheStripRow(t *testing.T) {
 	picker.pane = panePods
 	picker.layout()
 
-	if want := 40 - 4; picker.bodyHeight != want {
+	if want := 40 - 3 - spendBandLines; picker.bodyHeight != want {
 		t.Errorf("picker bodyHeight = %d, want %d: the reservation must not depend on the pane",
 			picker.bodyHeight, want)
 	}
@@ -441,11 +442,13 @@ func TestPaneView_DrawsTheStrip(t *testing.T) {
 	}
 
 	got := m.paneView()
-	if !strings.Contains(got, stripLabel) {
-		t.Errorf("paneView output has no %q row; the strip is not wired to the screen", stripLabel)
+	// The band carries no "SPEND" label: the column labels are the identity now, which is
+	// why they sit above the values rather than beside them.
+	if !strings.Contains(got, "LAST 1H") {
+		t.Errorf("paneView output has no band label row; the band is not wired to the screen:\n%s", got)
 	}
 	if !strings.Contains(got, "$1.12") {
-		t.Error("paneView output has no spend figure; the strip row is rendered from something other than spendSummary")
+		t.Error("paneView output has no spend figure; the band is rendered from something other than spendSummary")
 	}
 	// The strip must be the SECOND row, directly under the title bar. "In the
 	// chrome, read before the data" is the whole requirement -- a strip rendered
@@ -454,8 +457,13 @@ func TestPaneView_DrawsTheStrip(t *testing.T) {
 	if len(lines) < 2 {
 		t.Fatalf("paneView rendered %d lines; expected at least a title and a strip", len(lines))
 	}
-	if !strings.Contains(lines[1], stripLabel) {
-		t.Errorf("row 1 is %q, want the %q strip directly under the title", lines[1], stripLabel)
+	// Row 1 is the band's LABEL line and row 2 its values: labels above values is the whole
+	// point, so a view with the two swapped is wrong even though both are present.
+	if !strings.Contains(lines[1], "LAST 1H") {
+		t.Errorf("row 1 is %q, want the band's label row directly under the title", lines[1])
+	}
+	if len(lines) < 3 || !strings.Contains(lines[2], "$1.12") {
+		t.Errorf("row 2 is %q, want the value row under its labels", lines[2])
 	}
 }
 
