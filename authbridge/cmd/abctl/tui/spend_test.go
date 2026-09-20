@@ -554,12 +554,16 @@ func TestFetchSpendDrawer_AsksForTheDrawersAxis(t *testing.T) {
 	if got := q.Get("group"); got != string(usage.GroupModel) {
 		t.Errorf("group = %q, want %q; the drawer has no rows without it", got, usage.GroupModel)
 	}
-	// The default span too, on the same wire. A zero windowIdx must mean the hour the strip
-	// has always requested, not the first entry of a slice that happens to start at 15m —
-	// which is exactly what a bare index would have given a freshly constructed model.
-	if got := q.Get("window"); got != spendWindow.String() {
-		t.Errorf("window = %q, want %q: a fresh model must request the span the strip's label "+
-			"and every existing test assume", got, spendWindow)
+	// The default span too, on the same wire: a zero windowStep means the live hour, which is
+	// the first entry of the cycle now that the cycle is the band's four ascending spans.
+	//
+	// "1h" RATHER THAN "1h0m0s", and the change is an improvement rather than a break. The
+	// drawer's poll goes through GetUsageWindow now — it has to, since three of the four spans
+	// `w` reaches are symbolic boundaries a time.Duration cannot express — so the wire carries
+	// the CALLER's spelling instead of Go's stringification of a duration. The server echoes
+	// back what it served either way, and servedAsRequested treats the two as the same span.
+	if got, want := q.Get("window"), spendSpanDefs[spanHour].window; got != want {
+		t.Errorf("window = %q, want %q: a fresh model must request the live hour", got, want)
 	}
 	// The breakdown is only useful on the ALL-sessions ring, so a session parameter would
 	// collapse it to the one row it scoped to — and the strip is global, so its figures must

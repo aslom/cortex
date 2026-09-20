@@ -890,11 +890,14 @@ func (m *model) fetchSpendDrawer() tea.Cmd {
 	client := m.client
 	m.spend.drawer.reqSeq++
 	req := m.spend.drawer.reqSeq
-	window, axis := m.spend.window(), m.spend.axis()
+	// GetUsageWindow, not GetUsage: the drawer's span can now be a symbolic boundary, which a
+	// time.Duration cannot express. One request-building path for every span it can be pointed
+	// at, so the hour cannot drift from the other three.
+	window, resolution, axis := m.spend.window(), m.spend.windowResolution(), m.spend.axis()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), spendFetchTimeout)
 		defer cancel()
-		snap, err := client.GetUsage(ctx, window, spendResolution, "", axis)
+		snap, err := client.GetUsageWindow(ctx, window, resolution, "", axis)
 		return spendDrawerLoadedMsg{snap: snap, req: req, err: err}
 	}
 }

@@ -249,8 +249,8 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   ```
   abctl · http://localhost:9094 · [Sessions] Pipeline
-  TODAY     LAST 1H  SAVED     CACHE HIT  TOKENS
-  $30.93    $2.91    ~$0.18    81%        9.9M
+  LAST 1H    TODAY   7 DAYS    MONTH
+    $2.91   $30.93  $216.44  $703.18
 
    SESSION         UPDATED    EVENTS   TOKENS     COST     SAVED  ACTIVE
    ctx-abc-1234…   3s ago         42     48.2k   $0.12   ~<$0.01  ●
@@ -263,6 +263,32 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   Labels sit above their values rather than beside them: `$30.93 today`
   reads as a list, `TODAY` over `$30.93` reads as a figure.
+
+  **One cell per span a budget is read against**, ascending left to right, and
+  every cell's label names the period its figure covers. That last part is the
+  rule the band is built on: an earlier version carried `CACHE HIT` and `TOKENS`
+  read off the rolling hour while sitting in a row that opened with `TODAY`, so
+  an hour's token count read as a day's with nothing on screen to say otherwise.
+  Volume readings live where there is room to scope them — the `$` breakdown, the
+  sessions table, and the Usage pane.
+
+  All four figures share one column width and are right-aligned, so their decimal
+  points line up and the four periods can be compared by eye.
+
+  As the terminal narrows, whole cells drop — never a clipped figure — and the
+  middle yields first: `7 DAYS`, then `LAST 1H`, leaving `TODAY` and `MONTH` as
+  the last two readings. Four fit in 34 columns, two in 18, one in 10.
+
+  A span this deployment cannot answer reads `—`, not a number. Without a cost
+  ledger (Kubernetes by default) the proxy answers `today`, `7d` and `month` from
+  its six-hour in-memory ring and reports the window it actually served; a
+  six-hour figure under a `MONTH` label would understate the month by about 120x
+  while looking perfectly well-formed.
+
+  A poll chain that stops answering is dated on its own label — `TODAY 7m` — so a
+  wedged chain cannot pass for a current reading. Each span polls on its own
+  cadence (20s for the ring-served hour, a minute for today, five minutes for the
+  two that walk many day files), so the age is per cell rather than per band.
 
   Money is shown to the cent. A charge below half a cent reads `<$0.01`
   rather than `$0.00`, because a known charge displayed as free is a claim
@@ -562,7 +588,7 @@ Layered on top of all of them:
 | `u` | sessions, events, detail | open the usage charts (sessions: all sessions; events/detail: the selected session) |
 | `$` | every pane except the two pickers and usage | expand the spend strip into a per-model breakdown, in place — the table stays on screen. Needs 26 rows; refuses on the two pickers (nothing is connected yet) and on the usage pane, which is already a breakdown with its own cycles |
 | `a` | while the breakdown is open | cycle the axis: model / endpoint / agent. Not `g`, which is the global "jump to top" |
-| `w` | while the breakdown is open | cycle the span: 15m / 1h / 6h |
+| `w` | while the breakdown is open | cycle the span: the band's four — last 1h / today / 7 days / month |
 | `m` | usage | cycle metric: tokens / requests / errors / latency |
 | `w` | usage | cycle window: 10m / 1h / 6h |
 | `b` | usage | cycle breakdown: none / status / method / plugin (not offered for latency — there is no per-label latency) |

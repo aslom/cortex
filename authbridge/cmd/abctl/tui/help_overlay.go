@@ -50,7 +50,7 @@ var globalKeys = keyGroup{
 		// cover only as far back as the current proxy process. A reader comparing the table
 		// against the band's day figure and finding it smaller is seeing that, not a bug.
 		{"", "every band cell names its own span; the table is per session, and resets on proxy restart"},
-		{"a · w", "while it is open: cycle the axis · the span"},
+		{"a · w", "while it is open: cycle the axis · the span (the band's four)"},
 		{"q · ctrl+c", "quit"},
 	},
 }

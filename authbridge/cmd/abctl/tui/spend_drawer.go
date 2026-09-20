@@ -78,43 +78,62 @@ const (
 // one of them is wrong.
 var spendDrawerAxes = []usage.Group{usage.GroupModel, usage.GroupEndpoint, usage.GroupAgent}
 
-// spendDrawerWindows are the spans `w` cycles through.
+// spendDrawerWindows are the spans `w` cycles through: EXACTLY THE BAND'S FOUR.
 //
-// RING SPANS ONLY, and the absence of "today" and "7d" is a decision rather than an
-// omission. The strip's headline figure is already the day's spend, on its own
-// ledger-backed poll, so a "today" option here would render the same number twice and the
-// drawer would need a SECOND ledger query to break it down — day files off disk, on a
-// keypress, where every other option is a fold of a ring already in memory. The drawer
-// answers "what is my spend made of right now"; `abctl cost --window 7d` answers the other
-// question, from a shell, where waiting for a disk read is expected.
+// THE RING-ONLY RESTRICTION IS GONE, and both of the reasons for it have expired. It was
+// {15m, 1h, 6h}, on the grounds that a "today" option "would render the same number twice"
+// and that a ledger query on a keypress was too expensive.
 //
-// spendWindow (1h) is the middle entry, so the default index leaves the strip requesting
-// exactly what it requested before the drawer existed.
-var spendDrawerWindows = []time.Duration{15 * time.Minute, spendWindow, 6 * time.Hour}
+// The first was true while the band showed a single day headline and the drawer had no span
+// of its own to name. It is not true now: the band shows four TOTALS and the drawer shows a
+// BREAKDOWN, so pointing it at the month answers "what is this month's spend made of", which
+// no cell on the band can say at any width.
+//
+// The second was really a worry about the twenty-second POLL LOOP, not about user demand. The
+// drawer has its own chain now, polled only while it is open and at the slow cadence, and
+// `abctl cost --window 7d` has always done exactly this read on demand from a shell. A
+// keypress that costs a disk walk is a keypress someone asked for.
+//
+// 15m and 6h are dropped. They are ring diagnostics rather than budget spans, and six entries
+// to cycle through to reach four useful ones is a worse surface than four. Both remain
+// reachable through `abctl cost --window` and the Usage pane.
+//
+// STRINGS, not durations, because three of the four are symbolic boundaries that
+// time.ParseDuration cannot express — the same reason spendSpanDefs.window is a string.
+var spendDrawerWindows = []string{
+	spendSpanDefs[spanHour].window,
+	spendSpanDefs[spanToday].window,
+	spendSpanDefs[span7d].window,
+	spendSpanDefs[spanMonth].window,
+}
 
-// spendDrawerWindowDefault indexes spendWindow in spendDrawerWindows.
-const spendDrawerWindowDefault = 1
-
-// window is the span the strip and drawer currently request.
+// window is the span the drawer currently requests.
 //
-// windowStep is an OFFSET FROM THE DEFAULT, not an index, and that is the whole reason this
-// function exists. The strip polls long before anyone opens the drawer, so a freshly
-// constructed model must request spendWindow — but zero is also the natural zero value of a
-// counter, and an index of zero points at the FIRST entry of the slice, which is 15m. The
-// first version of this guarded only out-of-range indices and therefore made exactly that
-// mistake while carrying a comment claiming it did not; the wire assertion in
-// TestFetchSpend_AsksForTheDrawersAxis is what caught it.
+// A PLAIN INDEX NOW, and that is a footgun retired rather than a simplification. windowStep
+// used to be an OFFSET from spendDrawerWindowDefault, purely because the old slice had 1h in
+// the MIDDLE: zero is the natural zero value of a counter, an index of zero pointed at the
+// first entry, and the first entry was 15m — so a freshly constructed model would silently
+// have polled a span nobody asked for. The offset existed to make zero mean "the middle".
 //
-// Adding the default and taking the modulus makes the zero value mean "the span the strip
-// always asked for" while keeping the slice in ascending order, so the hint line reads
-// 15m · 1h · 6h and `w` still walks it in that direction.
-func (s *spendState) window() time.Duration {
+// With the band's four spans in ascending order the hour IS first, so the zero value is
+// already the right answer and the offset has nothing left to correct. The wrap survives as
+// defence in depth; see wrapIndex.
+func (s *spendState) window() string {
 	return spendDrawerWindows[s.windowStepIndex()]
+}
+
+// windowResolution asks the ring for a single bucket, and omits the parameter for a symbolic
+// window — the ledger serves those as one bucket and ignores the resolution entirely.
+func (s *spendState) windowResolution() time.Duration {
+	if _, ok := parseWindowSpan(s.window()); ok {
+		return spendResolution
+	}
+	return 0
 }
 
 // windowStepIndex resolves windowStep to a slice index, through the same wrap axis() uses.
 func (s *spendState) windowStepIndex() int {
-	return wrapIndex(spendDrawerWindowDefault+s.windowStep, len(spendDrawerWindows))
+	return wrapIndex(s.windowStep, len(spendDrawerWindows))
 }
 
 // axis is the breakdown the strip asks the server to fold for.
@@ -314,8 +333,28 @@ func plainFigures(ss ...string) []stripFigure {
 // FALLING BACK to the requested values when the snapshot cannot say: no snapshot yet, or a server
 // that echoed no group. The alternative is a hint line with a blank axis, which reads as a
 // rendering fault rather than as an answer in flight.
+// spanLabelFor renders a REQUESTED window the way the hint line wants it.
+//
+// A span the band already names gets the band's own label, so "month" reads as MONTH in both
+// places rather than as two spellings of the same period. A duration is compacted through
+// formatWindowLabel ("1h0m0s" -> "1h"), and anything else is carried through as given.
+//
+// Used only for the FALLBACK, before a snapshot has landed — drawerLabels prefers what the
+// server actually served, for the reason its own doc gives.
+func spanLabelFor(window string) string {
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if spendSpanDefs[span].window == window {
+			return spendSpanDefs[span].label
+		}
+	}
+	if d, ok := parseWindowSpan(window); ok {
+		return formatWindowLabel(d)
+	}
+	return window
+}
+
 func (m *model) drawerLabels() (usage.Group, string) {
-	axis, window := m.spend.axis(), formatWindowLabel(m.spend.window())
+	axis, window := m.spend.axis(), spanLabelFor(m.spend.window())
 	snap := m.spend.drawer.snap
 	if snap == nil {
 		return axis, window
@@ -335,10 +374,10 @@ func (m *model) drawerLabels() (usage.Group, string) {
 	// "1h" the caller asked for. A SYMBOLIC window ("today", "month") does not parse as a
 	// duration and is carried through as the server spelled it.
 	if l := sanitizeLabel(snap.Window); l != "" {
-		window = l
-		if d, ok := parseWindowSpan(l); ok {
-			window = formatWindowLabel(d)
-		}
+		// Through spanLabelFor, so a span the band names reads the SAME here: a drawer showing
+		// the month says MONTH, not "month", and the reader is not left matching two spellings
+		// of one period across two rows of the same region.
+		window = spanLabelFor(l)
 	}
 	return axis, window
 }

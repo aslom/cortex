@@ -2,7 +2,6 @@ package tui
 
 import (
 	"math"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"strings"
@@ -161,19 +160,53 @@ func TestRenderSpendDrawer_HintLineNamesTheKeysAndTheCurrentAxis(t *testing.T) {
 	}
 }
 
-// The zero value of the state must be what the strip requested before the drawer existed.
+// The zero value of the state must be the live hour and the model axis — the first entry of
+// each cycle, and the span a reader opening the drawer is most likely to want.
 //
-// windowStep is an offset rather than an index precisely because of this: spendWindow sits in
-// the MIDDLE of an ascending span slice, so a bare index of zero would have moved the
-// strip's own poll to 15m — which is what the first version did, under a comment claiming it
-// could not.
-func TestSpendState_ZeroValueRequestsThePreDrawerDefaults(t *testing.T) {
+// THE OFFSET IS GONE, and this test is why it existed. windowStep used to be an offset from a
+// default index purely because the old slice had 1h in the MIDDLE: a bare index of zero
+// pointed at 15m, so a freshly constructed state would have polled a span nobody asked for —
+// which is what the first version did, under a comment claiming it could not. With the band's
+// four spans in ascending order the hour is first, so zero is already right and the offset has
+// nothing left to correct.
+func TestSpendState_ZeroValueRequestsTheLiveHour(t *testing.T) {
 	var s spendState
-	if got := s.window(); got != spendWindow {
-		t.Errorf("window() = %v on a zero-value state, want %v", got, spendWindow)
+	if got, want := s.window(), spendSpanDefs[spanHour].window; got != want {
+		t.Errorf("window() = %q on a zero-value state, want %q", got, want)
 	}
 	if got := s.axis(); got != usage.GroupModel {
 		t.Errorf("axis() = %q on a zero-value state, want %q", got, usage.GroupModel)
+	}
+	// A ring span asks for a single bucket; a symbolic one omits the resolution entirely.
+	if got := s.windowResolution(); got != spendResolution {
+		t.Errorf("windowResolution() = %v for the hour, want %v", got, spendResolution)
+	}
+}
+
+// `w` REACHES EXACTLY THE BAND'S FOUR SPANS, in the band's order.
+//
+// The cycle used to be {15m, 1h, 6h} — ring diagnostics, none of them a span a budget is read
+// against, and it could not reach the day at all. Asserted against spendSpanDefs rather than
+// against four literals, so the two cannot drift: a span added to the band is a span `w` must
+// be able to point the breakdown at.
+func TestSpendDrawerWindows_AreExactlyTheBandsSpans(t *testing.T) {
+	if len(spendDrawerWindows) != int(numSpendSpans) {
+		t.Fatalf("w cycles %d windows but the band has %d spans", len(spendDrawerWindows), numSpendSpans)
+	}
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if got, want := spendDrawerWindows[span], spendSpanDefs[span].window; got != want {
+			t.Errorf("cycle position %d is %q, want %q — `w` must reach the band's spans in the "+
+				"band's order", span, got, want)
+		}
+	}
+	// And the two spans the old cycle offered are gone: they are ring diagnostics, reachable
+	// through `abctl cost --window`, and six stops to reach four useful ones is a worse surface.
+	for _, gone := range []string{"15m", "6h"} {
+		for _, w := range spendDrawerWindows {
+			if w == gone {
+				t.Errorf("%q is still in the cycle", gone)
+			}
+		}
 	}
 }
 
@@ -192,9 +225,9 @@ func TestSpendDrawer_CyclesWrapThroughEveryDistinctStop(t *testing.T) {
 	// (see wrapIndex), and two laps is what proves it.
 	// The expected sequence WRITTEN OUT, not derived from wrapIndex — deriving it from the
 	// helper under test would make the assertion agree with whatever that helper does. It starts
-	// at the DEFAULT rather than at the slice's first entry, which is the point of windowStep
-	// being an offset: a fresh model requests the span the strip has always requested.
-	wantSpans := []time.Duration{spendWindow, 6 * time.Hour, 15 * time.Minute}
+	// at the FIRST entry now, which is the live hour: windowStep is a plain index since the
+	// cycle became the band's four ascending spans.
+	wantSpans := []string{"1h", usage.WindowToday, usage.Window7d, usage.WindowMonth}
 	m := &model{}
 	for lap := 0; lap < 2; lap++ {
 		for i, want := range wantSpans {
@@ -204,8 +237,8 @@ func TestSpendDrawer_CyclesWrapThroughEveryDistinctStop(t *testing.T) {
 			_ = m.cycleSpendWindow()
 		}
 	}
-	if got := m.spend.window(); got != spendWindow {
-		t.Errorf("after two full laps window() = %v, want back at %v", got, spendWindow)
+	if got, want := m.spend.window(), "1h"; got != want {
+		t.Errorf("after two full laps window() = %q, want back at %q", got, want)
 	}
 
 	for lap := 0; lap < 2; lap++ {
@@ -702,7 +735,7 @@ func TestHandleKey_TheDrawersBindings(t *testing.T) {
 			t.Errorf("axis = %q after one `a`, want %q", m.spend.axis(), spendDrawerAxes[1])
 		}
 		m.handleKey(runeKey('w'))
-		if m.spend.window() == spendWindow {
+		if m.spend.window() == spendSpanDefs[spanHour].window {
 			t.Errorf("window = %v after one `w`, want it moved off the default", m.spend.window())
 		}
 	})
