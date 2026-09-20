@@ -1555,8 +1555,12 @@ func (m *model) paneView() string {
 		// short picker hint past the terminal width, and a wrapped footer costs a
 		// row of the table above it.
 		footer = fitHintLine(footer, m.width)
+		// The divider closes the top block here as on every other pane, which on a picker is
+		// the title alone. layout() reserves its row unconditionally, so a pane that skipped
+		// drawing it would leave a row nobody fills.
 		return lipgloss.JoinVertical(lipgloss.Left,
 			styleTitle.Render(title),
+			styleMuted.Render(renderDivider(m.width)),
 			body,
 			styleHint.Render(footer),
 		)
@@ -1574,6 +1578,7 @@ func (m *model) paneView() string {
 		footer = fitHintLine(footer, m.width)
 		return lipgloss.JoinVertical(lipgloss.Left,
 			styleTitle.Render(title),
+			styleMuted.Render(renderDivider(m.width)),
 			body,
 			styleHint.Render(footer),
 		)
@@ -1697,6 +1702,10 @@ func (m *model) paneView() string {
 			}
 		}
 	}
+	// The rule that closes the top block, AFTER the band and its drawer so it always sits
+	// between the whole block and the body rather than inside it. Appended unconditionally,
+	// which is what lets layout() reserve it without asking anything — see renderDivider.
+	rows = append(rows, styleMuted.Render(renderDivider(m.width)))
 	rows = append(rows, body, m.footerView())
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
