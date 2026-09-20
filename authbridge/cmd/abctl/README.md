@@ -252,8 +252,8 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   LAST 1H    TODAY   7 DAYS    MONTH
     $2.91   $30.93  $216.44  $703.18
 
-   SESSION         UPDATED    EVENTS   TOKENS     COST     SAVED  ACTIVE
-   ctx-abc-1234…   3s ago         42     48.2k   $0.12   ~<$0.01  ●
+   SESSION         UPDATED    EVENTS   TOKENS     COST   SAVED ~  ACTIVE
+   ctx-abc-1234…   3s ago         42     48.2k   $0.12    <$0.01  ●
    ctx-def-5678…   18m ago        15      1.2k  <$0.01         —
    default         1h ago          8         —       —         —
 
@@ -293,6 +293,12 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   Money is shown to the cent. A charge below half a cent reads `<$0.01`
   rather than `$0.00`, because a known charge displayed as free is a claim
   about the traffic.
+
+  The `~` on `SAVED` sits in the **heading**, not on every value. A saving is
+  estimated in every row, so a per-row marker distinguished nothing while
+  diluting the same glyph where it *is* conditional — on a cost figure whose
+  pricing was incomplete. `+` (the real figure is larger) and `!` (spend is
+  missing from the sum) stay on the values, because those are per-row claims.
 
   `$` expands the band into two columns — where the money went, by rate tier,
   and who spent it, by model, endpoint or agent:

@@ -12,12 +12,15 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
 // writeBuiltinConfig must produce a config file in cortexDir that loads, presets,
@@ -542,5 +545,58 @@ func TestDemoConfig_CostLedgerIsOnWhenLaunchedWithConfigNotLocal(t *testing.T) {
 	if !cfg.Session.SessionEnabled() {
 		t.Error("sessions are disabled in the generated config, which makes the ledger above " +
 			"unreachable; see warnCostLedgerNeedsSessions")
+	}
+}
+
+// TestBuiltinConfig_CommentedRetentionDoesNotTruncateAMonth.
+//
+// The generated config carries retention_days COMMENTED OUT, as a worked example of the value
+// an operator would set. That makes it a trap the type system cannot see: the line is inert
+// until someone uncomments it, and if the number in it is below what window=month needs, doing
+// so silently truncates month-to-date totals. A pruned day file is ABSENT rather than
+// unreadable, so it produces no Caveats entry and the short answer discloses nothing.
+//
+// It was 30 while costledger's default moved to 31 — one day short, which is exactly the
+// shortfall that default exists to prevent, sitting in the file we hand people to edit.
+//
+// Asserted against usage.WindowMonthLocalDays rather than against a literal, so the example and
+// the window it has to satisfy cannot drift apart again.
+func TestBuiltinConfig_CommentedRetentionDoesNotTruncateAMonth(t *testing.T) {
+	cortexDir := t.TempDir()
+	p, err := writeBuiltinConfig(cortexDir, filepath.Join(cortexDir, "ca"))
+	if err != nil {
+		t.Fatalf("writeBuiltinConfig: %v", err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	re := regexp.MustCompile(`(?m)^\s*#\s*retention_days:\s*(\d+)`)
+	m := re.FindSubmatch(raw)
+	if m == nil {
+		// Not a failure if the example is gone entirely — there is then nothing to uncomment.
+		t.Skip("the generated config carries no commented retention_days example")
+	}
+	got, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		t.Fatalf("unparseable retention_days example %q: %v", m[1], err)
+	}
+	if got < usage.WindowMonthLocalDays {
+		t.Errorf("the generated config suggests retention_days: %d, but a month-to-date window "+
+			"can touch %d local dates (usage.WindowMonthLocalDays). Uncommenting that line "+
+			"would truncate window=month, and a pruned day file is absent rather than "+
+			"unreadable — so nothing would disclose the shortfall.",
+			got, usage.WindowMonthLocalDays)
+	}
+	// And it must clear the validator's floor, which config derives from the DATES a 7d window
+	// can touch. Asserted against that constant rather than by building a Config and validating
+	// it: Validate also requires listener fields this example says nothing about, so a minimal
+	// fixture fails for reasons that have nothing to do with retention.
+	if got < usage.Window7dLocalDays {
+		t.Errorf("the generated config suggests retention_days: %d, below the %d a 7d window can "+
+			"touch — config.Validate refuses a non-zero value under that floor, so uncommenting "+
+			"this line would stop the proxy loading at all",
+			got, usage.Window7dLocalDays)
 	}
 }

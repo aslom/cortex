@@ -245,10 +245,11 @@ tls_bridge:
 # docs/plugin-catalog.md.
 #
 # Cost history on disk. Per-minute totals only -- no prompts, no completions,
-# no tool arguments -- under ~/.cortex/cost/YYYY-MM-DD.jsonl, kept 30 days
+# no tool arguments -- under ~/.cortex/cost/YYYY-MM-DD.jsonl, kept 31 days
 # (roughly 10 MB). The in-memory counters are a 6-hour ring and this proxy
 # restarts several times a day, so without this "what did today cost" answers
-# over whatever is left in that ring, and window=7d cannot be answered at all.
+# over whatever is left in that ring, and window=7d and window=month cannot be
+# answered at all.
 #
 # WRITTEN OUT RATHER THAN LEFT TO THE DEFAULT, which is belt-and-braces now
 # rather than the mechanism. The default used to be "on for --local, off
@@ -268,7 +269,11 @@ tls_bridge:
 cost_ledger:
   enabled: true
   # dir: /absolute/path        # default ~/.cortex/cost; a RELATIVE path is refused
-  # retention_days: 30         # minimum 9 -- window=7d can open nine local day files
+  # retention_days: 31         # minimum 9; 31 is the default and what window=month needs
+  #                             # -- a month-to-date total on the 31st of a 31-day month
+  #                             # opens 31 day files, and a pruned one is ABSENT rather
+  #                             # than unreadable, so a short answer discloses nothing.
+  #                             # window=7d can open nine.
 # Session bucketing: which request headers are used to group traffic into
 # sessions visible in abctl. Each listed header is tried in order; the first
 # non-empty value wins.
