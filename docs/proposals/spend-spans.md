@@ -1,7 +1,7 @@
 # Budget Spans in the abctl Spend Band
 
 Status: proposed · 2026-09-20 · targets `authbridge/authlib/{usage,config,costledger}`,
-`authbridge/cmd/abctl/{apiclient,tui}`
+`authbridge/cmd/abctl/{apiclient,tui}` · **builds on PR #1071 (`fix/header-align`), see §3.9**
 
 ## 1. Problem
 
@@ -81,6 +81,9 @@ Verified against `a62664bc`, not assumed.
 | `spendDrawerLines` | `numTierRows + 2` = 6 | unchanged |
 | `tierColumnWidth` / two-column min | 34 / 72 | unchanged |
 | Band poll chains | 2 (window, today) | 4 band + 1 drawer (§3.4) |
+| `headerTitle` (#1071) | strips alignment padding | + strips the column marker (§3.7) |
+| `sessionsRightAligned` (#1071) | keyed on bare titles | unchanged, but asserted (§5) |
+| `renderSpendBand` alignment | left-flush, `%-*s` | right-aligned, uniform width (§3.3) |
 
 Two facts do most of the work in the design below:
 
@@ -149,21 +152,34 @@ wrong on both of its reasons, and should be replaced rather than deleted silentl
 
 ### 3.3 The band is the span row, and the drawer's selector
 
-The band becomes **cost-only, four cells, one per span**, in ascending order:
+The band becomes **cost-only, four cells, one per span**, in ascending order, at a
+**uniform cell width with both lines right-aligned**:
 
 ```
-LAST 1H   TODAY     7 DAYS     MONTH
-$4.04     $18.80    $216.44    $703.18
+LAST 1H    TODAY   7 DAYS    MONTH
+  $4.04   $18.80  $216.44  $703.18
 ```
 
-33 columns at these magnitudes — narrower than today's five-cell band. `SAVED`,
-`CACHE HIT` and `TOKENS` come off the band.
+Uniform width is the widest label or value across all four cells — 7 here — so the four
+figures sit on a fixed stride and their decimal points share a column. 34 columns total,
+narrower than today's five-cell band.
 
-This is what **structurally eliminates defect 1a**: every cell in the band is a cost,
-and every cell's label is its span. There is no longer a place for a span-less figure to
-sit. The information does not disappear — the drawer's tier column already says the
-cache story better (`cache-read` against `input`, with bars), and the Usage pane and
-`abctl cost` keep the full metric set.
+**Right-aligned, not left.** `renderSpendBand` currently pads both lines with `%-*s`
+(`spend_band.go:111-112`), which left-flushes every figure in its cell. That is the same
+defect PR #1071 fixes in the two tables, and the band is the one money surface that PR
+does not touch — see §3.9. Four costs of different magnitudes that a reader compares
+directly is precisely the case that needs the last digits in one place. Cell width stays
+`max(label, value)` per cell for the *drop* arithmetic; the uniform width is applied to
+the cells that survive.
+
+The invariant this establishes is **every band cell's label names its span**, and that is
+what **structurally eliminates defect 1a** — not cost-only-ness as such. Cost-only
+satisfies it trivially; any future cell must satisfy it too.
+
+`SAVED`, `CACHE HIT` and `TOKENS` come off the band. The information does not disappear:
+the drawer's tier column says the cache story better than one percentage can
+(`cache-read` against `input`, with bars), the sessions table keeps per-session `TOKENS`
+and `SAVED`, and the Usage pane and `abctl cost` keep the full metric set.
 
 When the drawer is open, the selected span's cell is emphasised and the drawer below
 breaks that span down. The band becomes the drawer's tab bar:
@@ -273,6 +289,43 @@ later PR (§4). That is deliberate rather than wasted work: PR 1 must leave the 
 self-consistent, since it ships on its own and may sit in `main` for some time before
 PR 3 follows.
 
+**The sessions column title cannot simply be renamed.** PR #1071 makes the title string
+do double duty — it is both the rendered heading and the lookup key — and `headerTitle`
+is `strings.TrimSpace(c.Title)`, which strips alignment padding but nothing else. A title
+of `"SAVED ~"` therefore breaks three things at once, and only the first is loud:
+
+| Site | Effect of a renamed title |
+|---|---|
+| `sessionsColumnWidth(want, "SAVED")` (`sessions_pane.go:141`) | returns 0 → `sessionMoneyCell` budget 0 → **every saving renders `—`** |
+| `sessionsRightAligned["SAVED"]` (`sessions_pane.go:65`) | false → heading silently stops being right-aligned, reintroducing #1071's bug |
+| `TestSessionsHeader_SitsOverItsOwnValues` | `continue`s past the column (`header_align_test.go:266`) → **passes anyway** |
+
+So `headerTitle` must strip the marker as well as the padding:
+
+```go
+// headerMarker qualifies EVERY figure in a column, so it is a property of the heading
+// and not of any cell. Stripped here for the same reason alignment padding is: the name
+// is the key, and this is a rendering detail.
+const headerMarker = " ~"
+
+func headerTitle(c table.Column) string {
+    return strings.TrimSuffix(strings.TrimSpace(c.Title), headerMarker)
+}
+```
+
+Order matters — `TrimSpace` first to remove the leading alignment pad, then the suffix.
+This extends `headerTitle`'s existing contract rather than bending it; its own doc already
+says *"Trimming here keeps the name the key and the padding a rendering detail, which is
+what it is."* An unconditional column-level marker is the same class of thing.
+
+One width consequence: `SAVED ~` needs 7 display columns where `SAVED` needed 5, so the
+heading becomes the binding constraint on the column's minimum instead of the cell. With
+§3.6's cents the narrowest honest cell is `<$0.01` at 6, so the money column's floor must
+be `max(sessionMoneyCellMin, len("SAVED ~"))` = 7. Still **narrower than today's 9**
+(`~<$0.0001`), so the change buys width rather than spending it — but the floor has to be
+computed from both halves, not just the cell, or the fitter will squeeze the column until
+bubbles truncates the heading to `SAVED…`.
+
 `+` (`partialMarker`) and `!` (`damagedMarker`) stay on figures. They are conditional,
 and their whole design is that they ride on the number
 (`spend_strip.go:44-48,82-88`).
@@ -309,6 +362,42 @@ path §3.5 uses, at a different cause.
 were made to derive from one constant. Any month floor, if one is ever added, belongs in
 that same relationship rather than as a fourth independent number.
 
+### 3.9 Not re-breaking PR #1071
+
+PR #1071 (`Fix: Align abctl table headers with the values they name`, branch
+`fix/header-align`) is open against `main` and fixes a defect this proposal could
+reintroduce in three places. Its rule: **alignment is declared on the column and applied
+to both halves from one field**, so a cell can never align itself in a way its heading
+does not know about.
+
+Three interactions, in descending order of how quietly they would fail:
+
+**1. Silent — the sessions title is a lookup key.** Covered in §3.7. Renaming `SAVED` to
+`SAVED ~` un-right-aligns the heading *and* makes the new alignment test skip the column.
+`headerTitle` must learn to strip the marker.
+
+**2. Silent — the band is the money surface #1071 does not cover.** Its ten changed files
+are `events_columns.go`, `events_pane.go`, `sessions_pane.go`, `table_width.go` and six
+test files. `spend_band.go` is not among them, and it left-flushes every figure with
+`%-*s`. Today that is nearly invisible because the band holds one cost per span at most;
+§3.3 puts four directly comparable costs in a row, which is exactly the condition #1071
+exists for. Hence the uniform width and right alignment in §3.3. **The band should be
+brought under the same rule, not given a parallel one.**
+
+**3. Loud — fitted widths move.** #1071 pads headings against the **fitted** width, not
+the declared one, because *"a title padded to a width the column no longer has is a title
+bubbles truncates."* §3.6 changes every money cell's width, which changes what
+`fitTableColumns` settles on, which changes the padding. This is handled automatically
+since the padding is derived from the fitted width — but it means §3.6 cannot be reviewed
+by diffing expected strings alone; the cell/heading agreement test is the check.
+
+**Ordering.** PR 1 (§4) overlaps #1071 in `sessions_pane.go` and `table_width.go`.
+It should be **rebased onto #1071 after that merges** rather than developed in parallel:
+the `headerTitle` change in §3.7 is an edit to a function #1071 introduces, so there is no
+version of PR 1 that is correct against today's `main` *and* against `main` once #1071
+lands. If #1071 stalls, PR 1's marker move is the one piece to hold back — the cents
+change (§3.6) is independent of it.
+
 ## 4. Staging
 
 Two independent tracks. The first has no server dependency and can land immediately.
@@ -317,7 +406,7 @@ Two independent tracks. The first has no server dependency and can land immediat
 `sessionsScopeNote` (defect 1c) outright rather than rewording it: with the band
 cost-only and span-labelled per §3.3, the table's per-session grain is legible from the
 contrast, and the `?` overlay already states it in full (`help_overlay.go:47`). No new
-API surface, no new polls.
+API surface, no new polls. **Rebase onto #1071 — see §3.9.**
 
 **PR 2 — `month` window (`Feat:`).** §3.1 and §3.8, server-side only. `usage`, `config`,
 `costledger`. Inert until a client asks for it.
@@ -344,6 +433,21 @@ useful.
 - Money: the cents floor never prints `$0.00` for a non-zero charge, at every fitted
   column width.
 
+Three that exist to protect PR #1071 (§3.9):
+
+- **Every key in `sessionsRightAligned` resolves to a real column.** This is the gap that
+  makes interaction 1 silent: `assertHeadersMatchCells` does
+  `if !sessionsRightAligned[headerTitle(c)] { continue }`, and the `checked == 0` guard
+  cannot fire while the other three numeric columns still match — so a renamed column is
+  exempted rather than reported. Asserting the set against `sessionsColumns()` turns a
+  future rename into a failure instead of a silence. Worth proposing to #1071 directly,
+  independent of this work.
+- **`headerTitle` round-trips a marked, padded title back to its bare name**, over the
+  cross product of {marked, unmarked} × {padded, unpadded}.
+- **The band's figures line up**, asserted the way `TestHeaderAlignment_SurvivesRendering`
+  does it — slice the rendered lines and compare where the ink ends, not the pre-render
+  strings, since that is what catches padding lost on the way to the screen.
+
 ## 6. Rejected alternatives
 
 **A 4×4 span-by-metric matrix behind `$`.** The drawer's left column is a fixed
@@ -368,18 +472,42 @@ remain available through `abctl cost --window` and the Usage pane.
 of a month-to-date figure, and the natural follow-on — but it needs a configured budget
 value, which does not exist anywhere yet. Deferred rather than rejected.
 
-## 7. Open questions
+## 7. Decisions on the open questions
 
-1. **Calendar week.** `7d` stays rolling while `month` is calendar-aligned, so two
-   adjacent cells mean different kinds of thing. Consistent would be a `week` symbolic
-   window; the cost is a week-start convention and another wire label.
-2. **Feature flag.** The `kagenti` repo mandates a default-off flag for new features, but
-   its canonical mechanism is the Python backend's `config.py`; this repo's `CLAUDE.md`
-   has no equivalent rule and abctl has only the `Settings` persistence used for Usage
-   pane state. Flagging a TUI render change would mean two live render paths. Proposed:
-   no flag, on the grounds that PR 2 is inert API surface and PRs 1 and 3 are display
-   changes to an interactive tool. Worth confirming.
-3. **`CACHE HIT` leaving the band.** It is described as *"the leading indicator of the
-   bill for an agent"* (`spend.go:214-217`). The tier column carries the same signal with
-   more detail, but only while the drawer is open. If it should stay always-visible, §3.3
-   needs a fifth cell and an explicit span label on it.
+These were carried as open questions in the first draft. Each is resolved below, with the
+escape hatch recorded in case the reasoning is wrong.
+
+**7.1 The week stays rolling `7d`.** Not made calendar-aligned, and the inconsistency with
+a calendar month is accepted. Three reasons. `snapshot.go:760-766` already records that
+changing it alters what the window MEANS on the wire, that *"every client comparing
+figures across the change would see a step"*, and that it is a product decision rather
+than an implementation one — none of which this proposal improves on. The budget concern
+is the **month**, and that one *is* calendar-aligned, so the span that has to match a
+billing boundary does. And the labels already carry the distinction the way
+`ParseWindowSpec` does: `7 DAYS` reads as a length, `TODAY` and `MONTH` read as
+boundaries. *Escape hatch:* a `week` symbolic window is additive and needs only a
+week-start convention; it does not block anything here.
+
+**7.2 No feature flag.** The default-off rule lives in the `kagenti` repo's `CLAUDE.md`,
+and its canonical mechanism is `rossoctl/backend/app/core/config.py` exposed through
+`GET /api/v1/config/features` — a Python/React surface that does not exist in this repo.
+This repo's own `CLAUDE.md` has no feature-flag rule. Beyond jurisdiction, the rule's
+*intent* is already satisfied: PR 2 adds a window value nothing requests until PR 3, which
+is off-by-default in the most literal sense available. And gating PRs 1 and 3 would mean
+two live render paths through the band's fitting arithmetic, which is where essentially
+every defect in this file has originated — `spendStripReservesRow`, `spendDrawerLines` and
+`renderSpendBand` all carry comments about a reservation and a render disagreeing.
+*Escape hatch:* if a gate is wanted, abctl already persists `Settings` (used for Usage
+pane state), and that is where it goes — not a new mechanism.
+
+**7.3 `CACHE HIT` comes off the band.** Option A was chosen over an option that kept the
+volume metrics, so this follows the decision already made rather than reopening it. The
+documented counter-argument is real — `spend.go:214-217` calls it *"the leading indicator
+of the bill for an agent"* that *"moves before the dollar figure does"* — but the drawer's
+tier column carries the same signal with strictly more information: `cache-read` against
+`input` as proportional bars, which says how much the cache is saving and not merely that
+it is being hit. It is one keypress away, and the band is cost-only in exchange.
+*Escape hatch:* if it turns out to be missed, the cheap restoration is a fifth cell
+labelled `CACHE 1H` at the right end, first in the drop order. The span must be in the
+label — an unlabelled cache percentage beside four span-labelled costs is defect 1a
+returning by the same door it left.
