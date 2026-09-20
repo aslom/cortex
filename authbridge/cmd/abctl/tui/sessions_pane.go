@@ -162,17 +162,26 @@ func (m *model) rebuildSessionsTable() {
 		if m.filter != "" && !strings.Contains(s.ID, m.filter) {
 			continue
 		}
-		// THE LIVE DOT IS GREEN, which is the one piece of colour this table needs: it is the
-		// only cell whose meaning is a STATE rather than a figure, and a reader scanning for
-		// "what is running right now" is scanning for it specifically.
+		// NO COLOUR ON THIS CELL, and none is possible with this table widget.
 		//
-		// Styled per cell, which bubbles supports and this package already relies on — see
-		// tableStyles, where Selected is deliberately Reverse-only so per-cell colour survives
-		// the row wrapper, and events_pane's protocol colouring. padLeft measures with
-		// lipgloss.Width, so an escape-bearing cell still pads to its column.
+		// A green dot was tried and reverted. bubbles v1.0.0 renderRow does
+		// runewidth.Truncate(value, col.Width, "…") on the FINISHED cell, and runewidth is not
+		// ANSI-aware — so every byte of an escape sequence is charged against the column width.
+		// styleOK.Render("●") is an escape, one rune and a reset: eleven-odd runes against an
+		// eight-wide ACTIVE column, so the dot was truncated to "…".
+		//
+		// There is no per-cell or per-row hook to do it safely: table.Styles carries ONE Cell
+		// style for every cell, SetStyles is the only lever, and the truncation runs after
+		// anything a caller can reach. Colouring cells here needs a widget with a style callback
+		// applied AFTER truncation, or this package rendering the table itself.
+		//
+		// INVISIBLE WITHOUT A TTY, which is how it shipped: lipgloss emits no escapes when it
+		// detects no terminal, so the whole suite passed locally and in CI and broke only on a
+		// real terminal. TestSessionsRows_CarryNoANSIUnderAForcedColourProfile forces the profile
+		// so a future attempt fails in CI instead.
 		active := ""
 		if s.Active {
-			active = styleOK.Render("●")
+			active = "●"
 		}
 		row := table.Row{
 			trunc(s.ID, idW),
@@ -192,24 +201,10 @@ func (m *model) rebuildSessionsTable() {
 				padLeft(sessionMoneyCell(s.AvoidedMicros, s.Saturated, savedW), savedW))
 		}
 		row = append(row, active)
-		// A SESSION THAT HAS DONE NOTHING RECEDES. Not active, nothing spent, no tokens: the
-		// "default" stub row is the common case, and at a glance it is indistinguishable from a
-		// session that genuinely cost nothing to look at. Muting it puts the rows that have
-		// figures in front and leaves this one legible rather than hidden.
-		//
-		// ON THE CELLS, not the row, because bubbles has no per-row style — table.Styles has
-		// Header, Cell and Selected and nothing between. Applied after the cells are padded so
-		// the escapes cannot disturb the padding arithmetic.
-		//
-		// NOT gated on cost alone: a session whose traffic could not be PRICED shows an em dash
-		// in COST while having done real work, and muting that would hide the row a reader most
-		// needs to see. Tokens and the active flag are what distinguish "nothing happened" from
-		// "nothing was priced".
-		if !s.Active && s.CostMicros == 0 && s.TotalTokens == 0 {
-			for i := range row {
-				row[i] = styleMuted.Render(row[i])
-			}
-		}
+		// NO MUTED ROW EITHER, for the reason above: muting means styling every cell, which
+		// means an escape in every cell, which means bubbles truncates all of them. The
+		// "default" stub row with no cost and no tokens still reads as noise; distinguishing it
+		// needs the same widget change the dot does.
 		rows = append(rows, row)
 		// APPENDED IN LOCKSTEP, one line apart, so the two cannot drift: the row carries what
 		// a reader sees and this carries what the code acts on.
