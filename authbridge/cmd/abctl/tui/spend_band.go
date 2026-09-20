@@ -44,46 +44,62 @@ func (c bandCell) width() int {
 // WHOLE CELLS DROP, RIGHT TO LEFT, and nothing is ever clipped: the strip's rule, because a
 // truncated figure is a wrong figure. Today is first and so outlives the rest — it is the
 // figure the band exists to show.
+// GROUPED BY THE SPAN EACH FIGURE COVERS: the day's figures first, then the rolling window's,
+// and every window cell says which window it is.
+//
+// The order used to be TODAY, LAST 1H, SAVED, CACHE HIT, TOKENS — day, window, day, window,
+// window — with only the money cells labelled. An operator reading it left to right had no way
+// to know that TOKENS and CACHE HIT covered the last hour while TODAY covered the day, and the
+// question that produced this change was exactly that: why does TOKENS say 6.4M when the
+// sessions below it each show a hundred times more. They were an hour against a lifetime.
+//
+// Both halves of the fix are needed. Grouping alone still relies on the reader inferring where
+// one span ends; suffixing alone leaves a reader's eye crossing spans twice on its way along
+// the row. Together the row reads as two runs, each labelled.
 func renderSpendBand(s spendSummary, width int) []string {
+	window := strings.ToUpper(s.WindowLabel)
 	var cells []bandCell
 	if s.HasToday {
 		cells = append(cells, bandCell{"TODAY", moneyAmount(s.TodayUSD,
 			s.TodayUnpriced, s.TodayPriceable, s.TodayIncomplete, s.TodayDegraded, s.TodayClamped)})
 	}
+	// THE SAVING MUST MATCH THE SPAN OF THE FIGURE IT SITS BESIDE, which is the whole point of
+	// spendSummary.TodaySavedUSD. Reading the WINDOW's avoided spend into a cell beside TODAY
+	// made the two a pair that spanned two spans — measured on a local proxy at "$64.1765
+	// today" beside "~$1.0291" for a day that had really avoided $2.1891, understating the
+	// figure next to it by 2.1x.
+	//
+	// So the day's saving joins the day's group HERE, and the window's fallback is appended
+	// below with the window's — its span decides where it sits, not its name. The fallback
+	// exists for a deployment with no durable ledger (Kubernetes, by design).
+	//
+	// The marker is part of the value, and the value never joins the spend figures:
+	// usage.Counts.AvoidedMicros forbids any consumer adding it, in either direction.
+	if s.HasTodaySaved {
+		cells = append(cells, bandCell{"SAVED", inexactMarker + formatUSDCell(s.TodaySavedUSD)})
+	}
 	// Gated on Priced, matching the strip: the window figure exists when the snapshot could
 	// price something, and there is no separate HasWindow to consult.
 	if s.Priced {
 		cells = append(cells, bandCell{
-			"LAST " + strings.ToUpper(s.WindowLabel),
+			"LAST " + window,
 			moneyAmount(s.WindowUSD, s.Unpriced, s.Priceable, s.Incomplete, nil, s.Clamped),
 		})
 	}
-	// THE SAVING MUST MATCH THE SPAN OF THE FIGURE IT SITS BESIDE, which is the whole point of
-	// spendSummary.TodaySavedUSD. SAVED renders next to TODAY here, so reading the WINDOW's
-	// avoided spend into it made the two a pair that spanned two spans — measured on a local
-	// proxy at "$64.1765 today" beside "~$1.0291" for a day that had really avoided $2.1891,
-	// understating the figure next to it by 2.1x.
-	//
-	// The window's saving is the FALLBACK, for a deployment with no durable ledger — Kubernetes
-	// by design — and it says so in its own label rather than borrowing the day's. An unlabelled
-	// fallback here is the original defect with a different number in it.
-	//
-	// The marker is part of the value, and the value never joins the spend figures:
-	// usage.Counts.AvoidedMicros forbids any consumer adding it, in either direction.
-	switch {
-	case s.HasTodaySaved:
-		cells = append(cells, bandCell{"SAVED", inexactMarker + formatUSDCell(s.TodaySavedUSD)})
-	case s.HasSaved:
+	if !s.HasTodaySaved && s.HasSaved {
 		cells = append(cells, bandCell{
-			"SAVED " + strings.ToUpper(s.WindowLabel),
+			"SAVED " + window,
 			inexactMarker + formatUSDCell(s.SavedUSD),
 		})
 	}
-	if s.HasCacheHit {
-		cells = append(cells, bandCell{"CACHE HIT", fmt.Sprintf("%.0f%%", s.CacheHitPct)})
-	}
+	// TOKENS before CACHE HIT, so the two widest window cells are not adjacent at the end where
+	// the drop loop reaches first: the volume is what a reader checks the money against, and the
+	// hit rate is the one figure here that can be inferred from the tiers in the drawer.
 	if s.Tokens > 0 {
-		cells = append(cells, bandCell{"TOKENS", humanizeCount(s.Tokens)})
+		cells = append(cells, bandCell{"TOKENS " + window, humanizeCount(s.Tokens)})
+	}
+	if s.HasCacheHit {
+		cells = append(cells, bandCell{"CACHE HIT " + window, fmt.Sprintf("%.0f%%", s.CacheHitPct)})
 	}
 
 	// Drop from the right until what remains fits. The LAST cell's gutter is trimmed off the

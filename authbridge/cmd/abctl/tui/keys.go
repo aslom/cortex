@@ -1078,6 +1078,14 @@ func (m *model) layout() {
 	// no blank row to borrow, and a reader who believes there is one reclaims a row the
 	// footer is standing on.
 	bodyH := m.height - 3
+	// And one for the rule that closes the top block.
+	//
+	// UNCONDITIONAL, unlike the two reservations below it: paneView draws the rule on every
+	// pane and in every state, so there is no condition here to get wrong and none that can go
+	// stale between resizes. That is the reason it is drawn that way — see renderDivider.
+	// TestLayout_EveryPaneFitsTheTerminal reports its absence as "one line too many", on every
+	// pane and every size.
+	bodyH -= dividerLines
 	// And one for the spend strip, which View() draws directly under the title.
 	//
 	// BY HEIGHT ALONE, deliberately blind to the pane: layout() is called from exactly one
