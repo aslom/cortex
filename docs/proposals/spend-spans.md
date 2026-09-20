@@ -498,6 +498,37 @@ remain available through `abctl cost --window` and the Usage pane.
 of a month-to-date figure, and the natural follow-on — but it needs a configured budget
 value, which does not exist anywhere yet. Deferred rather than rejected.
 
+## 6a. Accepted limitations
+
+Two consequences of the decisions above, accepted with their reasoning rather than left to be
+rediscovered. Both were raised in review.
+
+**`w` LOSES ITS ONLY USEFUL SPANS ON A LEDGER-LESS DEPLOYMENT.** §3.2 replaces the drawer's
+`{15m, 1h, 6h}` with the band's four, and three of those four are ledger-backed. Without a
+ledger — Kubernetes by default — the server answers all three from the six-hour ring, clamped,
+so `w` has one span it can really distinguish there and three stops returning the same fold
+under different captions. The band discloses that per cell (§3.5); the drawer does not.
+
+Accepted, and scoped: the target is a local install, where the ledger is on by default and all
+four spans are real. Re-adding the ring spans for the Kubernetes case would restore exactly the
+clutter this set exists to remove, and both spans remain reachable through
+`abctl cost --window` and the Usage pane. If that case ever matters, the two ways out are to
+disclose in the drawer the way the band does, or to make the cycle's contents depend on whether
+a ledger answered.
+
+**CENTS REACH THE EVENTS PANE, WHERE THE ARGUMENT FOR THEM IS WEAKEST.** §3.6 counts 19 call
+sites and names only `abctl cost`; the per-event `COST` column and the `$` tier column go
+through `formatUSDCell` too. "Nobody acts on the fourth decimal of a dollar" holds for a period
+total, and the events pane's unit is a single request: on cache-read-dominated traffic a real
+share of individual events cost under half a cent, and those rows all collapse to `<$0.01` and
+stop being comparable with one another.
+
+Accepted for one spelling on every screen, which is this package's standing rule and the thing
+that stops two surfaces disagreeing about the same money. The surfaces weighed, and where exact
+figures survive: the detail pane renders the raw cost record for one event, and
+`abctl cost --json` reports `CostMicros` — the unrounded integer the ledger stores. A per-event
+format with more decimals is the alternative, at the cost of two money spellings.
+
 ## 7. Decisions on the open questions
 
 These were carried as open questions in the first draft. Each is resolved below, with the

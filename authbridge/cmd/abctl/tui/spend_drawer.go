@@ -98,6 +98,20 @@ var spendDrawerAxes = []usage.Group{usage.GroupModel, usage.GroupEndpoint, usage
 // to cycle through to reach four useful ones is a worse surface than four. Both remain
 // reachable through `abctl cost --window` and the Usage pane.
 //
+// KNOWN LIMITATION, ON A DEPLOYMENT WITH NO COST LEDGER. Three of these four spans are
+// ledger-backed, and without a ledger — Kubernetes by default — the server answers all three
+// from the six-hour ring instead, clamped to the window asked for. So `w` has ONE span the
+// store can really distinguish there (the hour), and the other three stops return the same
+// clamped answer under three different captions. The band already detects and discloses that
+// per cell, via servedAsRequested; THIS surface does not, so the drawer shows the clamped
+// breakdown without saying it is one.
+//
+// Left as it is deliberately, and scoped: the target is a local install, where the ledger is on
+// by default and all four spans are real. Dropping the ring spans is what a ledger-less
+// deployment lost, and re-adding them for that case would put back the clutter this set exists
+// to remove. The two ways out, if the Kubernetes case ever matters: disclose here the way the
+// band does, or make the cycle's contents depend on whether a ledger answered.
+//
 // STRINGS, not durations, because three of the four are symbolic boundaries that
 // time.ParseDuration cannot express — the same reason spendSpanDefs.window is a string.
 var spendDrawerWindows = []string{

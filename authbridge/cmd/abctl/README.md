@@ -285,6 +285,24 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   six-hour figure under a `MONTH` label would understate the month by about 120x
   while looking perfectly well-formed.
 
+  <a id="spans-and-the-cost-ledger"></a>
+  **Spans and the cost ledger.** Three of the four spans are ledger-backed, so what
+  abctl can really distinguish depends on whether the proxy keeps one:
+
+  | | `LAST 1H` | `TODAY` | `7 DAYS` | `MONTH` |
+  |---|---|---|---|---|
+  | local install (ledger on) | ring | ledger | ledger | ledger |
+  | Kubernetes (no ledger) | ring | `—` | `—` | `—` |
+
+  The **band** detects this and draws `—`, so it never labels six hours of spend as a
+  month. The **`$` breakdown does not**: `w` still offers all four spans there, and
+  without a ledger three of them return the same clamped six-hour fold under three
+  different captions. That is a known limitation rather than a design: the target is
+  a local install, where the ledger is on by default and all four spans are real.
+  `w` used to offer 15m/1h/6h, which is what a ledger-less deployment could actually
+  tell apart, and those remain reachable through `abctl cost --window` and the Usage
+  pane.
+
   A poll chain that stops answering is dated on its own label — `TODAY 7m` — so a
   wedged chain cannot pass for a current reading. Each span polls on its own
   cadence (20s for the ring-served hour, a minute for today, five minutes for the
@@ -293,6 +311,15 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   Money is shown to the cent. A charge below half a cent reads `<$0.01`
   rather than `$0.00`, because a known charge displayed as free is a claim
   about the traffic.
+
+  **Cents everywhere, and what that costs.** One spelling on every screen, so two
+  surfaces can never disagree about the same money. The trade is weakest in the
+  events pane, whose unit is a single request rather than a period total: on
+  cache-read-dominated agent traffic a real share of individual events cost under
+  half a cent, and those rows all read `<$0.01` and stop being comparable with each
+  other. Full precision is still there when you need a single event's exact figure —
+  the detail pane (`↵` on a row) shows the raw cost record, and `abctl cost --json`
+  reports `CostMicros`, which is the unrounded integer the ledger stores.
 
   The `~` on `SAVED` sits in the **heading**, not on every value. A saving is
   estimated in every row, so a per-row marker distinguished nothing while
@@ -594,7 +621,7 @@ Layered on top of all of them:
 | `u` | sessions, events, detail | open the usage charts (sessions: all sessions; events/detail: the selected session) |
 | `$` | every pane except the two pickers and usage | expand the spend strip into a per-model breakdown, in place — the table stays on screen. Needs 26 rows; refuses on the two pickers (nothing is connected yet) and on the usage pane, which is already a breakdown with its own cycles |
 | `a` | while the breakdown is open | cycle the axis: model / endpoint / agent. Not `g`, which is the global "jump to top" |
-| `w` | while the breakdown is open | cycle the span: the band's four — last 1h / today / 7 days / month |
+| `w` | while the breakdown is open | cycle the span: the band's four — last 1h / today / 7 days / month. Without a cost ledger only the hour is distinct; see [Spans and the cost ledger](#spans-and-the-cost-ledger) |
 | `m` | usage | cycle metric: tokens / requests / errors / latency |
 | `w` | usage | cycle window: 10m / 1h / 6h |
 | `b` | usage | cycle breakdown: none / status / method / plugin (not offered for latency — there is no per-label latency) |
