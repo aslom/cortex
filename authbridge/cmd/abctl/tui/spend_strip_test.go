@@ -187,9 +187,27 @@ func TestPaneView_NoStripRowOnAShortTerminal(t *testing.T) {
 		Priced: true,
 	}
 
-	if got := m.paneView(); strings.Contains(got, stripLabel) {
-		t.Errorf("19-row terminal drew the strip row it did not reserve: %q", got)
+	// AGAINST THE BAND'S OWN LABELS, not against a "SPEND" prefix. This asserted the absence of
+	// stripLabel, which renderSpendStrip put at the head of its line — and the band has no such
+	// prefix, so the condition became unfalsifiable the moment the band replaced the strip: it
+	// could not have failed on a band drawn in full. The labels ARE the band's identity now.
+	if got := m.paneView(); bandIsDrawn(got) {
+		t.Errorf("19-row terminal drew the band rows it did not reserve: %q", got)
 	}
+}
+
+// bandIsDrawn reports whether any band cell reached the output.
+//
+// ANY of the four rather than all: the fitter drops cells as the terminal narrows, so a test
+// asserting the band is ABSENT has to fail on a single surviving cell — and one asserting it is
+// present must not depend on which cells fitted.
+func bandIsDrawn(view string) bool {
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if strings.Contains(view, spendSpanDefs[span].label) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPaneView_PickerPanesDrawNoStrip(t *testing.T) {
@@ -206,8 +224,8 @@ func TestPaneView_PickerPanesDrawNoStrip(t *testing.T) {
 			Totals: usage.Counts{Requests: 1, CostMicros: 1_120_000, PricedRequests: 1, PriceableRequests: 1},
 			Priced: true,
 		}
-		if got := m.paneView(); strings.Contains(got, stripLabel) {
-			t.Errorf("pane %v drew the strip: %q", p, got)
+		if got := m.paneView(); bandIsDrawn(got) {
+			t.Errorf("pane %v drew the band: %q", p, got)
 		}
 		cancel()
 	}

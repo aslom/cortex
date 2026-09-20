@@ -10,9 +10,6 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
-// stripLabel prefixes the line. Kept short: it is spent on every width.
-const stripLabel = "SPEND"
-
 // stripGap separates whole figures. Three spaces rather than a glyph separator so
 // the figures read as independent readings rather than as one expression — the
 // same spacing the footer's status line uses between its own readings.
