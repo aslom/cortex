@@ -278,16 +278,13 @@ either precision alone.
 
 ### 3.7 `~` moves to the label; visual hierarchy
 
-`inexactMarker` comes off `SAVED` *values* and goes onto the label — `SAVED ~` in the
-sessions table header, and in the band's own `SAVED` cell label. It is applied
-unconditionally in both places (`sessions_pane.go:297`, `spend_band.go:75`), so per row
-it carries no information while diluting the same glyph on cost figures where it *is*
+`inexactMarker` comes off `SAVED` *values* and goes onto the sessions table's column
+heading — `SAVED ~`. It is applied unconditionally (`sessions_pane.go:297`), so per row it
+carries no information while diluting the same glyph on cost figures where it *is*
 conditional. This makes `~` on a money figure mean something again.
 
-The band's `SAVED` cell is treated here and then **removed** by §3.3, which lands in a
-later PR (§4). That is deliberate rather than wasted work: PR 1 must leave the band
-self-consistent, since it ships on its own and may sit in `main` for some time before
-PR 3 follows.
+The band's own `SAVED` cell (`spend_band.go:75`) wears the marker unconditionally for the
+same reason, and needs no treatment here: §3.3 removes that cell, in the same PR (§4).
 
 **The sessions column title cannot simply be renamed.** PR #1071 makes the title string
 do double duty — it is both the rendered heading and the lookup key — and `headerTitle`
@@ -339,8 +336,10 @@ Visual hierarchy, using the palette already in `styles.go` — no new colors:
   `w`-selected cell takes `colorAccent` + bold while the drawer is open.
 - `ACTIVE ●` becomes `colorOK`; a row with no activity and no cost recedes to
   `styleMuted` (the `default` row in the screen above).
-- The tab strip (`[Sessions] Pipeline`) styles the active tab rather than printing
-  brackets.
+Item F from the original sketch — "style the tab strip" — is **dropped**. `viewTabs`
+(`app.go:1706`) already renders the active tab through `styleTitle` and the inactive one
+through `styleHint`. The only change left would be removing the literal `[ ]`, and those
+brackets are what still distinguishes the tabs on a terminal with no color, so they stay.
 
 These are style-only and add no columns, so no fitting arithmetic changes. Tests that
 assert rendered text need escape-aware comparison, which is why this is its own commit.
@@ -391,31 +390,58 @@ bubbles truncates."* §3.6 changes every money cell's width, which changes what
 since the padding is derived from the fitted width — but it means §3.6 cannot be reviewed
 by diffing expected strings alone; the cell/heading agreement test is the check.
 
-**Ordering.** PR 1 (§4) overlaps #1071 in `sessions_pane.go` and `table_width.go`.
-It should be **rebased onto #1071 after that merges** rather than developed in parallel:
-the `headerTitle` change in §3.7 is an edit to a function #1071 introduces, so there is no
-version of PR 1 that is correct against today's `main` *and* against `main` once #1071
-lands. If #1071 stalls, PR 1's marker move is the one piece to hold back — the cents
-change (§3.6) is independent of it.
+**Ordering.** This work overlaps #1071 in `sessions_pane.go` and `table_width.go`, and
+commits 1 and 3 (§4) edit `headerTitle` — a function #1071 introduces. So the branch
+**rebases onto #1071 after that merges** rather than being developed in parallel; there is
+no version of it correct against today's `main` *and* against `main` once #1071 lands.
+
+If #1071 stalls, commits 1–3 are the pieces to hold back. Everything from commit 4 onward
+— the cents change, the scope-note deletion, the `month` window, the band — is independent
+of it, which is the other reason the commit order puts the marker work first.
 
 ## 4. Staging
 
-Two independent tracks. The first has no server dependency and can land immediately.
+**One PR**, titled `Feat: Show the four budget spans in the abctl spend band`. Roughly
+1,650 lines, measured rather than estimated: 135 test lines carry four-decimal dollar
+literals, 25 non-test lines touch the money formatters, and `spend_band.go` is a 120-line
+file getting a rewrite. Well inside the 10K ceiling.
 
-**PR 1 — readability (`Fix:`).** §3.6 cents, §3.7 marker and hierarchy, and deleting
-`sessionsScopeNote` (defect 1c) outright rather than rewording it: with the band
-cost-only and span-labelled per §3.3, the table's per-session grain is legible from the
-contrast, and the `?` overlay already states it in full (`help_overlay.go:47`). No new
-API surface, no new polls. **Rebase onto #1071 — see §3.9.**
+It **rebases onto PR #1071** (§3.9). Two of the commits below edit `headerTitle`, a
+function that PR introduces, so there is no ordering in which this work is correct against
+today's `main` as well as post-merge `main`.
 
-**PR 2 — `month` window (`Feat:`).** §3.1 and §3.8, server-side only. `usage`, `config`,
-`costledger`. Inert until a client asks for it.
+Reviewability comes from the commit sequence rather than from splitting the PR. Each
+commit below builds, passes tests, and leaves the surface self-consistent — so the diff can
+be read one concern at a time, and a contentious commit can be dropped without unpicking
+the rest.
 
-**PR 3 — spans in the band and `w` (`Feat:`).** §3.2, §3.3, §3.4, §3.5. Depends on PR 2.
+| # | Commit | § | ~lines |
+|---|---|---|---|
+| 1 | `fix(abctl): strip a column marker in headerTitle` | 3.7 | 15 |
+| 2 | `test(abctl): assert every right-aligned column name resolves` | 5 | 30 |
+| 3 | `fix(abctl): move the SAVED estimate marker to the column heading` | 3.7 | 60 |
+| 4 | `fix(abctl): render money to cents, not ten-thousandths` | 3.6 | 300 |
+| 5 | `fix(abctl): drop the misleading lifetime-totals note` | 1c | 40 |
+| 6 | `feat(usage): add a month-to-date symbolic window` | 3.1 | 200 |
+| 7 | `feat(costledger): retain 32 days so a 31-day month can be answered` | 3.8 | 100 |
+| 8 | `refactor(abctl): make the spend polls a table of span chains` | 3.4 | 350 |
+| 9 | `feat(abctl): show the four budget spans in the band` | 3.3 | 300 |
+| 10 | `feat(abctl): cycle the four budget spans with w` | 3.2 | 150 |
+| 11 | `fix(abctl): disclose a span the deployment cannot answer` | 3.5 | 120 |
 
-Splitting 3 further is possible (poll decoupling before the render change) but the band
-cannot show four spans until four chains feed it, so they would not be independently
-useful.
+Commit 2 lands before 3 deliberately: it is the assertion that would have caught commit
+3's silent failure mode, and it belongs to #1071's design rather than to this work — so it
+is also the one commit worth offering upstream on its own.
+
+Commits 6 and 7 are the only ones touching `authlib`, and therefore the only ones that
+cross the productization sync boundary. Keeping them contiguous and separately titled means
+they can be lifted out into their own PR if that review needs to happen independently,
+without rewriting the rest.
+
+Commit 8 is the soft estimate. It generalises two hand-rolled poll chains — each with its
+own snapshot, error, `reqSeq`, `tickGen`, message type and tick function across an 828-line
+file — into five table-driven ones. It deletes duplication rather than adding it, but the
+final shape is plan work, not proposal work.
 
 ## 5. Testing
 
