@@ -1590,14 +1590,25 @@ func (m *model) paneView() string {
 	var body string
 	switch m.pane {
 	case paneSessions:
+		// NO SCOPE NOTE. The title used to carry " · lifetime totals", to say that the table's
+		// figures are per-session sums rather than slices of a clock window. It is gone, because
+		// it misread in the one direction that matters:
+		//
+		//   - "lifetime" NAMES A SPAN, and this table has no single span. Each row covers its own
+		//     session, first event to last, and no two rows need cover the same duration. There
+		//     was no one duration for the word to be true about.
+		//   - WHERE IT DID IMPLY A SPAN, it implied the wrong one. The session store is in memory
+		//     and resets when the proxy restarts, so a session's lifetime cannot exceed proxy
+		//     uptime — measured on a freshly restarted local proxy, the COST column summed to
+		//     $4.04, matching the band's rolling hour, while the band's day read $18.80. The word
+		//     that sounds like "everything ever" was labelling the SHORTEST span on screen.
+		//   - It sat at the end of the title, one line above a band whose nearest cells are
+		//     explicitly clock-windowed, so it read as covering those too.
+		//
+		// The contrast carries it instead: every band cell names its own span, and the table is
+		// the only thing on screen with a SESSION column. The [?] overlay still states it in full
+		// for a reader who wants it spelled out.
 		title = fmt.Sprintf("abctl · %s · %s", m.endpoint, viewTabs(paneSessions))
-		// The span of every figure in the table below — see sessionsScopeNote, which argues why
-		// this belongs in the title rather than in the headers or the hint line. Added only when
-		// it fits, because the title is not otherwise fitted and a wrapped one costs a row of the
-		// table it describes.
-		if scoped := title + sessionsScopeNote; lipgloss.Width(scoped) <= m.width {
-			title = scoped
-		}
 		body = m.sessionsTbl.View()
 	case paneEvents:
 		title = fmt.Sprintf("abctl · %s", trunc(m.selectedSess, 36))

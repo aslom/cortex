@@ -39,12 +39,17 @@ var globalKeys = keyGroup{
 		// listing every binding, which is the only reason a reader would find `$` at all. The
 		// drawer's own hint line only helps someone who already pressed it.
 		{"$", "expand the spend band into tiers and a breakdown (not on usage)"},
-		// The scope, stated where there is always room for it. The sessions footer carries
-		// the same note, but it is a notice and fitHintLine drops notices before keys — so at
-		// 110 columns it is already gone, and this is the surface that cannot run out of
-		// width. A session's lifetime COST sitting under a band reading TODAY is the one
-		// figure on screen a reader is likely to call a bug.
-		{"", "the band is today and the window; the table's COST and SAVED are per-session lifetime"},
+		// The scope, stated where there is always room for it — and THIS IS NOW THE ONLY PLACE
+		// IT IS SPELLED OUT. The sessions footer used to carry it as a notice, and the pane
+		// title after that as " · lifetime totals"; both are gone, because a note that has to
+		// fit in a title could only name a span, and the table has no single span to name (see
+		// paneView's sessions case). Here there is room for the two facts that actually matter.
+		//
+		// "resets on proxy restart" rather than "lifetime", which is the correction that
+		// motivated dropping the title note: the store is in memory, so a session's figures
+		// cover only as far back as the current proxy process. A reader comparing the table
+		// against the band's day figure and finding it smaller is seeing that, not a bug.
+		{"", "every band cell names its own span; the table is per session, and resets on proxy restart"},
 		{"a · w", "while it is open: cycle the axis · the span"},
 		{"q · ctrl+c", "quit"},
 	},

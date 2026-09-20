@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
@@ -596,73 +595,6 @@ func TestSessionsRows_TruncateTheSessionID(t *testing.T) {
 	m.rebuildSessionsTable()
 	if got := m.sessionsTbl.Rows()[0][0]; got != "default" {
 		t.Errorf("short id rendered as %q, want %q untouched", got, "default")
-	}
-}
-
-// THE SCOPE IS ON SCREEN, not only in this file's comments.
-//
-// The reader's report that started this: a spend strip reading 84.6M tokens for its rolling hour,
-// directly above a TOKENS column summing to 123.8M for the same traffic. Both correct, three spans
-// on one screen (hour, day, lifetime) and one of them stated. The strip now names its own span as
-// a group prefix; this is the other half.
-func TestPaneView_SessionsTitleStatesTheLifetimeScope(t *testing.T) {
-	m := &model{width: 160, height: 40, endpoint: "http://x"}
-	m.pane = paneSessions
-	m.sessionsTbl = newSessionsTable()
-	m.layout()
-
-	out := m.paneView()
-	title := strings.SplitN(out, "\n", 2)[0]
-	if !strings.Contains(title, "lifetime") {
-		t.Errorf("sessions title %q does not say the figures below it are lifetime totals; a reader "+
-			"comparing the TOKENS column against the strip's window has nothing telling them the "+
-			"two are different questions", title)
-	}
-}
-
-// AND IT YIELDS RATHER THAN WRAPS. The title is not width-fitted, so an unconditional suffix
-// pushes it past a narrow terminal — and a wrapped title costs a row of the table it describes,
-// which is the same failure renderSpendStrip's whole ladder is built to avoid.
-//
-// THE ASSERTION IS "THE NOTE NEVER OVERFLOWS", NOT "THE TITLE NEVER DOES", and the difference is a
-// finding rather than a weakening: the base title already overflows without any note at all —
-// "abctl · http://x · [Sessions] Pipeline" is 38 columns and nothing fits it, so every pane's
-// title wraps on a terminal narrower than itself. That predates this change and is left alone
-// here; what this pins is that the note is not a new way to reach it.
-//
-// Asserted across every width rather than at one chosen number, because the note's length and the
-// endpoint's are both free to change while the invariant is neither.
-func TestPaneView_SessionsScopeNoteNeverOverflowsTheTerminal(t *testing.T) {
-	for _, endpoint := range []string{"http://x", "http://weather-agent-7f9c.team1.svc:9094"} {
-		for w := 20; w <= 200; w++ {
-			m := &model{width: w, height: 40, endpoint: endpoint}
-			m.pane = paneSessions
-			m.sessionsTbl = newSessionsTable()
-			m.layout()
-
-			title := strings.SplitN(m.paneView(), "\n", 2)[0]
-			if !strings.Contains(title, strings.TrimSpace(sessionsScopeNote)) {
-				continue // dropped, which is the honest degradation
-			}
-			if got := lipgloss.Width(title); got > w {
-				t.Fatalf("width %d, endpoint %q: title carries the scope note at %d columns (%q) "+
-					"and will wrap", w, endpoint, got, title)
-			}
-		}
-	}
-}
-
-// And it IS added wherever there is room, so the guard above cannot be satisfied by never adding
-// it at all. The widest fixture leaves 90 columns of slack, so a version that dropped the note
-// unconditionally would pass every assertion in the test above.
-func TestPaneView_SessionsScopeNoteAppearsWhenItFits(t *testing.T) {
-	m := &model{width: 200, height: 40, endpoint: "http://x"}
-	m.pane = paneSessions
-	m.sessionsTbl = newSessionsTable()
-	m.layout()
-
-	if title := strings.SplitN(m.paneView(), "\n", 2)[0]; !strings.Contains(title, sessionsScopeNote) {
-		t.Errorf("sessions title %q omits the scope note on a 200-column terminal", title)
 	}
 }
 

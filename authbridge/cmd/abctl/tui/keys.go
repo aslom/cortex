@@ -953,11 +953,16 @@ func (m *model) helpView() string {
 	case panePods:
 		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [r] reload  [?] keys  [q] quit"
 	case paneSessions:
-		// THE LIFETIME SCOPE IS NOT SAID HERE. It was, as a leading notice — and the pane's
-		// TITLE now carries it instead (see sessionsScopeNote), which is the better place for
-		// the same words: adjacent to the table they describe, and width-fitted so it drops
-		// rather than wraps. A notice here would have been the third copy on one screen, after
-		// the title and the [?] overlay, which is the redundancy "name the span once" forbids.
+		// THE PER-SESSION SCOPE IS NOT SAID HERE. It was, as a leading notice; then the pane's
+		// title carried it as " · lifetime totals"; now neither does. See paneView's sessions
+		// case for why the note was dropped rather than reworded — "lifetime" named a span this
+		// table does not have, and named the shortest one on screen when it named any.
+		//
+		// A notice here would have been the wrong place for it regardless: fitHintLine drops
+		// whole hints from the FRONT, so anything added here is paid for by the hints ahead of
+		// it — and the two keys that reach cost, [u] and [$], were deliberately placed to
+		// survive an 80-column cut. Spending them to explain a cost column is a bad trade at
+		// any width. The [?] overlay is the surface that cannot run out of room.
 		// [$] spend BESIDE [u] usage, because the footer is where a key gets discovered. It was
 		// documented in the [?] overlay and in the README's own footer sample and was missing
 		// from the line those two describe — so the drawer existed only for a reader who went

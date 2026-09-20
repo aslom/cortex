@@ -230,33 +230,43 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   event count, tokens, cost, saved, active marker. Numerics are right-aligned
   so the digits line up between rows.
 
-  **Every figure in this table is a lifetime total for its session** — which is
-  what the title says, and why the TOKENS column does not sum to the token count
-  in the band above it: that one covers the rolling window its `LAST 1H` label
-  names. Both are right; neither is a check on the other. The same goes for a
-  session's lifetime cost sitting under a smaller `TODAY` — that is the older
-  scope, not a fault.
+  **Every figure in this table is a per-session total**, summed over that
+  session's whole history rather than over a clock window — which is why the
+  TOKENS column does not sum to the token count in the band above it: that one
+  covers the rolling window its `LAST 1H` label names. Both are right; neither
+  is a check on the other.
 
-  The two money columns are dropped entirely on a terminal too narrow to show a
-  sub-cent charge honestly — below 72 columns — rather than rounded to `$0.00`
-  or blanked.
+  The table is also **not** a longer span than the band, which is the reading
+  worth heading off. The session store is in memory, so a session's figures only
+  reach back as far as the current proxy process — on a freshly restarted proxy
+  the whole COST column can sum to less than `TODAY`, because `TODAY` comes from
+  the durable cost ledger and survives restarts. `[?]` states both facts; the
+  title deliberately does not, since no single span is true of every row.
+
+  The two money columns are dropped entirely — below 69 columns — rather than
+  rounded to `$0.00` or blanked, on a terminal too narrow to show a sub-cent
+  charge honestly and still leave every other column its own minimum.
 
   ```
-  abctl · http://localhost:9094 · [Sessions] Pipeline · lifetime totals
-  TODAY      LAST 1H   SAVED      CACHE HIT  TOKENS
-  $30.9350   $2.9100   ~$0.1804   81%        9.9M
+  abctl · http://localhost:9094 · [Sessions] Pipeline
+  TODAY     LAST 1H  SAVED     CACHE HIT  TOKENS
+  $30.93    $2.91    ~$0.18    81%        9.9M
 
-   SESSION         UPDATED    EVENTS   TOKENS      COST      SAVED  ACTIVE
-   ctx-abc-1234…   3s ago         42     48.2k   $0.1214   ~$0.0038  ●
-   ctx-def-5678…   18m ago        15      1.2k   $0.0031          —
-   default         1h ago          8         —         —          —
+   SESSION         UPDATED    EVENTS   TOKENS     COST     SAVED  ACTIVE
+   ctx-abc-1234…   3s ago         42     48.2k   $0.12   ~<$0.01  ●
+   ctx-def-5678…   18m ago        15      1.2k  <$0.01         —
+   default         1h ago          8         —       —         —
 
   ● connected   2.1 ev/s   drops: 0
-  cost/saved: lifetime   [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
+  [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
   ```
 
-  Labels sit above their values rather than beside them: `$30.9350 today`
-  reads as a list, `TODAY` over `$30.9350` reads as a figure.
+  Labels sit above their values rather than beside them: `$30.93 today`
+  reads as a list, `TODAY` over `$30.93` reads as a figure.
+
+  Money is shown to the cent. A charge below half a cent reads `<$0.01`
+  rather than `$0.00`, because a known charge displayed as free is a claim
+  about the traffic.
 
   `$` expands the band into two columns — where the money went, by rate tier,
   and who spent it, by model, endpoint or agent:
