@@ -1075,25 +1075,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spendTickMsg:
-		// ONE guard, not two, and unlike the usage chain: this tick carries no pane or
-		// session scope, so generation is the only thing that can make it stale. See
-		// spendTickIsCurrent.
-		if !m.spendTickIsCurrent(msg.gen) {
+		// ONE CASE FOR EVERY SPAN, because the tick carries the span it belongs to. The
+		// four chains poll on four cadences — a ring read every 20s, up to thirty-one day
+		// files every 5 minutes — and each reschedules only itself.
+		//
+		// TWO guards in one, and unlike the usage chain this tick carries no pane or
+		// session scope: the span has to be a real one and the generation has to be live.
+		// See spendTickIsCurrent.
+		if !m.spendTickIsCurrent(msg.span, msg.gen) {
 			return m, nil
 		}
-		return m, tea.Batch(m.fetchSpend(), spendTick(msg.gen))
+		return m, tea.Batch(m.fetchSpendSpan(msg.span), spendTick(msg.span, msg.gen))
 
-	case spendTodayLoadedMsg:
-		m.applySpendTodayLoaded(msg)
+	case spendDrawerLoadedMsg:
+		m.applySpendDrawerLoaded(msg)
 		return m, nil
 
-	case spendTodayTickMsg:
-		// The day figure polls on its own, much slower clock — it reads day files off
-		// disk where the window figure reads a ring out of memory.
-		if !m.spendTodayTickIsCurrent(msg.gen) {
+	case spendDrawerTickMsg:
+		// The drawer's own chain, and it stops when the drawer closes rather than running
+		// for the session: its span can be a ledger window, so refreshing forever would
+		// walk day files to redraw rows nobody is looking at.
+		if !m.spendDrawerTickIsCurrent(msg.gen) || !m.spendDrawerVisible() {
 			return m, nil
 		}
-		return m, tea.Batch(m.fetchSpendToday(), spendTodayTick(msg.gen))
+		return m, tea.Batch(m.fetchSpendDrawer(), spendDrawerTick(msg.gen))
 
 	case streamClosedMsg:
 		// In picker mode, ignore the close from the previous session —
@@ -1703,7 +1708,7 @@ func (m *model) paneView() string {
 				// The axis and span come off the SNAPSHOT, not off what was last requested: see
 				// drawerLabels.
 				axis, window := m.drawerLabels()
-				lines = renderSpendDrawer(m.spend.snap, axis, window, m.width)
+				lines = renderSpendDrawer(m.spend.drawer.snap, axis, window, m.width)
 			}
 			for len(lines) < spendDrawerLines {
 				lines = append(lines, "")

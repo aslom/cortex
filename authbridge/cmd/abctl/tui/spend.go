@@ -10,19 +10,28 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
-// spendPollInterval is how often the strip refreshes. Matches the Usage pane's
-// cadence: the strip is glanceable chrome, not a live meter, and a faster poll
-// would spend requests to move a figure the user is not watching.
+// spendPollInterval is the band's FASTEST cadence — the hour's — and the figure
+// spendStaleAfter is derived from. Matches the Usage pane's: the band is glanceable chrome,
+// not a live meter, and a faster poll would spend requests to move a figure nobody is
+// watching move.
+//
+// EACH SPAN'S OWN CADENCE LIVES IN spendSpanDefs, because they differ by fifteen times and
+// for a reason that belongs beside the span rather than in a constant here: the hour is a
+// ring read, the month is a walk over up to thirty-one day files.
 const spendPollInterval = 20 * time.Second
 
-// spendTodayPollInterval is how often the "today" headline refreshes.
+// spendDrawerPollInterval is how often an OPEN drawer refreshes itself.
 //
-// Fifteen times slower than the window poll on purpose: "today" is a figure that
-// moves slowly by construction — it only ever grows, and by the size of one turn —
-// so a 20s cadence would spend a request every 20 seconds to move a number a user
-// reads once a session. It is also the more expensive of the two answers, since the
-// server reads day files off disk for it rather than summing an in-memory ring.
-const spendTodayPollInterval = 5 * time.Minute
+// The slow cadence, because the drawer's span can be a ledger window: re-folding a month's
+// breakdown every twenty seconds would walk day files to redraw four rows nobody asked to
+// change. Pressing `a` or `w` refetches immediately, so this only governs how stale an
+// untouched open drawer gets.
+const spendDrawerPollInterval = 5 * time.Minute
+
+// spendFetchTimeout bounds one poll. Generous enough for a ledger walk over a month of day
+// files on an operator-configured path — the slowest thing any of these ask for — and short
+// enough that a wedged endpoint surfaces as staleness rather than as a stuck chain.
+const spendFetchTimeout = 5 * time.Second
 
 // spendStaleAfter is how old the window figure has to be before the strip says so.
 //
@@ -36,13 +45,19 @@ const spendTodayPollInterval = 5 * time.Minute
 // that stops answering therefore looked exactly like a current reading — no error, no
 // staleness, the last good figure sitting there indefinitely.
 //
-// BOTH CHAINS ARE TIMED, and the age reported is the OLDER of the two. Only the window chain
-// used to be, which put the gap on the worst possible figure: today outranks the window, polls
-// twelve times more slowly, and is the last thing the fitter drops — so the most prominent
-// reading on the strip was the one that could silently go hours stale while the 1h figure beside
-// it carried a "polled Nm ago". One age for the line rather than one per figure, because this
-// qualifies the freshness of the whole answer, and taking the older of the two is what stops a
-// fresh window poll vouching for a wedged day poll.
+// EVERY CHAIN IS TIMED, and the age reported is the OLDEST. Only the window chain used to be,
+// which put the gap on the worst possible figure: the day outranks the hour, polls far more
+// slowly, and is among the last things the fitter drops — so the most prominent reading was the
+// one that could silently go hours stale while the hour beside it carried a "polled Nm ago".
+// One age for the band rather than one per figure, because this qualifies the freshness of the
+// whole answer, and taking the oldest is what stops a fresh hour poll vouching for a wedged
+// month poll.
+//
+// DERIVED FROM THE FASTEST CADENCE, which is the hour's. A threshold set against the SLOWEST
+// would make a wedged hour chain look healthy for ten minutes; set against the fastest, a
+// healthy month chain is briefly "stale" between its own polls — so the renderer reports the
+// age rather than an alarm, and the reader sees a figure with a timestamp rather than a
+// warning about nothing.
 const spendStaleAfter = 2 * spendPollInterval
 
 // spendWindow is the span the strip REQUESTS, and spendResolution asks for it as
@@ -67,67 +82,148 @@ const (
 // driving both from one chain would blank the strip the moment a user scoped the
 // Usage pane to one session, which is exactly when they are looking at cost.
 //
-// The cost is one extra GET /v1/usage per 20s asking for a single bucket, plus one
-// per 5 MINUTES for the ledger-backed "today" figure on its own chain. Together with
-// the Usage pane's chain that is three, and all three can be alive at once —
-// recorded here so it reads as a decision rather than an oversight. The today poll is
-// the only one that touches disk server-side, which is why it is the slow one.
+// THE COST, recorded here so it reads as a decision rather than an oversight. Four chains,
+// each on its own cadence (see spendSpanDefs): one ring read every 20s, one day file every
+// minute, and two ledger walks every 5 minutes. Averaged out that is roughly five requests a
+// minute, against the two the previous two-chain band made — the three ledger-backed spans
+// are the ones that touch disk server-side, which is exactly why they are the slow ones.
+//
+// Plus the drawer's chain while the drawer is open, and the Usage pane's while that pane is.
+// All six can be alive at once.
 type spendState struct {
-	snap      *usage.Snapshot
-	err       error
-	lastFetch time.Time
-
-	// todaySnap is the ledger-backed "today" answer, on its OWN chain with its own
-	// counters. Two chains against one endpoint, and a reply from one must never be
-	// applied as the other's: they ask different questions, so a today reply stored
-	// as the window snapshot would label a day's spend with the window's label and
-	// drive the burn rate off it.
+	// chains holds one poll chain per budget span, indexed by spendSpan.
 	//
-	// A separate error too, because the two can fail independently — an older proxy
-	// answers the window fine and 400s on window=today — and one broken figure must
-	// not blank the other.
-	todaySnap *usage.Snapshot
-	todayErr  error
+	// AN ARRAY RATHER THAN A FIELD GROUP PER SPAN, and the two it replaces are why. The
+	// window and today chains were written out longhand — snap, err, lastFetch, reqSeq,
+	// tickGen, twice, with each field's doc explaining that it could not be shared. Every
+	// one of those reasons is a reason to have N chains rather than two, and none of them
+	// is a reason to spell the Nth by hand: four copies of that group would be twenty
+	// fields, and adding a fifth span would mean finding all five places that poll.
+	//
+	// The array also makes the invariants structural. A reply can only be stored through
+	// its own span's index, so the "a today reply must never be applied as the window's"
+	// rule is no longer a convention the dispatch has to honour — see spendLoadedMsg.
+	chains [numSpendSpans]spendChain
 
-	// reqSeq is the id of the most recently ISSUED request; a reply carrying a
-	// different id is stale and dropped. An id rather than a comparison of the
-	// request's fields, for the reason usageLoadedMsg.req records: comparing
-	// fields means every future request option has to be added to the comparison
-	// or it silently stops being covered, while an id cannot be partially right.
-	reqSeq uint64
-	// tickGen identifies the current polling chain. See usageState.tickGen: a
-	// quick exit and re-entry left two chains alive, each rescheduling the other's
-	// successor and doubling the request rate for the life of the session.
-	tickGen uint64
+	// drawer is the breakdown's OWN chain, and it exists because the band's chains cannot
+	// serve it any more.
+	//
+	// They used to: one poll asked for the drawer's axis and the strip read Totals off the
+	// same answer while the drawer read Series. That worked while the band showed exactly
+	// one rolling window — the one the drawer was cycling — and it is precisely what made
+	// `w` silently change what the band's window cell reported. With the band pinned to
+	// four fixed spans the two questions have come apart: the band asks four windows with
+	// no grouping, and the drawer asks ONE window folded by an axis.
+	//
+	// Polled only while the drawer is open, so a reader who never presses `$` pays nothing
+	// for it.
+	drawer spendChain
 
-	// todayReqSeq and todayTickGen are the today chain's own counters, for the reason
-	// the snapshot is its own field: sharing reqSeq with the window chain would make
-	// every window reply invalidate the today request in flight, so the slower poll
-	// would never land at all.
-	todayReqSeq  uint64
-	todayTickGen uint64
-
-	// todayLastFetch is the today chain's own timestamp, for the reason its snapshot and its
-	// error are its own: the two chains answer at different cadences and can wedge
-	// independently, so one timestamp cannot describe both. See spendStaleAfter.
-	todayLastFetch time.Time
-	// expanded is the spend drawer's only state: whether the strip is showing its
+	// expanded is the spend drawer's only visibility state: whether the band is showing its
 	// breakdown. See spend_drawer.go for why a drawer rather than a pane.
 	expanded bool
 	// groupIdx indexes spendDrawerAxes; windowStep is an OFFSET from
 	// spendDrawerWindowDefault into spendDrawerWindows. Together they are the axis the
 	// server folds for and the span it covers.
 	//
-	// ON THIS STRUCT rather than on a drawer struct of its own, because they are what the
-	// STRIP's poll asks for: the drawer renders the same snapshot the strip does, so one
-	// poll serves both and there is one place that knows what was requested.
-	//
-	// BOTH ZERO VALUES ARE THE PRE-DRAWER DEFAULTS, which is why one is an index and the
-	// other an offset: GroupModel is already first in the axis slice, but spendWindow is in
-	// the MIDDLE of an ascending span slice, so an index of zero there would silently move
-	// the strip's own poll to 15m. See spendState.window.
+	// STILL ON THIS STRUCT rather than on a drawer struct of its own, because they are what
+	// the drawer's poll asks for and this is where that poll's state lives.
 	groupIdx   int
 	windowStep int
+}
+
+// spendSpan identifies one of the four budget spans the band reports.
+//
+// FOUR, AND THESE FOUR, because they are the spans a budget is actually read against: the
+// live hour (is something running away right now), the day, the week, and the month — which
+// is when the budget resets. Anything shorter is a diagnostic rather than a budget, and
+// belongs behind the drawer's own span cycle or `abctl cost --window`.
+type spendSpan int
+
+const (
+	spanHour spendSpan = iota
+	spanToday
+	span7d
+	spanMonth
+	numSpendSpans
+)
+
+// valid reports whether a span came from this enum. Guarded rather than trusted because
+// spendLoadedMsg carries one across a goroutine boundary and an out-of-range index is a panic
+// inside the array, not a dropped reply.
+func (s spendSpan) valid() bool { return s >= 0 && s < numSpendSpans }
+
+// spendSpanDef is one span's wire window, its label on the band, and how often it is polled.
+type spendSpanDef struct {
+	// window is the /v1/usage `window` parameter. A STRING, not a duration, because three
+	// of the four are symbolic boundaries that time.ParseDuration cannot express — see
+	// usage.ParseWindowSpec.
+	window string
+	// resolution asks the ring for a single bucket. Zero omits the parameter, which is
+	// right for every symbolic window: the ledger path serves one bucket regardless and
+	// ignores the resolution entirely.
+	resolution time.Duration
+	// label is the band's column heading, and it NAMES THE SPAN. That is the invariant the
+	// band rests on: every cell's label states the period its figure covers, so no figure
+	// can sit on the band without saying what it is a figure of.
+	label string
+	// interval is this span's poll cadence.
+	//
+	// SLOWER FOR LONGER SPANS, and that is not a compromise. A month-to-date total moves by
+	// well under a tenth of a percent in twenty seconds, while answering it costs the server
+	// a walk over up to thirty-one day files on an operator-configured path. Polling it at
+	// the hour's cadence would spend that walk every twenty seconds to move a figure nobody
+	// can see move.
+	interval time.Duration
+}
+
+// spendSpanDefs is the whole table. Ascending span order, which is also the band's
+// left-to-right order: reading outwards from "right now" to "this month".
+var spendSpanDefs = [numSpendSpans]spendSpanDef{
+	// The only ring-served span, and therefore the only cheap one: no disk, no day files.
+	spanHour: {window: "1h", resolution: time.Hour, label: "LAST 1H", interval: 20 * time.Second},
+	// One day file. Fast enough for a minute's cadence, and the day figure is the one an
+	// operator watches most closely after the hour.
+	spanToday: {window: usage.WindowToday, label: "TODAY", interval: time.Minute},
+	// Up to nine day files (usage.Window7dLocalDays) and up to thirty-one
+	// (usage.WindowMonthLocalDays). Both slow-moving, both on the slow cadence.
+	span7d:    {window: usage.Window7d, label: "7 DAYS", interval: 5 * time.Minute},
+	spanMonth: {window: usage.WindowMonth, label: "MONTH", interval: 5 * time.Minute},
+}
+
+// spendChain is one span's poll state: the last answer, whether it failed, when it landed,
+// and the two counters that decide which replies and which ticks still belong.
+//
+// Every field here is one the old two-chain code had to duplicate, each with a doc saying
+// why it could not be shared. Those docs are preserved on the fields, because the reasons
+// are what make this a per-chain struct rather than a shared one.
+type spendChain struct {
+	snap      *usage.Snapshot
+	err       error
+	lastFetch time.Time
+	// reqSeq is the id of the most recently ISSUED request on this chain; a reply carrying a
+	// different id is stale and dropped. An id rather than a comparison of the request's
+	// fields, for the reason usageLoadedMsg.req records: comparing fields means every future
+	// request option has to be added to the comparison or it silently stops being covered,
+	// while an id cannot be partially right.
+	//
+	// PER CHAIN, because a shared counter would make every fast reply invalidate the slow
+	// request in flight and the slower poll would never land at all.
+	reqSeq uint64
+	// tickGen identifies the current polling chain. See usageState.tickGen: a quick exit and
+	// re-entry left two chains alive, each rescheduling the other's successor and doubling
+	// the request rate for the life of the session.
+	tickGen uint64
+}
+
+// invalidate drops this chain's data and disowns anything in flight. See
+// spendState.invalidate for why both counters move rather than only tickGen.
+func (c *spendChain) invalidate() {
+	c.snap = nil
+	c.err = nil
+	c.lastFetch = time.Time{}
+	c.reqSeq++
+	c.tickGen++
 }
 
 // invalidate drops the data this state describes and disowns anything in flight.
@@ -143,45 +239,62 @@ type spendState struct {
 //
 // Mirrors the m.usage reset in backToPodsPane, which is the same state shape
 // facing the same hazard.
+// EVERY CHAIN, AND THE DRAWER'S TOO, by walking the array rather than naming them. Each
+// span's figure is the previous pod's just as much as the hour's is, and each reply outlives
+// the switch by the same 5s timeout — so a loop is not merely shorter than four hand-written
+// blocks, it is what makes a fifth span impossible to forget.
 func (s *spendState) invalidate() {
-	s.snap = nil
-	s.err = nil
-	s.lastFetch = time.Time{}
-	s.todayLastFetch = time.Time{}
-	s.reqSeq++
-	s.tickGen++
-	// The today figure is a different pod's day just as much as the window figure is
-	// its hour, and its reply outlives the switch by the same 5s timeout. Both
-	// counters move for the reason the window's do: bumping tickGen alone stops the
-	// old chain from scheduling, not the reply already in the air.
-	s.todaySnap = nil
-	s.todayErr = nil
-	s.todayReqSeq++
-	s.todayTickGen++
+	for i := range s.chains {
+		s.chains[i].invalidate()
+	}
+	s.drawer.invalidate()
 }
 
-// spendLoadedMsg carries a fetched snapshot back to Update.
+// spendLoadedMsg carries one span's fetched snapshot back to Update.
+//
+// ONE TYPE CARRYING ITS SPAN, replacing the pair of near-identical types the two chains
+// used. That pair's own doc argued for distinct types — "the compiler enforces what a shared
+// type would leave to a field" — and it was right about the hazard while the dispatch was
+// hand-written: two switch cases, each naming a chain, and nothing but care stopping the
+// today case storing into the window's fields.
+//
+// FOUR SPANS RETIRE THAT ARGUMENT RATHER THAN MULTIPLYING IT. Eight types would not make the
+// dispatch safer, only longer, and the routing is now DATA: applySpendLoaded indexes
+// chains[msg.span], so there is exactly one place a reply can be stored and it cannot pick
+// the wrong chain — a mis-tagged message would have to be constructed wrong at the fetch,
+// where the span is the same variable that chose the window. The compiler's guarantee is
+// replaced by a structural one rather than dropped.
+//
+// span is validated on arrival all the same: it crosses a goroutine boundary, and an
+// out-of-range index is a panic inside the array rather than a dropped reply.
 type spendLoadedMsg struct {
+	span spendSpan
 	snap *usage.Snapshot
 	req  uint64
 	err  error
 }
 
-// spendTickMsg fires the periodic refetch. gen ties it to the chain that
-// scheduled it, so a tick from a superseded chain is ignored.
-type spendTickMsg struct{ gen uint64 }
+// spendTickMsg fires one span's periodic refetch. gen ties it to the chain that scheduled it,
+// so a tick from a superseded chain is ignored; span says which chain to reschedule.
+type spendTickMsg struct {
+	span spendSpan
+	gen  uint64
+}
 
-// spendTodayLoadedMsg carries the ledger-backed "today" snapshot back to Update.
-// A distinct type from spendLoadedMsg so the two replies cannot be confused by the
-// dispatch switch — the compiler enforces what a shared type would leave to a field.
-type spendTodayLoadedMsg struct {
+// spendDrawerLoadedMsg and spendDrawerTickMsg are the drawer chain's own pair.
+//
+// DISTINCT TYPES from the band's, and here the original argument still holds: the drawer asks
+// a different QUESTION — one window, folded by an axis — so its reply is not a band span's
+// reply with a different tag, and there is no index that could route it. A shared type would
+// need a sentinel span meaning "not a band span", which is the shape that invites a reply
+// into chains[0].
+type spendDrawerLoadedMsg struct {
 	snap *usage.Snapshot
 	req  uint64
 	err  error
 }
 
-// spendTodayTickMsg fires the today refetch, on its own generation.
-type spendTodayTickMsg struct{ gen uint64 }
+type spendDrawerTickMsg struct{ gen uint64 }
 
 // spendSummary is what the strip renders.
 //
@@ -402,7 +515,7 @@ func (m *model) spendSummary() spendSummary {
 	// no diagnostic on every poll forever — while layout() went on reserving the
 	// row, leaving a permanent blank line above the footer. Rendering nothing and
 	// having nothing notice is the exact failure this whole strip exists to end.
-	if m.spend.err != nil {
+	if m.spend.chains[spanHour].err != nil {
 		// Failed describes the WINDOW poll ONLY, and the today figure is carried through it.
 		//
 		// That is the invariant spendState.todaySnap gives as the reason for splitting the two
@@ -416,7 +529,7 @@ func (m *model) spendSummary() spendSummary {
 		m.applyAges(&out)
 		return out
 	}
-	snap := m.spend.snap
+	snap := m.spend.chains[spanHour].snap
 	if snap == nil {
 		out := spendSummary{}
 		m.applyTodayFigure(&out)
@@ -564,7 +677,7 @@ func cacheHitPct(t usage.Counts) (float64, bool) {
 // Kubernetes deployment's strip.
 func (m *model) applyAges(out *spendSummary) {
 	var oldest time.Duration
-	for _, at := range []time.Time{m.spend.lastFetch, m.spend.todayLastFetch} {
+	for _, at := range []time.Time{m.spend.chains[spanHour].lastFetch, m.spend.chains[spanToday].lastFetch} {
 		if at.IsZero() {
 			continue
 		}
@@ -615,82 +728,149 @@ func formatWindowLabel(d time.Duration) string {
 	}
 }
 
-// spendTickIsCurrent reports whether a tick belongs to the live chain.
-func (m *model) spendTickIsCurrent(gen uint64) bool { return gen == m.spend.tickGen }
+// spendTickIsCurrent reports whether a tick belongs to the live chain for its span.
+func (m *model) spendTickIsCurrent(span spendSpan, gen uint64) bool {
+	return span.valid() && gen == m.spend.chains[span].tickGen
+}
 
-// applySpendLoaded stores a reply unless it is stale.
+// applySpendLoaded stores one span's reply unless it is stale.
 //
-// lastFetch moves only on an accepted reply: advancing it for a discarded one
-// would have the strip report the age of data it just threw away.
+// ROUTED BY msg.span, which is what makes "a reply from one chain must never be applied as
+// another's" structural rather than a rule the dispatch has to honour. There is one store
+// site and it indexes the span the fetch chose, so a today reply cannot land in the hour's
+// fields the way two hand-written switch cases could let it.
 //
-// A failed poll clears snap rather than leaving the previous one in place: once
-// the fetch failed we do not know the current spend, and continuing to draw the
-// last figure would present a stale number as a current one.
+// lastFetch moves only on an accepted reply: advancing it for a discarded one would have the
+// band report the age of data it just threw away.
 //
-// It does NOT render as silence. err is what spendSummary turns into
-// spendSummary.Failed, which the strip draws as "cost unavailable". The row is
-// reserved on height alone, so a broken endpoint rendering "" would buy a
-// permanent blank line above the footer and no diagnostic anywhere on screen.
+// A failed poll clears snap rather than leaving the previous one in place: once the fetch
+// failed we do not know that span's spend, and continuing to draw the last figure would
+// present a stale number as a current one.
+//
+// It does NOT render as silence. err is what spendSummary turns into a per-span failure,
+// which the band draws as an unavailable cell. The rows are reserved on height alone, so a
+// broken endpoint rendering "" would buy a permanent blank line above the footer and no
+// diagnostic anywhere on screen.
 func (m *model) applySpendLoaded(msg spendLoadedMsg) {
-	if msg.req != m.spend.reqSeq {
+	if !msg.span.valid() {
 		return
 	}
-	m.spend.snap, m.spend.err, m.spend.lastFetch = msg.snap, msg.err, time.Now()
+	c := &m.spend.chains[msg.span]
+	if msg.req != c.reqSeq {
+		return
+	}
+	c.snap, c.err, c.lastFetch = msg.snap, msg.err, time.Now()
 }
 
-// startSpendPolling begins (or restarts) the chain on a clean slate. Fetching
-// immediately as well means the strip is current on arrival rather than blank for
-// up to spendPollInterval.
+// startSpendPolling begins (or restarts) every span's chain on a clean slate. Fetching
+// immediately as well means the band is current on arrival rather than blank for up to the
+// slowest interval — five minutes, which for the month figure would be five minutes of empty
+// cell on the reading an operator opened abctl to see.
 //
-// invalidate() rather than a bare tickGen++ so that entering a session view can
-// never inherit a figure from a previous one. backToPodsPane already invalidates
-// on the way OUT, which is what closes the window while the picker is up; this is
-// the same guarantee on the way IN, so any future path that starts a chain gets it
-// without having to remember. The doubled reqSeq++ (here and in fetchSpend) is
-// harmless — the sequence only has to be monotonic.
+// invalidate() rather than a bare tickGen++ so that entering a session view can never inherit
+// a figure from a previous one. backToPodsPane already invalidates on the way OUT, which is
+// what closes the window while the picker is up; this is the same guarantee on the way IN, so
+// any future path that starts a chain gets it without having to remember. The doubled reqSeq++
+// (here and in fetchSpendSpan) is harmless — the sequence only has to be monotonic.
+//
+// A LOOP OVER THE TABLE, so adding a span cannot leave it unpolled. The drawer's chain is
+// deliberately absent: it starts when the drawer opens and stops when it closes.
 func (m *model) startSpendPolling() tea.Cmd {
 	m.spend.invalidate()
-	// Both chains, each on its own generation. The today figure is fetched
-	// immediately too rather than waiting out its 5-minute interval: the whole point
-	// of the headline is that it is there when the user arrives.
-	return tea.Batch(
-		m.fetchSpend(), spendTick(m.spend.tickGen),
-		m.fetchSpendToday(), spendTodayTick(m.spend.todayTickGen),
-	)
+	cmds := make([]tea.Cmd, 0, 2*numSpendSpans)
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		cmds = append(cmds, m.fetchSpendSpan(span), spendTick(span, m.spend.chains[span].tickGen))
+	}
+	return tea.Batch(cmds...)
 }
 
-// spendTick schedules the next poll for the given generation.
-func spendTick(gen uint64) tea.Cmd {
-	return tea.Tick(spendPollInterval, func(time.Time) tea.Msg { return spendTickMsg{gen: gen} })
+// spendTick schedules the next poll for one span, at that span's own cadence.
+func spendTick(span spendSpan, gen uint64) tea.Cmd {
+	if !span.valid() {
+		return nil
+	}
+	d := spendSpanDefs[span].interval
+	return tea.Tick(d, func(time.Time) tea.Msg { return spendTickMsg{span: span, gen: gen} })
 }
 
-// fetchSpend requests the all-sessions single-bucket snapshot off the render
-// loop. Returns nil before a client exists (picker mode), which keeps the tick
-// chain alive without issuing a request — the same shape tickMsg uses.
-func (m *model) fetchSpend() tea.Cmd {
+// fetchSpendSpan requests one span's all-sessions total off the render loop. Returns nil
+// before a client exists (picker mode), which keeps the tick chain alive without issuing a
+// request — the same shape tickMsg uses.
+//
+// GetUsageWindow rather than GetUsage, for every span including the hour: GetUsage takes a
+// time.Duration and stringifies it, and three of the four windows here are symbolic
+// boundaries that a duration cannot express at all. One request-building path for all four
+// rather than a duration path and a string path, so the hour cannot drift from the others.
+//
+// GROUP NONE, unconditionally, which is a change from the single chain this replaces. That
+// one asked for the drawer's axis so the drawer could read Series off the same answer; the
+// drawer now has its own chain, because the band asks four windows and the drawer asks one
+// window folded — see spendState.drawer. Nothing reads a band chain's Series, so asking for a
+// label map here would be work paid for and thrown away, four times over.
+//
+// Session "" is every session, and it cannot be anything else: the ledger's row key carries
+// no session dimension by design, and the server rejects session= alongside a symbolic
+// window. The band is a per-proxy reading, and making it look otherwise would be a wrong
+// number wearing a right label.
+func (m *model) fetchSpendSpan(span spendSpan) tea.Cmd {
+	if m.client == nil || !span.valid() {
+		return nil
+	}
+	client := m.client
+	c := &m.spend.chains[span]
+	c.reqSeq++
+	req := c.reqSeq
+	// Read on the update goroutine and captured, not read inside the closure: the closure
+	// runs on bubbletea's command goroutine, where touching m is a data race.
+	def := spendSpanDefs[span]
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), spendFetchTimeout)
+		defer cancel()
+		snap, err := client.GetUsageWindow(ctx, def.window, def.resolution, "", usage.GroupNone)
+		return spendLoadedMsg{span: span, snap: snap, req: req, err: err}
+	}
+}
+
+// spendDrawerTickIsCurrent reports whether a drawer tick belongs to the live drawer chain.
+func (m *model) spendDrawerTickIsCurrent(gen uint64) bool { return gen == m.spend.drawer.tickGen }
+
+// applySpendDrawerLoaded stores a drawer reply unless it is stale.
+func (m *model) applySpendDrawerLoaded(msg spendDrawerLoadedMsg) {
+	if msg.req != m.spend.drawer.reqSeq {
+		return
+	}
+	m.spend.drawer.snap, m.spend.drawer.err, m.spend.drawer.lastFetch = msg.snap, msg.err, time.Now()
+}
+
+// spendDrawerTick schedules the next drawer refresh.
+//
+// ON THE SLOW CADENCE, because the drawer's span can be a ledger window: refreshing a month's
+// breakdown every twenty seconds would walk thirty-one day files to redraw four rows nobody
+// has asked to change. A keypress refetches immediately — see cycleSpendAxis and
+// cycleSpendWindow — so the interval only governs how stale an untouched open drawer gets.
+func spendDrawerTick(gen uint64) tea.Cmd {
+	return tea.Tick(spendDrawerPollInterval, func(time.Time) tea.Msg {
+		return spendDrawerTickMsg{gen: gen}
+	})
+}
+
+// fetchSpendDrawer requests the breakdown: ONE window, folded by the current axis.
+//
+// The window comes from the drawer's own cycle and the axis from `a`, and both are captured
+// on the update goroutine for the reason fetchSpendSpan records.
+func (m *model) fetchSpendDrawer() tea.Cmd {
 	if m.client == nil {
 		return nil
 	}
 	client := m.client
-	m.spend.reqSeq++
-	req := m.spend.reqSeq
-	// Read on the update goroutine and captured, not read inside the closure: the closure
-	// runs on bubbletea's command goroutine, where touching m is a data race.
+	m.spend.drawer.reqSeq++
+	req := m.spend.drawer.reqSeq
 	window, axis := m.spend.window(), m.spend.axis()
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), spendFetchTimeout)
 		defer cancel()
-		// Session "" is every session, and the axis is whatever the drawer is showing —
-		// one poll serves both, the strip reading Totals and the drawer reading Series.
-		//
-		// Totals is unaffected by grouping (Snapshot sums it from the raw buckets before
-		// folding), so the strip's figures are byte-identical under any axis and the
-		// breakdown rides along for free. This asked for group=session while the sessions
-		// table summed its COST column out of this snapshot; that column is now summed
-		// server-side over each session's whole life instead, which is why the axis is free
-		// for the drawer to choose.
 		snap, err := client.GetUsage(ctx, window, spendResolution, "", axis)
-		return spendLoadedMsg{snap: snap, req: req, err: err}
+		return spendDrawerLoadedMsg{snap: snap, req: req, err: err}
 	}
 }
 
@@ -719,8 +899,8 @@ func (m *model) fetchSpend() tea.Cmd {
 // headline figure of this whole branch, published as exact, with the only gap marker on
 // screen built from a different window's numbers. See spendSummary.TodayUnpriced.
 func (m *model) applyTodayFigure(out *spendSummary) {
-	snap := m.spend.todaySnap
-	if snap == nil || m.spend.todayErr != nil {
+	snap := m.spend.chains[spanToday].snap
+	if snap == nil || m.spend.chains[spanToday].err != nil {
 		return
 	}
 	if snap.Window != usage.WindowToday {
@@ -779,52 +959,5 @@ func (m *model) applyTodayFigure(out *spendSummary) {
 	if av := snap.Totals.AvoidedMicros; av > 0 {
 		out.TodaySavedUSD = float64(av) / 1e6
 		out.HasTodaySaved = true
-	}
-}
-
-// spendTodayTickIsCurrent reports whether a today tick belongs to the live chain.
-func (m *model) spendTodayTickIsCurrent(gen uint64) bool { return gen == m.spend.todayTickGen }
-
-// applySpendTodayLoaded stores a today reply unless it is stale.
-//
-// Does not move lastFetch: that field reports the age of the WINDOW figure, and
-// advancing it on a today reply would have the strip claim a freshness the rolling
-// figure does not have.
-func (m *model) applySpendTodayLoaded(msg spendTodayLoadedMsg) {
-	if msg.req != m.spend.todayReqSeq {
-		return
-	}
-	m.spend.todaySnap, m.spend.todayErr, m.spend.todayLastFetch = msg.snap, msg.err, time.Now()
-}
-
-// spendTodayTick schedules the next today poll for the given generation.
-func spendTodayTick(gen uint64) tea.Cmd {
-	return tea.Tick(spendTodayPollInterval, func(time.Time) tea.Msg {
-		return spendTodayTickMsg{gen: gen}
-	})
-}
-
-// fetchSpendToday requests the ledger-backed day total off the render loop.
-//
-// GetUsageWindow rather than GetUsage: GetUsage takes a time.Duration and
-// stringifies it, and "today" is a boundary rather than a length, so it cannot be
-// expressed that way at all.
-//
-// group=none, unlike fetchSpend: the strip needs one number from this poll and the
-// sessions table reads the window snapshot's series, so asking for a breakdown here
-// would be a label map paid for and thrown away. Resolution 0 omits the parameter —
-// the ledger serves this as a single bucket and does not read it.
-func (m *model) fetchSpendToday() tea.Cmd {
-	if m.client == nil {
-		return nil
-	}
-	client := m.client
-	m.spend.todayReqSeq++
-	req := m.spend.todayReqSeq
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		snap, err := client.GetUsageWindow(ctx, usage.WindowToday, 0, "", usage.GroupNone)
-		return spendTodayLoadedMsg{snap: snap, req: req, err: err}
 	}
 }

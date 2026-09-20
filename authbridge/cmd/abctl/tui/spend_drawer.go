@@ -207,33 +207,44 @@ func (m *model) spendDrawerVisible() bool {
 //
 // The refusal does not set expanded, so growing the terminal later does not surprise the
 // user with a drawer they asked for minutes ago and were told they could not have.
-func (m *model) toggleSpendDrawer() {
+// IT RETURNS A COMMAND NOW, because the drawer owns a poll chain. Opening starts it and
+// closing stops it: the breakdown is the only thing that reads it, and its span can be a
+// ledger window, so a chain left running behind a closed drawer would walk day files for
+// nobody. Closing invalidates rather than merely ceasing to reschedule — a reply already in
+// the air outlives the keypress by up to spendFetchTimeout, and storing it would leave a
+// snapshot the next open would render before its own first poll lands.
+func (m *model) toggleSpendDrawer() tea.Cmd {
 	if m.spend.expanded {
 		m.spend.expanded = false
+		m.spend.drawer.invalidate()
 		// Give the rows back, for the reason the open path takes them.
 		m.layout()
-		return
+		return nil
 	}
 	// The PANE first, because its refusal has nothing to do with height and a height message
 	// there sends the reader to resize a terminal that was never the problem.
 	if ok, why := m.spendDrawerHost(); !ok {
 		m.setFlash(why)
-		return
+		return nil
 	}
 	if !m.spendStripVisible() {
-		m.setFlash("spend: no room for the strip on a terminal this short")
-		return
+		m.setFlash("spend: no room for the band on a terminal this short")
+		return nil
 	}
 	if m.height < spendDrawerMinHeight {
 		m.setFlash(fmt.Sprintf("spend: the breakdown needs %d rows, this terminal has %d",
 			spendDrawerMinHeight, m.height))
-		return
+		return nil
 	}
 	m.spend.expanded = true
 	// The reservation is made by layout(), which otherwise only runs on a resize — so without
 	// this the drawer draws into a body sized for a closed one and the footer goes off the
 	// bottom until the terminal happens to change size.
 	m.layout()
+	// Fetch immediately AND schedule: the drawer is opened to be read now, so waiting out
+	// spendDrawerPollInterval would show five minutes of empty rows.
+	m.spend.drawer.invalidate()
+	return tea.Batch(m.fetchSpendDrawer(), spendDrawerTick(m.spend.drawer.tickGen))
 }
 
 // cycleSpendAxis handles `a` while the drawer is open, and refetches.
@@ -253,18 +264,24 @@ func (m *model) toggleSpendDrawer() {
 // does not blink through an empty frame — it is a breakdown of the same traffic either way.
 func (m *model) cycleSpendAxis() tea.Cmd {
 	m.spend.groupIdx = (m.spend.groupIdx + 1) % len(spendDrawerAxes)
-	return m.fetchSpend()
+	return m.fetchSpendDrawer()
 }
 
 // cycleSpendWindow handles `w` while the drawer is open, and refetches.
 //
-// Changes the STRIP's figure too, which is intended: the strip's window reading and the
-// drawer's rows are one snapshot, and a breakdown of six hours sitting under a total for
-// one would be two spans presented as one answer. The label moves with it, because the
-// label is derived from what the server served — see spendSummary.
+// IT NO LONGER MOVES THE BAND, and that separation is the point of the drawer having its own
+// chain. The two used to share one poll, so `w` silently changed what the band's window cell
+// reported — press it once and "LAST 1H" became "LAST 15M" with nobody having asked for a
+// different band. The band now holds four fixed spans and this changes exactly the breakdown
+// it is pointed at.
+//
+// Refetches rather than regrouping client-side: the server folds, and doing it here would be
+// a second implementation of the aggregator's arithmetic that could disagree with the figures
+// above it. The old snapshot stays on screen until the new one lands, so the drawer does not
+// blink through an empty frame.
 func (m *model) cycleSpendWindow() tea.Cmd {
 	m.spend.windowStep = (m.spend.windowStep + 1) % len(spendDrawerWindows)
-	return m.fetchSpend()
+	return m.fetchSpendDrawer()
 }
 
 // plainFigures lifts a run of fixed strings into the fitter's type. None of them can be partial,
@@ -299,17 +316,29 @@ func plainFigures(ss ...string) []stripFigure {
 // rendering fault rather than as an answer in flight.
 func (m *model) drawerLabels() (usage.Group, string) {
 	axis, window := m.spend.axis(), formatWindowLabel(m.spend.window())
-	snap := m.spend.snap
+	snap := m.spend.drawer.snap
 	if snap == nil {
 		return axis, window
 	}
 	if snap.Group != "" {
 		axis = snap.Group
 	}
-	// The strip's own label, derived from the answer by spendSummary through the same parse; empty
-	// when the server sent a span this client cannot parse into a duration.
-	if l := m.spendSummary().WindowLabel; l != "" {
+	// FROM THE DRAWER'S OWN SNAPSHOT, not from spendSummary. It used to read
+	// spendSummary().WindowLabel, which was right while the drawer and the band shared one
+	// poll and is wrong now that they do not: the summary's label describes the BAND's hour,
+	// so a drawer showing a month would have been captioned "1h" — the mislabel this
+	// function exists to prevent, arriving through the function meant to prevent it.
+	//
+	// Sanitised because snap.Window is server-supplied and reaches the terminal verbatim, and
+	// compacted through the same parse-then-format the summary used: the server answers a
+	// duration window as "1h0m0s", which is literally true and three columns wider than the
+	// "1h" the caller asked for. A SYMBOLIC window ("today", "month") does not parse as a
+	// duration and is carried through as the server spelled it.
+	if l := sanitizeLabel(snap.Window); l != "" {
 		window = l
+		if d, ok := parseWindowSpan(l); ok {
+			window = formatWindowLabel(d)
+		}
 	}
 	return axis, window
 }

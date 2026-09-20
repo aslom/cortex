@@ -277,7 +277,10 @@ func TestPaneView_DrawsTheDrawerUnderTheStripAndKeepsTheBody(t *testing.T) {
 	m := &model{width: 160, height: 40, endpoint: "http://x"}
 	m.pane = paneSessions
 	m.sessionsTbl = newSessionsTable()
-	m.spend.snap = drawerSnap()
+	// BOTH CHAINS, because they are separate now: the band renders from its own spans and
+	// the drawer from its own fold. Seeding only one was enough while they shared a poll.
+	m.spend.chains[spanHour].snap = drawerSnap()
+	m.spend.drawer.snap = drawerSnap()
 	m.spend.expanded = true
 	m.layout()
 
@@ -325,7 +328,7 @@ func TestPaneView_FitsTheTerminalWithTheDrawerOpen(t *testing.T) {
 				m := &model{width: 160, height: h, endpoint: "http://x"}
 				m.pane = paneSessions
 				m.sessionsTbl = newSessionsTable()
-				m.spend.snap = snap
+				m.spend.drawer.snap = snap
 				m.spend.expanded = open
 				m.layout()
 
@@ -355,9 +358,9 @@ func TestDrawerLabels_DescribeTheSnapshotNotTheNextRequest(t *testing.T) {
 	m := &model{width: 200, height: 60}
 	m.pane = paneSessions
 	// The snapshot in hand was grouped by model over an hour.
-	m.spend.snap = drawerSnap()
-	m.spend.snap.Window = "1h0m0s"
-	m.spend.snap.Group = usage.GroupModel
+	m.spend.drawer.snap = drawerSnap()
+	m.spend.drawer.snap.Window = "1h0m0s"
+	m.spend.drawer.snap.Group = usage.GroupModel
 
 	// The operator presses `a` and `w`: the NEXT poll will ask for endpoint over 6h.
 	m.spend.groupIdx, m.spend.windowStep = 1, 1
@@ -377,7 +380,7 @@ func TestDrawerLabels_DescribeTheSnapshotNotTheNextRequest(t *testing.T) {
 
 	// With no snapshot there is nothing to describe, so the requested values are the honest
 	// fallback: a blank axis would read as a rendering fault.
-	m.spend.snap = nil
+	m.spend.drawer.snap = nil
 	if axis, window := m.drawerLabels(); axis == "" || window == "" {
 		t.Errorf("labels = %q/%q with no snapshot; want the requested values rather than blanks",
 			axis, window)
@@ -392,9 +395,13 @@ func TestPaneView_TheHintLineLabelsTheSnapshotNotTheNextRequest(t *testing.T) {
 	m := &model{width: 200, height: 60, endpoint: "http://x"}
 	m.pane = paneSessions
 	m.sessionsTbl = newSessionsTable()
-	m.spend.snap = drawerSnap()
-	m.spend.snap.Window = "1h0m0s"
-	m.spend.snap.Group = usage.GroupModel
+	// The BAND's chain as well as the drawer's: renderSpendDrawer is gated on the band having
+	// drawn, because a headless breakdown would be a pane. They are separate polls now, so a
+	// fixture seeding one gets a screen with no drawer on it at all.
+	m.spend.chains[spanHour].snap = drawerSnap()
+	m.spend.drawer.snap = drawerSnap()
+	m.spend.drawer.snap.Window = "1h0m0s"
+	m.spend.drawer.snap.Group = usage.GroupModel
 	m.spend.expanded = true
 	// `a` and `w` pressed: the next poll will ask for endpoint over 6h, the rows on screen are
 	// still model over an hour.
@@ -663,7 +670,7 @@ func TestHandleKey_TheDrawersBindings(t *testing.T) {
 		m := &model{width: 200, height: 60}
 		m.pane = pane
 		m.sessionsTbl = newSessionsTable()
-		m.spend.snap = drawerSnap()
+		m.spend.drawer.snap = drawerSnap()
 		return m
 	}
 

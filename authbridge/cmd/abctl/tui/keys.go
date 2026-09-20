@@ -165,8 +165,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if !m.filtering && !m.colPicker && m.editState.phase == editPhaseDone {
 		switch msg.String() {
 		case "$":
-			m.toggleSpendDrawer()
-			return nil
+			return m.toggleSpendDrawer()
 		case "a":
 			if m.spendDrawerVisible() {
 				return m.cycleSpendAxis()

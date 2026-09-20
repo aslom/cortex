@@ -138,7 +138,7 @@ func TestPaneView_DrawsTheStrip(t *testing.T) {
 	m := New(ctx, apiclient.New("http://127.0.0.1:1")).(*model)
 	m.width, m.height = 100, 40
 	m.layout()
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{
 			Requests: 10, CostMicros: 1_120_000,
@@ -181,7 +181,7 @@ func TestPaneView_NoStripRowOnAShortTerminal(t *testing.T) {
 	m := New(ctx, apiclient.New("http://127.0.0.1:1")).(*model)
 	m.width, m.height = 100, 19
 	m.layout()
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 1, CostMicros: 1_120_000, PricedRequests: 1, PriceableRequests: 1},
 		Priced: true,
@@ -201,7 +201,7 @@ func TestPaneView_PickerPanesDrawNoStrip(t *testing.T) {
 		m.width, m.height = 100, 40
 		m.layout()
 		m.pane = p
-		m.spend.snap = &usage.Snapshot{
+		m.spend.chains[spanHour].snap = &usage.Snapshot{
 			Window: "1h",
 			Totals: usage.Counts{Requests: 1, CostMicros: 1_120_000, PricedRequests: 1, PriceableRequests: 1},
 			Priced: true,
@@ -240,7 +240,7 @@ func TestFormatSpendAge_RoundsToTheCoarsestUsefulUnit(t *testing.T) {
 // makes this the one field on the path that can be populated at all.
 func TestApplyTodayFigure_CarriesTheLedgersDamageDisclosure(t *testing.T) {
 	m := &model{}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday,
 		Totals: usage.Counts{Requests: 400, CostMicros: 4_170_000,
 			PricedRequests: 400, PriceableRequests: 400},
@@ -270,7 +270,7 @@ func TestApplyTodayFigure_CarriesTheLedgersDamageDisclosure(t *testing.T) {
 // that never checked.
 func TestApplyTodayFigure_ACleanReadLeavesNoDisclosure(t *testing.T) {
 	m := &model{}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday,
 		Totals: usage.Counts{Requests: 400, CostMicros: 4_170_000,
 			PricedRequests: 400, PriceableRequests: 400},
@@ -296,9 +296,9 @@ func TestSpendSummary_CarriesTheClampDisclosureOnBothSpans(t *testing.T) {
 		PricedRequests: 400, PriceableRequests: 400, Saturated: true}
 
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{Window: "1h", Totals: clamped, Priced: true,
+	m.spend.chains[spanHour].snap = &usage.Snapshot{Window: "1h", Totals: clamped, Priced: true,
 		Buckets: []usage.Bucket{{Counts: clamped}}}
-	m.spend.todaySnap = &usage.Snapshot{Window: usage.WindowToday, Totals: clamped, Priced: true}
+	m.spend.chains[spanToday].snap = &usage.Snapshot{Window: usage.WindowToday, Totals: clamped, Priced: true}
 
 	out := m.spendSummary()
 	if !out.Clamped {
@@ -322,9 +322,9 @@ func TestSpendSummary_ACleanAggregateLeavesTheClampUnset(t *testing.T) {
 		PricedRequests: 400, PriceableRequests: 400}
 
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{Window: "1h", Totals: clean, Priced: true,
+	m.spend.chains[spanHour].snap = &usage.Snapshot{Window: "1h", Totals: clean, Priced: true,
 		Buckets: []usage.Bucket{{Counts: clean}}}
-	m.spend.todaySnap = &usage.Snapshot{Window: usage.WindowToday, Totals: clean, Priced: true}
+	m.spend.chains[spanToday].snap = &usage.Snapshot{Window: usage.WindowToday, Totals: clean, Priced: true}
 
 	out := m.spendSummary()
 	if out.Clamped || out.TodayClamped {
@@ -402,13 +402,13 @@ func TestMoneyFigure_OneMarkerForBothWaysAFigureCanBeShort(t *testing.T) {
 func TestSpendSummary_TheAgeComesFromTheOlderChain(t *testing.T) {
 	now := time.Now()
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h", Priced: true,
 		Totals: usage.Counts{Requests: 1, CostMicros: 1, PricedRequests: 1, PriceableRequests: 1},
 	}
 	// The window answered a moment ago; the day chain has been wedged for an hour.
-	m.spend.lastFetch = now
-	m.spend.todayLastFetch = now.Add(-time.Hour)
+	m.spend.chains[spanHour].lastFetch = now
+	m.spend.chains[spanToday].lastFetch = now.Add(-time.Hour)
 
 	got := m.spendSummary()
 	if !got.Stale {
@@ -424,7 +424,7 @@ func TestSpendSummary_TheAgeComesFromTheOlderChain(t *testing.T) {
 	// And a chain that has NEVER answered is not infinitely stale: today is unavailable on a
 	// proxy with no ledger, and reporting that as staleness would mark every Kubernetes
 	// deployment's strip permanently old.
-	m.spend.todayLastFetch = time.Time{}
+	m.spend.chains[spanToday].lastFetch = time.Time{}
 	if fresh := m.spendSummary(); fresh.Stale {
 		t.Errorf("Stale = true with a today chain that never answered (age %v); an absent ledger "+
 			"is not a wedged poll", fresh.Age)

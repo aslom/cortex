@@ -20,7 +20,7 @@ import (
 // same quotient restates it in smaller units while inheriting every caveat on the line.
 func TestSpendSummary_DerivesEveryWindowFigure(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{
 			Requests:          10,
@@ -73,7 +73,7 @@ func TestSpendSummary_DerivesEveryWindowFigure(t *testing.T) {
 func TestSpendSummary_NothingPricedIsNotZero(t *testing.T) {
 	// The distinction the whole strip rests on: an unknown cost is not a zero one.
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 10, PriceableRequests: 10},
 		Priced: false,
@@ -94,7 +94,7 @@ func TestSpendSummary_NothingPricedIsNotZero(t *testing.T) {
 
 func TestSpendSummary_CountsTheCoverageGap(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{
 			Requests: 318, CostMicros: 4_170_000,
@@ -128,7 +128,7 @@ func TestSpendSummary_NoSavedFigureUntilItIsMeasured(t *testing.T) {
 	// Rendering "saved $0.00" would assert that pruning saved nothing, when the
 	// truth is that nothing measures it yet. Same rule as "cost unavailable".
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 1, CostMicros: 100, PricedRequests: 1, PriceableRequests: 1},
 		Priced: true,
@@ -154,7 +154,7 @@ func TestSpendSummary_NoSavedFigureUntilItIsMeasured(t *testing.T) {
 // no cost ledger still has the window's figure to fall back to.
 func TestSpendSummary_TodaysSavingComesFromTheDaysPoll(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{
 			Requests: 299, Tokens: 84_576_928, CostMicros: 36_572_297,
@@ -163,7 +163,7 @@ func TestSpendSummary_TodaysSavingComesFromTheDaysPoll(t *testing.T) {
 		},
 		Priced: true,
 	}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday,
 		Totals: usage.Counts{
 			Requests: 537, Tokens: 122_486_000, CostMicros: 64_176_512,
@@ -194,7 +194,7 @@ func TestSpendSummary_TodaysSavingComesFromTheDaysPoll(t *testing.T) {
 // maximum span there, which leaves HasToday unset.
 func TestSpendSummary_WindowSavingSurvivesWithNoDayFigure(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{
 			Requests: 10, CostMicros: 1_120_000, AvoidedMicros: 180_400,
@@ -222,7 +222,7 @@ func TestSpendSummary_WindowSavingSurvivesWithNoDayFigure(t *testing.T) {
 // that guard rather than beside it.
 func TestSpendSummary_UnpricedDayPublishesNoSaving(t *testing.T) {
 	m := &model{}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday,
 		Totals: usage.Counts{Requests: 400, AvoidedMicros: 2_189_140, PriceableRequests: 400},
 		Priced: false,
@@ -243,34 +243,34 @@ func TestSpendTick_StaleGenerationIsDropped(t *testing.T) {
 	// The guard usage_pane.go:74-79 documents: two live chains each rescheduling
 	// the other's successor doubles the request rate for the life of the session.
 	m := &model{}
-	m.spend.tickGen = 2
+	m.spend.chains[spanHour].tickGen = 2
 
-	if m.spendTickIsCurrent(1) {
+	if m.spendTickIsCurrent(spanHour, 1) {
 		t.Error("a tick from generation 1 was accepted while generation 2 is current")
 	}
-	if !m.spendTickIsCurrent(2) {
+	if !m.spendTickIsCurrent(spanHour, 2) {
 		t.Error("the current generation's tick was dropped")
 	}
 }
 
 func TestSpendLoaded_StaleReplyIsDropped(t *testing.T) {
 	m := &model{}
-	m.spend.reqSeq = 5
+	m.spend.chains[spanHour].reqSeq = 5
 	fresh := &usage.Snapshot{Window: "1h"}
 
 	m.applySpendLoaded(spendLoadedMsg{req: 4, snap: fresh})
-	if m.spend.snap != nil {
+	if m.spend.chains[spanHour].snap != nil {
 		t.Error("a reply from an older request was applied")
 	}
-	if !m.spend.lastFetch.IsZero() {
+	if !m.spend.chains[spanHour].lastFetch.IsZero() {
 		t.Error("a stale reply moved lastFetch; the strip would report data it discarded")
 	}
 
 	m.applySpendLoaded(spendLoadedMsg{req: 5, snap: fresh})
-	if m.spend.snap != fresh {
+	if m.spend.chains[spanHour].snap != fresh {
 		t.Error("the current request's reply was dropped")
 	}
-	if m.spend.lastFetch.IsZero() {
+	if m.spend.chains[spanHour].lastFetch.IsZero() {
 		t.Error("lastFetch was not recorded for the accepted reply")
 	}
 }
@@ -280,13 +280,14 @@ func TestStartSpendPolling_InvalidatesThePreviousChain(t *testing.T) {
 	// each rescheduling their own successor doubles the request rate permanently.
 	m := &model{}
 	m.startSpendPolling()
-	first := m.spend.tickGen
+	first := m.spend.chains[spanHour].tickGen
 	m.startSpendPolling()
 
-	if m.spend.tickGen == first {
+	if m.spend.chains[spanHour].tickGen == first {
 		t.Errorf("tickGen still %d after a restart; the previous chain's ticks stay current", first)
 	}
-	if !m.spendTickIsCurrent(m.spend.tickGen) || m.spendTickIsCurrent(first) {
+	if !m.spendTickIsCurrent(spanHour, m.spend.chains[spanHour].tickGen) ||
+		m.spendTickIsCurrent(spanHour, first) {
 		t.Error("the restart did not make exactly the newest generation current")
 	}
 }
@@ -295,26 +296,26 @@ func TestSpendInvalidate_DropsTheSnapshotAndDisownsInFlight(t *testing.T) {
 	// A different pod is a different aggregator. Finding 1: without this the old
 	// pod's figure survives the switch and is drawn as the new pod's.
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{Window: "1h"}
-	m.spend.err = errUsageUnsupported
-	m.spend.lastFetch = time.Now()
-	beforeSeq, beforeGen := m.spend.reqSeq, m.spend.tickGen
+	m.spend.chains[spanHour].snap = &usage.Snapshot{Window: "1h"}
+	m.spend.chains[spanHour].err = errUsageUnsupported
+	m.spend.chains[spanHour].lastFetch = time.Now()
+	beforeSeq, beforeGen := m.spend.chains[spanHour].reqSeq, m.spend.chains[spanHour].tickGen
 
 	m.spend.invalidate()
 
-	if m.spend.snap != nil {
+	if m.spend.chains[spanHour].snap != nil {
 		t.Error("the old pod's snapshot survived invalidate; the strip would draw it as the new pod's")
 	}
-	if m.spend.err != nil {
+	if m.spend.chains[spanHour].err != nil {
 		t.Error("the old pod's error survived invalidate")
 	}
-	if !m.spend.lastFetch.IsZero() {
+	if !m.spend.chains[spanHour].lastFetch.IsZero() {
 		t.Error("lastFetch survived invalidate; the strip would report the old pod's freshness")
 	}
-	if m.spend.reqSeq == beforeSeq {
+	if m.spend.chains[spanHour].reqSeq == beforeSeq {
 		t.Error("reqSeq was not bumped, so an in-flight old-pod reply still passes the staleness guard")
 	}
-	if m.spend.tickGen == beforeGen {
+	if m.spend.chains[spanHour].tickGen == beforeGen {
 		t.Error("tickGen was not bumped, so the old chain keeps scheduling")
 	}
 }
@@ -324,17 +325,17 @@ func TestSpendInvalidate_InFlightOldPodReplyIsDropped(t *testing.T) {
 	// issued against the old pod can easily land after the switch; it must not be
 	// stored, and above all must not be stored with a fresh lastFetch.
 	m := &model{}
-	m.spend.reqSeq = 7
-	inFlight := m.spend.reqSeq // the id the old pod's request carries
+	m.spend.chains[spanHour].reqSeq = 7
+	inFlight := m.spend.chains[spanHour].reqSeq // the id the old pod's request carries
 
 	m.spend.invalidate()
 
 	m.applySpendLoaded(spendLoadedMsg{req: inFlight, snap: &usage.Snapshot{Window: "1h"}})
 
-	if m.spend.snap != nil {
+	if m.spend.chains[spanHour].snap != nil {
 		t.Error("an old-pod reply landed after the switch and was stored as the new pod's spend")
 	}
-	if !m.spend.lastFetch.IsZero() {
+	if !m.spend.chains[spanHour].lastFetch.IsZero() {
 		t.Error("an old-pod reply moved lastFetch, presenting a stale number as a current one")
 	}
 }
@@ -348,23 +349,23 @@ func TestBackToPodsPane_InvalidatesTheSpendStrip(t *testing.T) {
 	// backToPodsPane re-derives m.ctx from parentCtx for the next session view; it
 	// panics on a nil parent.
 	m.parentCtx = context.Background()
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 1, CostMicros: 9_990_000, PricedRequests: 1, PriceableRequests: 1},
 		Priced: true,
 	}
-	m.spend.lastFetch = time.Now()
-	beforeSeq := m.spend.reqSeq
+	m.spend.chains[spanHour].lastFetch = time.Now()
+	beforeSeq := m.spend.chains[spanHour].reqSeq
 
 	m.backToPodsPane()
 
-	if m.spend.snap != nil {
+	if m.spend.chains[spanHour].snap != nil {
 		t.Error("the previous pod's spend snapshot survived backToPodsPane")
 	}
 	if got := m.spendSummary(); got.Priced || got.WindowUSD != 0 {
 		t.Errorf("spendSummary still reports the old pod: %+v", got)
 	}
-	if m.spend.reqSeq == beforeSeq {
+	if m.spend.chains[spanHour].reqSeq == beforeSeq {
 		t.Error("backToPodsPane left reqSeq alone, so an in-flight old-pod reply would be accepted")
 	}
 }
@@ -373,15 +374,15 @@ func TestStartSpendPolling_StartsOnACleanSlate(t *testing.T) {
 	// The way IN, complementing backToPodsPane's way OUT: entering a session view
 	// must never inherit a figure from a previous one.
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{Window: "1h"}
-	m.spend.err = errUsageUnsupported
-	m.spend.lastFetch = time.Now()
+	m.spend.chains[spanHour].snap = &usage.Snapshot{Window: "1h"}
+	m.spend.chains[spanHour].err = errUsageUnsupported
+	m.spend.chains[spanHour].lastFetch = time.Now()
 
 	m.startSpendPolling()
 
-	if m.spend.snap != nil || m.spend.err != nil || !m.spend.lastFetch.IsZero() {
+	if m.spend.chains[spanHour].snap != nil || m.spend.chains[spanHour].err != nil || !m.spend.chains[spanHour].lastFetch.IsZero() {
 		t.Errorf("startSpendPolling inherited previous state: snap=%v err=%v lastFetch=%v",
-			m.spend.snap, m.spend.err, m.spend.lastFetch)
+			m.spend.chains[spanHour].snap, m.spend.chains[spanHour].err, m.spend.chains[spanHour].lastFetch)
 	}
 }
 
@@ -390,7 +391,7 @@ func TestSpendSummary_AFailedPollIsUnknownNotEmpty(t *testing.T) {
 	// through to "nothing to say", so a broken /v1/usage drew an empty strip
 	// forever with the row still reserved and no diagnostic anywhere.
 	m := &model{}
-	m.spend.err = errUsageUnsupported
+	m.spend.chains[spanHour].err = errUsageUnsupported
 
 	got := m.spendSummary()
 
@@ -410,7 +411,7 @@ func TestSpendSummary_NoErrorMeansNotFailed(t *testing.T) {
 	// simply priced nothing is NOT a failure, and the two render differently
 	// (the coverage counters are only meaningful for the non-failure case).
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 10, PriceableRequests: 10},
 		Priced: false,
@@ -429,7 +430,7 @@ func TestSpendSummary_NoErrorMeansNotFailed(t *testing.T) {
 // outlived the rate, because the label is derived from exactly the same parse.
 func TestSpendSummary_WindowLabelComesFromTheSnapshotNotTheRequest(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "30m",
 		Totals: usage.Counts{
 			Requests: 5, CostMicros: 1_200_000,
@@ -456,7 +457,7 @@ func TestSpendSummary_UnparseableWindowStillReportsItsTotal(t *testing.T) {
 	// suppression before the rate was removed; what survives is the rule that an
 	// unparseable span costs the label and nothing else.
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "today", // a future symbolic, ledger-backed span
 		Totals: usage.Counts{
 			Requests: 5, CostMicros: 1_200_000,
@@ -489,7 +490,7 @@ func TestSpendSummary_TidiesTheAggregatorsWindowString(t *testing.T) {
 		{"90s", "1m30s"}, // not a whole minute or hour: falls back to String()
 	} {
 		m := &model{}
-		m.spend.snap = &usage.Snapshot{Window: tc.wire, Totals: usage.Counts{Requests: 1}}
+		m.spend.chains[spanHour].snap = &usage.Snapshot{Window: tc.wire, Totals: usage.Counts{Requests: 1}}
 		if got := m.spendSummary().WindowLabel; got != tc.want {
 			t.Errorf("wire %q -> label %q, want %q", tc.wire, got, tc.want)
 		}
@@ -504,7 +505,7 @@ func TestSpendSummary_HasSnapshotSeparatesLookedFromNotLooked(t *testing.T) {
 	}
 
 	looked := &model{}
-	looked.spend.snap = &usage.Snapshot{Window: "1h", Totals: usage.Counts{}}
+	looked.spend.chains[spanHour].snap = &usage.Snapshot{Window: "1h", Totals: usage.Counts{}}
 	if got := looked.spendSummary(); !got.HasSnapshot {
 		t.Error("HasSnapshot = false after a poll answered with an empty window")
 	}
@@ -523,7 +524,7 @@ func TestSpendSummary_HasSnapshotSeparatesLookedFromNotLooked(t *testing.T) {
 // snapshot. That column is now summed server-side over each session's whole LIFE, which is
 // both the honest scope beside a lifetime token count and what freed the axis for the drawer;
 // see sessionsColumns.
-func TestFetchSpend_AsksForTheDrawersAxis(t *testing.T) {
+func TestFetchSpendDrawer_AsksForTheDrawersAxis(t *testing.T) {
 	var gotQuery string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
@@ -532,13 +533,13 @@ func TestFetchSpend_AsksForTheDrawersAxis(t *testing.T) {
 	defer ts.Close()
 
 	m := &model{client: apiclient.New(ts.URL)}
-	cmd := m.fetchSpend()
+	cmd := m.fetchSpendDrawer()
 	if cmd == nil {
-		t.Fatal("fetchSpend returned no command with a client set")
+		t.Fatal("fetchSpendDrawer returned no command with a client set")
 	}
-	msg, ok := cmd().(spendLoadedMsg)
+	msg, ok := cmd().(spendDrawerLoadedMsg)
 	if !ok {
-		t.Fatalf("fetchSpend produced %T, want spendLoadedMsg", cmd())
+		t.Fatalf("fetchSpendDrawer produced %T, want spendDrawerLoadedMsg", cmd())
 	}
 	if msg.err != nil {
 		t.Fatalf("fetch errored: %v", msg.err)
@@ -572,12 +573,12 @@ func TestFetchSpend_AsksForTheDrawersAxis(t *testing.T) {
 // a second poll is that the rolling window cannot answer "what did today cost".
 func TestSpendSummary_LedgerBackedTodayBecomesTheHeadline(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 10, CostMicros: 1_120_000, PricedRequests: 10, PriceableRequests: 10},
 		Priced: true,
 	}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: "today",
 		Totals: usage.Counts{Requests: 318, CostMicros: 4_170_000, PricedRequests: 318, PriceableRequests: 318},
 		Priced: true,
@@ -607,7 +608,7 @@ func TestSpendSummary_LedgerBackedTodayBecomesTheHeadline(t *testing.T) {
 // only coverage note the strip built came from the 1h ring snapshot.
 func TestSpendSummary_TodayCarriesItsOwnCoverageGap(t *testing.T) {
 	m := &model{}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday,
 		Totals: usage.Counts{
 			Requests: 400, CostMicros: 3_100,
@@ -634,7 +635,7 @@ func TestSpendSummary_TodayCarriesItsOwnCoverageGap(t *testing.T) {
 // ignore the one signal that matters.
 func TestSpendSummary_FullyPricedTodayCarriesNoGap(t *testing.T) {
 	m := &model{}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday,
 		Totals: usage.Counts{
 			Requests: 318, CostMicros: 4_170_000,
@@ -654,12 +655,12 @@ func TestSpendSummary_FullyPricedTodayCarriesNoGap(t *testing.T) {
 // warning.
 func TestSpendSummary_TodayCoverageIsNotTheWindowsCoverage(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 40, PriceableRequests: 40, PricedRequests: 0},
 		Priced: false,
 	}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday,
 		Totals: usage.Counts{
 			Requests: 318, CostMicros: 4_170_000,
@@ -691,7 +692,7 @@ func TestSpendSummary_TodayCoverageIsNotTheWindowsCoverage(t *testing.T) {
 // "$1.12 /1h", exact to four decimal places.
 func TestSpendSummary_CarriesTheInexactCountFromBothSnapshots(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{
 			Requests: 10, CostMicros: 1_120_000,
@@ -699,7 +700,7 @@ func TestSpendSummary_CarriesTheInexactCountFromBothSnapshots(t *testing.T) {
 		},
 		Priced: true,
 	}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday,
 		Totals: usage.Counts{
 			Requests: 318, CostMicros: 4_170_000,
@@ -727,12 +728,12 @@ func TestSpendSummary_CarriesTheInexactCountFromBothSnapshots(t *testing.T) {
 // furniture.
 func TestSpendSummary_AnExactTotalReportsNothingInexact(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 10, CostMicros: 1_120_000, PricedRequests: 10, PriceableRequests: 10},
 		Priced: true,
 	}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday,
 		Totals: usage.Counts{Requests: 318, CostMicros: 4_170_000, PricedRequests: 318, PriceableRequests: 318},
 		Priced: true,
@@ -752,12 +753,12 @@ func TestSpendSummary_AnExactTotalReportsNothingInexact(t *testing.T) {
 // six-hour total as a day's.
 func TestSpendSummary_DegradedTodayWindowLeavesHasTodayFalse(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 10, CostMicros: 1_120_000, PricedRequests: 10, PriceableRequests: 10},
 		Priced: true,
 	}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.MaxWindow.String(), // "6h0m0s" — the ring, not the ledger
 		Totals: usage.Counts{Requests: 50, CostMicros: 2_000_000, PricedRequests: 50, PriceableRequests: 50},
 		Priced: true,
@@ -766,7 +767,7 @@ func TestSpendSummary_DegradedTodayWindowLeavesHasTodayFalse(t *testing.T) {
 	got := m.spendSummary()
 
 	if got.HasToday {
-		t.Errorf("HasToday = true for a %q window; a 6h total must not be labelled a day's", m.spend.todaySnap.Window)
+		t.Errorf("HasToday = true for a %q window; a 6h total must not be labelled a day's", m.spend.chains[spanToday].snap.Window)
 	}
 	if got.TodayUSD != 0 {
 		t.Errorf("TodayUSD = %v, want 0 when there is no today figure", got.TodayUSD)
@@ -779,7 +780,7 @@ func TestSpendSummary_DegradedTodayWindowLeavesHasTodayFalse(t *testing.T) {
 // knows.
 func TestSpendSummary_UnpricedTodayLeavesHasTodayFalse(t *testing.T) {
 	m := &model{}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: "today",
 		Totals: usage.Counts{Requests: 10, PriceableRequests: 10},
 		Priced: false,
@@ -795,8 +796,8 @@ func TestSpendSummary_UnpricedTodayLeavesHasTodayFalse(t *testing.T) {
 // A failed today poll must not become a zero headline either.
 func TestSpendSummary_FailedTodayPollLeavesHasTodayFalse(t *testing.T) {
 	m := &model{}
-	m.spend.todayErr = context.DeadlineExceeded
-	m.spend.todaySnap = &usage.Snapshot{Window: "today", Priced: true}
+	m.spend.chains[spanToday].err = context.DeadlineExceeded
+	m.spend.chains[spanToday].snap = &usage.Snapshot{Window: "today", Priced: true}
 
 	if got := m.spendSummary(); got.HasToday {
 		t.Error("HasToday = true after a failed today poll")
@@ -807,7 +808,7 @@ func TestSpendSummary_FailedTodayPollLeavesHasTodayFalse(t *testing.T) {
 // are independent, and the headline is the figure a user actually wants.
 func TestSpendSummary_TodaySurvivesAWindowPollThatHasNotAnswered(t *testing.T) {
 	m := &model{}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: "today",
 		Totals: usage.Counts{Requests: 318, CostMicros: 4_170_000, PricedRequests: 318, PriceableRequests: 318},
 		Priced: true,
@@ -825,7 +826,7 @@ func TestSpendSummary_TodaySurvivesAWindowPollThatHasNotAnswered(t *testing.T) {
 
 // The today chain must ask for window=today, which no time.Duration can express —
 // the reason GetUsageWindow exists at all.
-func TestFetchSpendToday_AsksForTheSymbolicWindow(t *testing.T) {
+func TestFetchSpendSpan_AsksForTheSymbolicWindow(t *testing.T) {
 	var gotQuery string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
@@ -834,13 +835,17 @@ func TestFetchSpendToday_AsksForTheSymbolicWindow(t *testing.T) {
 	defer ts.Close()
 
 	m := &model{client: apiclient.New(ts.URL)}
-	cmd := m.fetchSpendToday()
+	cmd := m.fetchSpendSpan(spanToday)
 	if cmd == nil {
-		t.Fatal("fetchSpendToday returned no command with a client set")
+		t.Fatal("fetchSpendSpan returned no command with a client set")
 	}
-	msg, ok := cmd().(spendTodayLoadedMsg)
+	msg, ok := cmd().(spendLoadedMsg)
 	if !ok {
-		t.Fatalf("fetchSpendToday produced %T, want spendTodayLoadedMsg", cmd())
+		t.Fatalf("fetchSpendSpan produced %T, want spendLoadedMsg", cmd())
+	}
+	if msg.span != spanToday {
+		t.Errorf("reply tagged span %v, want %v — applySpendLoaded routes on this",
+			msg.span, spanToday)
 	}
 	if msg.err != nil {
 		t.Fatalf("fetch errored: %v", msg.err)
@@ -874,47 +879,71 @@ func TestFetchSpendToday_AsksForTheSymbolicWindow(t *testing.T) {
 // would let the fast chain invalidate the slow one's request forever.
 func TestApplySpendTodayLoaded_UsesItsOwnSequence(t *testing.T) {
 	m := &model{}
-	m.spend.reqSeq = 7
-	m.spend.todayReqSeq = 2
+	m.spend.chains[spanHour].reqSeq = 7
+	m.spend.chains[spanToday].reqSeq = 2
 	fresh := &usage.Snapshot{Window: "today", Priced: true, Totals: usage.Counts{CostMicros: 1, PricedRequests: 1}}
 
 	// The window chain's current sequence is not the today chain's.
-	m.applySpendTodayLoaded(spendTodayLoadedMsg{req: 7, snap: fresh})
-	if m.spend.todaySnap != nil {
+	m.applySpendLoaded(spendLoadedMsg{span: spanToday, req: 7, snap: fresh})
+	if m.spend.chains[spanToday].snap != nil {
 		t.Error("a reply carrying the window chain's sequence was accepted as today's")
 	}
-	m.applySpendTodayLoaded(spendTodayLoadedMsg{req: 2, snap: fresh})
-	if m.spend.todaySnap != fresh {
+	m.applySpendLoaded(spendLoadedMsg{span: spanToday, req: 2, snap: fresh})
+	if m.spend.chains[spanToday].snap != fresh {
 		t.Error("the today chain's own sequence was rejected")
 	}
 	// lastFetch reports the age of the WINDOW figure and must not move for a today
 	// reply, or the strip claims a freshness the rolling figure does not have.
-	if !m.spend.lastFetch.IsZero() {
-		t.Errorf("lastFetch moved on a today reply: %v", m.spend.lastFetch)
+	if !m.spend.chains[spanHour].lastFetch.IsZero() {
+		t.Errorf("lastFetch moved on a today reply: %v", m.spend.chains[spanHour].lastFetch)
 	}
 }
 
-// invalidate must disown the today chain too. A different pod is a different day
-// total, and its reply outlives the switch by the fetch timeout.
-func TestSpendInvalidate_DisownsTheTodayChain(t *testing.T) {
-	s := &spendState{
-		todaySnap:    &usage.Snapshot{Window: "today"},
-		todayErr:     context.DeadlineExceeded,
-		todayReqSeq:  3,
-		todayTickGen: 4,
+// invalidate must disown EVERY chain, and the drawer's. A different pod is a different
+// month total just as much as a different hour, and each reply outlives the switch by the
+// fetch timeout.
+//
+// ASSERTED OVER THE WHOLE TABLE rather than on the two chains that used to exist. That is
+// the point of the array: a fifth span added tomorrow is covered by this test the day it is
+// added, where two hand-written blocks would have left it silently retained.
+func TestSpendInvalidate_DisownsEveryChain(t *testing.T) {
+	s := &spendState{}
+	for i := range s.chains {
+		s.chains[i] = spendChain{
+			snap:    &usage.Snapshot{Window: "seeded"},
+			err:     context.DeadlineExceeded,
+			reqSeq:  3,
+			tickGen: 4,
+		}
+	}
+	s.drawer = spendChain{
+		snap:    &usage.Snapshot{Window: "seeded"},
+		err:     context.DeadlineExceeded,
+		reqSeq:  3,
+		tickGen: 4,
 	}
 
 	s.invalidate()
 
-	if s.todaySnap != nil || s.todayErr != nil {
-		t.Errorf("today state survived invalidate: snap=%v err=%v", s.todaySnap, s.todayErr)
+	check := func(name string, c spendChain) {
+		t.Helper()
+		if c.snap != nil || c.err != nil {
+			t.Errorf("%s: state survived invalidate: snap=%v err=%v", name, c.snap, c.err)
+		}
+		if !c.lastFetch.IsZero() {
+			t.Errorf("%s: lastFetch survived invalidate: %v — the age of discarded data", name, c.lastFetch)
+		}
+		if c.reqSeq != 4 {
+			t.Errorf("%s: reqSeq = %d, want 4 — an in-flight reply must be disowned", name, c.reqSeq)
+		}
+		if c.tickGen != 5 {
+			t.Errorf("%s: tickGen = %d, want 5 — the old chain must stop scheduling", name, c.tickGen)
+		}
 	}
-	if s.todayReqSeq != 4 {
-		t.Errorf("todayReqSeq = %d, want 4 — an in-flight reply must be disowned", s.todayReqSeq)
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		check(spendSpanDefs[span].label, s.chains[span])
 	}
-	if s.todayTickGen != 5 {
-		t.Errorf("todayTickGen = %d, want 5 — the old chain must stop scheduling", s.todayTickGen)
-	}
+	check("drawer", s.drawer)
 }
 
 // lastFetch was maintained on every accepted reply and asserted by six tests, and no
@@ -922,12 +951,12 @@ func TestSpendInvalidate_DisownsTheTodayChain(t *testing.T) {
 // current reading: no error, no staleness, the last good figure sitting there.
 func TestSpendSummary_AWedgedPollChainReportsItsAge(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 10, CostMicros: 1_120_000, PricedRequests: 10, PriceableRequests: 10},
 		Priced: true,
 	}
-	m.spend.lastFetch = time.Now().Add(-3 * time.Minute)
+	m.spend.chains[spanHour].lastFetch = time.Now().Add(-3 * time.Minute)
 
 	got := m.spendSummary()
 
@@ -954,12 +983,12 @@ func TestSpendSummary_AFreshFigureCarriesNoAge(t *testing.T) {
 	// clock, and what matters is that a figure inside the window is silent.
 	for _, age := range []time.Duration{0, time.Second, spendPollInterval, spendStaleAfter - time.Second} {
 		m := &model{}
-		m.spend.snap = &usage.Snapshot{
+		m.spend.chains[spanHour].snap = &usage.Snapshot{
 			Window: "1h",
 			Totals: usage.Counts{Requests: 1, CostMicros: 1_120_000, PricedRequests: 1, PriceableRequests: 1},
 			Priced: true,
 		}
-		m.spend.lastFetch = time.Now().Add(-age)
+		m.spend.chains[spanHour].lastFetch = time.Now().Add(-age)
 
 		if got := m.spendSummary(); got.Stale {
 			t.Errorf("age %v: Stale = true at or below the %v threshold", age, spendStaleAfter)
@@ -971,7 +1000,7 @@ func TestSpendSummary_AFreshFigureCarriesNoAge(t *testing.T) {
 // render as "this figure is infinitely old".
 func TestSpendSummary_NoFetchYetIsNotStale(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{Requests: 1, CostMicros: 1_120_000, PricedRequests: 1, PriceableRequests: 1},
 		Priced: true,
@@ -992,16 +1021,57 @@ func TestSpendStaleAfter_IsTwiceThePollInterval(t *testing.T) {
 	}
 }
 
-// The today poll is deliberately far slower than the window poll: the figure only
-// grows, by one turn at a time, and it is the more expensive answer to compute.
-func TestSpendTodayPollInterval_IsMuchSlowerThanTheWindowPoll(t *testing.T) {
-	if spendTodayPollInterval <= spendPollInterval {
-		t.Fatalf("today interval %v is not slower than the window interval %v",
-			spendTodayPollInterval, spendPollInterval)
+// Cadence rises with the cost of the answer, which is what keeps four chains affordable.
+//
+// The hour is a ring read and polls fastest; each longer span walks more day files off an
+// operator-configured path and polls more slowly. Asserted as an ORDERING over the table
+// rather than as four literals, so it stays true when a cadence is retuned and fails when
+// one is retuned the wrong way — a month polled at the hour's rate would walk up to
+// thirty-one files every twenty seconds to move a figure by under a tenth of a percent.
+func TestSpendSpanDefs_CadenceRisesWithTheCostOfTheAnswer(t *testing.T) {
+	if spendSpanDefs[spanHour].interval != spendPollInterval {
+		t.Errorf("the hour's interval is %v, want spendPollInterval (%v) — spendStaleAfter is "+
+			"derived from that constant, so the fastest chain has to be the one it describes",
+			spendSpanDefs[spanHour].interval, spendPollInterval)
 	}
-	if spendTodayPollInterval < 5*time.Minute {
-		t.Errorf("today interval %v is faster than the 5m the comment claims is ample",
-			spendTodayPollInterval)
+	for span := spendSpan(1); span < numSpendSpans; span++ {
+		prev, cur := spendSpanDefs[span-1], spendSpanDefs[span]
+		if cur.interval < prev.interval {
+			t.Errorf("%s polls every %v, faster than the shorter %s at %v — a longer span costs "+
+				"the server more, not less", cur.label, cur.interval, prev.label, prev.interval)
+		}
+	}
+	// And the ledger-backed spans are all meaningfully slower than the ring, not merely
+	// not-faster: the whole reason the band can afford four chains.
+	for _, span := range []spendSpan{spanToday, span7d, spanMonth} {
+		if spendSpanDefs[span].interval <= spendPollInterval {
+			t.Errorf("%s polls every %v, no slower than the ring-served hour at %v — this span "+
+				"reads day files off disk", spendSpanDefs[span].label,
+				spendSpanDefs[span].interval, spendPollInterval)
+		}
+	}
+	if spendSpanDefs[spanMonth].interval < 5*time.Minute {
+		t.Errorf("the month polls every %v, faster than the 5m its own comment calls ample for a "+
+			"figure that moves under a tenth of a percent in twenty seconds",
+			spendSpanDefs[spanMonth].interval)
+	}
+}
+
+// Every span has to be fully described, or the band renders a cell it cannot label and a
+// chain that polls a window the server will refuse.
+func TestSpendSpanDefs_EverySpanIsComplete(t *testing.T) {
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		def := spendSpanDefs[span]
+		if def.window == "" {
+			t.Errorf("span %d has no window parameter", span)
+		}
+		if def.label == "" {
+			t.Errorf("span %d (%q) has no label — every band cell must name its span", span, def.window)
+		}
+		if def.interval <= 0 {
+			t.Errorf("span %d (%q) has no poll interval, so its chain would never reschedule",
+				span, def.window)
+		}
 	}
 }
 
@@ -1016,7 +1086,7 @@ func TestSpendTodayPollInterval_IsMuchSlowerThanTheWindowPoll(t *testing.T) {
 // to draw.
 func TestSpendSummary_ANegativeWindowTotalIsUnpricedNotARefund(t *testing.T) {
 	m := &model{}
-	m.spend.snap = &usage.Snapshot{
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
 		Window: "1h",
 		Totals: usage.Counts{
 			Requests: 10, CostMicros: -5_000_000,
@@ -1046,7 +1116,7 @@ func TestSpendSummary_ANegativeWindowTotalIsUnpricedNotARefund(t *testing.T) {
 // which is what an impossible number is.
 func TestApplyTodayFigure_ANegativeDayTotalLeavesHasTodayFalse(t *testing.T) {
 	m := &model{}
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday,
 		Totals: usage.Counts{
 			Requests: 400, CostMicros: -5_000_000,
@@ -1169,15 +1239,15 @@ func TestCacheHitPct_ReportedKindsWithZeroCountersIsNotNaN(t *testing.T) {
 // have one.
 func TestSpendSummary_AFailedWindowPollStillCarriesTheDayFigure(t *testing.T) {
 	m := &model{}
-	m.spend.err = errors.New("dial tcp: connection refused")
+	m.spend.chains[spanHour].err = errors.New("dial tcp: connection refused")
 	// The today chain answered, on its own generation, moments ago.
-	m.spend.todaySnap = &usage.Snapshot{
+	m.spend.chains[spanToday].snap = &usage.Snapshot{
 		Window: usage.WindowToday, Priced: true,
 		Totals: usage.Counts{
 			Requests: 250, CostMicros: 30_935_000, PricedRequests: 250, PriceableRequests: 250,
 		},
 	}
-	m.spend.todayLastFetch = time.Now()
+	m.spend.chains[spanToday].lastFetch = time.Now()
 
 	got := m.spendSummary()
 
