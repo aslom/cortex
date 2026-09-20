@@ -38,6 +38,12 @@ const (
 // tier hides, and a forgotten tier silently prices at zero.
 const numTiers = 4
 
+// NumTiers is numTiers for callers outside this package, so a consumer sizing a
+// per-tier array names the constant instead of writing 4 — a literal that would go
+// stale silently if a tier were ever added, which is the failure numTiers' own doc
+// says arrays exist to prevent.
+const NumTiers = numTiers
+
 // Usage is one request's token count, split by tier.
 //
 // This mirrors parsercommon.TokenUsage, which is what the inference parsers

@@ -163,6 +163,23 @@ type Event struct {
 	// a free completion.
 	OutputUSD float64 `json:"output_usd,omitempty"`
 
+	// Tiers is the modelled per-tier split, or NIL when the rate table could not produce
+	// one — a gateway-priced request on a model this deployment has no rates for.
+	//
+	// A POINTER, deliberately. A zero-valued struct cannot distinguish "no split exists"
+	// from "every tier cost nothing", and consumers APPORTION a real total by these
+	// numbers: an absent split read as four zeros divides by zero, and read as a real one
+	// reports all traffic as free. Absence is the load-bearing state here, the same way
+	// Agent "" is in costledger.Row.
+	//
+	// OVERLAPS OutputUSD ABOVE, and not by accident. That field is the output HALF as
+	// Settle computes it — a second pricing call with the prompt tiers zeroed, guarded by
+	// the pair ceiling — and it feeds a per-row figure in the events pane. This is one
+	// element of a decomposition of the WHOLE request, computed in a single pass under one
+	// resolved rate set. Merging them would make the events pane's output figure depend on
+	// this feature's arithmetic, so they stay separate and each keeps its own provenance.
+	Tiers *TierCost `json:"tiers,omitempty"`
+
 	// UsageRefused says the response's TOKEN COUNTS were impossible — negative, or past
 	// pricing.MaxPlausibleTokens — whatever happened to the money.
 	//
@@ -326,6 +343,29 @@ func (e Event) Micros() int64 {
 		return 0
 	}
 	return m
+}
+
+// TierCost is the modelled cost of one request, split by rate tier.
+//
+// NAMED FIELDS RATHER THAN A POSITIONAL ARRAY, because this lands in an APPEND-ONLY FILE
+// retained for thirty days. `"tiers":[0.007,0.022,0.3,0.46]` requires every future reader
+// to know pricing.Tier's declaration order, and that order is an implementation detail of
+// another package — one whose own doc says arrays exist there so a forgotten tier cannot
+// hide. Four names cost a few bytes each under omitempty and are self-describing to
+// anyone reading the ledger with jq.
+//
+// MODELLED, NEVER AUTHORITATIVE — the same standing as PromptUSD, and for the same reason
+// given there: a gateway reports one total for the call and never breaks it down. These
+// are the rate table's answer even when CostUSD is the gateway's, so they do NOT sum to
+// it and nothing may add them up and present the result as spend.
+//
+// A zero member means that tier carried no tokens. "No split at all" is the nil pointer
+// on Event.Tiers, not a zero-valued struct.
+type TierCost struct {
+	Input      float64 `json:"input,omitempty"`
+	CacheWrite float64 `json:"cache_write,omitempty"`
+	CacheRead  float64 `json:"cache_read,omitempty"`
+	Output     float64 `json:"output,omitempty"`
 }
 
 // Trust is the ONE answer to "what may be believed about this figure", derived from the record

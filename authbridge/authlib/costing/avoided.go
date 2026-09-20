@@ -96,7 +96,11 @@ func Avoided(pctx *pipeline.Context, rates pricing.Resolver) []costevent.Saving 
 		// this request landed on — including a long-context premium, which keying the
 		// lookup on the slice would have dropped: 9.7k avoided tokens resolve at At(9700)
 		// and miss a 200k threshold the 641k request they came out of is well past.
-		if micros, prov, ok, _ := modelledCost(rates, pctx.Host, model, saved, prompt); ok {
+		// The tier split is discarded here, deliberately. A saving is not spend — nothing may
+		// add it to a cost total in either direction — so splitting it by tier would invite
+		// exactly the addition the invariant forbids, and compound a bytes-to-tokens estimate
+		// with a modelled ratio into a figure nobody could defend.
+		if micros, _, prov, ok, _ := modelledCost(rates, pctx.Host, model, saved, prompt); ok {
 			s.USD, s.Provenance = float64(micros)/1e6, prov.String()
 		}
 		// Published even with no dollar figure: the token saving is still known, and

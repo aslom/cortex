@@ -273,32 +273,44 @@ func PlausibleUsage(u Usage) bool {
 	return true
 }
 
-// CostWithReason is Cost, and says why when it refuses.
+// CostByTier is Cost's arithmetic with the per-tier amounts kept instead of summed away.
 //
-// Split out rather than folded into Cost's signature because three call sites want the figure
-// and one wants the cause: costing.Settle publishes a refusal an operator can act on, and
-// telling "this rate table is wrong" from "this model has no rates" is the whole difference
-// between a signal and a shrug. Every refusal below is one of Cost's documented four-plus ways
-// to be unpriced, named rather than collapsed into a bare false.
-func CostWithReason(r Rates, u Usage) (int64, bool, Refusal) {
+// ONE PASS, ONE `eff`. The alternative is what Settle does for its prompt and output
+// halves: call Cost again with the other tiers zeroed. That re-resolves the rate table
+// against a MODIFIED prompt total on each call and re-applies the per-request
+// plausibility ceiling to each fragment, which is forty lines of guard reasoning in
+// costing.go. This returns a decomposition of the same float sum the total is built
+// from, so the tiers are mutually consistent by construction and no fragment can pass
+// or fail a bound the whole did not.
+//
+// THE TIERS NEED NOT SUM EXACTLY TO total. Each is converted to micros independently, so
+// four truncations can differ from one by a few micros. Callers use them as a RATIO — see
+// usage.Counts.ApportionTiers — where truncation is invisible. Nothing may present this
+// array as a total.
+//
+// The refusals below are Cost's own, unchanged: this function IS Cost's body, and
+// CostWithReason now delegates to it.
+func CostByTier(r Rates, u Usage) (tiers [NumTiers]int64, total int64, ok bool, refusal Refusal) {
 	if u == (Usage{}) {
-		return 0, false, RefusalNoTokens
+		return tiers, 0, false, RefusalNoTokens
 	}
 	// FIRST, so the reason is stable. Asked before the per-tier loop below because the loop
 	// returns on the first problem it meets, and an impossible COUNT is the one refusal a caller
 	// acts on differently — costing refuses every figure derived from the report. Checked here, a
 	// missing rate can no longer mask it.
 	if !PlausibleUsage(u) {
-		return 0, false, RefusalImpossibleCount
+		return tiers, 0, false, RefusalImpossibleCount
 	}
 	eff := r.At(u.PromptTotal())
 	var usd float64
+	// perTier keeps what the loop below used to discard.
+	var perTier [NumTiers]float64
 	for i, n := range u.tokens() {
 		if n == 0 {
 			continue
 		}
 		if !eff.Set[i] {
-			return 0, false, RefusalNoRate
+			return [NumTiers]int64{}, 0, false, RefusalNoRate
 		}
 		// The RATE is validated here, not only at config time. Checking the token
 		// count and trusting the rate is not enough: a negative rate yields ok=true
@@ -307,17 +319,18 @@ func CostWithReason(r Rates, u Usage) (int64, bool, Refusal) {
 		// every other producer unguarded — including the ProvDiscovered /model/info
 		// path, where the numbers come from a remote gateway.
 		if r := eff.Base[i]; r < 0 || math.IsNaN(r) || math.IsInf(r, 0) {
-			return 0, false, RefusalNoRate
+			return [NumTiers]int64{}, 0, false, RefusalNoRate
 		}
-		usd += float64(n) * eff.Base[i]
+		perTier[i] = float64(n) * eff.Base[i]
+		usd += perTier[i]
 	}
 	// Bound-checked before conversion, in MicrosFromUSD. Each RATE is validated above,
 	// but a finite rate times a large token count still accumulates past int64: the
 	// conversion would then be undefined and return ok=true with a garbage ledger
 	// figure, which is worse than reporting the request unpriced.
-	micros, ok := MicrosFromUSD(usd)
-	if !ok {
-		return 0, false, RefusalUnrepresentable
+	micros, converted := MicrosFromUSD(usd)
+	if !converted {
+		return [NumTiers]int64{}, 0, false, RefusalUnrepresentable
 	}
 	// AND HELD TO THE SAME PER-REQUEST CEILING AS A GATEWAY'S OWN FIGURE. MicrosFromUSD
 	// alone bounds this at MaxCostMicros — $9 billion, the figure this file calls a garbage
@@ -332,7 +345,32 @@ func CostWithReason(r Rates, u Usage) (int64, bool, Refusal) {
 	// Refused rather than clamped, like every other implausible input here: the request
 	// stays priceable-and-unpriced, which is a coverage gap a client already renders.
 	if micros > MaxPlausibleRequestCostMicros {
-		return 0, false, RefusalImplausibleTotal
+		return [NumTiers]int64{}, 0, false, RefusalImplausibleTotal
 	}
-	return micros, true, RefusalNone
+	for i, v := range perTier {
+		// A tier that will not convert leaves THAT tier at zero rather than refusing the
+		// request: the whole has already been bounded and accepted above, so the ratio is
+		// merely less complete — the case ApportionTiers already handles — and refusing
+		// here would unprice a request Cost priced.
+		if m, converted := MicrosFromUSD(v); converted {
+			tiers[i] = m
+		}
+	}
+	return tiers, micros, true, RefusalNone
+}
+
+// CostWithReason is Cost, and says why when it refuses.
+//
+// Split out rather than folded into Cost's signature because three call sites want the figure
+// and one wants the cause: costing.Settle publishes a refusal an operator can act on, and
+// telling "this rate table is wrong" from "this model has no rates" is the whole difference
+// between a signal and a shrug. Every refusal below is one of Cost's documented four-plus ways
+// to be unpriced, named rather than collapsed into a bare false.
+//
+// A two-line delegation to CostByTier, which holds the arithmetic and every refusal
+// above. Signature unchanged: three call sites want the figure and one wants the cause,
+// and none of them needs the split.
+func CostWithReason(r Rates, u Usage) (int64, bool, Refusal) {
+	_, micros, ok, refusal := CostByTier(r, u)
+	return micros, ok, refusal
 }
