@@ -23,6 +23,10 @@ type InferenceParser struct {
 	// rates is the process rate table, injected by plugins.BuildWithDeps. Nil when the
 	// process has no pricing wired, which costing.Settle handles by reporting unpriced.
 	rates pricing.Resolver
+	// blind reports gateways whose cost header omits cache cost, once each. It lives here
+	// rather than beside litellm-budget-track's drift reporter because that plugin is opt-in
+	// and this one runs wherever anything is priced — see cacheBlindReporter.
+	blind cacheBlindReporter
 }
 
 func NewInferenceParser() *InferenceParser { return &InferenceParser{} }

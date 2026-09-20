@@ -2,23 +2,27 @@
 // per-request cost and enforces a daily spending budget, rejecting requests
 // with HTTP 429 when the budget is exceeded.
 //
-// Cost is resolved in two ways:
+// THIS PLUGIN DOES NOT PRICE ANYTHING. inference-parser settles every request's cost and
+// publishes the record — see inferenceparser/cost.go for why the component that produces the
+// token counts is the one that turns them into money. This plugin reads that figure through
+// costing.Load, accumulates it against the budget, and annotates the record through
+// costing.Amend. It holds no rates and resolves no headers.
 //
-//   - Non-streaming responses carry the cost in a response header
-//     (x-litellm-response-cost, or the pre-discount -original variant), read
-//     on the terminal frame.
+// The paragraphs this replaces described the pre-d6eb9efa arrangement, where the figure was
+// resolved here — the header on a non-streamed response, the rate table on a streamed one. They
+// survived the refactor that moved cost ownership out and read, three days later, as though
+// ownership were still split. They are the reason an investigation into a cost discrepancy began
+// by looking for pricing logic in this file, and found none.
 //
-//   - Streaming responses (text/event-stream — what Claude Code's /v1/messages
-//     uses) report cost 0 in the header because the total is not known when the
-//     headers are sent. That zero is a placeholder, not an answer. For these the
-//     plugin prices the per-tier token counts inference-parser publishes, using the
-//     top-level `pricing:` section.
+// The plugin also carries no rate options. input_cost_per_token and its three siblings were
+// REMOVED, and a config still setting them now fails to start with the field named — see
+// docs/litellm-budgettrack-plugin.md. It requires inference-parser LATER in the chain, because
+// the response pass runs in reverse; see Capabilities.
 //
-//     The plugin no longer carries rate options of its own. input_cost_per_token
-//     and its three siblings were REMOVED, and a config still setting them now
-//     fails to start with the field named — see docs/litellm-budgettrack-plugin.md.
-//     It also requires inference-parser LATER in the chain, because the response
-//     pass runs in reverse; see Capabilities.
+// What it still owns about cost is the DRIFT CHECK in drift.go: the rate table measured against
+// a gateway's own figure. That check is reachable only where this plugin is configured, so the
+// default pipeline does not get it — the narrower cache-blind case is reported by the cost owner
+// instead, in inferenceparser/cacheblind.go, and moving the general check there is open work.
 package litellm_budgettrack
 
 import (

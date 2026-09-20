@@ -42,6 +42,14 @@ import (
 // So "-original" is the cost the gateway ACTUALLY CHARGED, not a pre-discount list price,
 // and falling back to it compares like with like.
 //
+// WHAT THAT MEASUREMENT DID NOT ESTABLISH, and the omission cost a week: the probe carried
+// 16 input and 4 output tokens and NO CACHE TOKENS, so it could only test the two tiers an
+// agent barely uses. On cache-bearing requests this gateway's header prices the uncached
+// tiers and stops — 114 of 322 sampled responses, understating them 17.8x — which is what
+// Settled.HeaderOmittedCache and the guard in headerOmitsCache exist to catch. A header
+// validation with no cache tokens in it validates the arithmetic on 4% of the money. Any
+// re-measurement here must include a cache-read-heavy pair.
+//
 // "Original" refers to LiteLLM's OWN discount/margin layer, reported alongside in
 // X-Litellm-Response-Cost-{Discount,Margin}-Amount: original is the figure before that
 // layer is applied. This gateway runs neither (both report 0.0), so the two agree. A
@@ -317,6 +325,25 @@ type Settled struct {
 	// ReportedUSD is the gateway's own figure, when it gave one.
 	ReportedUSD float64
 	HasReported bool
+	// HeaderOmittedCache says the gateway's figure priced only the uncached tiers while the
+	// cache tiers carried real cost, so the modelled figure was charged instead of it.
+	//
+	// NOT a disagreement this package is guessing at — it is a figure about a different
+	// quantity. Measured against ete-litellm over four days: of 322 non-streamed responses
+	// carrying a usable header, 208 matched the rate table EXACTLY and 114 matched the
+	// input+output cost alone, with nothing in between at a 5% tolerance. Many of the 114
+	// reported the identical $0.000205 — 90 input + 9 output tokens at sonnet-5's rates —
+	// while carrying 55k-416k cache tokens worth up to $0.77 apiece. Preferring the header
+	// understated those requests 17.8x, and the gateway's own spend records bill them in full,
+	// so the header disagrees with its own gateway rather than reporting a discount.
+	//
+	// ReportedUSD still holds the header figure when this is set: refusing it as the CHARGED
+	// figure and discarding it are different acts, and the drift reporter needs the pair.
+	//
+	// Why this needs a named field rather than RejectedReason: that reads as unpriced to every
+	// consumer, and this request IS priced — from the table, which on this gateway is the
+	// figure that matches the bill.
+	HeaderOmittedCache bool
 	// ModelledUSD is what the rate table says the same usage costs, when it can say.
 	// Computed even when a reported figure won, because the comparison is the only
 	// signal that a rate table has gone stale.
@@ -393,6 +420,53 @@ type Settled struct {
 	// not be read as a free tier — which is why the PUBLISHED field is a pointer.
 	HasTiers  bool
 	HasOutput bool
+}
+
+// cacheBlindTolerance is how close a header figure must sit to the uncached tiers before it is
+// read as having priced only those — and how much of the request's cost the cache tiers must
+// carry before the question is worth asking at all.
+//
+// The same 5% the drift reporter uses, for the same reason: it absorbs rounding and the micro
+// quantization while still separating the two populations cleanly. Measured on 322 real
+// responses, every one landed in "matches the whole" or "matches the uncached half" at this
+// tolerance and none in between, so the figure is not a knife edge that a slightly different
+// constant would move.
+const cacheBlindTolerance = 0.05
+
+// headerOmitsCache reports whether the gateway's figure priced the uncached tiers and nothing
+// else, on a request whose cache tiers carried real cost. See Settled.HeaderOmittedCache.
+//
+// THREE CONDITIONS, and each one rules out a case that would otherwise be misread:
+//
+//   - A modelled figure with a tier split must exist. Without it there is nothing to charge
+//     instead, and firing would trade a low figure for no figure — which is worse, and is what
+//     a guard keyed on the header alone would do for a model that has no rates.
+//   - The cache tiers must carry more than the tolerance of the total. On a CACHE-FREE request
+//     the uncached figure IS the whole figure, so "the header equals the uncached tiers" is true
+//     of every perfectly correct header ever sent; this is the condition that tells the two
+//     apart, and without it the guard would reprice all ordinary traffic from the table.
+//   - The header must MATCH the uncached figure, not merely fall below it. A header that is low
+//     for some other reason is a disagreement this package cannot adjudicate — it may be a
+//     deeper discount than the table models — so it stands, and the drift reporter says so.
+//     Substituting there would be the "your table must be wrong" mistake written into code.
+func headerOmitsCache(out Settled, header float64) bool {
+	if !out.HasModelled || !out.HasTiers {
+		return false
+	}
+	uncached := out.TierUSD[pricing.TierInput] + out.TierUSD[pricing.TierOutput]
+	cached := out.TierUSD[pricing.TierCacheWrite] + out.TierUSD[pricing.TierCacheRead]
+	total := uncached + cached
+	if total <= 0 || cached/total <= cacheBlindTolerance {
+		return false
+	}
+	// Relative to the uncached figure, which is the quantity being recognised. Against the
+	// TOTAL instead, a request whose cache share barely cleared the bar above would match
+	// almost anything.
+	if uncached <= 0 {
+		return false
+	}
+	d := header - uncached
+	return d <= uncached*cacheBlindTolerance && d >= -uncached*cacheBlindTolerance
 }
 
 // Settle prices one response.
@@ -545,8 +619,12 @@ func Settle(pctx *pipeline.Context, rates pricing.Resolver) Settled {
 	streamedPlaceholder := state == headerZero && IsEventStream(pctx)
 	out.DeclaredFree = state == headerZero && !streamedPlaceholder
 
+	// Asked here, where both figures and the tier split exist, and BEFORE the precedence
+	// below — it is the one exception to "a positive header figure wins outright".
+	out.HeaderOmittedCache = state == headerPositive && headerOmitsCache(out, cost)
+
 	switch {
-	case state == headerPositive:
+	case state == headerPositive && !out.HeaderOmittedCache:
 		out.CostUSD, out.Source, out.Provenance, out.Priced =
 			cost, costevent.SourceGatewayHeader, pricing.ProvAuthoritative, true
 	case out.DeclaredFree:
