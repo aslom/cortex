@@ -57,7 +57,27 @@ func (c bandCell) width() int {
 // one span ends; suffixing alone leaves a reader's eye crossing spans twice on its way along
 // the row. Together the row reads as two runs, each labelled.
 func renderSpendBand(s spendSummary, width int) []string {
-	window := strings.ToUpper(s.WindowLabel)
+	// THE SUFFIX, COMPUTED ONCE, and EMPTY when there is no label to suffix with.
+	//
+	// spendSummary.WindowLabel is set only when parseWindowSpan could read snap.Window, so an
+	// unreadable window — or the Failed path, which builds a summary with no label at all —
+	// leaves it empty while every other field is populated. renderSpendStrip guards its own use
+	// with `s.WindowLabel != ""` and says an unlabelled group is the honest answer there.
+	//
+	// Concatenated unguarded, each label gained a TRAILING SPACE: "LAST ", "SAVED ", "TOKENS ",
+	// "CACHE HIT ". bandCell.width() is max(label, value), so that space costs a column in
+	// exactly the cells whose LABEL is the wider half — TOKENS (6 against "5.6M") and CACHE HIT
+	// (9 against "93%"). LAST and SAVED concatenated unguarded too, since before the band was
+	// grouped by span, but their money values are wider than their labels and absorbed it. All
+	// four go through one variable so the distinction stops mattering.
+	//
+	// Alignment survived either way — labels and values share the pad — and the final cell's
+	// trailing space is trimmed off the line. That is why this was invisible: the cost is wasted
+	// width, never a misplaced figure.
+	suffix := ""
+	if s.WindowLabel != "" {
+		suffix = " " + strings.ToUpper(s.WindowLabel)
+	}
 	var cells []bandCell
 	if s.HasToday {
 		cells = append(cells, bandCell{"TODAY", moneyAmount(s.TodayUSD,
@@ -82,13 +102,13 @@ func renderSpendBand(s spendSummary, width int) []string {
 	// price something, and there is no separate HasWindow to consult.
 	if s.Priced {
 		cells = append(cells, bandCell{
-			"LAST " + window,
+			"LAST" + suffix,
 			moneyAmount(s.WindowUSD, s.Unpriced, s.Priceable, s.Incomplete, nil, s.Clamped),
 		})
 	}
 	if !s.HasTodaySaved && s.HasSaved {
 		cells = append(cells, bandCell{
-			"SAVED " + window,
+			"SAVED" + suffix,
 			inexactMarker + formatUSDCell(s.SavedUSD),
 		})
 	}
@@ -96,10 +116,10 @@ func renderSpendBand(s spendSummary, width int) []string {
 	// the drop loop reaches first: the volume is what a reader checks the money against, and the
 	// hit rate is the one figure here that can be inferred from the tiers in the drawer.
 	if s.Tokens > 0 {
-		cells = append(cells, bandCell{"TOKENS " + window, humanizeCount(s.Tokens)})
+		cells = append(cells, bandCell{"TOKENS" + suffix, humanizeCount(s.Tokens)})
 	}
 	if s.HasCacheHit {
-		cells = append(cells, bandCell{"CACHE HIT " + window, fmt.Sprintf("%.0f%%", s.CacheHitPct)})
+		cells = append(cells, bandCell{"CACHE HIT" + suffix, fmt.Sprintf("%.0f%%", s.CacheHitPct)})
 	}
 
 	// Drop from the right until what remains fits. The LAST cell's gutter is trimmed off the

@@ -97,6 +97,45 @@ func TestDivider_TracksAResize(t *testing.T) {
 	}
 }
 
+// THE TWO STATES THAT DRAW NO RULE, and the property that makes that safe.
+//
+// paneView returns early for the edit overlay and for a zero width, so "on every pane and in
+// every state" was an overclaim. Both are exempt because they are full-screen takeovers that
+// render their own geometry and never read bodyHeight — the reserved row cannot be stranded in a
+// body that does not exist. Asserted rather than described, because the next early return will
+// inherit the exemption without inheriting the reason: if it sizes a body from bodyHeight it has
+// to draw the rule, and layout() will not say so.
+func TestDivider_ExemptStatesDrawNoRuleAndStillFit(t *testing.T) {
+	t.Run("edit overlay", func(t *testing.T) {
+		m := fitModel(t, paneSessions, 100, 30, cursorRowsFixture(60))
+		m.editState.phase = editPhaseFetching
+		view := m.View()
+		if at := dividerLine(view); at >= 0 {
+			t.Errorf("the edit overlay drew a rule at line %d; it renders its own screen", at)
+		}
+		// And the takeover still fits, which is what makes the unreserved row harmless.
+		if got := lipgloss.Height(view); got > m.height {
+			t.Errorf("edit overlay is %d lines for a %d-line terminal", got, m.height)
+		}
+	})
+	// The zero-width state reaches paneView by two different routes, and the exemption has to
+	// hold on both. A zero-value model is on paneNamespaces, whose branch returns BEFORE the
+	// `m.width == 0` check — so the picker renders at width 0 and calls renderDivider(0), which
+	// is empty. Only a data pane reaches "initializing…".
+	t.Run("zero width on a picker renders no rule", func(t *testing.T) {
+		m := &model{} // paneNamespaces is the zero value
+		if at := dividerLine(m.paneView()); at >= 0 {
+			t.Errorf("a zero-width picker drew a rule at line %d", at)
+		}
+	})
+	t.Run("zero width on a data pane is a takeover", func(t *testing.T) {
+		m := &model{pane: paneSessions}
+		if got := m.paneView(); got != "initializing…" {
+			t.Errorf("paneView at zero width = %q, want the takeover", got)
+		}
+	})
+}
+
 // A zero width is a real state — the model exists before the first WindowSizeMsg — and
 // strings.Repeat would panic on a negative count.
 func TestRenderDivider_EmptyBelowZeroWidth(t *testing.T) {

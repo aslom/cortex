@@ -66,6 +66,36 @@ func TestRenderSpendBand_TheWindowSavingJoinsTheWindowGroup(t *testing.T) {
 	orderOf(t, labels, []string{"TODAY", "LAST 1H", "SAVED 1H", "TOKENS 1H", "CACHE HIT 1H"})
 }
 
+// NO LABEL, NO SUFFIX — and no space where the suffix would have gone.
+//
+// spendSummary.WindowLabel is populated only when parseWindowSpan could read snap.Window, so an
+// unreadable window leaves it empty with every other field intact; the Failed path builds a
+// summary with no label at all. Concatenated unguarded, the labels became "LAST ", "SAVED ",
+// "TOKENS ", "CACHE HIT ", and bandCell.width() charged a column for the space in the two whose
+// label is the wider half. Invisible on screen, which is exactly why it needs a test.
+func TestRenderSpendBand_NoWindowLabelLeavesNoTrailingSpace(t *testing.T) {
+	s := bandSummary()
+	s.WindowLabel = ""
+
+	lines := renderSpendBand(s, 120)
+
+	// The whole label line, because the defect is a WIDTH and only the exact string pins one.
+	// Each cell is max(label, value) + the gutter, and with no suffix that is:
+	//
+	//   TODAY     5 against "$3.8402"  -> 7+2
+	//   LAST      4 against "$4.5462"  -> 7+2   (the value absorbed the old trailing space)
+	//   SAVED     5 against "~$0.2091" -> 8+2   (likewise; this fixture's SAVED is the fallback)
+	//   TOKENS    6 against "5.6M"     -> 6+2   (the label decides, so a space cost a column)
+	//   CACHE HIT 9 against "93%"      -> 9     (last cell, no gutter)
+	const wantLabels = "TODAY    LAST     SAVED     TOKENS  CACHE HIT"
+	if lines[0] != wantLabels {
+		t.Errorf("label line\n  got  %q\n  want %q", lines[0], wantLabels)
+	}
+	if lines[1] != "$3.8402  $4.5462  ~$0.2091  5.6M    93%" {
+		t.Errorf("values moved with the labels: %q", lines[1])
+	}
+}
+
 // The suffix is the SNAPSHOT'S window, not the string "1H". A band that hardcoded it would
 // mislabel every figure the moment `w` changed the span.
 func TestRenderSpendBand_SuffixFollowsTheWindow(t *testing.T) {

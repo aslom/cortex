@@ -1080,11 +1080,17 @@ func (m *model) layout() {
 	bodyH := m.height - 3
 	// And one for the rule that closes the top block.
 	//
-	// UNCONDITIONAL, unlike the two reservations below it: paneView draws the rule on every
-	// pane and in every state, so there is no condition here to get wrong and none that can go
-	// stale between resizes. That is the reason it is drawn that way — see renderDivider.
-	// TestLayout_EveryPaneFitsTheTerminal reports its absence as "one line too many", on every
-	// pane and every size.
+	// UNCONDITIONAL, unlike the two reservations below it: paneView draws the rule on every pane
+	// that renders a body, so there is no pane-dependent condition here to get wrong and none
+	// that can go stale between resizes.
+	//
+	// The two states that do NOT draw it — the edit overlay and `m.width == 0` — are full-screen
+	// takeovers that never read bodyHeight, so this row cannot be stranded in a body that does
+	// not exist. That is the exemption's reason, and it is narrower than "it always draws"; see
+	// renderDivider for what it means for anyone adding a third early return.
+	//
+	// TestLayout_EveryPaneFitsTheTerminal reports the reservation's absence as "one line too
+	// many", on every pane and every size.
 	bodyH -= dividerLines
 	// And one for the spend strip, which View() draws directly under the title.
 	//
