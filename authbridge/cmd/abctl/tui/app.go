@@ -1586,6 +1586,13 @@ func (m *model) paneView() string {
 	switch m.pane {
 	case paneSessions:
 		title = fmt.Sprintf("abctl · %s · %s", m.endpoint, viewTabs(paneSessions))
+		// The span of every figure in the table below — see sessionsScopeNote, which argues why
+		// this belongs in the title rather than in the headers or the hint line. Added only when
+		// it fits, because the title is not otherwise fitted and a wrapped one costs a row of the
+		// table it describes.
+		if scoped := title + sessionsScopeNote; lipgloss.Width(scoped) <= m.width {
+			title = scoped
+		}
 		body = m.sessionsTbl.View()
 	case paneEvents:
 		title = fmt.Sprintf("abctl · %s", trunc(m.selectedSess, 36))

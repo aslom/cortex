@@ -130,3 +130,54 @@ func TestRenderSpendBand_EmptySummaryStillFillsItsHeight(t *testing.T) {
 		t.Errorf("lines = %d for an empty summary, want %d: %q", len(lines), spendBandLines, lines)
 	}
 }
+
+// SAVED is the DAY's saving, because it sits beside TODAY.
+//
+// The defect #1067 exists to fix, carried into the band: the strip was fixed, but the band is
+// what paneView renders, and it read the WINDOW's avoided spend into a cell next to the day's
+// cost. Measured on a local proxy: "~$1.0291" beside a day that had really avoided $2.1891,
+// understating the figure next to it by 2.1x.
+func TestRenderSpendBand_SavedIsTheDaysFigureNotTheWindows(t *testing.T) {
+	s := bandSummary()
+	s.SavedUSD, s.HasSaved = 1.0291, true           // the window's
+	s.TodaySavedUSD, s.HasTodaySaved = 2.1891, true // the day's
+	joined := strings.Join(renderSpendBand(s, 120), "\n")
+
+	if !strings.Contains(joined, inexactMarker+"$2.1891") {
+		t.Errorf("SAVED is not the day's figure:\n%s", joined)
+	}
+	if strings.Contains(joined, inexactMarker+"$1.0291") {
+		t.Errorf("SAVED shows the window's figure beside TODAY, understating the day:\n%s", joined)
+	}
+}
+
+// With no day figure the WINDOW's saving is the fallback — and says so in its own label.
+//
+// This is the Kubernetes shape: no durable ledger, so there is no day reply to read a saving
+// from. An unlabelled fallback here would be the original defect with a different number in it.
+func TestRenderSpendBand_TheWindowSavingFallbackNamesItsSpan(t *testing.T) {
+	s := bandSummary()
+	s.HasToday, s.TodaySavedUSD, s.HasTodaySaved = false, 0, false
+	s.SavedUSD, s.HasSaved = 1.0291, true
+	s.WindowLabel = "1h"
+	lines := renderSpendBand(s, 120)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, inexactMarker+"$1.0291") {
+		t.Errorf("the window saving is missing entirely:\n%s", joined)
+	}
+	if !strings.Contains(lines[0], "SAVED 1H") {
+		t.Errorf("the fallback saving is labelled %q, which does not name its span:\n%s",
+			lines[0], joined)
+	}
+}
+
+// Neither saving means no cell, rather than a zero one.
+func TestRenderSpendBand_NoSavingShowsNoCell(t *testing.T) {
+	s := bandSummary()
+	s.HasSaved, s.HasTodaySaved = false, false
+	joined := strings.Join(renderSpendBand(s, 120), "\n")
+	if strings.Contains(joined, "SAVED") {
+		t.Errorf("a SAVED cell with no saving to report:\n%s", joined)
+	}
+}

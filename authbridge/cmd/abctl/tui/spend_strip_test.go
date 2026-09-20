@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -90,13 +91,19 @@ func TestRenderSpendStrip_TheClipAssertionCanActuallyFail(t *testing.T) {
 		}
 	}
 	// ...and passes on the real, unclipped rendering, so it is not vacuously strict.
-	if line := "SPEND  " + whole + " /1h"; strings.Contains(line, prefix) && !strings.Contains(line, whole) {
+	if line := "SPEND  1h: " + whole; strings.Contains(line, prefix) && !strings.Contains(line, whole) {
 		t.Errorf("%q failed the whole-figure assertion; the clip test rejects correct output", line)
 	}
 }
 
-// The agreed line, in the agreed order: spend, saved, the window total, then the volume
-// readings a reader checks those against.
+// The agreed line, in the agreed order: the day's spend and the day's saving, then the window
+// group — its total first, then the volume readings a reader checks that total against.
+//
+// THE ORDER CHANGED ONCE, and this is the change: `saved` used to stand between the two money
+// figures, reading as the day's partner while carrying the HOUR's number. It is now the day's own
+// figure and sits inside the day's group, which is what makes the adjacency true rather than
+// merely suggestive. The window's saving is the fallback and lives in the window group — see
+// TestRenderSpendStrip_WindowGroupLeadsWhenThereIsNoDay.
 //
 // ORDER IS ASSERTED, not just presence, because the order IS the design — the ladder drops
 // whole figures from the right, so position determines what a narrow terminal keeps. A test
@@ -105,7 +112,7 @@ func TestRenderSpendStrip_TheClipAssertionCanActuallyFail(t *testing.T) {
 func TestRenderSpendStrip_WideShowsEveryFigureInPriorityOrder(t *testing.T) {
 	s := spendSummary{
 		TodayUSD: 30.935, HasToday: true, TodayPriceable: 100, TodayIncomplete: 0,
-		SavedUSD: 0.1804, HasSaved: true,
+		TodaySavedUSD: 0.1804, HasTodaySaved: true,
 		WindowUSD: 2.91, WindowLabel: "1h", Priced: true,
 		CacheHitPct: 81, HasCacheHit: true,
 		Tokens: 9_890_000,
@@ -114,19 +121,35 @@ func TestRenderSpendStrip_WideShowsEveryFigureInPriorityOrder(t *testing.T) {
 	got := renderSpendStrip(s, 200)
 
 	// Left to right. Each must appear AFTER the previous one.
-	want := []string{"SPEND", "$30.9350", "today", "saved", "~$0.1804", "$2.9100", "/1h",
+	want := []string{"SPEND", "$30.9350", "today", "saved", "~$0.1804", "1h:", "$2.9100",
 		"cache 81%", "9.9M", "tokens", "2 err"}
-	at := 0
-	for _, w := range want {
-		i := strings.Index(got[at:], w)
-		if i < 0 {
-			t.Fatalf("strip %q is missing %q, or has it before %q", got, w, want[max(0, at-1)])
-		}
-		at += i + len(w)
-	}
+	assertInOrder(t, got, want)
 	// The saving must not have been folded into either dollar figure.
 	if strings.Contains(got, "$31.1154") || strings.Contains(got, "$3.0904") {
 		t.Errorf("strip %q added the saving to a spend figure", got)
+	}
+}
+
+// assertInOrder fails unless every want appears in line, each after the previous one.
+//
+// A helper because three tests assert an order now, and because the loop they each wrote by hand
+// had a bug in its FAILURE path: it reported the previous expectation as want[at-1], indexing the
+// expectation slice by a byte offset into the line. On the first real ordering failure — the one
+// this grouping change produced — that panicked with "index out of range [51] with length 11"
+// instead of naming the two figures that had swapped.
+func assertInOrder(t *testing.T, line string, want []string) {
+	t.Helper()
+	at := 0
+	for n, w := range want {
+		i := strings.Index(line[at:], w)
+		if i < 0 {
+			prev := "the start of the line"
+			if n > 0 {
+				prev = strconv.Quote(want[n-1])
+			}
+			t.Fatalf("strip %q is missing %q, or has it before %s", line, w, prev)
+		}
+		at += i + len(w)
 	}
 }
 
@@ -232,6 +255,116 @@ func TestRenderSpendStrip_ShowsSavedWhenMeasured(t *testing.T) {
 	got := renderSpendStrip(s, 120)
 	if !strings.Contains(got, "saved") || !strings.Contains(got, "$0.24") {
 		t.Errorf("strip %q does not show the measured saving", got)
+	}
+}
+
+// THE SAVING BELONGS TO THE SPAN IT SITS BESIDE. The day's saving is rendered in the day's
+// group; the hour's is not rendered at all while the day's exists, because two saved figures on
+// one line is how a reader learns to read neither.
+//
+// The figures are the ones a local proxy served at one instant: the hour had avoided $1.0291 and
+// the day $2.1891, so publishing the hour's beside "today" understated the day by 2.1x.
+func TestRenderSpendStrip_SavedFigureBelongsToTheDayItSitsBeside(t *testing.T) {
+	s := spendSummary{
+		TodayUSD: 64.1765, HasToday: true, TodayPriceable: 537,
+		TodaySavedUSD: 2.1891, HasTodaySaved: true,
+		SavedUSD: 1.0291, HasSaved: true,
+		WindowUSD: 36.5723, WindowLabel: "1h", Priced: true, Priceable: 290,
+		CacheHitPct: 99, HasCacheHit: true,
+		Tokens: 84_576_928,
+	}
+	got := renderSpendStrip(s, 200)
+
+	if !strings.Contains(got, "saved ~$2.1891") {
+		t.Errorf("strip %q does not carry the DAY's saving beside the day's cost", got)
+	}
+	// The hour's saving must not appear anywhere: the day's is the one on the line, and a second
+	// saved figure four columns to the right would be the same misattribution in reverse.
+	if strings.Contains(got, "$1.0291") {
+		t.Errorf("strip %q publishes the hour's saving as well as the day's", got)
+	}
+	// Left to right: the day's cost, then the day's saving, then the window group.
+	assertInOrder(t, got, []string{"$64.1765", "today", "saved ~$2.1891", "1h:", "$36.5723"})
+}
+
+// ONE LABEL FOR THE GROUP, not one per figure. The window's cost, its cache ratio and its token
+// count are all the same span, and labelling each would spend three times the width to say one
+// thing — on the line whose entire design problem is width.
+//
+// The prefix costs exactly what the old suffix cost: "1h: $1.1200" and "$1.1200 /1h" are both
+// eleven columns, so the documented width at which the strip falls silent does not move.
+func TestRenderSpendStrip_LabelsTheWindowGroupOnceAsAPrefix(t *testing.T) {
+	s := spendSummary{
+		TodayUSD: 64.1765, HasToday: true, TodayPriceable: 537,
+		WindowUSD: 36.5723, WindowLabel: "1h", Priced: true, Priceable: 290,
+		CacheHitPct: 99, HasCacheHit: true,
+		Tokens: 84_576_928,
+		Errors: 2,
+	}
+	got := renderSpendStrip(s, 200)
+
+	if !strings.Contains(got, "1h: $36.5723") {
+		t.Errorf("strip %q does not introduce the window group with its span", got)
+	}
+	// The trailing form is gone: it labelled the money figure and left the three volume figures
+	// after it wearing nothing, which is what let a reader compare the hour's token count against
+	// a day's total and a lifetime table.
+	if strings.Contains(got, "/1h") {
+		t.Errorf("strip %q still suffixes a figure with its span; the group prefix replaces it", got)
+	}
+	// And the volume figures are INSIDE the group, after the label.
+	// "84M", not "84.6M": humanizeCount renders a whole number of millions from 10M up, which is
+	// also why the line the reader reported said "85M tokens" for 85.0-85.9M.
+	label := strings.Index(got, "1h:")
+	for _, w := range []string{"cache 99%", "84M", "2 err"} {
+		if i := strings.Index(got, w); i < label {
+			t.Errorf("strip %q renders %q ahead of the window label, so it reads as the day's", got, w)
+		}
+	}
+}
+
+// WITH NO DAY FIGURE the window group leads the line, and it still says which span it is. This is
+// every Kubernetes deployment: no durable ledger, so applyTodayFigure never sets HasToday.
+func TestRenderSpendStrip_WindowGroupLeadsWhenThereIsNoDay(t *testing.T) {
+	s := spendSummary{
+		WindowUSD: 36.5723, WindowLabel: "1h", Priced: true, Priceable: 290,
+		SavedUSD: 1.0291, HasSaved: true,
+		Tokens: 84_576_928,
+	}
+	got := renderSpendStrip(s, 200)
+
+	if !strings.Contains(got, "1h: $36.5723") {
+		t.Errorf("strip %q lost the span label when the window group led the line", got)
+	}
+	// The window's saving is the fallback, and its partner is the figure immediately before it.
+	if !strings.Contains(got, "saved ~$1.0291") {
+		t.Errorf("strip %q dropped the window's saving, which is the only one it has", got)
+	}
+	if strings.Contains(got, "today") {
+		t.Errorf("strip %q mentions a day it has no figure for", got)
+	}
+}
+
+// The group label survives to the narrowest width that renders a figure at all, because it rides
+// ON the figure rather than beside it — the same rule the partiality markers follow. A bare
+// "$36.5723" on a narrow terminal would be a figure of unknown span.
+func TestRenderSpendStrip_NarrowKeepsTheSpanWithTheFigure(t *testing.T) {
+	s := spendSummary{
+		WindowUSD: 1.12, WindowLabel: "1h", Priced: true, Priceable: 290,
+		Tokens: 84_576_928,
+	}
+	// 11 columns is the whole figure with its prefix and no room for the "SPEND" label, which is
+	// the documented floor: fitStripFigures drops the label before it drops a number. It is also
+	// the exact figure renderSpendStrip's own doc measures — "$1.1200 /1h" is 11 columns, and
+	// "1h: $1.1200" is 11 too, which is the arithmetic that makes the prefix width-neutral.
+	got := renderSpendStrip(s, 11)
+	if got != "1h: $1.1200" {
+		t.Errorf("strip at width 11 = %q, want %q — the span must not be what gets dropped",
+			got, "1h: $1.1200")
+	}
+	// One column narrower drops the whole figure rather than clipping it or shedding the span.
+	if got := renderSpendStrip(s, 10); got != "" {
+		t.Errorf("strip at width 10 = %q, want empty: a clipped figure is a wrong figure", got)
 	}
 }
 
@@ -669,7 +802,7 @@ func TestRenderSpendStrip_TodayWithAnUnpricedWindowStatesNoWindowZero(t *testing
 	}
 	got := renderSpendStrip(s, 120)
 
-	if strings.Contains(got, "$0.0000 /1h") {
+	if strings.Contains(got, "$0.0000") {
 		t.Errorf("strip %q reports an UNPRICED window as a settled $0.0000", got)
 	}
 	// The today figure is the one thing here that IS known, so it must survive.
@@ -733,7 +866,9 @@ func TestRenderSpendStrip_TheHoursGapDoesNotQualifyTheDay(t *testing.T) {
 	if strings.Contains(got, "$4.1700"+partialMarker) {
 		t.Errorf("strip %q marks a fully priced day as partial", got)
 	}
-	if !strings.Contains(got, "$1.1200"+partialMarker+" /1h (40 of 40 unpriced)") {
+	// The gap rides on the hour's own figure, inside the hour's group — the span is now the
+	// group's prefix rather than a suffix on this figure, so the whole reading is one unit.
+	if !strings.Contains(got, "1h: $1.1200"+partialMarker+" (40 of 40 unpriced)") {
 		t.Errorf("strip %q does not attach the hour's gap to the hour's own figure", got)
 	}
 	// And the old shape must be gone: an unlabelled coverage note at the end of the line
@@ -744,8 +879,12 @@ func TestRenderSpendStrip_TheHoursGapDoesNotQualifyTheDay(t *testing.T) {
 }
 
 // A window that priced NOTHING has no figure for its gap to ride on, and the gap still
-// has to be stated. It wears the window's label, so it cannot be read as qualifying the
-// today figure beside it.
+// has to be stated. It leads the window group, so the group's span names it and it cannot be
+// read as qualifying the today figure beside it.
+//
+// THE NOTE ITSELF NO LONGER CARRIES A LABEL: it is the first figure of the window group, so the
+// prefix that names the span is the group's. The hand-appended "/1h" this used to assert was the
+// narrower fix for the same misreading, made before there was a group to belong to.
 func TestRenderSpendStrip_ASuppressedWindowsGapWearsTheWindowsLabel(t *testing.T) {
 	s := spendSummary{
 		TodayUSD: 4.17, HasToday: true, TodayPriceable: 318,
@@ -754,7 +893,7 @@ func TestRenderSpendStrip_ASuppressedWindowsGapWearsTheWindowsLabel(t *testing.T
 	}
 	got := renderSpendStrip(s, 200)
 
-	if !strings.Contains(got, "40 of 40 unpriced /1h") {
+	if !strings.Contains(got, "1h: 40 of 40 unpriced") {
 		t.Errorf("strip %q does not name the window the 40-request gap belongs to", got)
 	}
 	if strings.Contains(got, "$4.1700"+partialMarker) {
@@ -900,8 +1039,15 @@ func TestRenderSpendStrip_AStaleFigureIsDated(t *testing.T) {
 		t.Errorf("strip %q does not date a figure fetched 3m ago", got)
 	}
 	// The figure stays: it is old, not wrong.
-	if !strings.Contains(got, "$1.1200 /1h") {
+	if !strings.Contains(got, "1h: $1.1200") {
 		t.Errorf("strip %q withheld a stale figure instead of dating it", got)
+	}
+	// And the age is NOT inside the window group. applyAges takes the older of both poll chains
+	// precisely so one reading describes the whole answer, so a "1h:" in front of it would hand a
+	// both-chains figure the hour's span.
+	if strings.Contains(got, "1h: polled") || strings.Contains(got, "1h: 3m") {
+		t.Errorf("strip %q put the staleness note inside the window group; it belongs to neither "+
+			"span", got)
 	}
 }
 
@@ -1018,7 +1164,7 @@ func TestRenderSpendStrip_TodayWithAPricedWindowKeepsBoth(t *testing.T) {
 	if !strings.Contains(got, "$4.1700 today") {
 		t.Errorf("strip %q lost the today figure", got)
 	}
-	if !strings.Contains(got, "$1.1200 /1h") {
+	if !strings.Contains(got, "1h: $1.1200") {
 		t.Errorf("strip %q lost the priced window figure", got)
 	}
 }
@@ -1396,7 +1542,11 @@ func TestRenderSpendStrip_AClampedFigureWearsTheShortMarkerOnEitherReading(t *te
 			Clamped: true,
 		}
 		got := renderSpendStrip(s, 200)
-		if !strings.Contains(got, damagedMarker+"$1.1200 /1h") {
+		// The group's span sits OUTSIDE the markers — "1h: !$1.1200". The markers keep their own
+		// order among themselves (damaged outside inexact, so the leftmost cell is the most serious
+		// claim); the span is not a claim about the figure's accuracy but a statement of what it
+		// covers, so it reads first without displacing anything.
+		if !strings.Contains(got, "1h: "+damagedMarker+"$1.1200") {
 			t.Errorf("strip %q publishes a clamped rolling figure with no marker on it", got)
 		}
 		if strings.Contains(got, damagedMarker+"$4.1700") {
@@ -1637,7 +1787,11 @@ func TestRenderSpendStrip_TheCoverageGapIsStatedOnce(t *testing.T) {
 			if n := strings.Count(got, "318 of 318 unpriced"); n != 1 {
 				t.Errorf("strip %q states the same gap %d times, want once", got, n)
 			}
-			labelled := strings.Contains(got, "318 of 318 unpriced /1h")
+			// The label is the GROUP's prefix now, so it appears on the note only when the note
+			// LEADS the window group. Which is exactly the distinction this table draws: beside
+			// "cost unavailable" the note is second and adjacency carries it, while a today figure
+			// pushes it to the front of the group and the span comes with the position.
+			labelled := strings.Contains(got, "1h: 318 of 318 unpriced")
 			if labelled != tc.label {
 				t.Errorf("strip %q: window-labelled = %v, want %v — an unlabelled note is only "+
 					"safe immediately after the reading it qualifies", got, labelled, tc.label)
@@ -1672,7 +1826,7 @@ func TestRenderSpendStrip_EitherChainCanFailWithoutBlankingTheOther(t *testing.T
 		}
 		// And it says which reading is missing, with the window's label so it cannot be read
 		// as qualifying the day.
-		if !strings.Contains(got, "poll failed /1h") {
+		if !strings.Contains(got, "1h: poll failed") {
 			t.Errorf("strip %q does not say the window poll failed, or says it unlabelled beside "+
 				"a day figure", got)
 		}
@@ -1684,7 +1838,7 @@ func TestRenderSpendStrip_EitherChainCanFailWithoutBlankingTheOther(t *testing.T
 			WindowLabel: "1h", Priced: true, WindowUSD: 2.91, Priceable: 10, HasSnapshot: true,
 			Tokens: 9_890_000,
 		}, 200)
-		if !strings.Contains(got, "$2.9100 /1h") {
+		if !strings.Contains(got, "1h: $2.9100") {
 			t.Errorf("strip %q lost the window figure to an absent day figure", got)
 		}
 		if strings.Contains(got, "poll failed") {
