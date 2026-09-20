@@ -115,9 +115,10 @@ func TestSessionsPane_TokensCellIsNotTruncatedInTheRow(t *testing.T) {
 	}
 	// By title, not by index: rows are built positionally, so a hardcoded 3 keeps
 	// asserting after a column is inserted ahead of TOKENS — on the wrong cell, quietly.
+	// Through headerTitle, since TOKENS right-aligns its heading and so arrives padded.
 	col := -1
 	for i, c := range m.sessionsTbl.Columns() {
-		if c.Title == "TOKENS" {
+		if headerTitle(c) == "TOKENS" {
 			col = i
 		}
 	}

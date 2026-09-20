@@ -157,7 +157,10 @@ func TestTableColumns_MatchesTheDefinition(t *testing.T) {
 		t.Fatalf("tableColumns produced %d for %d columns", len(tc), len(cols))
 	}
 	for i := range cols {
-		if tc[i].Title != string(cols[i].id) {
+		// The NAME, read through headerTitle: a right-aligning column's heading arrives
+		// padded into its width, which is alignment rather than a different heading.
+		// TestEventsHeader_SitsOverItsOwnValues is what holds that padding to account.
+		if headerTitle(tc[i]) != string(cols[i].id) {
 			t.Errorf("column %d: header %q, definition %q", i, tc[i].Title, cols[i].id)
 		}
 		if tc[i].Width != cols[i].width {
@@ -815,9 +818,13 @@ func TestEventColumns_CellsTruncateToTheirOwnWidth(t *testing.T) {
 	}
 }
 
-// TestNumericColumns_RightAligned drives the wired cell closures for the
-// three numeric columns (DURATION, TOKENS, COST) at their real widths and
-// asserts they come out right-aligned by display width.
+// TestNumericColumns_RightAligned renders the three numeric columns (DURATION, TOKENS, COST)
+// the way the row loop does and asserts they come out right-aligned by display width.
+//
+// Through eventColumn.render rather than the raw cell closure, because that is where the
+// alignment now lives: the cells return bare values and the column's rightAlign flag drives
+// both their padding and their heading's. Calling cell() here would assert on a value the table
+// never receives — and would keep passing if render stopped aligning anything.
 func TestNumericColumns_RightAligned(t *testing.T) {
 	ev := pipeline.SessionEvent{
 		Direction: pipeline.Outbound,
@@ -835,11 +842,16 @@ func TestNumericColumns_RightAligned(t *testing.T) {
 		if !numeric[col.id] {
 			continue
 		}
-		cc.width = col.width
-		got := col.cell(cc)
-		// Empty is legitimate — COST is blank without a cost record; the wiring
-		// still passes through padLeft, so an empty cell provides no signal on
-		// alignment. Non-empty cells go through the full check.
+		// The column must also SAY it right-aligns, or its heading will not be padded to
+		// match — the two come off one flag, and this is the half a cell cannot show.
+		if !col.rightAlign {
+			t.Errorf("%s pads its cells but does not declare rightAlign, so its heading "+
+				"will render left-flush over right-aligned figures", col.id)
+		}
+		got := col.render(cc)
+		// Empty is legitimate — COST is blank without a cost record; render still passes
+		// it through padLeft, so an empty cell provides no signal on alignment. Non-empty
+		// cells go through the full check.
 		if got != "" {
 			filled++
 			// lipgloss.Width, not len: TOKENS/COST cells can carry U+2212 (3
@@ -902,6 +914,10 @@ func TestTableColumns_SortGlyphFitsEveryWidth(t *testing.T) {
 
 // The sorted column is marked, in the direction it is sorted — and only that
 // column.
+//
+// Compared through headerTitle, so a right-aligning column's padding does not read as a
+// different heading. The glyph is applied BEFORE that padding, which is why it survives the
+// trim: it rides at the name's right edge, where a reader looks for it.
 func TestTableColumns_SortGlyph(t *testing.T) {
 	cols := selectedColumns(defaultColumnSelection())
 
@@ -910,14 +926,14 @@ func TestTableColumns_SortGlyph(t *testing.T) {
 	for i, c := range cols {
 		switch c.id {
 		case colDuration:
-			if want := string(colDuration) + sortGlyphDesc; desc[i].Title != want {
+			if want := string(colDuration) + sortGlyphDesc; headerTitle(desc[i]) != want {
 				t.Errorf("descending header = %q, want %q", desc[i].Title, want)
 			}
-			if want := string(colDuration) + sortGlyphAsc; asc[i].Title != want {
+			if want := string(colDuration) + sortGlyphAsc; headerTitle(asc[i]) != want {
 				t.Errorf("ascending header = %q, want %q", asc[i].Title, want)
 			}
 		default:
-			if desc[i].Title != string(c.id) {
+			if headerTitle(desc[i]) != string(c.id) {
 				t.Errorf("unsorted column %s got header %q", c.id, desc[i].Title)
 			}
 		}
@@ -925,7 +941,7 @@ func TestTableColumns_SortGlyph(t *testing.T) {
 
 	// No sort: every header is bare. This is newEventsTable's path.
 	for i, c := range tableColumns(cols, "", true) {
-		if c.Title != string(cols[i].id) {
+		if headerTitle(c) != string(cols[i].id) {
 			t.Errorf("with no sort column, header %d = %q, want %q", i, c.Title, cols[i].id)
 		}
 	}

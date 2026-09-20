@@ -376,9 +376,11 @@ func TestSessionsPane_EventCountDoesNotFlipOnAStreamedEvent(t *testing.T) {
 // column — after which this would read TOKENS and go on passing against the wrong cell.
 func sessionsEventsCell(t *testing.T, m *model, id string) string {
 	t.Helper()
+	// headerTitle, not the raw Title: EVENTS right-aligns its heading, so the installed
+	// title carries the padding that puts it over its own digits.
 	col := -1
 	for i, c := range m.sessionsTbl.Columns() {
-		if c.Title == "EVENTS" {
+		if headerTitle(c) == "EVENTS" {
 			col = i
 			break
 		}

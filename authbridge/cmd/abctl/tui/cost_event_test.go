@@ -333,10 +333,13 @@ func TestTokensCellFitsASevenDigitPrompt(t *testing.T) {
 
 // columnWidth reads a width off the real events-table definition, so a test
 // cannot drift from the column it is meant to be guarding.
+//
+// Through headerTitle: TOKENS and COST right-align their headings, so their installed titles
+// carry leading padding and match no name written out here.
 func columnWidth(t *testing.T, title string) int {
 	t.Helper()
 	for _, c := range newEventsTable().Columns() {
-		if c.Title == title {
+		if headerTitle(c) == title {
 			return c.Width
 		}
 	}

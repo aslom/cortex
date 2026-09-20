@@ -84,7 +84,21 @@ type eventColumn struct {
 	id    eventColumnID
 	width int
 	// cell renders this column for one row.
+	//
+	// Returns the VALUE, unpadded: alignment is rightAlign's business, applied by
+	// render below, so a cell function cannot align itself in a way its header does
+	// not know about. That is what went wrong — see rightAlign.
 	cell func(cellContext) string
+	// rightAlign presses this column's values, and its heading, against the column's
+	// right edge. For the numeric columns: figures are compared down a column, which
+	// needs their last digits in one place.
+	//
+	// ONE FLAG FOR BOTH, which is the point. The three numeric cells each called
+	// padLeft themselves and nothing did the same for the header, so bubbles rendered
+	// every heading left-flush and TOKENS sat eleven columns from the figure it
+	// named. Declaring the alignment on the column means the header cannot be left
+	// out of it: render and tableColumns read this same field.
+	rightAlign bool
 	// defaultOn is whether the column shows without the user asking.
 	defaultOn bool
 	// desc is the one-line explanation shown beside the name in the picker. Twelve
@@ -222,27 +236,27 @@ var eventColumns = []eventColumn{
 	// The Duration itself. This is the column #865 is about ("the events with the
 	// longest duration"), and the one where sorting the rendered string is most
 	// obviously wrong: "340ms" > "1.20s" lexically.
-	{id: colDuration, width: 10, defaultOn: true, keep: keepLow,
+	{id: colDuration, width: 10, defaultOn: true, keep: keepLow, rightAlign: true,
 		desc:    "how long the exchange took",
-		cell:    func(c cellContext) string { return padLeft(durationCell(*c.row.event), c.width) },
+		cell:    func(c cellContext) string { return durationCell(*c.row.event) },
 		sortKey: func(c cellContext) sortValue { return numKey(c.row.event.Duration) }},
 	// 17, not 15: sized for a SEVEN-digit prompt, "1,048,576(−12.3k)". Million-token
 	// contexts are in service, and bubbles truncates a cell at the column width, so
 	// 15 rendered "1,048,576(−1…" — dropping the saving, which is the half of this
 	// cell that appears nowhere else.
-	{id: colTokens, width: 17, defaultOn: true, keep: keepLow,
+	{id: colTokens, width: 17, defaultOn: true, keep: keepLow, rightAlign: true,
 		desc: "tokens used, and what tool-prune saved",
 		cell: func(c cellContext) string {
-			return padLeft(c.m.tokensCell(c.rows, c.partner, c.i, c.row.event), c.width)
+			return c.m.tokensCell(c.rows, c.partner, c.i, c.row.event)
 		},
 		sortKey: func(c cellContext) sortValue { return numKey(rowTokens(c)) }},
 	// 19 fits the widest cell the formatter can produce: "<$0.0001(−<$0.0001)",
 	// where both halves fell under the four-decimal floor. The ordinary shape is
 	// "$0.2546(−$0.0037)" at 17.
-	{id: colCost, width: 19, defaultOn: true, keep: keepLow,
+	{id: colCost, width: 19, defaultOn: true, keep: keepLow, rightAlign: true,
 		desc: "estimated cost, and what tool-prune saved",
 		cell: func(c cellContext) string {
-			return padLeft(c.m.costCell(c.rows, c.partner, c.i, c.row.event), c.width)
+			return c.m.costCell(c.rows, c.partner, c.i, c.row.event)
 		},
 		sortKey: func(c cellContext) sortValue { return numKey(rowCostUSD(c)) }},
 	// keepHigh: the column #866 was filed about. Last in display order, so without
@@ -255,6 +269,23 @@ var eventColumns = []eventColumn{
 		// rather than the port deciding. Full host, not the truncated cell, for the
 		// same reason PLUGIN uses the full name.
 		sortKey: func(c cellContext) sortValue { return strKey(hostOnly(c.row.event.Host)) }},
+}
+
+// render is one cell as the table receives it: the column's value, aligned the way the column
+// declares.
+//
+// Sets cc.width itself rather than trusting the caller to, so the width a cell truncates
+// against and the width it is aligned into are read from the same place — the column. The copy
+// is local (cellContext is passed by value), so nothing leaks into the next column's turn.
+//
+// The header counterpart is tableColumns, which reads the same rightAlign field.
+func (c eventColumn) render(cc cellContext) string {
+	cc.width = c.width
+	v := c.cell(cc)
+	if c.rightAlign {
+		return padLeft(v, c.width)
+	}
+	return v
 }
 
 // rowTokens and rowCostUSD are the numeric readings behind the TOKENS and COST
@@ -362,7 +393,13 @@ const (
 )
 
 // tableColumns converts the selection into the bubbles column slice, marking the
-// sorted column (#865).
+// sorted column (#865) and right-aligning the heading of every column that
+// right-aligns its cells — the header half of eventColumn.rightAlign.
+//
+// The glyph goes on BEFORE the padding, so the marker stays against the name's right edge
+// where a reader expects it rather than drifting to the column's far side. It costs one of the
+// column's own columns either way, which is what TestTableColumns_SortGlyphFitsEveryWidth
+// measures.
 //
 // sortCol is "" for chronological order, in which case no header carries a glyph —
 // which is what newEventsTable passes, having no sort state to consult.
@@ -376,6 +413,9 @@ func tableColumns(cols []eventColumn, sortCol eventColumnID, desc bool) []table.
 			} else {
 				title += sortGlyphAsc
 			}
+		}
+		if c.rightAlign {
+			title = rightAlignHeader(title, c.width)
 		}
 		out = append(out, table.Column{Title: title, Width: c.width})
 	}
