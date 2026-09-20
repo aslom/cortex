@@ -1048,7 +1048,12 @@ type spanReading struct {
 	// looking entirely well-formed. Detected by comparing what was asked for against what was
 	// served; rendered as an em dash, because a wrong number wearing a right label is the one
 	// thing every money surface here refuses.
-	Unanswerable                    bool
+	Unanswerable bool
+	// DaysOutsideRetention is how many days of this span's window fall before the ledger's
+	// retention horizon, so the figure cannot include them. COVERAGE, not damage — see
+	// usage.Snapshot.DaysOutsideRetention — and it earns partialMarker rather than
+	// damagedMarker: the real total is larger, and nothing was destroyed.
+	DaysOutsideRetention            int64
 	Unpriced, Priceable, Incomplete int64
 	Degraded                        *usage.Degraded
 	Clamped                         bool
@@ -1121,6 +1126,7 @@ func (m *model) spanReadings() [numSpendSpans]spanReading {
 			snap := c.snap
 			r.Unpriced, r.Priceable = unpricedGap(snap.Totals)
 			r.Incomplete = snap.Totals.IncompleteRequests
+			r.DaysOutsideRetention = snap.DaysOutsideRetention
 			r.Degraded = snap.Degraded
 			r.Clamped = snap.Totals.Saturated
 			// A NEGATIVE TOTAL IS REFUSED, not clamped, and not rendered: the aggregator sums

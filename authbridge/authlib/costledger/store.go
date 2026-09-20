@@ -485,11 +485,7 @@ const maxLineBytes = 1 << 20
 func (s *store) readDay(day time.Time) ([]Row, dayIssues, error) {
 	f, err := os.Open(s.path(day))
 	if os.IsNotExist(err) {
-		// ABSENCE IS REPORTED, not silently equated with an empty day. The two are
-		// indistinguishable here — this function cannot know whether the day was quiet or
-		// pruned — so it states the fact it has and lets the caller, which knows the retention
-		// horizon, decide whether it means anything.
-		return nil, dayIssues{absent: true}, nil
+		return nil, dayIssues{}, nil
 	}
 	if err != nil {
 		return nil, dayIssues{}, err
@@ -575,23 +571,24 @@ type dayIssues struct {
 	// after that offset is missing from the answer and nothing says how much, which is
 	// why it is tracked separately from a skip rather than added to it.
 	truncated bool
-	// absent reports that there was NO FILE for this day.
-	//
-	// NOT AN ERROR AND NOT A CAVEAT ON ITS OWN. A day inside the retention window with no
-	// file is a day with no traffic, which is the common case and says nothing. It only
-	// becomes a disclosure when combined with WHERE the day falls: absent AND outside
-	// retention means the file was pruned, so the answer is short by whatever it held. See
-	// Caveats.DaysBeforeRetention, which is the only consumer.
-	absent bool
 }
 
-// retentionCutoff is the oldest day retention is guaranteed to hold: the same
-// [ref-(retainDays-1), ref] window prune keeps, measured from the clock's day.
+// retentionCutoff is the oldest day this ledger's CONFIGURATION reaches back to: the
+// [ref-(retainDays-1), ref] span prune keeps, measured from the clock's day.
 //
-// DERIVED FROM THE SAME EXPRESSION prune uses rather than restated, because the two have to
-// agree about which days can have been deleted — and a bound defined twice is a bound that
-// drifts. A day BEFORE this and absent from disk was pruned; a day before it that is still
-// present has simply not been pruned yet, which is why absence is half the test.
+// A STATEMENT ABOUT CONFIGURATION, NOT ABOUT WHAT WAS DELETED, and the difference is why an
+// earlier version of this was wrong. It claimed to be "derived from the same expression prune
+// uses" and it is not: prune floors its own ref at the NEWEST day file, so on a ledger that has
+// been idle it reaches further back than this does, and files can outlive this cutoff between
+// prune runs in any case.
+//
+// So this cannot answer "was anything deleted". Nothing in this package can: no inception date
+// is persisted and prune records nothing about what it removed, so an absent old day is
+// indistinguishable from a day that was never written. A three-day-old install with
+// retention_days=10 has twenty-two absent days before this cutoff and lost nothing.
+//
+// What it CAN answer is "how far back can a request expect coverage", which is a coverage
+// question and is all its one caller asks. See sessionapi's daysOutsideRetention.
 func (s *store) retentionCutoff(now time.Time) time.Time {
 	return s.dayOf(now).AddDate(0, 0, -(s.retainDays - 1))
 }

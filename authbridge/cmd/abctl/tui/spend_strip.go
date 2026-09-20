@@ -146,8 +146,17 @@ const saturatedNote = "clamped, figures are floors"
 //
 // Marker order is load-bearing and unchanged: damaged outermost so the leftmost glyph is the
 // most serious claim, inexact next to the amount, partial trailing.
+// alsoPartial is a SECOND reason the figure covers less than the question implied, independent
+// of the unpriced gap.
+//
+// A parameter rather than more counters, because the caller's reasons are not this function's
+// business: it composes markers. Today the only extra reason is a window reaching past the
+// ledger's retention — the total cannot include days the configuration does not keep — which is
+// exactly partialMarker's claim ("the real total is LARGER than the number shown") arrived at by
+// a different route. Smuggling it in through `unpriced` would have said requests went unpriced,
+// which is a different fact.
 func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
-	degraded *usage.Degraded, saturated bool) string {
+	degraded *usage.Degraded, saturated, alsoPartial bool) string {
 	amount := formatUSDCell(usd)
 	if incomplete > 0 {
 		amount = inexactMarker + amount
@@ -155,7 +164,7 @@ func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
 	if figureIsShort(degraded, saturated) {
 		amount = damagedMarker + amount
 	}
-	if unpriced > 0 && priceable > 0 {
+	if (unpriced > 0 && priceable > 0) || alsoPartial {
 		amount += partialMarker
 	}
 	return amount
@@ -209,6 +218,16 @@ func damagedNote(d *usage.Degraded) string {
 		return fmt.Sprintf("%d line%s lost", d.SkippedLines, plural(int(d.SkippedLines)))
 	case d.TruncatedDays > 0:
 		return fmt.Sprintf("%d day file%s lost", d.TruncatedDays, plural(int(d.TruncatedDays)))
+	// THE OTHER TWO COUNTERS, which fell through to "rows lost" while holding their own number.
+	// Less wrong than costDegradedText's version of the same gap — this note is a few words on a
+	// figure rather than a whole sentence — but wrong in the same way: the amount is statable and
+	// the generic branch declines to state it. Ordered after the two above because a lost day
+	// file and a lost line describe the READ, while these two describe a file that could not be
+	// opened at all and a row the WRITER never persisted.
+	case d.UnreadableDays > 0:
+		return fmt.Sprintf("%d day file%s unreadable", d.UnreadableDays, plural(int(d.UnreadableDays)))
+	case d.DroppedRowsTotal > 0:
+		return fmt.Sprintf("%d row%s dropped", d.DroppedRowsTotal, plural(int(d.DroppedRowsTotal)))
 	default:
 		// A disclosure carrying no counters. Presence is still the claim — see
 		// snapshotDamaged — and this is the least it can say without inventing a number.
@@ -218,7 +237,7 @@ func damagedNote(d *usage.Degraded) string {
 
 func moneyFigure(usd float64, label string, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) stripFigure {
-	amount := moneyAmount(usd, unpriced, priceable, incomplete, degraded, saturated)
+	amount := moneyAmount(usd, unpriced, priceable, incomplete, degraded, saturated, false)
 	// A gap is only readable with a denominator, and a denominator of zero is not a
 	// gap at all — it is a window with nothing to price, which the caller handles.
 	// Recomputed here for the caveat list; moneyAmount owns the MARKER.

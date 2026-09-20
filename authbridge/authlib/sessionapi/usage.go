@@ -289,6 +289,11 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 	if err != nil {
 		return usage.Snapshot{}, err
 	}
+	// HOW MUCH OF THE WINDOW THE CONFIGURATION CANNOT REACH, computed here rather than in the
+	// ledger because it is a fact about the REQUEST measured against the ledger's horizon, and
+	// the ledger does not know what was asked for. See usage.Snapshot.DaysOutsideRetention for
+	// why this is coverage rather than damage.
+	outside := daysOutsideRetention(spec.From, s.ledger.RetentionCutoff())
 	// THE GROUPING THIS SOURCE CAN APPLY, which is not always the one that was asked for,
 	// and the response says which it was.
 	//
@@ -388,7 +393,8 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 		// window whose every request was a truncated stream reports priced:true over a
 		// real total and discloses the caveat in Totals.IncompleteRequests. Withholding
 		// the figure would render "cost unavailable" over dollars that are known.
-		Priced: totals.PricedRequests > 0,
+		Priced:               totals.PricedRequests > 0,
+		DaysOutsideRetention: outside,
 	}
 	// The dollars the breakdown above does not account for — a gateway-priced response the
 	// inference parser could not read is stored with no model, so it counts toward Totals
@@ -420,6 +426,24 @@ func writeUsageError(w http.ResponseWriter, err error) {
 	}
 }
 
+// daysOutsideRetention is how many whole days of a window start before a retention cutoff.
+//
+// Zero when the window fits, which is the normal case and says nothing. Counted in DAYS because
+// that is the unit the ledger stores and prunes in: a window reaching back half a day past the
+// cutoff has one day it cannot cover, not half of one.
+func daysOutsideRetention(from, cutoff time.Time) int64 {
+	if !from.Before(cutoff) {
+		return 0
+	}
+	// Truncated to the day boundary at both ends, so the count is of DATES and not of the hours
+	// between two instants — the ledger keeps whole day files.
+	d := cutoff.Truncate(24 * time.Hour).Sub(from.Truncate(24 * time.Hour))
+	if n := int64(d / (24 * time.Hour)); n > 0 {
+		return n
+	}
+	return 1
+}
+
 // degradedFrom is the whole of the Caveats-to-wire conversion, in one place so a field cannot be
 // added on one side and forgotten on the other.
 //
@@ -430,10 +454,9 @@ func writeUsageError(w http.ResponseWriter, err error) {
 // field by field through reflection, so a fourth counter fails here rather than shipping silently.
 func degradedFrom(c costledger.Caveats) *usage.Degraded {
 	return &usage.Degraded{
-		SkippedLines:        c.SkippedLines,
-		TruncatedDays:       c.TruncatedDays,
-		UnreadableDays:      c.UnreadableDays,
-		DaysBeforeRetention: c.DaysBeforeRetention,
+		SkippedLines:   c.SkippedLines,
+		TruncatedDays:  c.TruncatedDays,
+		UnreadableDays: c.UnreadableDays,
 	}
 }
 

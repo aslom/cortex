@@ -567,6 +567,13 @@ func costDegradedText(d *usage.Degraded) string {
 	// combinations, and a switch over a subset of them is how two came to be missing. A counter
 	// added to the struct needs one clause here and any mixture composes.
 	//
+	// FOUR COUNTERS, FOUR CLAUSES, and that equality is asserted by
+	// TestCostDegradedText_HasAClauseForEveryCounter rather than maintained by hand. A fifth
+	// counter reaching Degraded without a clause here falls through to "did not say how much it
+	// lost" — which is wrong on every word when the amount IS statable, and worse, is erased
+	// entirely the moment any other counter is also set. Retention coverage is deliberately NOT
+	// one of these: it is not a loss, so it is reported with the unpriced gap above.
+	//
 	// Ordered by how much each kind loses, worst first: a whole day, the rest of a day, the named
 	// lines, then the writer's own drops.
 	var lost []string

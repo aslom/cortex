@@ -112,30 +112,20 @@ type Caveats struct {
 	// says it is short is strictly better than no answer that says nothing. Counted separately
 	// from TruncatedDays because nothing at all was read from these, not merely a prefix.
 	UnreadableDays int64
-	// DaysBeforeRetention is how many days of the REQUESTED window fall outside what retention
-	// holds and had no file on disk — so their spend was pruned, and the total beside this is
-	// short by whatever they held.
-	//
-	// IT EXISTS BECAUSE THIS WAS THE ONE SHORTFALL THAT DISCLOSED NOTHING. An unreadable day is
-	// counted, a truncated one is counted, a skipped line is counted — and a day whose file was
-	// deleted by prune read as a day with no traffic, because readDay cannot tell those apart.
-	// So window=month against a ledger configured to keep ten days answered priced:true, short
-	// by three weeks, with Caveats clean. The config floor is nine days while the default is
-	// thirty-one precisely so the shipped windows work, but a deployment may legitimately keep
-	// less history than the longest window asks for, and then it has to say so.
-	//
-	// ABSENT **AND** OUTSIDE RETENTION, both, which is what keeps this quiet in the normal case.
-	// A day inside the window with no file is a day with no traffic — the common case, and it
-	// says nothing. A day outside retention that is still present has merely not been pruned yet
-	// (prune runs at startup and on day roll, so files outlive the cutoff between runs), and
-	// counting it would report a loss that did not happen. Only the conjunction is evidence.
-	DaysBeforeRetention int64
 }
 
 // Clean reports that the read lost nothing, so a caller can disclose the caveats only
 // when there are some. The absent-not-zero convention usage.Degraded documents: zeros in
 // an always-present object read as "checked, fine" from a producer that never checked.
 func (c Caveats) Clean() bool { return c == Caveats{} }
+
+// RetentionCutoff is the oldest day this ledger's configuration reaches back to.
+//
+// EXPORTED FOR THE COVERAGE STATEMENT, and for nothing else. A caller comparing a requested
+// window's start against this learns whether the answer CAN cover the whole window — which is a
+// fact about configuration, not about data. It deliberately does not, and cannot, say whether
+// anything was deleted: see store.retentionCutoff.
+func (w *Writer) RetentionCutoff() time.Time { return w.store.retentionCutoff(w.now()) }
 
 // Query returns every row whose minute falls in [from, to], inclusive at minute
 // granularity.
@@ -190,9 +180,6 @@ func (w *Writer) Query(ctx context.Context, from, to time.Time) ([]Row, Caveats,
 	// startup and on day roll, so between rolls a file just outside the retention window is still
 	// live and readable, and a caller asking a wider window should still see it.
 	first, last := w.dayWalk(fromMin, toMin)
-	// Read once, outside the loop: the clock must not move mid-walk, or a day could be judged
-	// against a different horizon than its neighbours.
-	cutoff := w.store.retentionCutoff(w.now())
 	for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
 		if err := ctx.Err(); err != nil {
 			// Before the first read too, so a request cancelled while it queued does no IO
@@ -214,10 +201,6 @@ func (w *Writer) Query(ctx context.Context, from, to time.Time) ([]Row, Caveats,
 		caveats.SkippedLines += int64(issues.skippedLines)
 		if issues.truncated {
 			caveats.TruncatedDays++
-		}
-		// See Caveats.DaysBeforeRetention for why absence alone is not evidence.
-		if issues.absent && d.Before(cutoff) {
-			caveats.DaysBeforeRetention++
 		}
 		for _, r := range rows {
 			if m := r.At.Truncate(time.Minute); m.Before(fromMin) || m.After(toMin) {

@@ -162,6 +162,24 @@ type Snapshot struct {
 	// a deduction from it — the coverage question and the exactness question are
 	// separate, and this field answers neither on its own.
 	Priced bool `json:"priced"`
+	// DaysOutsideRetention is how many days of the REQUESTED window fall before the durable
+	// ledger's retention horizon. A COVERAGE statement: the answer cannot have covered them.
+	//
+	// NOT A LOSS, AND DELIBERATELY NOT IN Degraded, whose downstream meaning is "rows are
+	// missing from the sum". Nothing in the ledger records its own inception or what prune
+	// deleted, so an absent old day is indistinguishable from a day that was never written — a
+	// three-day-old install with retention_days=10 has twenty-two absent days before its cutoff
+	// and lost nothing. Reporting that as damage would make the disclosure fire when nothing
+	// was pruned, and noise on a disclosure is how a real one gets ignored.
+	//
+	// What it states instead is the part a client can act on and the server can prove: this
+	// window asked for N days the configuration does not reach. Whether spend happened on them
+	// is unknowable here; that the total cannot include it is certain.
+	//
+	// SAME SHAPE AS THE UNPRICED COVERAGE GAP beside it — Unpriced over Priceable — which is
+	// why it sits here rather than with the damage counters: both say "this figure covers less
+	// than the question implied", and neither says anything was destroyed.
+	DaysOutsideRetention int64 `json:"daysOutsideRetention,omitempty"`
 	// UnpricedBy counts the requests that could NOT be priced, keyed
 	// "<endpoint> <model>". Present only when something was unpriced — and never
 	// present at all on a ledger-backed window, where a per-minute row carries only
@@ -405,17 +423,6 @@ type Degraded struct {
 	// was added to end, on the half nobody wired up. Compare across polls for a rate; a non-zero
 	// value at all means some total below is short.
 	DroppedRowsTotal int64 `json:"droppedRowsTotal,omitempty"`
-	// DaysBeforeRetention is how many days of the requested window fall outside what the
-	// durable ledger retains and had no file on disk. Their spend was pruned, so the totals
-	// beside this are SHORT by whatever those days held, and by an amount nothing can state.
-	//
-	// A CONFIGURATION SHORTFALL RATHER THAN A FAULT, which is what makes it different from
-	// every other counter here: nothing is broken, the deployment simply keeps less history
-	// than the window asked for. It still has to be disclosed, because the alternative is a
-	// figure labelled with a span it does not cover — window=month against ten days of
-	// retention answering priced:true and three weeks short. See
-	// costledger.Caveats.DaysBeforeRetention for why absence alone is not evidence of it.
-	DaysBeforeRetention int64 `json:"daysBeforeRetention,omitempty"`
 	// UnreadableDays is how many day files could not be opened or scanned at all — a
 	// permission change, a vanished mount, an IO error on the first read.
 	//
