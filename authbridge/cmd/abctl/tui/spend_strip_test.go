@@ -45,15 +45,20 @@ func TestRenderSpendStrip_DropsWholeFiguresNeverClipsANumber(t *testing.T) {
 		if got == "" {
 			continue
 		}
-		// Any figure that appears at all must appear IN FULL, as formatUSDCell
-		// actually renders it: "$1.1200", not "$1.12". Asserting the short form could
-		// not detect clipping -- output truncated to "SPEND  $1.12" contains both
-		// "$1.1" and "$1.12", so it passed, and only a clip to "$1.1" or shorter was
-		// ever caught. The prefix probes stop just past the "$" so a figure clipped
+		// Any figure that appears at all must appear IN FULL, as formatUSDCell actually
+		// renders it. Asserting a SHORTER form could not detect clipping -- output truncated
+		// to "$1.12" contains "$1.1", so a clip only tripped the probe when it cut deeper than
+		// the form being asserted. The prefix probes stop just past the "$" so a figure clipped
 		// anywhere in its digits still trips them.
+		//
+		// ASKED OF THE FORMATTER, not written out, which is what
+		// TestRenderSpendStrip_TheClipAssertionCanActuallyFail exists to insist on: it warned
+		// that hardcoded literals would leave this test asserting a format the code no longer
+		// produces while the guard went on passing. That is precisely what happened when the
+		// formatter moved to two decimals, so the literals are gone.
 		for prefix, whole := range map[string]string{
-			"$1.": "$1.1200", // the window figure
-			"$0.": "$0.0187", // the saving
+			formatUSDCell(s.WindowUSD)[:3]: formatUSDCell(s.WindowUSD), // the window figure
+			formatUSDCell(s.SavedUSD)[:3]:  formatUSDCell(s.SavedUSD),  // the saving
 		} {
 			if strings.Contains(got, prefix) && !strings.Contains(got, whole) {
 				t.Errorf("width %d: %q has a clipped %q figure (want the whole %q)", w, got, prefix, whole)
@@ -121,11 +126,11 @@ func TestRenderSpendStrip_WideShowsEveryFigureInPriorityOrder(t *testing.T) {
 	got := renderSpendStrip(s, 200)
 
 	// Left to right. Each must appear AFTER the previous one.
-	want := []string{"SPEND", "$30.9350", "today", "saved", "~$0.1804", "1h:", "$2.9100",
+	want := []string{"SPEND", "$30.93", "today", "saved", "~$0.18", "1h:", "$2.91",
 		"cache 81%", "9.9M", "tokens", "2 err"}
 	assertInOrder(t, got, want)
 	// The saving must not have been folded into either dollar figure.
-	if strings.Contains(got, "$31.1154") || strings.Contains(got, "$3.0904") {
+	if strings.Contains(got, "$31.12") || strings.Contains(got, "$3.09") {
 		t.Errorf("strip %q added the saving to a spend figure", got)
 	}
 }
@@ -204,7 +209,7 @@ func TestRenderSpendStrip_PartiallyPricedDisclosesTheGap(t *testing.T) {
 		t.Errorf("strip %q does not disclose the 12 unpriced requests", got)
 	}
 	// And the figure it qualifies is still there, so this cannot pass on an empty line.
-	if !strings.Contains(got, "$4.1700") {
+	if !strings.Contains(got, "$4.17") {
 		t.Errorf("strip %q lost the figure the gap is about", got)
 	}
 }
@@ -219,7 +224,7 @@ func TestRenderSpendStrip_FullyPricedIsNotAnnotated(t *testing.T) {
 	got := renderSpendStrip(s, 120)
 	// ANCHORED FIRST. "Does not contain 'unpriced'" is satisfied by an empty string, so without
 	// this a regression that suppressed the whole line would read as a clean deployment.
-	if !strings.Contains(got, "$4.1700") {
+	if !strings.Contains(got, "$4.17") {
 		t.Fatalf("strip %q did not render the figure at all, so the absence below proves nothing", got)
 	}
 	if strings.Contains(got, "unpriced") {
@@ -262,8 +267,8 @@ func TestRenderSpendStrip_ShowsSavedWhenMeasured(t *testing.T) {
 // group; the hour's is not rendered at all while the day's exists, because two saved figures on
 // one line is how a reader learns to read neither.
 //
-// The figures are the ones a local proxy served at one instant: the hour had avoided $1.0291 and
-// the day $2.1891, so publishing the hour's beside "today" understated the day by 2.1x.
+// The figures are the ones a local proxy served at one instant: the hour had avoided $1.03 and
+// the day $2.19, so publishing the hour's beside "today" understated the day by 2.1x.
 func TestRenderSpendStrip_SavedFigureBelongsToTheDayItSitsBeside(t *testing.T) {
 	s := spendSummary{
 		TodayUSD: 64.1765, HasToday: true, TodayPriceable: 537,
@@ -275,23 +280,23 @@ func TestRenderSpendStrip_SavedFigureBelongsToTheDayItSitsBeside(t *testing.T) {
 	}
 	got := renderSpendStrip(s, 200)
 
-	if !strings.Contains(got, "saved ~$2.1891") {
+	if !strings.Contains(got, "saved ~$2.19") {
 		t.Errorf("strip %q does not carry the DAY's saving beside the day's cost", got)
 	}
 	// The hour's saving must not appear anywhere: the day's is the one on the line, and a second
 	// saved figure four columns to the right would be the same misattribution in reverse.
-	if strings.Contains(got, "$1.0291") {
+	if strings.Contains(got, "$1.03") {
 		t.Errorf("strip %q publishes the hour's saving as well as the day's", got)
 	}
 	// Left to right: the day's cost, then the day's saving, then the window group.
-	assertInOrder(t, got, []string{"$64.1765", "today", "saved ~$2.1891", "1h:", "$36.5723"})
+	assertInOrder(t, got, []string{"$64.18", "today", "saved ~$2.19", "1h:", "$36.57"})
 }
 
 // ONE LABEL FOR THE GROUP, not one per figure. The window's cost, its cache ratio and its token
 // count are all the same span, and labelling each would spend three times the width to say one
 // thing — on the line whose entire design problem is width.
 //
-// The prefix costs exactly what the old suffix cost: "1h: $1.1200" and "$1.1200 /1h" are both
+// The prefix costs exactly what the old suffix cost: "1h: $1.12" and "$1.12 /1h" are both
 // eleven columns, so the documented width at which the strip falls silent does not move.
 func TestRenderSpendStrip_LabelsTheWindowGroupOnceAsAPrefix(t *testing.T) {
 	s := spendSummary{
@@ -303,7 +308,7 @@ func TestRenderSpendStrip_LabelsTheWindowGroupOnceAsAPrefix(t *testing.T) {
 	}
 	got := renderSpendStrip(s, 200)
 
-	if !strings.Contains(got, "1h: $36.5723") {
+	if !strings.Contains(got, "1h: $36.57") {
 		t.Errorf("strip %q does not introduce the window group with its span", got)
 	}
 	// The trailing form is gone: it labelled the money figure and left the three volume figures
@@ -333,11 +338,11 @@ func TestRenderSpendStrip_WindowGroupLeadsWhenThereIsNoDay(t *testing.T) {
 	}
 	got := renderSpendStrip(s, 200)
 
-	if !strings.Contains(got, "1h: $36.5723") {
+	if !strings.Contains(got, "1h: $36.57") {
 		t.Errorf("strip %q lost the span label when the window group led the line", got)
 	}
 	// The window's saving is the fallback, and its partner is the figure immediately before it.
-	if !strings.Contains(got, "saved ~$1.0291") {
+	if !strings.Contains(got, "saved ~$1.03") {
 		t.Errorf("strip %q dropped the window's saving, which is the only one it has", got)
 	}
 	if strings.Contains(got, "today") {
@@ -347,24 +352,31 @@ func TestRenderSpendStrip_WindowGroupLeadsWhenThereIsNoDay(t *testing.T) {
 
 // The group label survives to the narrowest width that renders a figure at all, because it rides
 // ON the figure rather than beside it — the same rule the partiality markers follow. A bare
-// "$36.5723" on a narrow terminal would be a figure of unknown span.
+// "$36.57" on a narrow terminal would be a figure of unknown span.
 func TestRenderSpendStrip_NarrowKeepsTheSpanWithTheFigure(t *testing.T) {
 	s := spendSummary{
 		WindowUSD: 1.12, WindowLabel: "1h", Priced: true, Priceable: 290,
 		Tokens: 84_576_928,
 	}
-	// 11 columns is the whole figure with its prefix and no room for the "SPEND" label, which is
+	// 9 columns is the whole figure with its prefix and no room for the "SPEND" label, which is
 	// the documented floor: fitStripFigures drops the label before it drops a number. It is also
-	// the exact figure renderSpendStrip's own doc measures — "$1.1200 /1h" is 11 columns, and
-	// "1h: $1.1200" is 11 too, which is the arithmetic that makes the prefix width-neutral.
-	got := renderSpendStrip(s, 11)
-	if got != "1h: $1.1200" {
-		t.Errorf("strip at width 11 = %q, want %q — the span must not be what gets dropped",
-			got, "1h: $1.1200")
+	// the exact figure renderSpendStrip's own doc measures — "$1.12 /1h" is 9 columns, and
+	// "1h: $1.12" is 9 too, which is the arithmetic that makes the prefix width-neutral.
+	//
+	// NINE, DOWN FROM ELEVEN, because the formatter moved to two decimals: the same figure that
+	// needed "$1.1200" now needs "$1.12". The floor is a CONSEQUENCE of the money format rather
+	// than a constant, so it moves when the format does — and it moved in the good direction,
+	// since the strip now survives two columns of terminal it used to go blank on.
+	const floor = 9
+	got := renderSpendStrip(s, floor)
+	if got != "1h: $1.12" {
+		t.Errorf("strip at width %d = %q, want %q — the span must not be what gets dropped",
+			floor, got, "1h: $1.12")
 	}
 	// One column narrower drops the whole figure rather than clipping it or shedding the span.
-	if got := renderSpendStrip(s, 10); got != "" {
-		t.Errorf("strip at width 10 = %q, want empty: a clipped figure is a wrong figure", got)
+	if got := renderSpendStrip(s, floor-1); got != "" {
+		t.Errorf("strip at width %d = %q, want empty: a clipped figure is a wrong figure",
+			floor-1, got)
 	}
 }
 
@@ -696,7 +708,7 @@ func TestRenderSpendStrip_SettledZeroShowsZeroNotUnavailable(t *testing.T) {
 	// Finding 3, the half that was unpinned. A window that WAS priced and cost
 	// exactly nothing is a known answer: the gateway declared the traffic free.
 	// authlib/usage asserts "a settled zero IS priced", and formatUSDCell renders
-	// "<$0.0001" for any positive amount under the floor -- so "$0.0000" in the
+	// "<$0.01" for any positive amount under the floor -- so "$0.00" in the
 	// strip can only ever mean an exact, settled zero.
 	//
 	// Without this test, someone could "fix" the zero into an unavailable branch
@@ -711,7 +723,7 @@ func TestRenderSpendStrip_SettledZeroShowsZeroNotUnavailable(t *testing.T) {
 	if strings.Contains(got, "unavailable") {
 		t.Errorf("strip %q reports a SETTLED zero as unavailable; that conflates free with unknown", got)
 	}
-	if !strings.Contains(got, "$0.0000") {
+	if !strings.Contains(got, "$0.00") {
 		t.Errorf("strip %q does not state the settled zero as an amount", got)
 	}
 	// And it must be distinguishable from the unknown case, which is the whole point.
@@ -789,7 +801,7 @@ func TestRenderSpendStrip_UnpricedGapStillOutranksTheNoTrafficLine(t *testing.T)
 // A LATENT bug, armed by the commit that first sets HasToday. The "nothing was
 // priced" branch is guarded on `!s.Priced && !s.HasToday`, so a summary carrying a
 // today figure over a window that priced nothing falls through to the figures
-// path — where the window figure was rendered unconditionally and read "$0.0000
+// path — where the window figure was rendered unconditionally and read "$0.00
 // /1h". That states a settled zero for a cost nobody knows, which is the one thing
 // this whole feature forbids, and it is exactly the misreading formatUSDCell's
 // floor and the strip's "cost unavailable" branch both exist to prevent.
@@ -805,8 +817,8 @@ func TestRenderSpendStrip_TodayWithAnUnpricedWindowStatesNoWindowZero(t *testing
 	}
 	got := renderSpendStrip(s, 120)
 
-	if strings.Contains(got, "$0.0000") {
-		t.Errorf("strip %q reports an UNPRICED window as a settled $0.0000", got)
+	if strings.Contains(got, "$0.00") {
+		t.Errorf("strip %q reports an UNPRICED window as a settled $0.00", got)
 	}
 	// The today figure is the one thing here that IS known, so it must survive.
 	if !strings.Contains(got, "4.17") {
@@ -821,7 +833,7 @@ func TestRenderSpendStrip_TodayWithAnUnpricedWindowStatesNoWindowZero(t *testing
 // THE critical finding: a partial day published as a complete total.
 //
 // One priced request out of four hundred. The dollar figure is real and the day's real
-// cost is unknown and far larger, and the strip printed "$0.0031 today" with no marker
+// cost is unknown and far larger, and the strip printed "<$0.01 today" with no marker
 // anywhere on the line — the branch's headline figure, presented as settled. Asserted at
 // EVERY width, because the marker's whole justification is that it is one column and so
 // cannot be squeezed out: wherever the figure appears, the fact that it is partial
@@ -834,12 +846,12 @@ func TestRenderSpendStrip_APartialTodayIsNeverPublishedAsComplete(t *testing.T) 
 	}
 	for w := 1; w <= 200; w++ {
 		got := renderSpendStrip(s, w)
-		if !strings.Contains(got, "$0.0031") {
+		if !strings.Contains(got, "<$0.01") {
 			// Dropped whole, which is the honest degradation. It is the figure appearing
 			// UNQUALIFIED that is forbidden.
 			continue
 		}
-		if !strings.Contains(got, "$0.0031"+partialMarker) {
+		if !strings.Contains(got, "<$0.01"+partialMarker) {
 			t.Fatalf("width %d: %q states today's partial total as a complete one", w, got)
 		}
 	}
@@ -851,7 +863,7 @@ func TestRenderSpendStrip_APartialTodayIsNeverPublishedAsComplete(t *testing.T) 
 	}
 }
 
-// The second verified misread, at the renderer: "SPEND $4.1700 today  $1.1200 /1h
+// The second verified misread, at the renderer: "SPEND $4.17 today  $1.12 /1h
 // 40 of 40 unpriced" — a warning that reads as qualifying the DAY and describes the
 // HOUR. Here the day is complete and the hour has the gap, so the day must carry no
 // marker and the gap must be attached to the figure it is about.
@@ -863,15 +875,15 @@ func TestRenderSpendStrip_TheHoursGapDoesNotQualifyTheDay(t *testing.T) {
 	}
 	got := renderSpendStrip(s, 200)
 
-	if !strings.Contains(got, "$4.1700 today") {
+	if !strings.Contains(got, "$4.17 today") {
 		t.Errorf("strip %q does not state the day's complete total plainly", got)
 	}
-	if strings.Contains(got, "$4.1700"+partialMarker) {
+	if strings.Contains(got, "$4.17"+partialMarker) {
 		t.Errorf("strip %q marks a fully priced day as partial", got)
 	}
 	// The gap rides on the hour's own figure, inside the hour's group — the span is now the
 	// group's prefix rather than a suffix on this figure, so the whole reading is one unit.
-	if !strings.Contains(got, "1h: $1.1200"+partialMarker+" (40 of 40 unpriced)") {
+	if !strings.Contains(got, "1h: $1.12"+partialMarker+" (40 of 40 unpriced)") {
 		t.Errorf("strip %q does not attach the hour's gap to the hour's own figure", got)
 	}
 	// And the old shape must be gone: an unlabelled coverage note at the end of the line
@@ -899,7 +911,7 @@ func TestRenderSpendStrip_ASuppressedWindowsGapWearsTheWindowsLabel(t *testing.T
 	if !strings.Contains(got, "1h: 40 of 40 unpriced") {
 		t.Errorf("strip %q does not name the window the 40-request gap belongs to", got)
 	}
-	if strings.Contains(got, "$4.1700"+partialMarker) {
+	if strings.Contains(got, "$4.17"+partialMarker) {
 		t.Errorf("strip %q marked the day partial from the HOUR's gap", got)
 	}
 }
@@ -907,7 +919,7 @@ func TestRenderSpendStrip_ASuppressedWindowsGapWearsTheWindowsLabel(t *testing.T
 // A truncated stream's floor must never be published as an exact total.
 //
 // That is the title of a commit on this branch, and the strip ignored it: the figure
-// went out as "$4.1700 today" and "$1.1200 /1h" to four decimal places, with no
+// went out as "$4.17 today" and "$1.12 /1h" to four decimal places, with no
 // annotation, for a total the aggregator itself reports as a lower bound. Asserted at
 // every width for the reason the partial marker is: one column is exactly what it takes
 // to make the qualification undroppable.
@@ -919,7 +931,7 @@ func TestRenderSpendStrip_AnInexactTotalIsMarkedAtEveryWidth(t *testing.T) {
 	}
 	for w := 1; w <= 200; w++ {
 		got := renderSpendStrip(s, w)
-		for amount, label := range map[string]string{"$4.1700": "today", "$1.1200": "the hour"} {
+		for amount, label := range map[string]string{"$4.17": "today", "$1.12": "the hour"} {
 			if !strings.Contains(got, amount) {
 				continue
 			}
@@ -946,7 +958,7 @@ func TestRenderSpendStrip_AnExactTotalCarriesNoInexactMarker(t *testing.T) {
 	}
 	got := renderSpendStrip(s, 200)
 
-	if strings.Contains(got, inexactMarker+"$4.1700") || strings.Contains(got, inexactMarker+"$1.1200") {
+	if strings.Contains(got, inexactMarker+"$4.17") || strings.Contains(got, inexactMarker+"$1.12") {
 		t.Errorf("strip %q marks an exact total as inexact", got)
 	}
 	if strings.Contains(got, "inexact") {
@@ -964,7 +976,7 @@ func TestRenderSpendStrip_AFigureCanBeBothInexactAndPartial(t *testing.T) {
 	}
 	got := renderSpendStrip(s, 200)
 
-	if !strings.Contains(got, inexactMarker+"$0.0031"+partialMarker+" today") {
+	if !strings.Contains(got, inexactMarker+"<$0.01"+partialMarker+" today") {
 		t.Errorf("strip %q does not carry both markers on the figure they qualify", got)
 	}
 	if !strings.Contains(got, "(2 inexact, 399 of 400 unpriced)") {
@@ -972,7 +984,7 @@ func TestRenderSpendStrip_AFigureCanBeBothInexactAndPartial(t *testing.T) {
 	}
 	// And both markers survive the compact form, which is what a narrow terminal gets.
 	narrow := renderSpendStrip(s, 24)
-	if !strings.Contains(narrow, inexactMarker+"$0.0031"+partialMarker) {
+	if !strings.Contains(narrow, inexactMarker+"<$0.01"+partialMarker) {
 		t.Errorf("narrow strip %q dropped a marker; the figure now reads as settled", narrow)
 	}
 }
@@ -1042,7 +1054,7 @@ func TestRenderSpendStrip_AStaleFigureIsDated(t *testing.T) {
 		t.Errorf("strip %q does not date a figure fetched 3m ago", got)
 	}
 	// The figure stays: it is old, not wrong.
-	if !strings.Contains(got, "1h: $1.1200") {
+	if !strings.Contains(got, "1h: $1.12") {
 		t.Errorf("strip %q withheld a stale figure instead of dating it", got)
 	}
 	// And the age is NOT inside the window group. applyAges takes the older of both poll chains
@@ -1075,7 +1087,7 @@ func TestRenderSpendStrip_TheAgeYieldsBeforeAFigure(t *testing.T) {
 	}
 	narrow := renderSpendStrip(s, 24)
 
-	if !strings.Contains(narrow, "$4.1700") {
+	if !strings.Contains(narrow, "$4.17") {
 		t.Errorf("narrow strip %q dropped the headline figure before the age", narrow)
 	}
 	if strings.Contains(narrow, "ago") {
@@ -1164,10 +1176,10 @@ func TestRenderSpendStrip_TodayWithAPricedWindowKeepsBoth(t *testing.T) {
 	}
 	got := renderSpendStrip(s, 120)
 
-	if !strings.Contains(got, "$4.1700 today") {
+	if !strings.Contains(got, "$4.17 today") {
 		t.Errorf("strip %q lost the today figure", got)
 	}
-	if !strings.Contains(got, "1h: $1.1200") {
+	if !strings.Contains(got, "1h: $1.12") {
 		t.Errorf("strip %q lost the priced window figure", got)
 	}
 }
@@ -1325,7 +1337,7 @@ func TestRenderSpendStrip_ADamagedDayWearsItsOwnMarker(t *testing.T) {
 	}
 	got := renderSpendStrip(s, 200)
 
-	if !strings.Contains(got, damagedMarker+"$4.1700 today") {
+	if !strings.Contains(got, damagedMarker+"$4.17 today") {
 		t.Errorf("strip %q publishes a short day figure with no marker on it", got)
 	}
 	// The words too, while there is room for them.
@@ -1335,7 +1347,7 @@ func TestRenderSpendStrip_ADamagedDayWearsItsOwnMarker(t *testing.T) {
 	// The rolling window figure is ring-backed and cannot be damaged, so it must NOT wear
 	// the marker: a caveat on the wrong figure is a misattribution, which is the defect
 	// moneyFigure was built to end.
-	if strings.Contains(got, damagedMarker+"$1.1200") {
+	if strings.Contains(got, damagedMarker+"$1.12") {
 		t.Errorf("strip %q marks the ring-backed window figure as damaged", got)
 	}
 }
@@ -1364,7 +1376,7 @@ func TestRenderSpendStrip_TheDamageMarkerSurvivesNarrowing(t *testing.T) {
 			t.Errorf("width %d: %q dropped the damage marker: a short total now reads as complete", w, got)
 		}
 		// All three claims, all one cell each, none crowding out another.
-		if !strings.Contains(got, damagedMarker+inexactMarker+"$4.1700"+partialMarker) {
+		if !strings.Contains(got, damagedMarker+inexactMarker+"$4.17"+partialMarker) {
 			t.Errorf("width %d: %q lost one of the three markers", w, got)
 		}
 	}
@@ -1498,7 +1510,7 @@ func TestRenderSpendStrip_ADisclosureWithNoCountersStillMarksTheFigure(t *testin
 		HasSnapshot:   true,
 	}
 	got := renderSpendStrip(s, 200)
-	if !strings.Contains(got, damagedMarker+"$4.1700") {
+	if !strings.Contains(got, damagedMarker+"$4.17") {
 		t.Errorf("strip %q reads a counterless disclosure as a clean read", got)
 	}
 	if !strings.Contains(got, "rows lost") {
@@ -1526,7 +1538,7 @@ func TestRenderSpendStrip_AClampedFigureWearsTheShortMarkerOnEitherReading(t *te
 			WindowUSD: 1.12, WindowLabel: "1h", Priced: true, HasSnapshot: true, Priceable: 10,
 		}
 		got := renderSpendStrip(s, 200)
-		if !strings.Contains(got, damagedMarker+"$4.1700 today") {
+		if !strings.Contains(got, damagedMarker+"$4.17 today") {
 			t.Errorf("strip %q publishes a clamped day figure with no marker on it", got)
 		}
 		if !strings.Contains(got, saturatedNote) {
@@ -1534,7 +1546,7 @@ func TestRenderSpendStrip_AClampedFigureWearsTheShortMarkerOnEitherReading(t *te
 		}
 		// The clean rolling figure must NOT be marked: a caveat on the wrong figure is the
 		// misattribution moneyFigure was built to end.
-		if strings.Contains(got, damagedMarker+"$1.1200") {
+		if strings.Contains(got, damagedMarker+"$1.12") {
 			t.Errorf("strip %q marks an unclamped window figure as short", got)
 		}
 	})
@@ -1545,14 +1557,14 @@ func TestRenderSpendStrip_AClampedFigureWearsTheShortMarkerOnEitherReading(t *te
 			Clamped: true,
 		}
 		got := renderSpendStrip(s, 200)
-		// The group's span sits OUTSIDE the markers — "1h: !$1.1200". The markers keep their own
+		// The group's span sits OUTSIDE the markers — "1h: !$1.12". The markers keep their own
 		// order among themselves (damaged outside inexact, so the leftmost cell is the most serious
 		// claim); the span is not a claim about the figure's accuracy but a statement of what it
 		// covers, so it reads first without displacing anything.
-		if !strings.Contains(got, "1h: "+damagedMarker+"$1.1200") {
+		if !strings.Contains(got, "1h: "+damagedMarker+"$1.12") {
 			t.Errorf("strip %q publishes a clamped rolling figure with no marker on it", got)
 		}
-		if strings.Contains(got, damagedMarker+"$4.1700") {
+		if strings.Contains(got, damagedMarker+"$4.17") {
 			t.Errorf("strip %q marks an unclamped day figure as short", got)
 		}
 	})
@@ -1589,7 +1601,7 @@ func TestRenderSpendStrip_TheClampMarkerSurvivesNarrowing(t *testing.T) {
 		if got == "" {
 			continue
 		}
-		if !strings.Contains(got, damagedMarker+inexactMarker+"$4.1700"+partialMarker) {
+		if !strings.Contains(got, damagedMarker+inexactMarker+"$4.17"+partialMarker) {
 			t.Errorf("width %d: %q lost one of the three markers", w, got)
 		}
 	}
@@ -1705,7 +1717,7 @@ func TestRenderSpendStrip_AnUnpricedWindowStillShowsWhatItKnows(t *testing.T) {
 				t.Errorf("strip %q renders $0.00 for an unknown cost", got)
 			}
 			// And every reading that IS known survives to the screen.
-			for _, want := range []string{"~$0.1804", "saved", "cache 81%", "9.9M", "2 err"} {
+			for _, want := range []string{"~$0.18", "saved", "cache 81%", "9.9M", "2 err"} {
 				if !strings.Contains(got, want) {
 					t.Errorf("strip %q dropped %q: the money is unknown, this reading is not",
 						got, want)
@@ -1820,11 +1832,11 @@ func TestRenderSpendStrip_EitherChainCanFailWithoutBlankingTheOther(t *testing.T
 			TodayUSD: 30.935, HasToday: true, TodayPriceable: 100,
 			SavedUSD: 0.1804, HasSaved: true,
 		}, 200)
-		if !strings.Contains(got, "$30.9350 today") {
+		if !strings.Contains(got, "$30.93 today") {
 			t.Errorf("strip %q lost the day figure to a failed WINDOW poll — the two chains are "+
 				"split precisely so that cannot happen", got)
 		}
-		if !strings.Contains(got, "~$0.1804") {
+		if !strings.Contains(got, "~$0.18") {
 			t.Errorf("strip %q lost the saving as well", got)
 		}
 		// And it says which reading is missing, with the window's label so it cannot be read
@@ -1841,7 +1853,7 @@ func TestRenderSpendStrip_EitherChainCanFailWithoutBlankingTheOther(t *testing.T
 			WindowLabel: "1h", Priced: true, WindowUSD: 2.91, Priceable: 10, HasSnapshot: true,
 			Tokens: 9_890_000,
 		}, 200)
-		if !strings.Contains(got, "1h: $2.9100") {
+		if !strings.Contains(got, "1h: $2.91") {
 			t.Errorf("strip %q lost the window figure to an absent day figure", got)
 		}
 		if strings.Contains(got, "poll failed") {
@@ -1892,7 +1904,7 @@ func TestSpendSummary_TheAgeComesFromTheOlderChain(t *testing.T) {
 // figure is shown.
 //
 // ~ is inexactMarker, and on a money figure that means "lower bound" — an inexact spend figure
-// renders "~$4.1700 today" and keeps its label. So a bare "~$0.1804" sitting between two
+// renders "~$4.17 today" and keeps its label. So a bare "~$0.18" sitting between two
 // labelled figures reads as spend whose label the ladder happened to drop, which is a different
 // claim rather than a terser one. The ladder's rule is that it gives up explanations before
 // figures; this is not an explanation.

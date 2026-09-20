@@ -127,12 +127,12 @@ func TestRenderTierRows_NegativeTotalIsRefused(t *testing.T) {
 	}
 }
 
-// A tier absent from the modelled mix shows the unknown cell, NOT $0.0000.
+// A tier absent from the modelled mix shows the unknown cell, NOT $0.00.
 //
 // FOUND BY RENDERING, NOT BY A TEST, which is the lesson: tierCounts() populates all four
 // tiers, so every assertion above was blind to a partial mix — and a partial mix is the
 // normal case, since a window of cache-heavy traffic may report no cache WRITES at all.
-// "$0.0000" in a money column asserts the tier was free, which is the lie this package
+// "$0.00" in a money column asserts the tier was free, which is the lie this package
 // refuses in sessionMoneyCell and in `abctl cost`'s headline.
 func TestRenderTierRows_ATierAbsentFromTheMixIsUnknownNotFree(t *testing.T) {
 	c := usage.Counts{
@@ -142,7 +142,10 @@ func TestRenderTierRows_ATierAbsentFromTheMixIsUnknownNotFree(t *testing.T) {
 	lines := renderTierRows(c, 60)
 	joined := strings.Join(lines, "\n")
 
-	if strings.Contains(joined, "$0.0000") || strings.Contains(joined, "$0.00 ") {
+	// One probe, not two: the second clause used to be "$0.00 " against a four-decimal "$0.0000",
+	// catching the coarser rung separately. At two decimals "$0.00" IS the cents rendering, so it
+	// subsumes the padded form and the pair became the same assertion written twice.
+	if strings.Contains(joined, "$0.00") {
 		t.Errorf("a tier absent from the mix rendered as free:\n%s", joined)
 	}
 	// The two tiers that ARE in the mix keep their figures: this must not blank the column.

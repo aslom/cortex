@@ -27,7 +27,7 @@ func TestSpendSummary_DerivesEveryWindowFigure(t *testing.T) {
 			Errors:            2,
 			Tokens:            9_890_000,
 			CostMicros:        1_120_000, // $1.12
-			AvoidedMicros:     180_400,   // $0.1804
+			AvoidedMicros:     180_400,   // $0.18
 			InputTokens:       1_000_000,
 			CacheReadTokens:   8_100_000,
 			CacheWriteTokens:  1_000_000,
@@ -144,8 +144,8 @@ func TestSpendSummary_NoSavedFigureUntilItIsMeasured(t *testing.T) {
 // today, so a saving read from the 1h ring was a figure from one span standing in for another.
 //
 // The fixture is MEASURED, not invented: these are the two AvoidedMicros a local proxy served
-// at the same instant, and the ratio is the size of the error. The hour had avoided $1.0291
-// while the day had avoided $2.1891, so the line understated the day's saving by 2.1x — and
+// at the same instant, and the ratio is the size of the error. The hour had avoided $1.03
+// while the day had avoided $2.19, so the line understated the day's saving by 2.1x — and
 // nothing on it said which span the number was about.
 //
 // BOTH TWINS ARE POPULATED, which is the point of carrying two fields rather than one plus a
@@ -158,7 +158,7 @@ func TestSpendSummary_TodaysSavingComesFromTheDaysPoll(t *testing.T) {
 		Window: "1h",
 		Totals: usage.Counts{
 			Requests: 299, Tokens: 84_576_928, CostMicros: 36_572_297,
-			AvoidedMicros:  1_029_134, // $1.0291 — THE HOUR's
+			AvoidedMicros:  1_029_134, // $1.03 — THE HOUR's
 			PricedRequests: 290, PriceableRequests: 290,
 		},
 		Priced: true,
@@ -167,7 +167,7 @@ func TestSpendSummary_TodaysSavingComesFromTheDaysPoll(t *testing.T) {
 		Window: usage.WindowToday,
 		Totals: usage.Counts{
 			Requests: 537, Tokens: 122_486_000, CostMicros: 64_176_512,
-			AvoidedMicros:  2_189_140, // $2.1891 — THE DAY's
+			AvoidedMicros:  2_189_140, // $2.19 — THE DAY's
 			PricedRequests: 537, PriceableRequests: 537,
 		},
 		Priced: true,
@@ -603,7 +603,7 @@ func TestSpendSummary_LedgerBackedTodayBecomesTheHeadline(t *testing.T) {
 // The fixture is the shape every "today" fixture in this file lacked: PricedRequests
 // != PriceableRequests. With the counters discarded, this day — one priced request out
 // of four hundred, a total of unknown magnitude and certainly far larger — reached the
-// strip as a bare "$0.0031 today" with no gap marker anywhere on the line, because the
+// strip as a bare "<$0.01 today" with no gap marker anywhere on the line, because the
 // only coverage note the strip built came from the 1h ring snapshot.
 func TestSpendSummary_TodayCarriesItsOwnCoverageGap(t *testing.T) {
 	m := &model{}
@@ -687,8 +687,8 @@ func TestSpendSummary_TodayCoverageIsNotTheWindowsCoverage(t *testing.T) {
 // The fixture is the other shape every "today" fixture on this branch lacked:
 // IncompleteRequests > 0. This branch carries a commit titled "Stop publishing a
 // truncated stream's floor as an exact total", and spendSummary had no field for the
-// counter that says so — so the strip republished the floor as "$4.1700 today" and
-// "$1.1200 /1h", exact to four decimal places.
+// counter that says so — so the strip republished the floor as "$4.17 today" and
+// "$1.12 /1h", exact to four decimal places.
 func TestSpendSummary_CarriesTheInexactCountFromBothSnapshots(t *testing.T) {
 	m := &model{}
 	m.spend.snap = &usage.Snapshot{
@@ -775,7 +775,7 @@ func TestSpendSummary_DegradedTodayWindowLeavesHasTodayFalse(t *testing.T) {
 
 // An unpriced today must not become a headline. renderSpendStrip renders the today
 // figure whenever HasToday is set, with no Priced guard of its own, so admitting an
-// unpriced day here would print "$0.0000 today" — a settled zero for a cost nobody
+// unpriced day here would print "$0.00 today" — a settled zero for a cost nobody
 // knows.
 func TestSpendSummary_UnpricedTodayLeavesHasTodayFalse(t *testing.T) {
 	m := &model{}
@@ -788,7 +788,7 @@ func TestSpendSummary_UnpricedTodayLeavesHasTodayFalse(t *testing.T) {
 	got := m.spendSummary()
 
 	if got.HasToday {
-		t.Error("HasToday = true for an unpriced today; the strip would render $0.0000")
+		t.Error("HasToday = true for an unpriced today; the strip would render $0.00")
 	}
 }
 
@@ -1189,7 +1189,7 @@ func TestSpendSummary_AFailedWindowPollStillCarriesTheDayFigure(t *testing.T) {
 	}
 	// And the renderer really shows it, so the two halves are joined rather than each correct
 	// in isolation.
-	if out := renderSpendStrip(got, 200); !strings.Contains(out, "$30.9350 today") {
+	if out := renderSpendStrip(got, 200); !strings.Contains(out, "$30.93 today") {
 		t.Errorf("strip %q lost the day figure the summary carried", out)
 	}
 }

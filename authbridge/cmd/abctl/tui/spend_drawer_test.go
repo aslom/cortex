@@ -126,14 +126,14 @@ func TestRenderSpendDrawer_ShowsAPerSeriesSavingWithoutAddingItToCost(t *testing
 	if opus == "" {
 		t.Fatal("no row for claude-opus-5")
 	}
-	if !strings.Contains(opus, inexactMarker+"$0.1804") {
+	if !strings.Contains(opus, inexactMarker+"$0.18") {
 		t.Errorf("row %q is missing the saving or its %q marker", opus, inexactMarker)
 	}
-	if !strings.Contains(opus, "$11.1214") {
+	if !strings.Contains(opus, "$11.12") {
 		t.Errorf("row %q lost its cost", opus)
 	}
 	// 11.1214 + 0.1804.
-	if strings.Contains(opus, "$11.3018") {
+	if strings.Contains(opus, "$11.30") {
 		t.Errorf("row %q added the saving to the cost", opus)
 	}
 }
@@ -591,8 +591,8 @@ func TestRenderSpendDrawer_AFullyUnpricedSeriesSaysItsCostIsUnknown(t *testing.T
 	}
 	// Never a zero: a zero cost and an unknown cost are different answers, and this row is the
 	// second kind.
-	if strings.Contains(row, "$0.0000") {
-		t.Errorf("row %q renders $0.0000 for a cost nobody produced", row)
+	if strings.Contains(row, "$0.00") {
+		t.Errorf("row %q renders $0.00 for a cost nobody produced", row)
 	}
 	// And a priced row in the same drawer is NOT annotated, or the caveat means nothing.
 	for _, l := range renderSpendDrawer(snap, usage.GroupModel, "1h", 200) {
@@ -646,7 +646,7 @@ func TestRenderSpendDrawer_ANegativeSeriesTotalIsUnpricedNotARefund(t *testing.T
 		t.Errorf("row %q blames coverage for an impossible figure", row)
 	}
 	// And the healthy series in the same drawer still shows its figure.
-	if !strings.Contains(joined, "$11.1214") {
+	if !strings.Contains(joined, "$11.12") {
 		t.Errorf("the good row lost its figure:\n%s", joined)
 	}
 }
@@ -1015,7 +1015,7 @@ func TestRenderSpendDrawer_DoesNotRestateTheBandsFigures(t *testing.T) {
 	joined := strings.Join(renderSpendDrawer(snap, usage.GroupModel, "1h", 100), "\n")
 	// The window total appears once — on the model row that earned it — and the tier column
 	// carries shares of it rather than the figure again.
-	if n := strings.Count(joined, "$4.5462"); n > 1 {
+	if n := strings.Count(joined, "$4.55"); n > 1 {
 		t.Errorf("the window total appears %d times in the panel:\n%s", n, joined)
 	}
 }

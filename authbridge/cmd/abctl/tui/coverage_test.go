@@ -193,7 +193,7 @@ func TestRenderCostSummary_SanitizesWireDerivedLabels(t *testing.T) {
 	for name, hostile := range map[string]string{
 		"ANSI colour":     "gw \x1b[31mclaude-opus-5",
 		"cursor move":     "gw \x1b[2Aclaude",
-		"newline":         "gw claude\nFAKE TOTAL: $0.0000",
+		"newline":         "gw claude\nFAKE TOTAL: $0.00",
 		"carriage return": "gw claude\rerased",
 		"NUL":             "gw claude\x00",
 		"DEL":             "gw claude\x7f",

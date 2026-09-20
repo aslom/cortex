@@ -68,39 +68,41 @@ func formatCompact(v float64) string {
 	}
 }
 
-func formatUSD(v float64) string {
-	switch {
-	case v >= 1:
-		return fmt.Sprintf("%.2f", v)
-	case v >= 0.01:
-		return fmt.Sprintf("%.3f", v)
-	default:
-		return fmt.Sprintf("%.4f", v)
-	}
-}
+// formatUSDAmount renders a dollar amount at FIXED precision, without the "$" — the
+// caller places that, since a saving needs it inside the parentheses.
+//
+// Fixed rather than varied by magnitude, because these amounts are stacked in one column
+// and compared down it: "$0.255" above "−$0.0037" misaligns the decimal point and reads as
+// though the two figures were measured to different accuracy.
+//
+// TWO DECIMALS, not four. Four is finer than any decision made from this screen — nobody
+// acts on the fourth decimal of a dollar — and it cost width in every money column while
+// making the figures harder to compare at a glance. A magnitude-varying ladder was the
+// other candidate and is why the previous `formatUSD` existed; it was already dead code by
+// the time this changed, for the alignment reason above.
+func formatUSDAmount(v float64) string { return fmt.Sprintf("%.2f", v) }
 
-// formatUSD4 is formatUSD at fixed precision, for the case where two amounts of
-// different magnitude share one column and their decimal points must line up.
-// Neither returns a "$" — the caller places it, since a saving needs it inside
-// the parentheses.
-func formatUSD4(v float64) string { return fmt.Sprintf("%.4f", v) }
-
-// usdFloor is the smallest amount four decimal places can state. Anything
-// positive below half of it rounds to "0.0000".
-const usdFloor = 0.0001
+// usdFloor is the smallest amount two decimal places can state. Anything
+// positive below half of it rounds to "0.00".
+const usdFloor = 0.01
 
 // formatUSDCell renders a dollar amount for a table cell, with the "$" attached
 // and a floor below which it says so rather than rounding to zero.
 //
-// The floor exists because %.4f renders anything under $0.00005 as "$0.0000",
-// which reads as "this was free" — the exact reading decodeCostEvent (declining a
-// cost of 0) and promptCost (declining an unpriced model rather than showing
-// $0.00) both go out of their way to avoid. Reintroducing it at the formatting
-// layer would undo both. Reachable on a small cache-read-only request: 100
-// cache-read tokens at a typical rate is $0.000038.
+// The floor exists because %.2f renders anything under $0.005 as "$0.00", which reads as
+// "this was free" — the exact reading decodeCostEvent (declining a cost of 0) and
+// promptCost (declining an unpriced model rather than showing $0.00) both go out of their
+// way to avoid. Reintroducing it at the formatting layer would undo both. Reachable on a
+// small cache-read-only request: 100 cache-read tokens at a typical rate is $0.000038.
+//
+// THE FLOOR CARRIES MORE WEIGHT AT TWO DECIMALS THAN IT DID AT FOUR. It used to catch only
+// amounts under $0.00005, which is close to nothing; it now catches everything under half a
+// cent, which on cache-read-dominated agent traffic is a real share of requests. That is a
+// deliberate trade — "<$0.01" says less than "$0.0038" did, but it says it honestly, and
+// the alternative is a column of four-decimal figures nobody reads to the end.
 func formatUSDCell(v float64) string {
 	if v > 0 && v < usdFloor/2 {
-		return "<$" + formatUSD4(usdFloor)
+		return "<$" + formatUSDAmount(usdFloor)
 	}
-	return "$" + formatUSD4(v)
+	return "$" + formatUSDAmount(v)
 }

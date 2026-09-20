@@ -401,10 +401,14 @@ func sessionMoneyCell(micros int64, avoided, saturated bool, budget int) string 
 	}
 	compact := rung{"$" + humanizeCount(int64(usd)), math.Trunc(usd)}
 	for _, r := range []rung{
-		// formatUSDCell has its own floor: anything positive under half a ten-thousandth renders
-		// "<$0.0001" rather than "$0.0000", so this rung never claims zero for a real charge.
+		// formatUSDCell has its own floor: anything positive under half a CENT renders
+		// "<$0.01" rather than "$0.00", so this rung never claims zero for a real charge.
+		//
+		// THE %.2f RUNG THAT USED TO SIT BELOW THIS ONE IS GONE, because formatUSDCell now IS
+		// two decimals — the two rendered the identical string, so the ladder had a step that
+		// could never change the outcome and only obscured which rung a cell came from. The
+		// ladder is now three rungs: cents, whole dollars, compact.
 		{formatUSDCell(usd), usd},
-		{"$" + fmt.Sprintf("%.2f", usd), math.Round(usd*100) / 100},
 		{"$" + fmt.Sprintf("%.0f", usd), math.Round(usd)},
 		compact,
 	} {
@@ -480,17 +484,43 @@ func sessionsColumnWidth(cols []table.Column, title string) int {
 // and TestSessionTokens_FitsEveryFittedWidth, which walks the same boundary.
 const sessionTokensCellMin = 6
 
+// sessionUpdatedCellMin is the narrowest UPDATED cell that holds relTime's widest RELATIVE
+// form: "just now", eight runes. Every other relative form is shorter ("59s ago", "23h ago"
+// are seven).
+//
+// RELATIVE ONLY, and that limit is a known gap rather than an oversight. Past 24 hours relTime
+// switches to an absolute stamp, and "Jan 12 15:04" is TWELVE runes — so a column fitted below
+// twelve clips a day-old session's timestamp. The fitter only reaches twelve at about 83
+// terminal columns, which means an 80-column terminal — the documented default this table's
+// whole fitting ladder was built for — renders "Jan 12 15…" today.
+//
+// NOT FIXED HERE, and not papered over by raising this constant to twelve either: twelve would
+// decline the money columns on every terminal under ~83, which is a much larger regression than
+// the clip it prevents, and it would be choosing a display for the common case (a session
+// touched seconds ago) to protect the rare one. The real fix is for relTime to offer a narrow
+// absolute form and be told its budget, the way sessionTokens already yields precision to its
+// column. That is a separate change to a separate function; this constant is deliberately
+// scoped to what it can honestly promise.
+const sessionUpdatedCellMin = 8
+
 // sessionMoneyCellMin is the narrowest money cell that can hold an honest figure for ANY
 // non-zero charge. sessionMoneyCell's last honest rung is formatUSDCell's own floor,
-// "<$0.0001" at eight runes, and SAVED wears the estimate marker on top: "~<$0.0001", nine.
+// "<$0.01" at six runes, and SAVED wears the estimate marker on top: "~<$0.01", seven.
 // Below that every rung either rounds a real charge to zero — which the ladder skips — or does
 // not fit, so the cell can only ever come out as emptyCell.
 //
 // Deliberately NOT ten, the declared width, even though the fitter's shrink order means the
 // columns are at their declared width whenever they survive today. Ten is what the widest
-// value happens to need; nine is what honesty needs, and only the second one stays true if a
+// value happens to need; seven is what honesty needs, and only the second one stays true if a
 // column's declared width changes.
-const sessionMoneyCellMin = 9
+//
+// SEVEN, DOWN FROM NINE, and the drop is a CONSEQUENCE rather than a tuning: the floor form was
+// "<$0.0001" while money rendered at four decimals. Leaving it at nine after the formatter moved
+// to cents would not have failed any test — nine still holds an honest figure, it is merely two
+// columns wider than one needs — so the cost would have been silent, paid as money columns
+// dropped on terminals that could now afford them. TestSessionMoneyCellMin_MatchesTheFormatter
+// pins it to the formatter so the next precision change cannot go unnoticed the same way.
+const sessionMoneyCellMin = 7
 
 // sessionsShowMoney reports whether this terminal can afford the COST and SAVED columns.
 //
@@ -531,6 +561,19 @@ func sessionsShowMoney(termWidth int) bool {
 	fitted := fitTableColumns(sessionsColumns(), termWidth)
 	for _, c := range fitted {
 		if headerTitle(c) == "TOKENS" && c.Width < sessionTokensCellMin {
+			return false
+		}
+		// UPDATED is measured on the same footing as TOKENS, and it has to be: the money
+		// columns are paid for out of EVERY other column's width, so any column with a
+		// minimum of its own is a reason to decline them.
+		//
+		// LEAVING IT OUT HID WHICH CONSTRAINT WAS BINDING. Between 59 and 68 columns the
+		// fitter left UPDATED 6 or 7 runes where "just now" needs 8, and the money columns
+		// were only declined there because sessionMoneyCellMin was two columns wider than
+		// the money cells actually needed. So the right answer came out of the wrong
+		// reason, and narrowing that constant to what it claims to measure turned a
+		// correct decision into a clipped cell.
+		if c.Title == "UPDATED" && c.Width < sessionUpdatedCellMin {
 			return false
 		}
 	}

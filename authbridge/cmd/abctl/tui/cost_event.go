@@ -137,12 +137,13 @@ func formatTokensWithSaving(total int, saved float64, projected, estimated bool)
 	return cell + "(" + savingSign(projected) + figure + ")"
 }
 
-// formatUSDWithSaving is formatTokensWithSaving for money: "$0.2546(−$0.0037)".
+// formatUSDWithSaving is formatTokensWithSaving for money: "$0.25(−$0.01)".
 //
-// Both halves are rendered at a fixed 4 decimal places rather than through
-// formatUSD's variable precision. Stacked in one column, "$0.255" above
-// "−$0.0037" misaligns the decimal point and reads as though the two figures
-// were measured to different accuracy.
+// Both halves go through formatUSDCell, so they share its fixed precision and its
+// sub-cent floor. Fixed precision is the point: stacked in one column, "$0.255" above
+// "−$0.0037" misaligns the decimal point and reads as though the two figures were
+// measured to different accuracy. See formatUSDAmount for why that precision is two
+// places rather than four.
 func formatUSDWithSaving(total float64, saved float64, projected bool) string {
 	if total <= 0 {
 		return ""
