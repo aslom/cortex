@@ -81,8 +81,15 @@ func slowScript(t *testing.T) string {
 func runTransientUnit(t *testing.T, name, script string) {
 	t.Helper()
 	stop := func() {
-		_ = exec.Command("systemctl", "--user", "stop", name).Run()         //nolint:errcheck
-		_ = exec.Command("systemctl", "--user", "reset-failed", name).Run() //nolint:errcheck
+		// Errors here are logged, not asserted on: cleanup failing shouldn't fail a
+		// test that already got its answer, but a leaked unit should be visible
+		// instead of silently accumulating on the runner's user session.
+		if err := exec.Command("systemctl", "--user", "stop", name).Run(); err != nil {
+			t.Logf("cleanup: systemctl --user stop %s: %v", name, err)
+		}
+		if err := exec.Command("systemctl", "--user", "reset-failed", name).Run(); err != nil {
+			t.Logf("cleanup: systemctl --user reset-failed %s: %v", name, err)
+		}
 	}
 	t.Cleanup(stop)
 	stop() // in case a previous, aborted run of this test left it behind
@@ -219,6 +226,11 @@ func TestSupervisorStaysStoppedAfterDeliberateStop_RealSystemd(t *testing.T) {
 	if waitUntil(1*time.Second, func() bool { return unitIsActive(unit) }) {
 		t.Fatal("unit is active immediately after a deliberate stop")
 	}
+	// A flat sleep, not a poll, because this asserts a negative: there is no "it
+	// happened" event to wait for. The risk this accepts is one-directional — a
+	// heavily loaded runner could make this pass when it shouldn't (a slow wrong
+	// restart lands after the check), never fail when it shouldn't (nothing here
+	// depends on speed for a legitimate pass).
 	time.Sleep(4 * time.Second) // past RestartSec=1; a wrongly-firing restart would show by now
 	if unitIsActive(unit) {
 		t.Error("unit restarted after a deliberate `systemctl stop` — Restart=on-failure should not cover this")
