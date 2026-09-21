@@ -148,8 +148,8 @@ WantedBy=default.target
 `
 }
 
-func loadService(p servicePaths, progress io.Writer) error {
-	if runtime.GOOS == "darwin" {
+func loadService(goos string, p servicePaths, progress io.Writer) error {
+	if goos == "darwin" {
 		uid := strconv.Itoa(os.Getuid())
 		target := "gui/" + uid + "/" + launchdLabel
 		// Clear any disable left by `service stop`: a disabled label cannot be
@@ -266,8 +266,8 @@ func lingerEnabled(uid string) bool {
 	return !strings.Contains(strings.ToLower(string(out)), "linger=no")
 }
 
-func unloadService(p servicePaths) error {
-	if runtime.GOOS == "darwin" {
+func unloadService(goos string, p servicePaths) error {
+	if goos == "darwin" {
 		uid := strconv.Itoa(os.Getuid())
 		if out, err := exec.Command("launchctl", "bootout", "gui/"+uid+"/"+launchdLabel).CombinedOutput(); err != nil {
 			return fmt.Errorf("launchctl bootout: %v: %s", err, strings.TrimSpace(string(out)))
@@ -380,8 +380,8 @@ func dialableAddr(addr string) string {
 }
 
 // controlService maps stop/start/restart onto the platform's supervisor.
-func controlService(action string, p servicePaths, progress io.Writer) error {
-	if runtime.GOOS == "darwin" {
+func controlService(goos string, action string, p servicePaths, progress io.Writer) error {
+	if goos == "darwin" {
 		target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + launchdLabel
 		switch action {
 		case "stop":
@@ -403,10 +403,10 @@ func controlService(action string, p servicePaths, progress io.Writer) error {
 			}
 			return nil
 		case "start":
-			return loadService(p, progress) // loadService clears the disable
+			return loadService(goos, p, progress) // loadService clears the disable
 		default: // restart
 			_ = exec.Command("launchctl", "bootout", target).Run() //nolint:errcheck
-			return loadService(p, progress)
+			return loadService(goos, p, progress)
 		}
 	}
 	if _, err := exec.LookPath("systemctl"); err != nil {
@@ -431,8 +431,8 @@ func controlService(action string, p servicePaths, progress io.Writer) error {
 // supervisorRunning asks the supervisor whether OUR job is up, which health alone
 // cannot establish: an unadopted proxy keeps the ports, the supervised copy
 // crash-loops on the bind, and the probe succeeds against the survivor.
-func supervisorRunning(p servicePaths) (bool, string) {
-	if runtime.GOOS == "darwin" {
+func supervisorRunning(goos string, p servicePaths) (bool, string) {
+	if goos == "darwin" {
 		target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + launchdLabel
 		// Poll rather than sample once. Immediately after a kickstart the job passes
 		// through transient states — "xpcproxy" while launchd's exec helper is still

@@ -427,7 +427,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 		fmt.Fprintf(stdout, "Wrote %s\n", p.unitFile)
 	}
 
-	if err := loadService(p, stdout); errors.Is(err, errLingerUnavailable) {
+	if err := loadService(runtime.GOOS, p, stdout); errors.Is(err, errLingerUnavailable) {
 		// The unit IS loaded, so this is a caveat rather than a failure: keep going,
 		// but never claim it survives a logout.
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
@@ -449,7 +449,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	// keeps the ports, the supervised copy loses the bind race and crash-loops, and
 	// the probe cheerfully succeeds against the survivor. Ask the supervisor whether
 	// OUR job is actually up before believing the probe.
-	if running, why := supervisorRunning(p); !running {
+	if running, why := supervisorRunning(runtime.GOOS, p); !running {
 		fmt.Fprintf(stderr, "abctl: the unit loaded but the supervisor does not report it running (%s).\n"+
 			"  Something else may hold the ports — check for a Cortex you started by hand:\n"+
 			"    pgrep -fl authbridge-prox\n"+
@@ -512,7 +512,7 @@ func serviceUninstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "Not changed.")
 		return exitDeclined
 	}
-	if err := unloadService(p); err != nil {
+	if err := unloadService(runtime.GOOS, p); err != nil {
 		// Report but keep going: leaving the unit file behind would make a
 		// reinstall look installed-but-dead.
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
@@ -617,7 +617,7 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 		// umask — measured at 0644, which silently undid the 0600 this sets.
 		tightenLog(p.logFile, stderr)
 	}
-	if err := controlService(action, p, stdout); err != nil {
+	if err := controlService(runtime.GOOS, action, p, stdout); err != nil {
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
 		return 1
 	}
@@ -644,7 +644,7 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 		// Same gate install uses: an unadopted proxy holding the ports answers the
 		// probe while OUR job crash-loops on the bind, so health alone would report a
 		// restart that did not happen.
-		if running, why := supervisorRunning(p); !running {
+		if running, why := supervisorRunning(runtime.GOOS, p); !running {
 			fmt.Fprintf(stderr, "abctl: %sed, but the supervisor does not report it running (%s).\n"+
 				"  Check for a Cortex started by hand holding the ports: pgrep -fl authbridge-prox\n", action, why)
 			for _, line := range lastLines(p.logFile, 5) {
@@ -794,7 +794,7 @@ func serviceIsCurrent(p servicePaths) bool {
 	if runtime.GOOS == "darwin" && !strings.Contains(body, "--supervise") {
 		return false
 	}
-	if running, _ := supervisorRunning(p); !running {
+	if running, _ := supervisorRunning(runtime.GOOS, p); !running {
 		return false
 	}
 	if p.healthURL == "" {
