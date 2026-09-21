@@ -690,3 +690,37 @@ func TestBandCell_MeasuresAndPadsInDisplayColumns(t *testing.T) {
 		})
 	}
 }
+
+// AND A CLEAN SPAN WEARS NO MARKER AT ALL, which is the half that was missing.
+//
+// Every marker test here was positive — set a condition, find the glyph — so a renderer that
+// prepended one UNCONDITIONALLY passed all of them. Verified: making moneyAmount always prepend
+// inexactMarker left the whole package green, and the same for damagedMarker.
+//
+// That is pointed rather than theoretical. Removing an unconditional `~` from SAVED is one of this
+// branch's headline fixes — a saving marked "estimated" on every row taught operators to read the
+// glyph as decoration — and nothing would have caught it coming back. A marker that is always
+// present carries no information, and it costs the two markers that ARE informative their meaning.
+func TestRenderSpendBand_ACleanSpanCarriesNoMarker(t *testing.T) {
+	lines := renderSpendBand(bandSummary(), 200)
+	joined := strings.Join(lines, "\n")
+
+	// The fixture is exact, fully priced, unclamped, undamaged and inside retention, so every
+	// glyph below would be a claim about nothing.
+	for _, tc := range []struct{ marker, means string }{
+		{inexactMarker, "estimated — set only by IncompleteRequests"},
+		{partialMarker, "a floor — set by an unpriced gap or by days outside retention"},
+		{damagedMarker, "short by an unstatable amount — set by a damaged read or a clamp"},
+	} {
+		if strings.Contains(joined, tc.marker) {
+			t.Errorf("a clean band carries %q (%s):\n%s", tc.marker, tc.means, joined)
+		}
+	}
+	// And the figures really are there, or "no markers" would be satisfied by an empty band.
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if want := formatUSDCell(bandSummary().Spans[span].USD); !strings.Contains(lines[1], want) {
+			t.Fatalf("the clean band is missing %s's figure %q, so this test asserted nothing:\n%s",
+				spendSpanDefs[span].label, want, joined)
+		}
+	}
+}

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
@@ -47,16 +48,34 @@ func TestSpendLabels_NeutraliseAServerSuppliedControlCharacter(t *testing.T) {
 				assertNoControlChars(t, "drawer line", line)
 			}
 
-			// The band's side: spanReadings compares the served window against the requested
-			// one, so a control character travels into that comparison and onto the cell.
+			// THE BAND NEVER PRINTS THE SERVER'S LABEL, so its side of this is a different
+			// assertion — and the previous version of this claimed otherwise ("a control
+			// character travels into that comparison and onto the cell") and checked the band
+			// lines for control characters, which no band cell can contain whatever the server
+			// sends: bandSpanCell builds its label from spendSpanDefs and its value from
+			// moneyAmount, and snap.Window reaches neither.
+			//
+			// What the band DOES with a tampered window is refuse the span: the served label
+			// cannot match the requested one, so the reading is Unanswerable and the cell is an
+			// em dash. That is the assertion worth making, because the alternative — drawing the
+			// figure under the requested label — publishes a number for a window nobody served.
 			b := &model{}
 			b.spend.chains[spanHour].snap = &usage.Snapshot{
 				Window: tc.window,
 				Totals: usage.Counts{Requests: 1, CostMicros: 1_000_000, PricedRequests: 1, PriceableRequests: 1},
 				Priced: true,
 			}
-			for _, line := range renderSpendBand(spendSummary{Spans: b.spanReadings()}, 200) {
+			lines := renderSpendBand(spendSummary{Spans: b.spanReadings()}, 200)
+			for _, line := range lines {
 				assertNoControlChars(t, "band line", line)
+			}
+			if !strings.Contains(lines[1], emptyCell) {
+				t.Errorf("a tampered served window drew a cell instead of %q:\n%s",
+					emptyCell, strings.Join(lines, "\n"))
+			}
+			if strings.Contains(lines[1], "$1.00") {
+				t.Errorf("the band drew the figure under the requested label for a window the "+
+					"server did not serve:\n%s", strings.Join(lines, "\n"))
 			}
 		})
 	}

@@ -277,7 +277,7 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   As the terminal narrows, whole cells drop — never a clipped figure — and the
   middle yields first: `7 DAYS`, then `LAST 1H`, leaving `TODAY` and `MONTH` as
-  the last two readings. Four fit in 34 columns, two in 18, one in 10.
+  the last two readings. Four fit in 34 columns, three in 25, two in 16, one in 7.
 
   A span this deployment cannot answer reads `—`, not a number. Without a cost
   ledger (Kubernetes by default) the proxy answers `today`, `7d` and `month` from
@@ -332,9 +332,9 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   ```
     WHERE IT WENT                     BY MODEL
-  output      ██████ ~$2.7048         claude-opus-5   $4.5462   35 req   5.6M tokens
-  cache-read  ███▌   ~$1.6229
-  input       ▍      ~$0.2185
+  output      ██████ ~$2.71           claude-opus-5   $4.55   35 req   5.6M tokens
+  cache-read  ███▌   ~$1.62
+  input       ▍      ~$0.22
   cache-write —
      [a] [model] · endpoint · agent   [w] 1h   esc closes
   ```
@@ -343,31 +343,32 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   even when the total beside it is a gateway's own authoritative figure: a
   gateway reports one number per call and never breaks it down. They are
   apportioned so the column sums to the window total exactly, and a tier the
-  rate table says nothing about shows `—` rather than `$0.0000`, which would
-  claim the tier was free. Below 72 columns the tier column drops and the
+  rate table says nothing about shows `—` rather than `$0.00`, which would
+  claim the tier was free. The apportionment is exact in micros; the figures above
+  are rounded to the cent they are displayed at, so a column can differ from the
+  total it sums to by less than a cent. Below 72 columns the tier column drops and the
   panel degrades to the by-model breakdown alone.
 
   The selected row is reverse-video rather than marked with a glyph, so it is
   the one thing these listings cannot show.
 
-  **Reading the SPEND line: figures are grouped by the span they cover, and each
-  group names its span once.** Everything before `1h:` is the day — `$30.9350
-  today` is spend since local midnight from the durable cost ledger, and
-  `saved ~$0.1804` beside it is the same day's avoided spend, so the pair is
-  "what it cost" and "what it would have cost" over one span. Everything from
-  `1h:` onward is the rolling window the `[w]` key cycles: its cost, then the
-  cache hit rate and token count that window covers. A span's label rides on the
-  first figure of its group, so it survives every width at which that figure
-  does. Two trailing readings belong to neither group and appear last: `[u] usage`
-  and a `polled 3m ago` staleness note, which is built from whichever of the two
-  poll chains is further behind.
+  **What the markers on a figure mean.** Each rides on the figure it qualifies,
+  and a clean figure carries none — a marker present on every row would
+  distinguish nothing:
 
-  On a deployment with no durable cost ledger — Kubernetes, by design — there is
-  no day figure, so the line opens with the window group instead
-  (`SPEND  1h: $2.9100   saved ~$0.1804   …`) and the saving shown is that
-  window's. `~` on a money figure means it is a lower bound, never an exact
-  total; the saving always wears one, because it is estimated from a
-  bytes-to-tokens ratio rather than measured by a tokenizer.
+  | | |
+  |---|---|
+  | `~` | estimated, so the figure is a lower bound rather than an exact total |
+  | `+` | a floor: some traffic in the span is unpriced, or the span reaches back past what the ledger retains |
+  | `!` | short by an amount nothing can state — a damaged ledger read, or a counter that hit its ceiling |
+
+  This paragraph used to describe a single `SPEND` line whose figures were grouped
+  by span — `SPEND  $30.93 today   1h: $2.91   cache 81% …` — with the day's cost
+  and saving before `1h:` and the rolling window's readings after it, and a `~` on
+  the saving on every row. That line is gone: it mixed spans on one row, which is
+  the defect the band replaced, and the saving's unconditional `~` was noise on
+  100% of rows. Avoided spend now lives per session in the sessions table and per
+  series in the `$` breakdown; volume readings live in the Usage pane.
 - **Events**: per-session event table. `c` opens a column picker — a popup with
   a checkbox and a one-line description per column, since twelve abbreviated
   headers are not self-describing.
@@ -413,7 +414,7 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
    #     TIME          DIR   PHASE    ACTION    PLUGIN              METHOD              STATUS   DURATION    TOKENS             COST                 HOST
    1     14:23:07.41   in    req      allow     jwt-validation                                                                                       weather-agent
    1     14:23:07.52   in    resp     —         —                                       200      118ms                                               weather-agent
-   2     14:23:07.71   out   req      observe   inference-parser    claude-sonnet-5                                            681,300(−9.9k)   $0.2546(−$0.0037)   api.anthropic.com
+   2     14:23:07.71   out   req      observe   inference-parser    claude-sonnet-5                                            681,300(−9.9k)   $0.25(−<$0.01)   api.anthropic.com
    2     14:23:08.91   out   resp     —         —                   claude-sonnet-5     200      1.20s       412                                     api.anthropic.com
    3     14:23:09.01   out   req      modify    token-exchange      tools/call                                                                       github-tool-mcp
    3     14:23:09.10   out   resp     —         —                   tools/call          503      96ms                                                github-tool-mcp

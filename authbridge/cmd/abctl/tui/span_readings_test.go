@@ -189,3 +189,59 @@ func TestSpanReadings_FailureAndEmptinessAreDistinct(t *testing.T) {
 		}
 	}
 }
+
+// THE TWO DISCLOSURES THAT TRAVEL FROM THE LEDGER REACH THE CELL, asserted through the live path.
+//
+// Deleting both `r.DaysOutsideRetention = snap.DaysOutsideRetention` and `r.Degraded =
+// snap.Degraded` from spanReadings left the whole package green: no fixture fed either field
+// through spanReadings into renderSpendBand, so the retention-coverage marker — the disclosure this
+// branch argues for at length — was carried by nothing but its own assignment. The one Degraded
+// fixture that existed sat on the hour-and-day path that the four spans replaced.
+//
+// The two are DIFFERENT CLAIMS and wear different glyphs, which is why both are here:
+//
+//	DaysOutsideRetention  a floor      the window asked for days the ledger cannot reach
+//	Degraded              short by an unstatable amount, from a damaged read
+//
+// A month against a ten-day ledger is the ordinary case for the first, and it is exactly the case
+// where a clean-looking total is most misleading.
+func TestSpanReadings_CarryTheLedgersDisclosuresToTheCell(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*usage.Snapshot)
+		want   string
+	}{
+		{"days outside retention", func(s *usage.Snapshot) { s.DaysOutsideRetention = 21 }, partialMarker},
+		{"a damaged read", func(s *usage.Snapshot) {
+			s.Degraded = &usage.Degraded{UnreadableDays: 1}
+		}, damagedMarker},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{}
+			snap := &usage.Snapshot{
+				Window: spendSpanDefs[spanMonth].window,
+				Totals: usage.Counts{
+					Requests: 400, CostMicros: 703_180_000,
+					PricedRequests: 400, PriceableRequests: 400,
+				},
+				Priced: true,
+			}
+			tc.mutate(snap)
+			m.spend.chains[spanMonth].snap = snap
+
+			got := m.spanReadings()[spanMonth]
+			if !got.Priced {
+				t.Fatalf("the reading is unpriced, so the marker has no figure to ride on")
+			}
+			line := renderSpendBand(spendSummary{Spans: m.spanReadings()}, 200)[1]
+			if !strings.Contains(line, tc.want) {
+				t.Errorf("the month's cell carries no %q for %s, so the total is published as "+
+					"though it were whole:\n%s", tc.want, tc.name, line)
+			}
+			// The figure is still shown — this qualifies the number, it does not withhold it.
+			if !strings.Contains(line, "$703.18") {
+				t.Errorf("the disclosure took the figure with it:\n%s", line)
+			}
+		})
+	}
+}

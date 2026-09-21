@@ -1142,6 +1142,13 @@ func (m *model) spanReadings() [numSpendSpans]spanReading {
 			r.Failed = true
 		case c.snap == nil:
 			// Nothing has answered yet. Not a failure, and not zero.
+		// sanitizeLabel here CANNOT CHANGE THE ANSWER, and saying so is more useful than implying
+		// it can: measured against every control-character fixture in spend_sanitize_test.go, this
+		// comparison returns the same result sanitised or raw, because a label carrying a control
+		// byte neither parses as a duration nor equals the requested string either way. It stays
+		// because no wire string should be compared or carried raw — but the band's own cell never
+		// prints this label, so the sanitising that MATTERS is at the drawer's caption and its
+		// error text, which is where removing the call fails a test.
 		case !servedAsRequested(def.window, sanitizeLabel(c.snap.Window)):
 			r.Unanswerable = true
 		default:
