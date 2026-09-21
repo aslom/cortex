@@ -59,41 +59,99 @@ import (
 // appends every event under its session id, so any session with traffic since it attached has a
 // conversation here. One idle since before that shows the dash until an operator drills in and
 // the snapshot fills the cache.
+// A whole-slice fold, for callers with no running state to keep — the tests, and any future
+// one-shot reader. The sessions pane goes through sessionContextFor instead.
 func sessionContext(events []pipeline.SessionEvent) int {
-	// Which exchanges had a tool manifest on the REQUEST side. Requests and responses have never
-	// been observed to disagree — 117 pairs, no divergence — so this is belt and braces rather
-	// than a second filter, and it is cheap: one pass and a set of ids.
-	toolRequests := make(map[string]bool)
+	run, _ := foldSessionContext(events, contextRun{})
+	return run.tokens
+}
+
+// contextRun is the running answer over the events folded so far: the winning figure and the
+// message count that won it, plus how many events have been folded in.
+//
+// A RUNNING answer rather than a rescan, because the caller's shape demands it. The sessions row
+// loop asks for every session, rebuildSessionsTable runs on every streamed event, and retention
+// is unbounded — so a full scan per call is O(events) per session per event on the DEFAULT pane.
+// Measured on this branch before the fold: 6.1ms and 3.49MB per call at 100k events, against
+// ~14ns and no allocation for the tail scan it replaced. Ten sessions of that size is 60ms and
+// 35MB for one arriving event.
+type contextRun struct {
+	n      int // events folded so far
+	tokens int
+	msgs   int
+}
+
+// foldSessionContext folds events into run and returns the new running answer.
+//
+// Forward, and ties keep the LATEST: `>=` rather than `>`, because folding walks in arrival order
+// where the previous backward scan walked in reverse. The two must agree — a tie between two turns
+// of the same length should report the more recent — and the direction is what decides which
+// comparison expresses that.
+//
+// Reports whether anything was folded so a caller can tell "no candidates yet" from "zero".
+func foldSessionContext(events []pipeline.SessionEvent, run contextRun) (contextRun, bool) {
+	changed := false
 	for i := range events {
 		e := &events[i]
-		if e.Phase == pipeline.SessionRequest && e.RequestID != "" &&
-			e.Inference != nil && len(e.Inference.Tools) > 0 {
-			toolRequests[e.RequestID] = true
-		}
-	}
-
-	best, bestMsgs := 0, -1
-	for i := len(events) - 1; i >= 0; i-- {
-		e := &events[i]
-		if e.Inference == nil || len(e.Inference.Tools) == 0 {
+		// RESPONSES ONLY, stated rather than relied on. The token counts arrive on the response
+		// pass, so a request snapshot carries zeroes and would be dropped by the promptTokens
+		// check below anyway — but that is an accident of when SnapshotInference copies, not
+		// something this loop said. Checking the phase makes the doc above load-bearing and
+		// halves the candidates.
+		if e.Phase != pipeline.SessionResponse || e.Inference == nil {
 			continue
 		}
-		// The paired request must have carried tools too — unless there is no RequestID to pair
-		// on, which is an older proxy. Excluding those would blank the column for it, so the
-		// response's own manifest stands in.
-		if e.RequestID != "" && !toolRequests[e.RequestID] {
+		// The tool manifest is the filter: no tools means a one-shot completion.
+		//
+		// The REQUEST side is not checked, and the reason is stronger than the 117 paired
+		// samples that showed no divergence. SnapshotInference is `c := *ext`, a shallow copy,
+		// and Tools is only ever appended while parsing the REQUEST — so both snapshots carry
+		// the same slice header off the same extension and cannot disagree by construction. A
+		// paired check would be dead code, and the map it needed is what made this function
+		// allocate per call.
+		if len(e.Inference.Tools) == 0 {
 			continue
 		}
 		n := promptTokens(e.Inference)
 		if n <= 0 {
 			continue
 		}
-		// Strictly greater, walking backwards, so equal message counts keep the MOST RECENT.
-		if len(e.Inference.Messages) > bestMsgs {
-			best, bestMsgs = n, len(e.Inference.Messages)
+		if msgs := len(e.Inference.Messages); msgs >= run.msgs {
+			run.tokens, run.msgs, changed = n, msgs, true
 		}
 	}
-	return best
+	run.n += len(events)
+	return run, changed
+}
+
+// sessionContextFor is the gauge's figure for one session, folded rather than rescanned.
+//
+// Appending is the only growth path that preserves the prefix, so a longer slice folds just its
+// tail. Both wholesale replacements — the snapshot load in app.go and the older-page merge in
+// paging.go — drop the entry, so a replacement of the SAME length cannot return a stale figure
+// through the length check below.
+func (m *model) sessionContextFor(id string) int {
+	events := m.events[id]
+	run, ok := m.contextRun[id]
+	switch {
+	case ok && run.n == len(events):
+		return run.tokens
+	case ok && run.n < len(events):
+		run, _ = foldSessionContext(events[run.n:], run)
+	default:
+		run, _ = foldSessionContext(events, contextRun{})
+	}
+	if m.contextRun == nil {
+		m.contextRun = map[string]contextRun{}
+	}
+	m.contextRun[id] = run
+	return run.tokens
+}
+
+// forgetSessionContext drops a session's running answer, for the paths that replace its events
+// rather than appending to them.
+func (m *model) forgetSessionContext(id string) {
+	delete(m.contextRun, id)
 }
 
 // contextGauge draws prompt tokens against contextWindowTokens, in exactly width columns.

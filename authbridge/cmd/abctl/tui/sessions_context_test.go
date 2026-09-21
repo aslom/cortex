@@ -116,23 +116,14 @@ func TestSessionContext_MostMessagesWinsTiesGoToTheLatest(t *testing.T) {
 	}
 }
 
-// Belt and braces: a response carrying tools whose REQUEST did not is not a candidate. The two
-// have never been seen to disagree — 117 pairs, no divergence — so this guards a shape that has
-// not happened rather than one that has.
-func TestSessionContext_RequiresTheRequestToCarryToolsToo(t *testing.T) {
-	base := time.Now()
-	evs := conversation("c1", base, 40, 90_000)
-	odd := conversation("c2", base.Add(time.Minute), 900, 500_000)
-	odd[0].Inference.Tools = nil // the request lost its manifest
-
-	if got, want := sessionContext(append(evs, odd...)), 90_000; got != want {
-		t.Errorf("sessionContext = %d, want %d — the unpaired response must not win", got, want)
-	}
-}
-
-// An event with no RequestID cannot be paired, and excluding it would blank the column against an
-// older proxy. Its own manifest stands in.
-func TestSessionContext_UnpairableEventFallsBackToItsOwnManifest(t *testing.T) {
+// THE RESPONSE'S OWN MANIFEST IS THE FILTER, and the request's is deliberately not consulted.
+//
+// An earlier version required the paired request to carry tools too, justified as insurance.
+// It was dead code: SnapshotInference is `c := *ext`, a shallow copy, and Tools is only appended
+// while parsing the REQUEST — so both snapshots carry the same slice header off the same
+// extension and cannot disagree. The pairing needed a map keyed by request id, which is what made
+// this function allocate on every call, for a branch that could not be reached.
+func TestSessionContext_JudgesTheResponsesOwnManifest(t *testing.T) {
 	evs := []pipeline.SessionEvent{{
 		At: time.Now(), Phase: pipeline.SessionResponse, Direction: pipeline.Outbound,
 		Inference: &pipeline.InferenceExtension{
@@ -142,7 +133,45 @@ func TestSessionContext_UnpairableEventFallsBackToItsOwnManifest(t *testing.T) {
 	}}
 
 	if got, want := sessionContext(evs), 100_000; got != want {
-		t.Errorf("sessionContext = %d, want %d", got, want)
+		t.Errorf("sessionContext = %d, want %d — a response with tools and tokens is a "+
+			"candidate on its own account", got, want)
+	}
+}
+
+// ONLY RESPONSES. A request snapshot carries no token counts, so it would be dropped anyway — but
+// by accident of when SnapshotInference copies, not because the loop said so. This pins the
+// phase check that makes the rule explicit: a request bearing tokens must still not count.
+func TestSessionContext_IgnoresRequestEventsEvenWithCounts(t *testing.T) {
+	inf := &pipeline.InferenceExtension{
+		Model: "claude-opus-5", Messages: make([]pipeline.InferenceMessage, 900),
+		Tools: toolsOf(27), InputTokens: 1_000, CacheReadTokens: 499_000,
+	}
+	evs := []pipeline.SessionEvent{
+		{At: time.Now(), Phase: pipeline.SessionRequest, Direction: pipeline.Outbound,
+			Inference: inf},
+	}
+
+	if got := sessionContext(evs); got != 0 {
+		t.Errorf("sessionContext = %d, want 0 — the prompt side is read off the response", got)
+	}
+}
+
+// THE COMPACTION TRADEOFF, pinned so it cannot be "fixed" by reintroducing the window that was
+// ruled out.
+//
+// A compaction restarts the conversation at a low message count while the pre-compaction turn
+// stays retained with 1500 of them, so the older, longer turn keeps winning and the gauge holds
+// the old figure. That is deliberate: a stale figure beats one that flips to a one-shot's. If this
+// test starts failing because a recency rule was added, the silence problem is back with it — the
+// main thread goes quiet while a subagent runs, and a last-N window fills with its traffic.
+func TestSessionContext_HoldsThePreCompactionFigure(t *testing.T) {
+	base := time.Now()
+	evs := conversation("before", base, 1500, 851_000)
+	evs = append(evs, conversation("after", base.Add(time.Hour), 40, 62_000)...)
+
+	if got, want := sessionContext(evs), 851_000; got != want {
+		t.Errorf("sessionContext = %d, want %d — the stale-after-compaction tradeoff changed; "+
+			"see the doc comment before accepting a new expectation here", got, want)
 	}
 }
 
@@ -185,12 +214,17 @@ func TestContextGauge(t *testing.T) {
 		{"full", 1_000_000, 10, "▕████████▏"},
 		// A NON-ZERO CONTEXT NEVER RENDERS AS AN EMPTY TRACK. tierBar's rule, inherited: 8,200
 		// of a million is 0.8%, which rounds to no block at all, so it gets the sliver instead.
+		// An empty track beside a live session reads as a rendering fault.
 		{"a sliver rather than nothing", 8_200, 10, "▕▏       ▏"},
 		// Unknown is the em dash COST and SAVED use, and it must not be confusable with the
 		// sliver above — which is the whole reason the brackets are drawn.
 		{"unknown", 0, 10, emptyCell},
+		// Over the window: capped rather than overflowing its column.
 		{"past the window", 1_400_000, 10, "▕████████▏"},
+		// Narrow terminals shrink the track with the column.
 		{"the narrowest useful gauge", 500_000, 3, "▕▌▏"},
+		// Below that there is nothing to draw; a bracket pair alone would claim a scale it
+		// cannot show.
 		{"too narrow to say anything", 500_000, 2, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,6 +232,8 @@ func TestContextGauge(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("contextGauge(%d, %d) = %q, want %q", tc.tokens, tc.width, got, tc.want)
 			}
+			// Exactly the column's width, so every row's gauge starts and ends in the same
+			// place and the fills can be compared down the column by eye.
 			if tc.want != "" && tc.want != emptyCell {
 				if w := lipgloss.Width(got); w != tc.width {
 					t.Errorf("gauge is %d columns, want %d: %q", w, tc.width, got)
@@ -230,6 +266,7 @@ func TestSessionsTable_ContextColumnReplacesActive(t *testing.T) {
 	if last != contextColumnTitle {
 		t.Fatalf("last column is %q, want %s", last, contextColumnTitle)
 	}
+	// The heading states the denominator, because a gauge with no scale is a decoration.
 	if !strings.Contains(contextColumnTitle, "1M") {
 		t.Errorf("the heading does not name its denominator: %q", contextColumnTitle)
 	}
@@ -238,6 +275,7 @@ func TestSessionsTable_ContextColumnReplacesActive(t *testing.T) {
 	if len(row) != len(cols) {
 		t.Fatalf("row has %d cells against %d columns", len(row), len(cols))
 	}
+	// 500k of 1M: a gauge half full, drawn to the fitted width.
 	cell := row[len(row)-1]
 	if !strings.Contains(cell, "▕") || !strings.Contains(cell, "█") {
 		t.Errorf("last cell is not a gauge: %q", cell)

@@ -239,6 +239,9 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 		merged = merged[:len(merged)-newest]
 		st.droppedNewer = true
 	}
+	// Older events land BEFORE the ones already folded, so the running answer cannot be
+	// extended and is dropped — see sessionContextFor.
+	m.forgetSessionContext(msg.id)
 	m.events[msg.id] = merged
 	st.fetched++
 

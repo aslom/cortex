@@ -31,8 +31,15 @@ func TestTableStyles_SelectionDoesNotInvertTheRow(t *testing.T) {
 	}
 }
 
-// And the property that matters, end to end: the gauge's TEXT is identical on the selected row and
-// an unselected one, so whatever the highlight does it does not redraw the value.
+// The gauge's TEXT is identical on the selected row and an unselected one, so the highlight does
+// not redraw the value.
+//
+// THIS DOES NOT CATCH THE REPORTED BUG, and saying so matters: reverse video changes no
+// characters, so a stripANSI comparison is blind to it. Mutation-checked — restoring
+// Reverse(true) fails only the GetReverse assertion above, and this test keeps passing. What it
+// guards is the neighbouring class: a cell whose content is rewritten or truncated by the row
+// style, which is how a styled cell came back as a lone ellipsis and why colouring the gauge is
+// impossible here.
 func TestSessionsTable_TheGaugeReadsTheSameOnTheSelectedRow(t *testing.T) {
 	orig := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.ANSI256)

@@ -325,10 +325,15 @@ type model struct {
 	// Data caches.
 	sessions []session.SessionSummary
 	events   map[string][]pipeline.SessionEvent // sessionID → ring buffer
-	eventCt  uint64                             // monotonic counter
-	lastTick time.Time
-	lastCt   uint64
-	rate     float64
+	// contextRun is the CONTEXT(1M) gauge's answer per session, folded forward as events
+	// arrive rather than recomputed from the whole slice — see sessionContextFor. The row
+	// loop asks for every session on every rebuild, and a rebuild happens on every streamed
+	// event, so a full scan there is O(events) per session per event.
+	contextRun map[string]contextRun
+	eventCt    uint64 // monotonic counter
+	lastTick   time.Time
+	lastCt     uint64
+	rate       float64
 
 	// Connection status.
 	connState connStateInfo
@@ -1027,6 +1032,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Learned from the echo, not assumed: see model.serverProjects.
 		m.serverProjects = msg.projected
 		// Only update if we're still focused on this session.
+		// A wholesale replacement, so the gauge's running answer for this session is
+		// void — see sessionContextFor.
+		m.forgetSessionContext(msg.id)
 		m.events[msg.id] = msg.events
 		if m.olderNotFetched == nil {
 			m.olderNotFetched = map[string]int{}
