@@ -2,11 +2,13 @@
 
 **Status:** research + gap analysis complete. Landed 2026-09-17: the `TimeoutStopSec` fix
 (bullet 7) and the Tier 2 `fakeSystemctl`/`fakeLoginctl` test harness (bullet 6), which
-required refactoring four functions to take `goos` explicitly. Landed 2026-09-20: the
-Tier 3 real-systemd integration test (bullet 5) — written, compiles, correctly skips on
-non-Linux, but **not yet actually run against a real systemd** (needs a real Linux box
-or CI wiring — see "Suggested next steps" #5). Tier 4 (install.sh smoke test, #957) and
-Tier 5 (reboot check, #964) are separate issues, not started.
+required refactoring four functions to take `goos` explicitly. Landed 2026-09-21
+(PR #1076): the Tier 3 real-systemd integration test (bullet 5), wired into CI, and
+**confirmed passing against a real systemd** — `Restart=on-failure` really does restart
+a crashed unit, and a deliberate stop really doesn't trigger one. Two real bugs the
+first CI run caught (a `systemd-run` argument mistake, and this doc tripping an
+unrelated guard test) were fixed in the same PR. Tier 4 (install.sh smoke test, #957)
+and Tier 5 (reboot check, #964) are separate issues, not started.
 **Owner:** Alan Cha (per epic #962 owner table: "Linux install, release smoke tests, reboot
 verification, CI").
 **Repo:** rossoctl/cortex. This doc lives in the same directory as other planning docs
@@ -155,7 +157,7 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   zero test coverage — a parsing regression could silently re-enable linger every install,
   or silently skip enabling it when needed.
 
-### 5. Service survives reboot and a crash — **Tier 3 test written 2026-09-20, not yet CI-verified**
+### 5. Service survives reboot and a crash — **CLOSED (crash half) 2026-09-21; reboot half is #964**
 - **Added:** `cmd_service_systemd_integration_test.go` — mirrors
   `TestWaitBootedOut_RealLaunchd`'s structure exactly: a throwaway `systemd-run --user`
   transient unit, a synthetic slow-to-exit script (not the real proxy, for the same
@@ -163,21 +165,34 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   (wrong OS, missing binaries, no reachable `systemctl --user` session) plus an
   `ABCTL_SYSTEMD_TESTS=required` escape hatch. Two tests:
   `TestSupervisorRestartsAfterCrash_RealSystemd` (`kill -9` the main PID, confirm the
-  unit comes back with a *different* PID — proving `Restart=on-failure` actually fires)
-  and `TestSupervisorStaysStoppedAfterDeliberateStop_RealSystemd` (a deliberate
-  `systemctl stop` must NOT trigger a restart — the other half of the claim in
-  `renderUnitFor`'s comment: *"a `systemctl stop` is distinguishable from a crash, so a
-  stop stays stopped"*).
-- **Honest limit:** written and confirmed to compile, `go vet` cleanly, and correctly
-  *skip* (not silently pass, not fail) on a non-Linux host with a clear reason — that's
-  the full extent of what's verifiable from a Mac. The actual real-systemd behavior these
-  tests assert has **not yet been confirmed to pass on a real machine**. Next: either run
-  manually on a real Linux box, or wire the CI setup (`enable-linger` +
-  `XDG_RUNTIME_DIR` + setting `ABCTL_SYSTEMD_TESTS=required` for this job) discussed in
-  "Suggested next steps" below and watch it run there.
-- Still the biggest historical gap this closes: unlike the darwin `KeepAlive` claim
-  (tested, found false, drove the supervisor redesign — see below), the Linux
-  `Restart=on-failure` assumption had never been through an equivalent real check at all.
+  unit comes back with a *different* PID) and
+  `TestSupervisorStaysStoppedAfterDeliberateStop_RealSystemd` (a deliberate
+  `systemctl stop` must NOT trigger a restart).
+- **Confirmed for real, against a live systemd, in CI** (PR #1076,
+  `go-ci-authbridge-cmd` / abctl leg, run 35558708292, 2026-09-21):
+  `TestSupervisorRestartsAfterCrash_RealSystemd` **PASS (3.09s)**,
+  `TestSupervisorStaysStoppedAfterDeliberateStop_RealSystemd` **PASS (7.09s)**. This is
+  the actual real-world verification the darwin `KeepAlive` claim already had (tested,
+  found false, drove the supervisor redesign) and the Linux `Restart=on-failure`
+  assumption never did — now it does, and it held up.
+- **Two genuine bugs the first "blind" CI run caught, exactly as intended:**
+  1. `systemd-run` is not `systemctl`-shaped — there's no separate `run` verb;
+     `systemd-run` itself IS the run action. An extra literal `"run"` argument made
+     both tests fail identically (`Failed to find executable run`) on the first push.
+     Fixed by removing it.
+  2. This same planning doc's own reference to the retired `exclude_plugin_*` tag form
+     (as design history for #966) tripped `TestNoExcludePluginTagsRemain` — a guard
+     from a different, unrelated part of this codebase. Fixed with the
+     `allow-legacy-plugin-tag` marker its own error message names.
+  Neither was a systemd-behavior surprise — both were caught and fixed within the same
+  PR before merge, which is the point of running this blind rather than guessing.
+- **One useful incidental finding:** this repo's `ubuntu-latest` (Ubuntu 24) runner image
+  already ships `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS` pointed at a live user
+  session by default — the `enable-linger` setup step still ran and succeeded, but the
+  base image may need less setup than assumed going in.
+- **Still open:** this only proves crash-recovery within a live session. It does **not**
+  prove lingering survives an actual logout/reboot — that's a different claim, and
+  deliberately out of scope here; see #964.
 - **Exists (and well-reasoned):** unit rendering (`renderUnitFor("linux", ...)`,
   `cmd_service_platform.go:131-148`) sets `Restart=on-failure`, `RestartSec=10`,
   `StartLimitIntervalSec=300`, `StartLimitBurst=5` — correctly placed in `[Unit]`, not
@@ -275,21 +290,19 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
    `unloadService` to take `goos` explicitly first (same fix `renderUnitFor` already had) —
    otherwise these functions can't be exercised from a non-Linux host at all.
 3. ~~Get real verification that `Restart=on-failure` actually recovers the unit after
-   `kill -9`~~ — **test written 2026-09-20** (`cmd_service_systemd_integration_test.go`,
-   see bullet 5 above), but **not yet run against a real systemd** — only confirmed to
-   compile and correctly skip on a non-Linux host. Still needed: actually run it on a real
-   Linux box or in CI, and separately verify lingering survives a real logout/reboot
-   (that second half is not covered by this test at all — it only proves crash-recovery
-   within a live session, not the lingering/reboot-survival claim; see #964).
+   `kill -9`~~ — **done 2026-09-21, confirmed passing in real CI**, see bullet 5 above
+   (PR #1076). Still open: lingering/reboot-survival is a separate claim this test does
+   not cover — see #964.
 4. Decide whether Linux needs its own `launchdUsable()`-equivalent preflight (tested, named
    exit code) or whether the current "discover it inside `loadService`, clean up, fall
    through to the generic fallback" behavior is an acceptable, intentional asymmetry.
-5. Wire `cmd_service_systemd_integration_test.go` into CI: add an `enable-linger` +
-   `XDG_RUNTIME_DIR` setup step to the `abctl` leg of `go-ci-authbridge-cmd` in `ci.yaml`,
-   and set `ABCTL_SYSTEMD_TESTS=required` for that job — unlike the darwin equivalent
+5. ~~Wire `cmd_service_systemd_integration_test.go` into CI~~ — **done 2026-09-21**
+   (PR #1076): `enable-linger` +
+   `XDG_RUNTIME_DIR` setup step on the `abctl` leg of `go-ci-authbridge-cmd` in `ci.yaml`,
+   `ABCTL_SYSTEMD_TESTS=required` set for that job — unlike the darwin equivalent
    (`ABCTL_LAUNCHD_TESTS=required`), which exists in code but is never set by any
    workflow, so `TestWaitBootedOut_RealLaunchd` has skipped in every CI run since it was
-   written. Doing this step, unlike macOS, needs no new runner type — `ubuntu-latest`
+   written. This one now genuinely runs on every PR. Needed no new runner type — `ubuntu-latest`
    already has a real systemd. This is also the foundation #957's smoke test can build on.
 
 ## Relationship to other issues (for context, not in scope here)
