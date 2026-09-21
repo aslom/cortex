@@ -36,7 +36,7 @@ func benchContextEvents(n int) []pipeline.SessionEvent {
 //
 // Run it before changing sessionContextFor:
 //
-//	go test ./tui/ -run XXX -bench BenchmarkSessionContextPerEvent -benchtime 20x
+//	go test ./tui/ -run XXX -bench BenchmarkSessionContextPerEvent
 func BenchmarkSessionContextPerEvent(b *testing.B) {
 	for _, n := range []int{1_000, 10_000} {
 		b.Run(fmt.Sprintf("folded/%d", n), func(b *testing.B) {
@@ -47,11 +47,29 @@ func BenchmarkSessionContextPerEvent(b *testing.B) {
 				m.events[ids[i]] = benchContextEvents(n)
 				_ = m.sessionContextFor(ids[i]) // warm, as a running TUI is
 			}
+			// THE SLICE IS BUILT ONCE, OUTSIDE THE LOOP, and the run is rewound instead.
+			//
+			// An earlier version appended the delta inside the b.N loop, which made the
+			// measurement a function of how many iterations the sweep chose: the slice grew by a
+			// turn every iteration, so a default -benchtime spent most of its time in append and
+			// realloc — 152KB/op of it — and the per-event fold this benchmark exists to protect
+			// was the small term. It only read correctly under -benchtime 20x, which is a
+			// measurement you have to remember to ask for.
+			//
+			// Rewinding the winner's run to its pre-delta state is the same work with none of the
+			// growth: every iteration folds exactly the arriving events for ids[0] and takes the
+			// length-check hit for the other nine, which is the shape one streamed event has.
+			// What it adds is one map store per iteration, constant and tens of nanoseconds.
 			arriving := conversation("new", time.Now(), 999, 900_000)
+			head := m.events[ids[0]]
+			full := make([]pipeline.SessionEvent, 0, len(head)+len(arriving))
+			full = append(append(full, head...), arriving...)
+			warm := m.contextRun[ids[0]]
+			m.events[ids[0]] = full
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				m.events[ids[0]] = append(m.events[ids[0]], arriving...)
+				m.contextRun[ids[0]] = warm // as if the delta had only just landed
 				for _, id := range ids {
 					_ = m.sessionContextFor(id)
 				}

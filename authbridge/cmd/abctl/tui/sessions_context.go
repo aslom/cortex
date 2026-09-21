@@ -62,8 +62,7 @@ import (
 // A whole-slice fold, for callers with no running state to keep — the tests, and any future
 // one-shot reader. The sessions pane goes through sessionContextFor instead.
 func sessionContext(events []pipeline.SessionEvent) int {
-	run, _ := foldSessionContext(events, contextRun{})
-	return run.tokens
+	return foldSessionContext(events, contextRun{}).tokens
 }
 
 // contextRun is the running answer over the events folded so far: the winning figure and the
@@ -88,9 +87,10 @@ type contextRun struct {
 // of the same length should report the more recent — and the direction is what decides which
 // comparison expresses that.
 //
-// Reports whether anything was folded so a caller can tell "no candidates yet" from "zero".
-func foldSessionContext(events []pipeline.SessionEvent, run contextRun) (contextRun, bool) {
-	changed := false
+// Returns only the new run. An earlier version also reported whether anything was folded, "so a
+// caller can tell no-candidates-yet from zero" — a distinction no caller made: all three sites
+// discarded it and sessionContext collapses both cases to 0 regardless.
+func foldSessionContext(events []pipeline.SessionEvent, run contextRun) contextRun {
 	for i := range events {
 		e := &events[i]
 		// RESPONSES ONLY, stated rather than relied on. The token counts arrive on the response
@@ -117,11 +117,11 @@ func foldSessionContext(events []pipeline.SessionEvent, run contextRun) (context
 			continue
 		}
 		if msgs := len(e.Inference.Messages); msgs >= run.msgs {
-			run.tokens, run.msgs, changed = n, msgs, true
+			run.tokens, run.msgs = n, msgs
 		}
 	}
 	run.n += len(events)
-	return run, changed
+	return run
 }
 
 // sessionContextFor is the gauge's figure for one session, folded rather than rescanned.
@@ -137,9 +137,9 @@ func (m *model) sessionContextFor(id string) int {
 	case ok && run.n == len(events):
 		return run.tokens
 	case ok && run.n < len(events):
-		run, _ = foldSessionContext(events[run.n:], run)
+		run = foldSessionContext(events[run.n:], run)
 	default:
-		run, _ = foldSessionContext(events, contextRun{})
+		run = foldSessionContext(events, contextRun{})
 	}
 	if m.contextRun == nil {
 		m.contextRun = map[string]contextRun{}

@@ -324,7 +324,14 @@ type model struct {
 
 	// Data caches.
 	sessions []session.SessionSummary
-	events   map[string][]pipeline.SessionEvent // sessionID → ring buffer
+	// events is APPEND-ONLY and never trimmed. It was labelled a ring buffer, which it has
+	// never been — and that label is now load-bearing rather than merely inaccurate:
+	// sessionContextFor folds each session's gauge forward and reads an unchanged LENGTH as
+	// "nothing new to fold". A real ring buffer trims one and appends one, holding the length
+	// constant, so the gauge would freeze on a stale figure permanently and silently. Anything
+	// that starts trimming here must invalidate that run — forgetSessionContext is what the two
+	// wholesale-replacement paths already call.
+	events map[string][]pipeline.SessionEvent // sessionID → every event held for it
 	// contextRun is the CONTEXT(1M) gauge's answer per session, folded forward as events
 	// arrive rather than recomputed from the whole slice — see sessionContextFor. The row
 	// loop asks for every session on every rebuild, and a rebuild happens on every streamed
