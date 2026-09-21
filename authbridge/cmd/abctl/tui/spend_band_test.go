@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
@@ -626,5 +627,66 @@ func TestBandFixtureProbes_DoNotCrossMatch(t *testing.T) {
 					probe, spendSpanDefs[other].label, whole)
 			}
 		}
+	}
+}
+
+// THE BAND MEASURES AND PADS IN DISPLAY COLUMNS, not in runes — the rule renderSpendStrip states
+// for this package and footer.go records the cost of breaking.
+//
+// NO PRODUCTION PATH REACHES THESE VALUES TODAY, and that is why the cells are built by hand: a
+// label comes from spendSpanDefs and a value from digits, markers and an em dash, so every cell the
+// renderer can currently produce is ASCII-wide. The rule still binds for two reasons — a styled
+// cell is one style call away, and this package has already shipped a data-destroying bug by
+// measuring styled text with a rune-counting primitive — so it is pinned at the two functions that
+// implement it rather than left to a fixture the renderer cannot generate.
+//
+// BOTH FUNCTIONS, because they have to agree: width() decides the column and padLeft fills it, and
+// a column measured in one vocabulary and filled in the other is wrong by the difference.
+//
+// WHAT THIS CANNOT HOLD, stated rather than implied: that renderSpendBand still CALLS padLeft.
+// Swapping it back to Fprintf("%*s") passes every test in this package, because fmt and padLeft
+// agree on every input the renderer can produce — the two differ only on the styled and wide cells
+// above, which no production path can put in a cell. So the measurement half is pinned by mutation
+// here and the call site is not; the guard against that is the comment at the call site, and a
+// fixture cannot be written for it without a seam the renderer does not have.
+func TestBandCell_MeasuresAndPadsInDisplayColumns(t *testing.T) {
+	restore := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(restore) })
+
+	styled := lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("$4.04")
+	if styled == "$4.04" {
+		t.Fatal("the style emitted no escape sequence, so the styled case asserts nothing")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		cell  bandCell
+		want  int
+		cause string
+	}{
+		{"ascii", bandCell{label: "LAST 1H", value: "$4.04"}, 7, "the wider half"},
+		{"styled value", bandCell{label: "TODAY", value: styled}, 5,
+			"escape bytes are not columns: counting them charges the cell for invisible text and " +
+				"the band drops a figure that would have fitted"},
+		// The wide half has to be the WIDER half, or the ASCII value decides the answer and the
+		// case cannot tell a rune count from a column count. Four CJK runes are eight columns
+		// against the value's five; as runes they are four, so a rune count picks the value.
+		{"wide runes", bandCell{label: "過去一時", value: "$4.04"}, 8,
+			"a CJK rune occupies two columns, so counting runes under-measures the cell and the " +
+				"band renders wider than the terminal"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cell.width(); got != tc.want {
+				t.Errorf("width() = %d, want %d — %s", got, tc.want, tc.cause)
+			}
+			// And the padding lands on the same number the measurement produced.
+			for _, s := range []string{tc.cell.label, tc.cell.value} {
+				if got := lipgloss.Width(padLeft(s, tc.want)); got != tc.want {
+					t.Errorf("padLeft(%q, %d) renders %d columns: the cell is measured in one "+
+						"vocabulary and filled in another", s, tc.want, got)
+				}
+			}
+		})
 	}
 }

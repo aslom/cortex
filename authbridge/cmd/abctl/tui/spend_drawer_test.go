@@ -5,11 +5,11 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
-
-	tea "github.com/charmbracelet/bubbletea"
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
@@ -1280,5 +1280,55 @@ func TestRenderSpendDrawer_AFailedFetchSaysSo(t *testing.T) {
 	fresh := strings.Join(renderSpendDrawer(nil, nil, usage.GroupModel, "MONTH", 100), "\n")
 	if strings.Contains(fresh, "unavailable") {
 		t.Errorf("a drawer awaiting its first answer reports a failure:\n%s", fresh)
+	}
+}
+
+// CLOSING THE DRAWER DISOWNS ITS POLL CHAIN, BY EITHER KEY — and the two keys are asserted
+// together because the bug was that they had drifted apart.
+//
+// `$` invalidated and esc did not. That was harmless only because the OPEN path also invalidates,
+// for snapshot freshness, which is not about closing at all: a reply already in the air outlives
+// the keypress by up to spendFetchTimeout, and without reqSeq moving it passes
+// applySpendDrawerLoaded's guard and is stored against a closed drawer, so the next open renders a
+// stale breakdown before its own first poll lands.
+//
+// reqSeq IS THE ASSERTION, not just snap. Clearing the snapshot without bumping the sequence leaves
+// exactly that in-flight reply admissible, which is the half a "did it clear?" test would miss —
+// and removing the esc-path call left the entire package green before this existed.
+func TestClosingTheDrawer_DisownsItsPollChainByEitherKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{"dollar", keyRune('$')},
+		{"esc", tea.KeyMsg{Type: tea.KeyEsc}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{width: 100, height: 40}
+			m.pane = paneSessions
+			m.handleKey(keyRune('$'))
+			if !m.spendDrawerVisible() {
+				t.Fatalf("the drawer did not open, so this says nothing about closing it")
+			}
+			// A breakdown on screen and a request in flight.
+			m.spend.drawer.snap = &usage.Snapshot{Window: "month", Priced: true}
+			m.spend.drawer.lastFetch = time.Now()
+			seq := m.spend.drawer.reqSeq
+
+			m.handleKey(tc.key)
+
+			if m.spend.expanded {
+				t.Fatalf("%q did not close the drawer", tc.name)
+			}
+			if m.spend.drawer.snap != nil {
+				t.Errorf("%q left the breakdown behind, so the next open draws a stale one before "+
+					"its own poll lands", tc.name)
+			}
+			if m.spend.drawer.reqSeq == seq {
+				t.Errorf("%q closed the drawer without bumping reqSeq (%d): a reply already in "+
+					"flight is still admissible and will be stored against a closed drawer",
+					tc.name, seq)
+			}
+		})
 	}
 }
