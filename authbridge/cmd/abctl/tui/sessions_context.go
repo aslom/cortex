@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -105,14 +106,24 @@ type contextRun struct {
 	n      int // events folded so far
 	tokens int
 	msgs   int
+	// at is WHEN the winning response arrived, and it exists because of the rebase. Ties go to
+	// the latest, which a single forward fold expresses as arrival order — but a rebase folds
+	// new events on top of a winner that is no longer in the slice, so arrival order says
+	// nothing about which of the two came first. Without this, opening an OLDER turn of equal
+	// length replaced a newer remembered figure (reproduced at 445k against a true 500k).
+	at time.Time
 }
 
 // foldSessionContext folds events into run and returns the new running answer.
 //
-// Forward, and ties keep the LATEST: `>=` rather than `>`, because folding walks in arrival order
-// where the previous backward scan walked in reverse. The two must agree — a tie between two turns
-// of the same length should report the more recent — and the direction is what decides which
-// comparison expresses that.
+// Forward, and ties keep the LATEST — by TIMESTAMP, not by arrival order. A plain `>=` expressed
+// that correctly while folding was the only way events entered the run, since arrival order and
+// time order agreed. Rebasing broke the equivalence: the remembered winner is not in the slice
+// being folded, so "later in this fold" no longer means "later in the session", and an older turn
+// of equal length would take the tie. Comparing At keeps the rule the tests name.
+//
+// `!Before` rather than `After`, so two candidates sharing a timestamp still resolve by arrival
+// order the way the pure fold did.
 //
 // Returns only the new run. An earlier version also reported whether anything was folded, "so a
 // caller can tell no-candidates-yet from zero" — a distinction no caller made: all three sites
@@ -143,8 +154,9 @@ func foldSessionContext(events []pipeline.SessionEvent, run contextRun) contextR
 		if n <= 0 {
 			continue
 		}
-		if msgs := len(e.Inference.Messages); msgs >= run.msgs {
-			run.tokens, run.msgs = n, msgs
+		if msgs := len(e.Inference.Messages); msgs > run.msgs ||
+			(msgs == run.msgs && !e.At.Before(run.at)) {
+			run.tokens, run.msgs, run.at = n, msgs, e.At
 		}
 	}
 	run.n += len(events)
@@ -188,7 +200,7 @@ func (m *model) sessionContextFor(id string) int {
 // (one event swapped in place for its full self, length unchanged), and sessionContextFor's own
 // fallback for a slice shorter than the run.
 //
-// KEEPS tokens AND msgs, and re-folds the whole new slice on top of them. Keeping the figure is
+// KEEPS tokens, msgs AND at, and re-folds the whole new slice on top of them. Keeping the figure is
 // what makes the column survive a `view=summary` snapshot — see sessionContext on why the timeline
 // cannot answer this. Re-folding rather than just re-basing n is what lets the new slice WIN:
 // nothing here assumes the replacement is poorer, so a detail fetch that puts a longer
@@ -205,7 +217,8 @@ func (m *model) sessionContextFor(id string) int {
 // handles that by nilling the whole map beside m.events.
 func (m *model) rebaseSessionContext(id string, events []pipeline.SessionEvent) {
 	prev := m.contextRun[id]
-	run := foldSessionContext(events, contextRun{tokens: prev.tokens, msgs: prev.msgs})
+	run := foldSessionContext(events,
+		contextRun{tokens: prev.tokens, msgs: prev.msgs, at: prev.at})
 	if m.contextRun == nil {
 		m.contextRun = map[string]contextRun{}
 	}

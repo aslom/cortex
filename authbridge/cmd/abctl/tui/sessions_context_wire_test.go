@@ -178,3 +178,43 @@ func TestSessionContextFor_AReleaseOfItsEventsKeepsTheFigure(t *testing.T) {
 		t.Errorf("after a new turn: %d, want %d", got, want)
 	}
 }
+
+// A TIE MUST STILL GO TO THE LATEST TURN ACROSS A REBASE, which is the one rule the remembered
+// figure could break.
+//
+// Two turns of equal length, the later one winning. The snapshot projects both away, so the figure
+// survives only in the run — and then the operator opens the OLDER turn, whose full event comes
+// back unprojected and folds as a candidate. It ties on message count, and a fold that reads "later
+// in this fold" as "later in the session" hands it the column: reproduced at 445k against a true
+// 500k before contextRun carried a timestamp.
+func TestSessionContextFor_ATieAcrossARebaseKeepsTheLaterTurn(t *testing.T) {
+	base := time.Now()
+	const id = "s"
+	older := conversation("early", base, 700, 445_000)
+	newer := conversation("late", base.Add(time.Hour), 700, 500_000)
+	for i := range older {
+		older[i].Seq = uint64(i + 1)
+	}
+	for i := range newer {
+		newer[i].Seq = uint64(i + 3)
+	}
+	all := append(append([]pipeline.SessionEvent{}, older...), newer...)
+
+	m := &model{events: map[string][]pipeline.SessionEvent{id: all}}
+	m.sessionsTbl = newSessionsTable()
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Fatalf("from the stream: %d, want %d", got, want)
+	}
+	m.Update(snapshotLoadedMsg{id: id, events: projected(all), projected: true})
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Fatalf("after the snapshot: %d, want %d", got, want)
+	}
+
+	resp := older[1] // the detail pane fetched the older turn's response
+	m.replaceHeldEvent(id, &resp)
+
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Errorf("after opening the older turn: %d, want %d — an older tie took the column",
+			got, want)
+	}
+}
