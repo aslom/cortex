@@ -98,16 +98,45 @@ func runTransientUnit(t *testing.T, name, script string) {
 	}
 }
 
+// currentMainPID reads MainPID once, or 0 if unset/unparseable.
+func currentMainPID(name string) int {
+	out, err := exec.Command("systemctl", "--user", "show", name, "--property=MainPID", "--value").Output()
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
 // unitMainPID polls for a MainPID, since it is briefly 0 right after start.
 func unitMainPID(t *testing.T, name string, within time.Duration) (int, bool) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
-		out, err := exec.Command("systemctl", "--user", "show", name, "--property=MainPID", "--value").Output()
-		if err == nil {
-			if pid, perr := strconv.Atoi(strings.TrimSpace(string(out))); perr == nil && pid > 0 {
-				return pid, true
-			}
+		if pid := currentMainPID(name); pid > 0 {
+			return pid, true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return 0, false
+}
+
+// waitForNewMainPID polls until MainPID is both nonzero and different from oldPID.
+// Checking is-active alone is not enough: systemd can still report a unit "active"
+// in the brief window right after a kill, before it has noticed the death and
+// respawned — is-active going true first, then a same-old-PID read right behind
+// it, would misreport a real restart as a failure to restart. Requiring a genuinely
+// new PID is the direct claim ("something new is running"), not the reachable proxy
+// for it.
+func waitForNewMainPID(t *testing.T, name string, oldPID int, within time.Duration) (int, bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if pid := currentMainPID(name); pid > 0 && pid != oldPID {
+			return pid, true
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -154,16 +183,15 @@ func TestSupervisorRestartsAfterCrash_RealSystemd(t *testing.T) {
 		t.Fatalf("kill -9 %d: %v", pid, err)
 	}
 
-	if !waitUntil(10*time.Second, func() bool { return unitIsActive(unit) }) {
-		t.Error("unit did not report active again after the crash — Restart=on-failure did not fire")
+	// The authoritative signal is a genuinely new PID, not is-active: is-active can
+	// still read "active" in the brief window right after the kill, before systemd
+	// has noticed the death and respawned, which would let a same-old-PID read slip
+	// through as a false "it restarted."
+	if _, ok := waitForNewMainPID(t, unit, pid, 10*time.Second); !ok {
+		t.Fatal("no new main PID within 10s — Restart=on-failure did not fire")
 	}
-
-	newPID, ok := unitMainPID(t, unit, 5*time.Second)
-	if !ok {
-		t.Fatal("restarted unit never reported a main PID")
-	}
-	if newPID == pid {
-		t.Error("same PID after the crash — nothing actually restarted")
+	if !unitIsActive(unit) {
+		t.Error("got a new PID but the unit does not report active")
 	}
 }
 

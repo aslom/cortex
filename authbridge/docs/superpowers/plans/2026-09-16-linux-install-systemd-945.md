@@ -268,18 +268,23 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
 
 ## Cross-cutting themes
 
-1. **The systemd rendering/string-shape logic is solid and well tested.** The gap is almost
-   entirely at the "does this actually work against a real system service manager" layer —
-   nothing fakes or drives real `systemctl`/`loginctl` for Linux, while macOS has both a
-   `fakeLaunchctl` unit-test harness *and* a real-launchd integration test.
-2. **The Linux path is architecturally simpler** (no supervisor process, no bootout-race
-   workaround) for a legitimate reason — but that simplicity has never been backed by the
-   same real-world verification that justified and shaped the macOS design.
-3. **One concrete, low-risk fix stands out:** add `TimeoutStopSec=` to the Linux unit. Small,
-   self-contained, directly addresses checklist bullet 7.
-4. **No real Linux CI smoke test exists yet anywhere in the repo** — this is #957's job, but
-   #957 can't be trusted until the gaps above are closed, since a smoke test built on top of
-   an unverified `Restart=on-failure` assumption would just as confidently pass.
+*(Written during the initial research pass; superseded as of 2026-09-21 — kept for
+history, corrected below rather than deleted.)*
+
+1. ~~The systemd rendering/string-shape logic is solid and well tested. The gap is almost
+   entirely at the "does this actually work against a real system service manager"
+   layer — nothing fakes or drives real `systemctl`/`loginctl` for Linux~~ — **no longer
+   true**: `cmd_service_systemd_test.go` (fake harness) and
+   `cmd_service_systemd_integration_test.go` (real systemd) both exist now, and Linux has
+   a real-integration test wired into CI, which macOS still does not (see #944 relationship
+   note below).
+2. ~~That simplicity has never been backed by the same real-world verification that
+   justified and shaped the macOS design~~ — **it now has**: PR #1076 confirmed
+   `Restart=on-failure` against a live systemd, in CI, 2026-09-21.
+3. ~~One concrete, low-risk fix stands out: add `TimeoutStopSec=`~~ — **done**, bullet 7.
+4. **No real Linux CI smoke test exists yet anywhere in the repo** — still true, this
+   remains #957's job. What's changed: #957 now has a verified `Restart=on-failure`
+   foundation to build on, rather than an unverified assumption underneath it.
 
 ## Suggested next steps (not yet sequenced into a task plan)
 
