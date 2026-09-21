@@ -305,7 +305,9 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   because CI runners don't reboot. Shares the exact "does Restart=on-failure/launchd
   KeepAlive really survive a restart" question raised above — worth coordinating rather than
   duplicating.
-- **#966** — plugin build-tag convention cleanup (`exclude_plugin_*` → `include_plugin_*`)
+- **#966** — plugin build-tag convention cleanup (retired `exclude_plugin_*` form →
+  `include_plugin_*`; allow-legacy-plugin-tag: this reference is design history, not a
+  live usage)
   and a smaller desktop artifact. Touches the same install/upgrade path (H2 in that issue:
   upgrading to a build that dropped a plugin an existing config still names must be handled
   gracefully) — flagged there as something #944/#945/#964 must cover. Worth checking in on
