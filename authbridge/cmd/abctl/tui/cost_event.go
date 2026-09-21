@@ -142,7 +142,7 @@ func formatTokensWithSaving(total int, saved float64, projected, estimated bool)
 // Both halves go through formatUSDCell, so they share its fixed precision and its
 // sub-cent floor. Fixed precision is the point: stacked in one column, "$0.255" above
 // "−$0.0037" misaligns the decimal point and reads as though the two figures were
-// measured to different accuracy. See formatUSDAmount for why that precision is two
+// measured to different accuracy. See formatUSDMicros for why that precision is two
 // places rather than four.
 func formatUSDWithSaving(total float64, saved float64, projected bool) string {
 	if total <= 0 {

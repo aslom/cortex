@@ -69,7 +69,7 @@ func formatCompact(v float64) string {
 	}
 }
 
-// formatUSDAmount renders a dollar amount at FIXED precision, without the "$" — the
+// formatUSDMicros renders a dollar amount at FIXED precision from integer micros — the
 // caller places that, since a saving needs it inside the parentheses.
 //
 // Fixed rather than varied by magnitude, because these amounts are stacked in one column

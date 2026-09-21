@@ -104,7 +104,17 @@ func TestSessionsHeaders_CarryNoANSIUnderAForcedColourProfile(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(restore) })
 
-	for _, width := range []int{200, 90, 80, 60, 50} {
+	// EVERY WIDTH THE TABLE CLAIMS TO WORK AT, not a handful. Hand-picked widths is how a
+	// clipped heading survived: "CONTEXT(1M)" was declared at exactly its own eleven columns so
+	// it could not be clipped, and the FITTER — which shrinks the widest column against one
+	// global floor of four — squeezed it to ten at 80 and eight at 50, two sizes this list did
+	// not name. The heading now abbreviates to seven; see contextColumnTitle.
+	//
+	// FROM 45 UP, because below that every column reaches that floor and headings clip starting
+	// with SESSION. That is the regime fitTableColumns documents as "the terminal is simply too
+	// narrow", and the table is already knowingly degraded there — TOKENS cannot hold its own
+	// widest value below forty columns either.
+	for width := 45; width <= 200; width++ {
 		m := &model{width: width, height: 40, pane: paneSessions}
 		m.sessionsTbl = newSessionsTable()
 		m.layout()

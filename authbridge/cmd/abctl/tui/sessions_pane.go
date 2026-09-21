@@ -60,8 +60,24 @@ func sessionsColumns() []table.Column {
 //
 // The width follows the title rather than the gauge: the gauge scales to whatever the fitter
 // leaves, and a column narrower than its own heading would have bubbles truncate the heading to
-// "CONTEXT(1…", which states no scale at all.
-const contextColumnTitle = "CONTEXT(1M)"
+// "CTX(1…", which states no scale at all.
+//
+// ABBREVIATED, BECAUSE THE DECLARED WIDTH IS NOT THE FITTED ONE. It read "CONTEXT(1M)" — eleven
+// columns, declared at exactly its own length so the heading could not be clipped — and
+// fitTableColumns shrinks the widest column repeatedly against ONE global floor of four, so the
+// heading was squeezed to ten columns at an 80-column terminal and eight at fifty. The truncation
+// this width was chosen to prevent happened anyway, two terminal sizes down.
+//
+// Seven columns fits every width the column survives at, so the scale is stated everywhere rather
+// than on wide terminals only — which is the requirement, the denominator being the whole reason
+// the title carries it. Dropping the column instead was tried and is worse: it changes what the
+// table shows at narrow widths, and it frees so much width that the money columns are never
+// fitted below their declared size, which silently retires the guard on rendering cells against
+// their FITTED width.
+//
+// Found by TestSessionsHeaders_CarryNoANSIUnderAForcedColourProfile, which measures every heading
+// against the width it will RENDER at rather than the one it asked for.
+const contextColumnTitle = "CTX(1M)"
 
 // contextWindowTokens is the denominator every gauge is drawn against.
 //
