@@ -177,7 +177,35 @@ jobs:
             echo "::endgroup::"
           done
 
+      # cmd_service_systemd_integration_test.go drives a REAL systemd --user session
+      # to prove Restart=on-failure actually restarts a crashed unit — the Linux
+      # counterpart to TestWaitBootedOut_RealLaunchd, which has skipped in every CI
+      # run since it was written because no workflow gives it a real launchd or sets
+      # its required-env-var escape hatch. Don't repeat that here: this step gives the
+      # abctl leg a real, reachable systemd --user session, and the Test step below
+      # sets ABCTL_SYSTEMD_TESTS=required for this leg only, so a skip here is a
+      # failure, not a silent no-op.
+      #
+      # The runner user has no interactive login, so nothing has started a user
+      # manager or created /run/user/<uid> yet. enable-linger asks logind to start
+      # one and keep it running; wait for its bus socket rather than assuming it is
+      # instant.
+      - name: Enable a systemd --user session (abctl leg only)
+        if: matrix.binary == 'abctl'
+        run: |
+          sudo loginctl enable-linger "$(whoami)"
+          rt="/run/user/$(id -u)"
+          for i in $(seq 1 30); do
+            [ -S "${rt}/bus" ] && break
+            sleep 1
+          done
+          echo "XDG_RUNTIME_DIR=${rt}" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="${rt}" systemctl --user show-environment || \
+            echo "::warning::systemd --user session not reachable after enable-linger; the real-systemd tests will report why"
+
       - name: Test
+        env:
+          ABCTL_SYSTEMD_TESTS: ${{ matrix.binary == 'abctl' && 'required' || '' }}
         run: go test -v -race -cover ./...
 
   proxy-init-iptables:
