@@ -30,7 +30,11 @@ func TestRenderSpendBand_AlignsValuesUnderTheirLabels(t *testing.T) {
 	for _, pair := range []struct{ label, value string }{
 		{"TODAY", "$3.84"},
 		{"LAST 1H", "$4.55"},
-		{"SAVED", inexactMarker + "$0.21"},
+		// The value is bare: the marker is on the label now. Matched on the label's PREFIX,
+		// as it always was — this fixture has no TodaySaved, so it takes the window fallback
+		// and the label is "SAVED 1H~". The marker itself is asserted in
+		// TestRenderSpendBand_SavingStaysMarkedAndSeparate.
+		{"SAVED", "$0.21"},
 		{"CACHE HIT", "93%"},
 	} {
 		li, vi := strings.Index(labels, pair.label), strings.Index(values, pair.value)
@@ -49,11 +53,26 @@ func TestRenderSpendBand_AlignsValuesUnderTheirLabels(t *testing.T) {
 	}
 }
 
-// The saving keeps its marker and never joins the spend figures.
+// The saving is still marked as an estimate — on its LABEL now — and never joins the spend
+// figures.
+//
+// Both halves asserted, because "the marker moved" and "the marker was deleted" produce the same
+// band if you only look for its absence on the value.
 func TestRenderSpendBand_SavingStaysMarkedAndSeparate(t *testing.T) {
-	joined := strings.Join(renderSpendBand(bandSummary(), 78), "\n")
-	if !strings.Contains(joined, inexactMarker+"$0.21") {
-		t.Errorf("the saving lost its %q marker:\n%s", inexactMarker, joined)
+	// THE DAY'S saving, so the label is the bare "SAVED~" rather than the fallback's
+	// "SAVED 1H~" — the suffixed form is TestRenderSpendBand_TheWindowSavingFallbackNamesItsSpan's
+	// case, and between them both labels are covered. Same figure either way, so the sum check
+	// below is unchanged.
+	s := bandSummary()
+	s.TodaySavedUSD, s.HasTodaySaved = 0.2091, true
+	lines := renderSpendBand(s, 78)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(lines[0], "SAVED"+inexactMarker) {
+		t.Errorf("the SAVED label lost its %q marker:\n%s", inexactMarker, joined)
+	}
+	if strings.Contains(lines[1], inexactMarker) {
+		t.Errorf("a value carries %q; on this band it belongs on the label:\n%s",
+			inexactMarker, joined)
 	}
 	// 3.8402 + 0.2091 — the sum usage.Counts.AvoidedMicros forbids in either direction.
 	if strings.Contains(joined, "$4.05") {
@@ -150,10 +169,13 @@ func TestRenderSpendBand_SavedIsTheDaysFigureNotTheWindows(t *testing.T) {
 	s.TodaySavedUSD, s.HasTodaySaved = 2.1891, true // the day's
 	joined := strings.Join(renderSpendBand(s, 120), "\n")
 
-	if !strings.Contains(joined, inexactMarker+"$2.19") {
+	// Bare figures: the estimate marker is on the label. Which is also why the negative half
+	// below has to match the bare figure too — against "~$1.03" it would pass on the marker's
+	// absence alone and stop saying anything about which span the cell holds.
+	if !strings.Contains(joined, "$2.19") {
 		t.Errorf("SAVED is not the day's figure:\n%s", joined)
 	}
-	if strings.Contains(joined, inexactMarker+"$1.03") {
+	if strings.Contains(joined, "$1.03") {
 		t.Errorf("SAVED shows the window's figure beside TODAY, understating the day:\n%s", joined)
 	}
 }
@@ -170,12 +192,15 @@ func TestRenderSpendBand_TheWindowSavingFallbackNamesItsSpan(t *testing.T) {
 	lines := renderSpendBand(s, 120)
 	joined := strings.Join(lines, "\n")
 
-	if !strings.Contains(joined, inexactMarker+"$1.03") {
+	if !strings.Contains(joined, "$1.03") {
 		t.Errorf("the window saving is missing entirely:\n%s", joined)
 	}
-	if !strings.Contains(lines[0], "SAVED 1H") {
-		t.Errorf("the fallback saving is labelled %q, which does not name its span:\n%s",
-			lines[0], joined)
+	// The span AND the estimate marker, in that order, because the fallback label is where the
+	// two compose: "SAVED 1H~". A marker appended before the span suffix would name the span
+	// wrongly ("SAVED~ 1H") and still satisfy a test that looked for them separately.
+	if !strings.Contains(lines[0], "SAVED 1H"+inexactMarker) {
+		t.Errorf("the fallback saving is labelled %q, which does not name its span and mark "+
+			"itself as an estimate:\n%s", lines[0], joined)
 	}
 }
 

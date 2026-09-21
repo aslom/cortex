@@ -256,19 +256,27 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   scope, not a fault.
 
   The two money columns are dropped entirely on a terminal too narrow to show a
-  sub-cent charge honestly — below 72 columns — rather than rounded to `$0.00`
-  or blanked.
+  sub-cent charge honestly — below 73 columns — rather than rounded to `$0.00`
+  or blanked. A charge under a cent reads `<$0.01`.
+
+  `SAVED~` carries the tilde in its **heading** rather than on every row: a
+  saving is always an estimate, so the caveat belongs to the column rather than
+  to any one figure in it. Neither money column in this table marks a *value* —
+  the only glyph a cell here can wear is `+`, meaning the session's total hit the
+  int64 ceiling and the figure is a floor. The conditional `~`, earned by a figure
+  whose requests could not all be settled exactly, appears on the band's `TODAY`
+  and `LAST 1H` and on the `$` drawer's per-model cost.
 
   ```
   abctl · http://localhost:9094 · [Sessions] Pipeline · lifetime totals
-  TODAY   SAVED   LAST 1H  TOKENS 1H  CACHE HIT 1H
-  $30.94  ~$0.18  $2.91    9.9M       81%
+  TODAY   SAVED~  LAST 1H  TOKENS 1H  CACHE HIT 1H
+  $30.94  $0.18   $2.91    9.9M       81%
   ───────────────────────────────────────────────────────────────────────────
-   SESSION         UPDATED    EVENTS   TOKENS      COST      SAVED  CONTEXT(1M)
-   ctx-abc-1234…   3s ago         42     48.2k   $0.1214   ~$0.0038  ▕███████▌ ▏
-   ctx-def-5678…   18m ago        15      1.2k   $0.0031          —  ▕▎        ▏
-   ctx-ghi-9012…   cached          7      2.9k         —          —  ▕████▍    ▏
-   default         1h ago          8         —         —          —            —
+   SESSION         UPDATED    EVENTS   TOKENS    COST  SAVED~  CONTEXT(1M)
+   ctx-abc-1234…   3s ago         42    48.2k   $0.12  <$0.01  ▕███████▌ ▏
+   ctx-def-5678…   18m ago        15     1.2k  <$0.01       —  ▕▎        ▏
+   ctx-ghi-9012…   cached          7     2.9k       —       —  ▕████▍    ▏
+   default         1h ago          8        —       —       —            —
 
   ● connected   2.1 events/sec
   cost/saved: lifetime   [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
@@ -283,35 +291,45 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   cannot afford to leave to inference. A rule closes the block off from the
   table below it.
 
-  **How precise a money figure is depends on what it measures.** A figure that
-  answers "how much has this cost over a span" reads in cents: `TODAY`,
-  `LAST 1H`, `SAVED`, and the Usage pane's `COST`. A figure attributable to one
-  thing keeps four decimals, because those are routinely sub-cent — a single
-  cache-read request is $0.000038, and cents would render every one of them as
-  nothing. That covers the sessions table's `COST` and `SAVED`, the events
-  table's `COST`, and both columns of the `$` drawer. Neither form ever prints a
-  positive figure as `$0.00`: cents falls back to `<$0.01` and four decimals to
-  `<$0.0001`.
+  **How precise a money figure is depends on whether you scan it.** Anything read
+  down a column or compared against its neighbours reads in **cents**: `TODAY`,
+  `LAST 1H`, `SAVED`, the Usage pane's `COST`, the sessions table's `COST` and
+  `SAVED`, and both columns of the `$` drawer. Two digits of extra precision are
+  noise on a surface whose job is comparing rows to each other.
+
+  **One request** is the exception, and keeps four decimals: the events table's
+  `COST`. A single cache-read request is $0.000038, so cents there would render
+  a whole column identically — the one place the precision carries all of the
+  information rather than a little of it.
+
+  Neither form ever prints a positive figure as `$0.00`: cents falls back to
+  `<$0.01` and four decimals to `<$0.0001`. "Free" is a claim about the traffic,
+  never a rounding artefact.
 
   `$` expands the band into two columns — where the money went, by rate tier,
   and who spent it, by model, endpoint or agent:
 
   ```
-    WHERE IT WENT                     BY MODEL
-  output      ██████ ~$2.7048         claude-opus-5   $4.5462   35 req   5.6M tokens
-  cache-read  ███▌   ~$1.6229
-  input       ▍      ~$0.2185
+    WHERE IT WENT                    BY MODEL
+  output      ██████ $2.70           claude-opus-5   $4.55   35 req   5.6M tokens
+  cache-read  ███▌   $1.62
+  input       ▍      $0.22
   cache-write —
      [a] [model] · endpoint · agent   [w] 1h   esc closes
   ```
 
-  The tier figures wear `~` because the SPLIT is modelled from the rate table
-  even when the total beside it is a gateway's own authoritative figure: a
-  gateway reports one number per call and never breaks it down. They are
-  apportioned so the column sums to the window total exactly, and a tier the
-  rate table says nothing about shows `—` rather than `$0.0000`, which would
-  claim the tier was free. Below 72 columns the tier column drops and the
-  panel degrades to the by-model breakdown alone.
+  The tier figures are **modelled, not measured**: the split comes from the rate
+  table even when the total beside it is a gateway's own authoritative figure,
+  because a gateway reports one number per call and never breaks it down. They
+  are apportioned so the column sums to the window total exactly, and a tier the
+  rate table says nothing about shows `—` rather than `$0.00`, which would claim
+  the tier was free. Below 72 columns the tier column drops and the panel
+  degrades to the by-model breakdown alone.
+
+  These rows carry **no** `~`, unlike the sessions table's `SAVED~`. The caveat is
+  real but this panel has no money heading to hang it on — `WHERE IT WENT` names
+  the column, not the figures — so the choice was a tilde on every row or the
+  sentence above, and the sentence won.
 
   The selected row is reverse-video rather than marked with a glyph, so it is
   the one thing these listings cannot show.

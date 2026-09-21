@@ -18,7 +18,7 @@ import (
 // resize: fitting the LIVE columns would be cumulative, and a terminal that got narrower once
 // would keep its narrowed columns after being widened again.
 //
-// These widths sum to 90 rendered columns (80 declared plus bubbles' two per cell), which is
+// These widths sum to 91 rendered columns (77 declared plus bubbles' two per cell), which is
 // why they are fitted rather than used as-is — see fitTableColumns.
 func sessionsColumns() []table.Column {
 	return []table.Column{
@@ -103,12 +103,27 @@ var sessionsRightAligned = map[string]bool{
 //
 // Idempotent, because each heading is re-derived from headerTitle rather than padded again:
 // re-aligning an already-aligned set is a no-op rather than a heading pushed off its column.
+// headerTitle strips the estimate marker as well as the padding, which is what keeps that true
+// for SAVED — otherwise each pass would add another "~".
+//
+// THE ESTIMATE MARKER IS ADDED HERE, at render time, and the declared Title stays the bare name.
+// A saving is always an estimate, so the caveat is the column's rather than any row's and is
+// stated once above them instead of on every cell — see sessionMoneyCell. Doing it here rather
+// than in sessionsColumns is what keeps "SAVED" the lookup key: four callers address this column
+// by that literal string, and a declared Title of "SAVED~" would make all four read it as absent
+// and render every saving as "—".
 func alignSessionsHeaders(cols []table.Column) []table.Column {
 	out := make([]table.Column, len(cols))
 	copy(out, cols)
 	for i, c := range out {
+		title := headerTitle(c)
+		if title == "SAVED" {
+			title += inexactMarker
+		}
 		if sessionsRightAligned[headerTitle(c)] {
-			out[i].Title = rightAlignHeader(headerTitle(c), c.Width)
+			out[i].Title = rightAlignHeader(title, c.Width)
+		} else {
+			out[i].Title = title
 		}
 	}
 	return out
@@ -198,8 +213,8 @@ func (m *model) rebuildSessionsTable() {
 		}
 		if showMoney {
 			row = append(row,
-				padLeft(sessionMoneyCell(s.CostMicros, false, s.Saturated, costW), costW),
-				padLeft(sessionMoneyCell(s.AvoidedMicros, true, s.Saturated, savedW), savedW))
+				padLeft(sessionMoneyCell(s.CostMicros, s.Saturated, costW), costW),
+				padLeft(sessionMoneyCell(s.AvoidedMicros, s.Saturated, savedW), savedW))
 		}
 		row = append(row, padLeft(contextGauge(sessionContext(m.events[s.ID]), contextW), contextW))
 		rows = append(rows, row)
@@ -361,8 +376,9 @@ func (m *model) selectedSessionID() string {
 // a surface that used "0" in one column and "—" in another would erase it.
 const emptyCell = "—"
 
-// sessionMoneyCell renders one session's lifetime cost, or its lifetime saving when
-// avoided is set.
+// sessionMoneyCell renders one session's lifetime cost or its lifetime saving. The two are the
+// same cell: they differ only in which micros the caller passes and in the column heading above
+// them, not in how a figure is formatted or marked.
 //
 // UNKNOWN AND ZERO ARE THE SAME CELL HERE, and deliberately: micros == 0 means either the
 // session's traffic could not be priced or it genuinely charged nothing, and this function
@@ -375,10 +391,23 @@ const emptyCell = "—"
 // sums non-negative per-request figures, so a negative can only come from a broken producer,
 // and "-$5.00" in a column of costs reads as a refund nobody issued.
 //
-// A saving wears inexactMarker unconditionally. It is estimated from a bytes-to-tokens ratio
-// and gross of the prompt-cache re-warm — see usage.Counts.AvoidedMicros — and the per-request
-// flags that record which caveats applied do not survive summation, so the marker cannot be
-// conditional on them without claiming an exactness nothing here can verify.
+// A saving is estimated — from a bytes-to-tokens ratio, gross of the prompt-cache re-warm, see
+// usage.Counts.AvoidedMicros — and that caveat is NOT on this cell. It is on the column HEADER,
+// which reads "SAVED~"; see alignSessionsHeaders.
+//
+// THE MARKER MOVED BECAUSE IT IS A PROPERTY OF THE COLUMN, not of the row. It applied to every
+// saving this cell has ever rendered — the per-request flags recording which caveats applied do
+// not survive summation, so it could never be conditional — and a glyph repeated down every row
+// of a column states one fact as many times as there are sessions. The general rule this package
+// now follows: an UNCONDITIONAL caveat belongs on the header, a CONDITIONAL one rides the figure.
+// partialMarker below is conditional and stays here.
+//
+// This is a deliberate exception to "a marker rides ON the figure" (see partialMarker's own doc),
+// and it is narrow: a bubbles table always renders its header, so unlike the spend strip's
+// fitter — which can drop the words beside a figure while the figure stays — there is no width at
+// which these cells are visible and their header is not. sessionsShowMoney drops the columns
+// whole rather than letting them narrow far enough to clip the heading.
+//
 // saturated marks the figure as a FLOOR: the session's total reached the int64 ceiling and
 // was clamped, so the real number is larger by an amount nothing can state. It arrives from
 // session.SessionSummary.Saturated, which exists because MaxInt64 micros is about
@@ -391,7 +420,7 @@ const emptyCell = "—"
 // them there. A marker that rides ON the figure is the point: a cell can be truncated to
 // nothing but while the number is on screen its caveat is too.
 // budget is the column's FITTED width, and the figure is rendered less precisely rather than
-// wider when four decimals will not fit.
+// wider when cents will not fit.
 //
 // A bubbles table does not re-flow an overflowing cell, it truncates — and truncating a money
 // figure produces a smaller figure that reads as real, which is the one thing every surface here
@@ -400,33 +429,37 @@ const emptyCell = "—"
 // ("~$9223372036854.7754+", twenty-one) because the marker that says "this is a floor" is
 // appended to the longest value there is.
 //
-// PRECISION IS WHAT YIELDS, in order: four decimals, two, none, then humanizeCount's compact
-// form, which is itself width-bounded and clamps at ">999T". Four decimals are worth having on a
-// cent-scale figure and are noise on a four-figure one, so the ladder costs nothing where it
-// matters. The last candidate always fits a sane column, and is returned unconditionally so this
-// cannot fall through to an unbounded string.
-func sessionMoneyCell(micros int64, avoided, saturated bool, budget int) string {
+// PRECISION IS WHAT YIELDS, in order: cents, whole dollars, then humanizeCount's compact form,
+// which is itself width-bounded and clamps at ">999T". The last candidate always fits a sane
+// column, so this cannot fall through to an unbounded string.
+//
+// CENTS AT THE TOP, not four decimals, and that is a reversal. This column read "$1.8140" — four
+// decimals — on the reasoning that a per-session figure is attributable to one thing and is
+// routinely sub-cent. It is the wrong trade for a column a reader SCANS: four decimals are two
+// digits of noise on every row of a table whose purpose is comparing sessions to each other, and
+// the sub-cent case is served by the floor below rather than by widening every other row. The
+// cost is real and accepted: two sessions that differ below a cent now read alike. See the
+// precision rule beside formatUSDTotal, which this change rewrote.
+func sessionMoneyCell(micros int64, saturated bool, budget int) string {
 	if micros == 0 || negativeCost(micros) {
 		return emptyCell
 	}
 	decorate := func(amount string) string {
-		if avoided {
-			amount = inexactMarker + amount
-		}
 		if saturated {
 			amount += partialMarker
 		}
 		return amount
 	}
 	usd := float64(micros) / 1e6
-	// A RUNG THAT ROUNDS THE FIGURE TO ZERO IS SKIPPED, not rendered. %.2f turns a sub-cent
-	// charge into "$0.00" and %.0f turns anything under fifty cents into "$0" — and a known
-	// non-zero cost displayed as free is worse than the unknown one emptyCell stands for. This
-	// cell's own rule, fifty lines up, is never $0.00 for a figure that might be unknown; a figure
-	// that is KNOWN and shown as nothing breaks it harder.
+	// A RUNG THAT ROUNDS THE FIGURE TO ZERO IS SKIPPED, not rendered. %.0f turns anything under
+	// fifty cents into "$0" — and a known non-zero cost displayed as free is worse than the
+	// unknown one emptyCell stands for. This cell's own rule, fifty lines up, is never $0.00 for a
+	// figure that might be unknown; a figure that is KNOWN and shown as nothing breaks it harder.
 	//
-	// Measured before the guard: at the narrowest widths these columns survive (a six-column
-	// budget), $0.0012 rendered "$0.00" in COST and "~$0.00" in SAVED.
+	// THE GUARD NOW PROTECTS ONLY THE LOWER RUNGS. It used to be what kept a sub-cent charge off
+	// the cents rung, because that rung was a bare fmt.Sprintf("%.2f") with no floor of its own and
+	// printed "$0.00". formatUSDTotalMicros has the floor built in, so the top rung is honest for
+	// every positive figure and the guard never fires on it.
 	//
 	// Each rung carries the rounded value it would print, so "is this rung honest" is one
 	// comparison rather than a guess about the format string.
@@ -436,10 +469,16 @@ func sessionMoneyCell(micros int64, avoided, saturated bool, budget int) string 
 	}
 	compact := rung{"$" + humanizeCount(int64(usd)), math.Trunc(usd)}
 	for _, r := range []rung{
-		// formatUSDCell has its own floor: anything positive under half a ten-thousandth renders
-		// "<$0.0001" rather than "$0.0000", so this rung never claims zero for a real charge.
-		{formatUSDCell(usd), usd},
-		{"$" + fmt.Sprintf("%.2f", usd), math.Round(usd*100) / 100},
+		// THROUGH MICROS, not usd: formatUSDTotalMicros rounds half-up on the integer, which is
+		// the whole reason it exists — 1_005_000 micros is exactly $1.005, the nearest float64 is
+		// 1.00499999…, and %.2f prints "$1.00". The integer is already in hand here, so there is
+		// no reason to launder it through a float and back.
+		//
+		// rounded is usd, NOT the rounded cents value, for the same reason the four-decimal rung
+		// carried it: this formatter has its own floor — anything positive under half a cent
+		// renders "<$0.01" rather than "$0.00" — so it never claims zero for a real charge and
+		// must not be skipped by the guard below.
+		{formatUSDTotalMicros(micros), usd},
 		{"$" + fmt.Sprintf("%.0f", usd), math.Round(usd)},
 		compact,
 	} {
@@ -451,15 +490,15 @@ func sessionMoneyCell(micros int64, avoided, saturated bool, budget int) string 
 		}
 	}
 	// NOTHING FITS — or nothing that can be shown WITHOUT rounding a real charge to zero — so
-	// nothing is shown. Both are reachable at the narrowest width these columns survive at: the
-	// compact form plus both markers is seven columns against a budget the fitter can squeeze to
-	// six, and a sub-cent charge has no honest form shorter than "<$0.0001".
+	// nothing is shown. The floor is "<$0.01" at six columns, seven with the clamp marker, which
+	// sessionMoneyCellMin is derived from: the columns are dropped whole rather than narrowed past
+	// it, so this is unreachable through sessionsShowMoney and is kept for a caller that passes a
+	// budget of its own.
 	//
-	// The em dash rather than a truncation, and rather than dropping the markers to buy two
-	// columns: a clipped figure is a smaller figure that reads as real, and the markers are the
-	// figure's meaning — "~" says estimated and "+" says floor, so a bare number in their place
-	// is a different claim. If it cannot be said correctly it is not said, which is the rule the
-	// spend strip's ladder follows for the same reason.
+	// The em dash rather than a truncation, and rather than dropping the marker to buy a column:
+	// a clipped figure is a smaller figure that reads as real, and "+" says the figure is a floor,
+	// so a bare number in its place is a different claim. If it cannot be said correctly it is not
+	// said, which is the rule the spend strip's ladder follows for the same reason.
 	return emptyCell
 }
 
@@ -515,15 +554,32 @@ func sessionsColumnWidth(cols []table.Column, title string) int {
 // and TestSessionTokens_FitsEveryFittedWidth, which walks the same boundary.
 const sessionTokensCellMin = 6
 
-// sessionMoneyCellMin is the narrowest money cell that can hold an honest figure for ANY
-// non-zero charge. sessionMoneyCell's last honest rung is formatUSDCell's own floor,
-// "<$0.0001" at eight runes, and SAVED wears the estimate marker on top: "~<$0.0001", nine.
-// Below that every rung either rounds a real charge to zero — which the ladder skips — or does
-// not fit, so the cell can only ever come out as emptyCell.
+// sessionMoneyCellMin is the width below which sessionsShowMoney drops the COST and SAVED
+// columns rather than render them dishonestly.
+//
+// NINE, WHICH IS NO LONGER THE MONEY CELL'S OWN FLOOR, and the gap is deliberate. The cell's
+// floor came down to seven when this column moved to cents: sessionMoneyCell's top rung is
+// formatUSDTotalMicros, whose own floor is "<$0.01" at six runes, plus partialMarker for a
+// clamped total — "<$0.01+", seven. The estimate marker used to make it nine ("~<$0.0001") and
+// it no longer rides the figure at all.
+//
+// SO WHY NOT SEVEN. Because this constant does not only gate the money cell — it is what keeps
+// the fitter away from the rest of the table. fitTableColumns shrinks the widest column first,
+// so SESSION and UPDATED are what pay for two extra money columns, and MEASURED at seven the
+// money columns survive down to terminal width 59, where the fitter has taken UPDATED to six or
+// seven runes and relTime's "just now" needs eight — a clipped cell, which is the one thing this
+// file refuses. Guarding UPDATED instead is worse in the other direction: its widest output is
+// the date form past a day ("Jan 12 15:04", twelve), and holding twelve drops the money columns
+// below width 86, thirteen columns worse than today.
+//
+// Nine is therefore the empirical width at which this WHOLE table still renders honestly, and it
+// is the number the drop is keyed on until UPDATED can degrade its own cell the way this one
+// does. Both figures are here because a later reader will otherwise re-derive seven from the
+// cell and wonder why the constant disagrees.
 //
 // Deliberately NOT ten, the declared width, even though the fitter's shrink order means the
 // columns are at their declared width whenever they survive today. Ten is what the widest
-// value happens to need; nine is what honesty needs, and only the second one stays true if a
+// value happens to need; nine is what the table needs, and only the second one stays true if a
 // column's declared width changes.
 const sessionMoneyCellMin = 9
 
@@ -554,7 +610,7 @@ const sessionMoneyCellMin = 9
 // "$0.00" for a sub-cent figure, read from the other end, and the rule this file states fifty
 // lines above sessionMoneyCell forbids it in both directions.
 //
-// The cost is real and measured: the columns now disappear below 72 columns, where an ordinary
+// The cost is real and measured: the columns now disappear below 73 columns, where an ordinary
 // "$36.58" would still have fitted. Dropping a whole column is this file's stated answer to
 // not being able to render a cell honestly, and a reader who cannot see COST at all goes
 // looking for the width; one who sees "—" against a session that definitely spent money
@@ -564,13 +620,15 @@ func sessionsShowMoney(termWidth int) bool {
 		return true
 	}
 	fitted := fitTableColumns(sessionsColumns(), termWidth)
-	for _, c := range fitted {
-		if headerTitle(c) == "TOKENS" && c.Width < sessionTokensCellMin {
-			return false
-		}
-	}
-	for _, title := range []string{"COST", "SAVED"} {
-		if sessionsColumnWidth(fitted, title) < sessionMoneyCellMin {
+	for _, c := range []struct {
+		title string
+		min   int
+	}{
+		{"TOKENS", sessionTokensCellMin},
+		{"COST", sessionMoneyCellMin},
+		{"SAVED", sessionMoneyCellMin},
+	} {
+		if sessionsColumnWidth(fitted, c.title) < c.min {
 			return false
 		}
 	}
