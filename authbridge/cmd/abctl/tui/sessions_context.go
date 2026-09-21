@@ -60,28 +60,16 @@ import (
 // appends every event under its session id, so any session with traffic since it attached has a
 // conversation here.
 //
-// THE TIMELINE ALMOST COULD NOT ANSWER THIS, and the fix was server-side. abctl asks for
-// `view=summary` on every timeline fetch, tail and page alike (apiclient/snapshot.go), and
-// summarizeEvent drops exactly the two fields this rule reads. Measured on one live session, the
-// same 200-event window both ways, before the counts existed:
+// THE TIMELINE ANSWERS ONLY THROUGH THE COUNTS. abctl asks for `view=summary` on every timeline
+// fetch, tail and page alike, and that projection drops both fields this rule reads — so
+// summarizeEvent records their lengths first and toolCount/messageCount read either shape. Without
+// them a delivered row cannot be read at all: measured on one live session's 200-event window, 41 of
+// 62 inference responses carry a manifest unprojected and 0 of 62 do projected.
 //
-//	unprojected      62 inference responses   41 carry a manifest   up to 1755 msgs, 997k context
-//	view=summary     62 inference responses    0 carry a manifest    no msgs, no manifest
-//
-// So the rule worked on streamed events and read a dash on delivered ones. That was a REGRESSION
-// against the rule it replaced, which keyed on promptTokens alone and survives the projection: on
-// six live sessions the old reading matched the truth exactly after a drill-in — and, simulating
-// every drill-in moment, was off by more than 10% at 37% of them, worst case 6,331 against a true
-// 246,919. A worse answer, but an answer. The projection now records len(Messages) and len(Tools)
-// before dropping them, and toolCount/messageCount read either shape, so a delivered row is
-// correct rather than either blank or a coin flip.
-//
-// A SNAPSHOT STILL MUST NOT ERASE WHAT THE STREAM ESTABLISHED — see rebaseSessionContext, and note
-// that dropping the run on replacement is what blanked the column before the counts landed. Two
-// cases keep that machinery load-bearing even now: a proxy built between the CONTEXT column and the
-// counts projects without stating them, and abctl releases a live session's events for memory
-// (keys.go) without learning anything new about it. The figure deliberately outlives the events it
-// was read from.
+// AND THE FIGURE OUTLIVES THE EVENTS IT WAS READ FROM, deliberately — see rebaseSessionContext. Two
+// cases need that: a proxy built between this column and the counts projects without stating them,
+// and the picker releases a live session's events for memory (keys.go) without learning anything
+// about the session.
 //
 // A whole-slice fold, for callers with no running state to keep — the tests, and any future
 // one-shot reader. The sessions pane goes through sessionContextFor instead.
@@ -92,12 +80,12 @@ func sessionContext(events []pipeline.SessionEvent) int {
 // contextRun is the running answer over the events folded so far: the winning figure and the
 // message count that won it, plus how many events have been folded in.
 //
-// A RUNNING answer rather than a rescan, because the caller's shape demands it. The sessions row
-// loop asks for every session, rebuildSessionsTable runs on every streamed event, and retention
-// is unbounded — so a full scan per call is O(events) per session per event on the DEFAULT pane.
-// Measured on this branch before the fold: 6.1ms and 3.49MB per call at 100k events, against
-// ~14ns and no allocation for the tail scan it replaced. Ten sessions of that size is 60ms and
-// 35MB for one arriving event.
+// A RUNNING answer rather than a rescan, because the caller's shape demands it: the sessions row
+// loop asks for every session, rebuildSessionsTable runs on every streamed event, and retention is
+// unbounded, so a full scan per call is O(events) per session per event on the DEFAULT pane. A
+// rescan measured 6.1ms and 3.49MB per call at 100k events — 60ms and 35MB for ten such sessions on
+// one arriving event. TestSessionContextFor_DoesNotRescanTheFoldedPrefix pins that it does not
+// happen; BenchmarkSessionContextPerEvent says what it costs.
 //
 // A REMEMBERED MAXIMUM, not a cache of a pure function over m.events — and the difference is
 // load-bearing, not a convenience. The events abctl holds for a session can stop carrying the
@@ -122,18 +110,16 @@ type contextRun struct {
 
 // foldSessionContext folds events into run and returns the new running answer.
 //
-// Forward, and ties keep the LATEST — by TIMESTAMP, not by arrival order. A plain `>=` expressed
-// that correctly while folding was the only way events entered the run, since arrival order and
-// time order agreed. Rebasing broke the equivalence: the remembered winner is not in the slice
-// being folded, so "later in this fold" no longer means "later in the session", and an older turn
-// of equal length would take the tie. Comparing At keeps the rule the tests name.
+// Forward, and ties keep the LATEST — by TIMESTAMP, not by arrival order. Arrival order says
+// nothing once a rebase folds new events onto a winner that is no longer in the slice, so an older
+// turn of equal length would take the tie.
+//
+// At and not Seq, though a reviewer asked for Seq: the store's counter restarts at 1 when a session
+// is evicted and re-created under the same id (authlib/session/store.go), so Seq cannot order across
+// that boundary and wall-clock time can. Same reason a paging client sorts pages by At.
 //
 // `!Before` rather than `After`, so two candidates sharing a timestamp still resolve by arrival
-// order the way the pure fold did.
-//
-// Returns only the new run. An earlier version also reported whether anything was folded, "so a
-// caller can tell no-candidates-yet from zero" — a distinction no caller made: all three sites
-// discarded it and sessionContext collapses both cases to 0 regardless.
+// order the way a pure fold did.
 func foldSessionContext(events []pipeline.SessionEvent, run contextRun) contextRun {
 	for i := range events {
 		e := &events[i]
@@ -145,15 +131,18 @@ func foldSessionContext(events []pipeline.SessionEvent, run contextRun) contextR
 		if e.Phase != pipeline.SessionResponse || e.Inference == nil {
 			continue
 		}
-		// The tool manifest is the filter: no tools means a one-shot completion. Read through
-		// toolCount so a PROJECTED event answers too — see manifestCount.
+		// The tool manifest is the filter: no tools means a one-shot completion, read through
+		// toolCount so a projected event answers too.
 		//
-		// The REQUEST side is not checked, and the reason is stronger than the 117 paired
-		// samples that showed no divergence. SnapshotInference is `c := *ext`, a shallow copy,
-		// and Tools is only ever appended while parsing the REQUEST — so both snapshots carry
-		// the same slice header off the same extension and cannot disagree by construction. A
-		// paired check would be dead code, and the map it needed is what made this function
-		// allocate per call.
+		// THE REQUEST SIDE IS NOT CONSULTED, because no copy on the way here can change a
+		// manifest's LENGTH — and enumerating the copies is the argument. There are three:
+		// SnapshotInference is `c := *ext` and shares the array; session.Interner CLONES it
+		// per event before interning the descriptions and schemas in place, precisely because
+		// the response-phase event aliases the same array (authlib/session/intern.go), and a
+		// clone preserves length; summarizeEvent drops it after recording that length as
+		// ToolCount. So a request and its response cannot disagree about whether a manifest
+		// was there, pairing them would be dead code, and the map that needs is what made
+		// this function allocate on every call.
 		if toolCount(e.Inference) == 0 {
 			continue
 		}
@@ -236,23 +225,25 @@ func (m *model) sessionContextFor(id string) int {
 // KEEPS tokens, msgs AND at, and re-folds the whole new slice on top of them. Keeping the figure is
 // what makes the column survive a snapshot from a proxy whose projection states no counts — see
 // sessionContext for what the timeline can and cannot say. Re-folding rather than just re-basing n
-// is what lets the new slice WIN:
-// nothing here assumes the replacement is poorer, so a detail fetch that puts a longer
+// is what lets the new slice WIN: nothing here assumes the replacement is poorer, so a detail fetch that puts a longer
 // conversation back in place beats the remembered one on message count exactly as a streamed turn
 // would.
 //
 // Costs one whole-slice fold per replacement, which is a keystroke rather than an arriving event:
 // 0.51ms at 100k events, no allocation.
 //
-// THERE IS NO forgetSessionContext, and its absence is deliberate. One existed and dropped the
-// entry on every path that did not append — that is what blanked the column after a projected
-// snapshot. The only thing that genuinely voids a figure is a DIFFERENT WORKLOAD: a pod or
-// endpoint switch, where the same session id means someone else's conversation. backToPodsPane
-// handles that by nilling the whole map beside m.events.
+// THERE IS DELIBERATELY NO forgetSessionContext. Dropping the entry is never the right answer to a
+// session's events changing: against a projection that states no counts, this figure is the only
+// source there is. The one thing that voids it is a DIFFERENT WORKLOAD behind the same session id,
+// which backToPodsPane handles by nilling the whole map beside m.events.
 func (m *model) rebaseSessionContext(id string, events []pipeline.SessionEvent) {
+	// The previous run with its COUNTER reset, rather than a field-by-field copy of it. Naming
+	// the fields to carry is how the At tie-break went missing from exactly this literal: a
+	// rebase seeded tokens and msgs, dropped at, and an older turn of equal length then took the
+	// column. Reset-what-changes carries the next field added to contextRun by default.
 	prev := m.contextRun[id]
-	run := foldSessionContext(events,
-		contextRun{tokens: prev.tokens, msgs: prev.msgs, at: prev.at})
+	prev.n = 0
+	run := foldSessionContext(events, prev)
 	if m.contextRun == nil {
 		m.contextRun = map[string]contextRun{}
 	}

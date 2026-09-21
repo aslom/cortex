@@ -270,7 +270,12 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   And after a compaction the gauge can stay on the pre-compaction context for a
   while, because the older, longer request still holds the most messages; a
-  stale figure was preferred to one that flips to a one-shot's.
+  stale figure was preferred to one that flips to a one-shot's. Since the figure
+  outlives the events it was read from, the way to clear one you do not believe
+  is `Esc` back to the Pods pane and re-enter: a different pod is the one thing
+  that discards it, and re-attaching starts the column from whatever streams
+  next. That reset only exists in picker mode — under `--endpoint` there is no
+  Pods pane to back out to, so restarting abctl is the equivalent.
 
   It replaced an `ACTIVE` column whose `●` nobody acted on — `UPDATED` already
   answers "is this live", in seconds rather than as a dot. The `cached` marker

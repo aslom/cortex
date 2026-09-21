@@ -12,6 +12,15 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
 
+// THE TESTS IN THIS FILE ASSERT THE RULE THROUGH sessionContext, WHICH PRODUCTION NEVER CALLS.
+// The gauge goes through sessionContextFor, and the two agree only because
+// TestSessionContextFor_FoldMatchesAFullRescan holds the folded path to this one's answer at every
+// length from 2 to 80 events, and TestSessionContextFor_DoesNotRescanTheFoldedPrefix pins that the
+// fold is genuinely incremental. Without that pair, everything below would be testing a function
+// with no callers. Keep new RULE cases here — one slice in, one figure out, no model — and put
+// anything about caching, replacement or invalidation in sessions_context_fold_test.go or
+// sessions_context_wire_test.go, which drive the real handlers.
+
 // toolsOf builds a manifest of n tools. Only its LENGTH matters to sessionContext: a request that
 // carries any tools is an agentic conversation, one that carries none is a one-shot completion.
 func toolsOf(n int) []pipeline.InferenceTool {

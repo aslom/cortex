@@ -5,6 +5,10 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
+
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
@@ -317,5 +321,89 @@ func TestSessionsTable_AProjectedTimelineStillPicksTheMainThread(t *testing.T) {
 	if got, want := m.sessionContextFor(id), 851_000; got != want {
 		t.Errorf("after the snapshot: %d, want %d — the subagent spoke last and is a candidate; "+
 			"only the message count keeps the column on the main thread", got, want)
+	}
+}
+
+// THE FOLD MUST NOT RESCAN WHAT IT ALREADY FOLDED, which is the whole point of contextRun and was
+// pinned by nothing: either branch could regress to a whole-slice scan and every other test in this
+// package would stay green, because a rescan reaches the same ANSWER — 6.1ms and 3.49MB more slowly,
+// per session, per arriving event, on the pane abctl opens on.
+//
+// So this poisons the prefix: the events already folded are overwritten with a turn that would win a
+// rescan outright. A fold that trusts its prefix cannot see it; anything that re-reads the prefix
+// reports 999,000. Artificial by construction — production only rewrites a held event through
+// replaceHeldEvent, which rebases — and that is what makes it a clean probe of this one property.
+//
+// Both branches need it, and they fail to different mutations. The equal-length HIT is what the row
+// loop takes on every rebuild for every session with no new events; the delta fold is what one
+// arriving event costs.
+func TestSessionContextFor_DoesNotRescanTheFoldedPrefix(t *testing.T) {
+	base := time.Now()
+	const id = "s"
+	poisoned := func(t *testing.T) *model {
+		t.Helper()
+		m := &model{events: map[string][]pipeline.SessionEvent{
+			id: conversation("c1", base, 600, 500_000),
+		}}
+		if got, want := m.sessionContextFor(id), 500_000; got != want {
+			t.Fatalf("the first fold: %d, want %d", got, want)
+		}
+		// Same length, so only a re-read of the prefix can notice.
+		copy(m.events[id], conversation("poison", base.Add(time.Minute), 9_000, 999_000))
+		return m
+	}
+
+	t.Run("a repeat call with nothing appended", func(t *testing.T) {
+		m := poisoned(t)
+		if got, want := m.sessionContextFor(id), 500_000; got != want {
+			t.Errorf("repeat call = %d, want %d — 999000 means the length check stopped "+
+				"short-circuiting, so every row rescans on every rebuild", got, want)
+		}
+	})
+
+	t.Run("a call after one appended turn", func(t *testing.T) {
+		m := poisoned(t)
+		m.events[id] = append(m.events[id],
+			conversation("c2", base.Add(time.Hour), 700, 600_000)...)
+		if got, want := m.sessionContextFor(id), 600_000; got != want {
+			t.Errorf("after one turn = %d, want %d — 999000 means the delta fold became a "+
+				"whole-slice fold", got, want)
+		}
+	})
+}
+
+// THE PICKER'S RELEASE IS THE ONE m.events WRITER WITH NO TEST, and the one whose correct action is
+// to do NOTHING to contextRun. A `delete(m.contextRun, cached)` there — the obvious lockstep, and
+// what its neighbours do for the two maps beside it — turns a live session's gauge into a dash for
+// having been economical with memory. Driven through handleKey, since the comment forbidding that
+// deletion is only worth as much as the test behind it.
+func TestSessionContextFor_ThePickerReleaseKeepsTheFigure(t *testing.T) {
+	base := time.Now()
+	m := fitModel(t, paneEvents, 200, 40, conversation("c1", base, 600, 500_000))
+	m.events["other"] = conversation("c2", base, 900, 700_000)
+	if got, want := m.sessionContextFor("other"), 700_000; got != want {
+		t.Fatalf("before the release: %d, want %d", got, want)
+	}
+
+	// Selecting one session prunes the OTHER cached-but-live entries, which is the path under
+	// test; both must still be listed by the server for the prune to consider them live.
+	m.sessions = []session.SessionSummary{{ID: "sess-1"}, {ID: "other"}}
+	m.rebuildSessionsTable()
+	setCursorVisible(&m.sessionsTbl, 0)
+	m.pane = paneSessions
+	m.selectedSess = ""
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+
+	released := false
+	for _, id := range []string{"sess-1", "other"} {
+		if _, held := m.events[id]; !held {
+			released = true
+			if got := m.sessionContextFor(id); got == 0 {
+				t.Errorf("%q had its events released and its gauge went to a dash", id)
+			}
+		}
+	}
+	if !released {
+		t.Fatal("the picker released nothing, so this test is not exercising the prune")
 	}
 }

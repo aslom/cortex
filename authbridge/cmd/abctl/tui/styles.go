@@ -44,44 +44,14 @@ var (
 	styleMuted  = lipgloss.NewStyle().Foreground(colorMuted)
 	styleBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorMuted)
 
-	// Per-protocol foreground colors so an eye can parse the events pane at
-	// a glance: a2a = blue (user-facing inbound), mcp = magenta (tool
-	// invocations), inference = amber (LLM reasoning). Adaptive pairs so
-	// both light and dark terminals get legible contrast.
-	styleProtoA2A = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#2563EB", Dark: "#60A5FA"}).
-			Bold(true)
-	styleProtoMCP = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#9333EA", Dark: "#C084FC"}).
-			Bold(true)
-	styleProtoInference = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#D97706", Dark: "#FBBF24"}).
-				Bold(true)
-	// Reserved for future guardrail/authorization plugins: blocked vs
-	// allowed should get its own distinct coloring so an operator can
-	// immediately see "this turn got redacted" or "this call was denied".
-	styleProtoBlocked = lipgloss.NewStyle().
-				Foreground(colorError).
-				Bold(true)
+	// PER-PROTOCOL CELL COLOURING USED TO LIVE HERE — styleProtoA2A / MCP / Inference / Blocked
+	// and a protoStyle() dispatcher — and is deleted rather than kept for later. It had no
+	// callers anywhere outside this file (events_pane.go records the change that removed the
+	// last one), and while it sat here unused it was cited as the reason the selected row had
+	// to be reverse video, which is the bug below. A palette nothing renders cannot justify a
+	// constraint on what everything renders; restore it from git with its caller if the events
+	// pane wants colour again.
 )
-
-// protoStyle returns the lipgloss style for a short-proto string. Unknown
-// values (including the placeholder "—" for empty-method MCP false
-// positives) get the muted style so they visually recede.
-func protoStyle(proto string) lipgloss.Style {
-	switch proto {
-	case "a2a":
-		return styleProtoA2A
-	case "mcp":
-		return styleProtoMCP
-	case "inf":
-		return styleProtoInference
-	case "blocked":
-		return styleProtoBlocked
-	default:
-		return styleMuted
-	}
-}
 
 // tableStyles returns the standard abctl table palette — layered on top of
 // bubbles' DefaultStyles so cell padding, borders, and other layout rules
@@ -95,9 +65,10 @@ func protoStyle(proto string) lipgloss.Style {
 // side. Any density-encoded figure has the same problem; only position and pattern survive an
 // inversion.
 //
-// The previous comment here said Reverse was deliberate, to keep per-cell protocol colouring
-// from being clobbered by the row style. That colouring does not exist: protoStyle and the
-// styleProto* palette have no callers outside styles.go, so nothing was being protected.
+// The previous comment here said Reverse was deliberate, to keep per-cell protocol colouring from
+// being clobbered by the row style. That colouring did not exist — the palette it named had no
+// callers — so nothing was being protected, and the palette is now deleted rather than left to make
+// the same claim again.
 //
 // Colouring the GAUGE instead was the first thing tried and is not possible in this table: a
 // styled cell carries escape bytes, runewidth.StringWidth counts them (an 11-column gauge

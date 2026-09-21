@@ -225,7 +225,11 @@ func TestSummarizeEvent_IsOrdersOfMagnitudeSmaller(t *testing.T) {
 	}
 	ratio := float64(len(fb)) / float64(len(sb))
 	t.Logf("full=%d summary=%d ratio=%.1fx", len(fb), len(sb), ratio)
-	if ratio < 10 {
+	// 40x against 52.4x on this fixture (163x on a live proxy's real events, whose conversations
+	// are far longer than 24 messages). The floor was 10, which would have passed a 5x
+	// regression — and this projection just grew two fields, so the margin is where a floor
+	// earns its keep. Deterministic: one fixture, one encoder, no sampling.
+	if ratio < 40 {
 		t.Errorf("summary is only %.1fx smaller (full=%d summary=%d); the payloads are the point",
 			ratio, len(fb), len(sb))
 	}
@@ -346,8 +350,13 @@ func TestSummarizeEvent_CountsTheConversationItDrops(t *testing.T) {
 		}
 	})
 
-	// A one-shot completion: messages but no manifest. The distinction the gauge turns on, so a
-	// stated zero has to stay zero rather than becoming absent-and-therefore-unknown.
+	// A one-shot completion: messages but no manifest — the distinction the gauge turns on.
+	//
+	// IN PROCESS the zero is stated; ON THE WIRE it is indistinguishable from an old proxy that
+	// said nothing, because omitempty drops it (the subtest below asserts that, deliberately).
+	// That costs nothing here and the reason is worth knowing: a reader treats "not stated" as
+	// "no manifest I can see" and skips the event either way. Only a NON-ZERO count changes an
+	// answer, so only a non-zero count has to survive the encoder.
 	t.Run("a one-shot with no manifest", func(t *testing.T) {
 		full := fullEvent()
 		full.Inference.Messages = bigConversation(3, 8)
