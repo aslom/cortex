@@ -349,27 +349,21 @@ func renderCostSummary(snap *usage.Snapshot) string {
 		// only one of them means the traffic was free.
 		return "COST unavailable"
 	}
-	// Integer cent rounding, not %.2f on float64(micros)/1e6: 1_005_000 micros
-	// is exactly $1.005 but the float is 1.0049999… so %.2f prints $1.00.
-	// A positive-but-sub-cent total falls back to "<$0.01" so small does not
-	// read as free — same floor rule formatUSDCell applies at $0.0001.
+	// The cent arithmetic and the sub-cent floor moved to formatUSDTotalMicros, with the rule
+	// that says which surfaces get cents at all. They were stated here and nowhere else, which
+	// is how this panel came to round to cents while the band above it showed the same money to
+	// four decimals.
 	micros := snap.Totals.CostMicros
 	var cell string
-	switch {
-	case negativeCost(micros):
-		// Go's / and % truncate toward zero, so a negative would render
-		// "$0.-1" through the integer-cents branch below. Through the shared
-		// predicate so this surface and the spend strip cannot disagree about
-		// what an impossible figure is.
+	if negativeCost(micros) {
+		// Go's / and % truncate toward zero, so a negative would render "$0.-1" through the
+		// integer-cent arithmetic. Through the shared predicate so this surface and the spend
+		// strip cannot disagree about what an impossible figure is.
 		cell = "COST unavailable"
-	case micros > 0 && micros < 5_000:
-		cell = "COST <$0.01"
-	default:
-		cents := micros / 10_000
-		if micros%10_000 >= 5_000 {
-			cents++
-		}
-		cell = fmt.Sprintf("COST $%d.%02d", cents/100, cents%100)
+	} else {
+		// Micros, not the float: the integer is already in hand, and the float64 entry point
+		// exists for callers that only have dollars.
+		cell = "COST " + formatUSDTotalMicros(micros)
 	}
 	// Compared against PRICEABLE requests, not all of them. Requests counts every
 	// proxied response — MCP tool calls, health checks, anything else the sidecar

@@ -28,9 +28,9 @@ func TestRenderSpendBand_AlignsValuesUnderTheirLabels(t *testing.T) {
 	}
 	labels, values := lines[0], lines[1]
 	for _, pair := range []struct{ label, value string }{
-		{"TODAY", "$3.8402"},
-		{"LAST 1H", "$4.5462"},
-		{"SAVED", inexactMarker + "$0.2091"},
+		{"TODAY", "$3.84"},
+		{"LAST 1H", "$4.55"},
+		{"SAVED", inexactMarker + "$0.21"},
 		{"CACHE HIT", "93%"},
 	} {
 		li, vi := strings.Index(labels, pair.label), strings.Index(values, pair.value)
@@ -52,11 +52,11 @@ func TestRenderSpendBand_AlignsValuesUnderTheirLabels(t *testing.T) {
 // The saving keeps its marker and never joins the spend figures.
 func TestRenderSpendBand_SavingStaysMarkedAndSeparate(t *testing.T) {
 	joined := strings.Join(renderSpendBand(bandSummary(), 78), "\n")
-	if !strings.Contains(joined, inexactMarker+"$0.2091") {
+	if !strings.Contains(joined, inexactMarker+"$0.21") {
 		t.Errorf("the saving lost its %q marker:\n%s", inexactMarker, joined)
 	}
 	// 3.8402 + 0.2091 — the sum usage.Counts.AvoidedMicros forbids in either direction.
-	if strings.Contains(joined, "$4.0493") {
+	if strings.Contains(joined, "$4.05") {
 		t.Errorf("the saving was added to today's spend:\n%s", joined)
 	}
 }
@@ -74,7 +74,7 @@ func TestRenderSpendBand_CarriesTheFigureMarkers(t *testing.T) {
 	s.Clamped = true                 // ! damaged, on the window figure
 	joined := strings.Join(renderSpendBand(s, 100), "\n")
 
-	if !strings.Contains(joined, inexactMarker+"$3.8402") {
+	if !strings.Contains(joined, inexactMarker+"$3.84") {
 		t.Errorf("today's figure lost its inexact marker:\n%s", joined)
 	}
 	if !strings.Contains(joined, damagedMarker) {
@@ -97,8 +97,15 @@ func TestRenderSpendBand_HeightIsConstantAndFiguresDropWhole(t *testing.T) {
 				t.Errorf("width %d: line %d is %d runes: %q", w, i, n, line)
 			}
 		}
-		// A figure that survives is never half a figure.
-		if strings.Contains(lines[1], "$3.84") && !strings.Contains(lines[1], "$3.8402") {
+		// A figure that survives is never half a figure: the band drops whole cells rather
+		// than clipping, so a line mentioning today's figure at all carries all of it.
+		//
+		// Keyed on "$3", not on the whole figure, and that is what makes it an assertion: a
+		// clip produces "$3." or "$3.8", both of which contain "$3" and neither of which
+		// contains "$3.84". Written against the figure itself — which is what substituting
+		// the cents form into the old expectation produced — it compares a string to itself
+		// and cannot fail.
+		if strings.Contains(lines[1], "$3") && !strings.Contains(lines[1], "$3.84") {
 			t.Errorf("width %d: today's figure was clipped: %q", w, lines[1])
 		}
 	}
@@ -143,10 +150,10 @@ func TestRenderSpendBand_SavedIsTheDaysFigureNotTheWindows(t *testing.T) {
 	s.TodaySavedUSD, s.HasTodaySaved = 2.1891, true // the day's
 	joined := strings.Join(renderSpendBand(s, 120), "\n")
 
-	if !strings.Contains(joined, inexactMarker+"$2.1891") {
+	if !strings.Contains(joined, inexactMarker+"$2.19") {
 		t.Errorf("SAVED is not the day's figure:\n%s", joined)
 	}
-	if strings.Contains(joined, inexactMarker+"$1.0291") {
+	if strings.Contains(joined, inexactMarker+"$1.03") {
 		t.Errorf("SAVED shows the window's figure beside TODAY, understating the day:\n%s", joined)
 	}
 }
@@ -163,7 +170,7 @@ func TestRenderSpendBand_TheWindowSavingFallbackNamesItsSpan(t *testing.T) {
 	lines := renderSpendBand(s, 120)
 	joined := strings.Join(lines, "\n")
 
-	if !strings.Contains(joined, inexactMarker+"$1.0291") {
+	if !strings.Contains(joined, inexactMarker+"$1.03") {
 		t.Errorf("the window saving is missing entirely:\n%s", joined)
 	}
 	if !strings.Contains(lines[0], "SAVED 1H") {

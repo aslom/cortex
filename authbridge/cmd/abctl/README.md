@@ -243,9 +243,9 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   ```
   abctl · http://localhost:9094 · [Sessions] Pipeline · lifetime totals
-  TODAY      LAST 1H   SAVED      CACHE HIT  TOKENS
-  $30.9350   $2.9100   ~$0.1804   81%        9.9M
-
+  TODAY   SAVED   LAST 1H  TOKENS 1H  CACHE HIT 1H
+  $30.94  ~$0.18  $2.91    9.9M       81%
+  ───────────────────────────────────────────────────────────────────────────
    SESSION         UPDATED    EVENTS   TOKENS      COST      SAVED  ACTIVE
    ctx-abc-1234…   3s ago         42     48.2k   $0.1214   ~$0.0038  ●
    ctx-def-5678…   18m ago        15      1.2k   $0.0031          —
@@ -255,8 +255,24 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   cost/saved: lifetime   [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
   ```
 
-  Labels sit above their values rather than beside them: `$30.9350 today`
-  reads as a list, `TODAY` over `$30.9350` reads as a figure.
+  Labels sit above their values rather than beside them: `$30.94 today`
+  reads as a list, `TODAY` over `$30.94` reads as a figure.
+
+  The cells are grouped by the span they cover — the day's figures, then the
+  rolling window's — and every window cell names its window, because `TOKENS`
+  covering an hour beside a `TODAY` covering a day is the one thing this line
+  cannot afford to leave to inference. A rule closes the block off from the
+  table below it.
+
+  **How precise a money figure is depends on what it measures.** A figure that
+  answers "how much has this cost over a span" reads in cents: `TODAY`,
+  `LAST 1H`, `SAVED`, and the Usage pane's `COST`. A figure attributable to one
+  thing keeps four decimals, because those are routinely sub-cent — a single
+  cache-read request is $0.000038, and cents would render every one of them as
+  nothing. That covers the sessions table's `COST` and `SAVED`, the events
+  table's `COST`, and both columns of the `$` drawer. Neither form ever prints a
+  positive figure as `$0.00`: cents falls back to `<$0.01` and four decimals to
+  `<$0.0001`.
 
   `$` expands the band into two columns — where the money went, by rate tier,
   and who spent it, by model, endpoint or agent:

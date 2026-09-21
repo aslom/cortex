@@ -82,16 +82,20 @@ func TestRenderSpendBand_NoWindowLabelLeavesNoTrailingSpace(t *testing.T) {
 	// The whole label line, because the defect is a WIDTH and only the exact string pins one.
 	// Each cell is max(label, value) + the gutter, and with no suffix that is:
 	//
-	//   TODAY     5 against "$3.8402"  -> 7+2
-	//   LAST      4 against "$4.5462"  -> 7+2   (the value absorbed the old trailing space)
-	//   SAVED     5 against "~$0.2091" -> 8+2   (likewise; this fixture's SAVED is the fallback)
-	//   TOKENS    6 against "5.6M"     -> 6+2   (the label decides, so a space cost a column)
-	//   CACHE HIT 9 against "93%"      -> 9     (last cell, no gutter)
-	const wantLabels = "TODAY    LAST     SAVED     TOKENS  CACHE HIT"
+	//   TODAY     5 against "$3.84"  -> 5+2
+	//   LAST      4 against "$4.55"  -> 5+2   (the value still decides, by one column)
+	//   SAVED     5 against "~$0.21" -> 6+2   (this fixture's SAVED is the window fallback)
+	//   TOKENS    6 against "5.6M"   -> 6+2   (the label decides, so a space cost a column)
+	//   CACHE HIT 9 against "93%"    -> 9     (last cell, no gutter)
+	//
+	// Every cell narrowed when the span totals moved to cents — see the precision rule beside
+	// formatUSDTotal — so these are not the widths a reader of the previous expectation would
+	// recognise, and the trailing-space defect they pin is unchanged underneath.
+	const wantLabels = "TODAY  LAST   SAVED   TOKENS  CACHE HIT"
 	if lines[0] != wantLabels {
 		t.Errorf("label line\n  got  %q\n  want %q", lines[0], wantLabels)
 	}
-	if lines[1] != "$3.8402  $4.5462  ~$0.2091  5.6M    93%" {
+	if lines[1] != "$3.84  $4.55  ~$0.21  5.6M    93%" {
 		t.Errorf("values moved with the labels: %q", lines[1])
 	}
 }

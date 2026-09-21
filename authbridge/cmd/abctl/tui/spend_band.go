@@ -80,7 +80,7 @@ func renderSpendBand(s spendSummary, width int) []string {
 	}
 	var cells []bandCell
 	if s.HasToday {
-		cells = append(cells, bandCell{"TODAY", moneyAmount(s.TodayUSD,
+		cells = append(cells, bandCell{"TODAY", moneyTotal(s.TodayUSD,
 			s.TodayUnpriced, s.TodayPriceable, s.TodayIncomplete, s.TodayDegraded, s.TodayClamped)})
 	}
 	// THE SAVING MUST MATCH THE SPAN OF THE FIGURE IT SITS BESIDE, which is the whole point of
@@ -96,20 +96,20 @@ func renderSpendBand(s spendSummary, width int) []string {
 	// The marker is part of the value, and the value never joins the spend figures:
 	// usage.Counts.AvoidedMicros forbids any consumer adding it, in either direction.
 	if s.HasTodaySaved {
-		cells = append(cells, bandCell{"SAVED", inexactMarker + formatUSDCell(s.TodaySavedUSD)})
+		cells = append(cells, bandCell{"SAVED", inexactMarker + formatUSDTotal(s.TodaySavedUSD)})
 	}
 	// Gated on Priced, matching the strip: the window figure exists when the snapshot could
 	// price something, and there is no separate HasWindow to consult.
 	if s.Priced {
 		cells = append(cells, bandCell{
 			"LAST" + suffix,
-			moneyAmount(s.WindowUSD, s.Unpriced, s.Priceable, s.Incomplete, nil, s.Clamped),
+			moneyTotal(s.WindowUSD, s.Unpriced, s.Priceable, s.Incomplete, nil, s.Clamped),
 		})
 	}
 	if !s.HasTodaySaved && s.HasSaved {
 		cells = append(cells, bandCell{
 			"SAVED" + suffix,
-			inexactMarker + formatUSDCell(s.SavedUSD),
+			inexactMarker + formatUSDTotal(s.SavedUSD),
 		})
 	}
 	// TOKENS before CACHE HIT, so the two widest window cells are not adjacent at the end where
