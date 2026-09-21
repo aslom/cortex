@@ -338,18 +338,6 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   cadence (20s for the ring-served hour, a minute for today, five minutes for the
   two that walk many day files), so the age is per cell rather than per band.
 
-  **How precise a figure is depends on whether you scan it.** Anything read down a
-  column or compared against its neighbours is shown **to the cent**, and a charge
-  below half a cent reads `<$0.01` rather than `$0.00`, because a known charge
-  displayed as free is a claim about the traffic.
-
-  The events table is the exception, and deliberately: its unit is **one request**,
-  not a period total. A single cache-read request costs about $0.000038, so cents
-  would render every one of them `<$0.01` — the whole column identically — and four
-  decimals is the only precision at which one request says anything. Everywhere else
-  the figures are cent-scale or larger, where two extra digits are noise on a surface
-  whose job is comparing rows.
-
   The `~` on `SAVED` sits in the **heading**, not on every value. A saving is
   estimated in every row, so a per-row marker distinguished nothing while
   diluting the same glyph where it *is* conditional — on a cost figure whose
@@ -357,10 +345,11 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   missing from the sum) stay on the values, because those are per-row claims.
 
   **How precise a money figure is depends on whether you scan it.** Anything read
-  down a column or compared against its neighbours reads in **cents**: `TODAY`,
-  `LAST 1H`, `SAVED`, the Usage pane's `COST`, the sessions table's `COST` and
-  `SAVED`, and both columns of the `$` drawer. Two digits of extra precision are
-  noise on a surface whose job is comparing rows to each other.
+  down a column or compared against its neighbours reads in **cents**: all four
+  band cells (`LAST 1H`, `TODAY`, `7 DAYS`, `MONTH`), the sessions table's `COST`
+  and `SAVED`, the Usage pane's `COST`, and both columns of the `$` drawer. Two
+  digits of extra precision are noise on a surface whose job is comparing rows to
+  each other.
 
   **One request** is the exception, and keeps four decimals: the events table's
   `COST`. A single cache-read request is $0.000038, so cents there would render
