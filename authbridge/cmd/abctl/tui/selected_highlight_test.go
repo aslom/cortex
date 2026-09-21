@@ -25,9 +25,17 @@ func TestTableStyles_SelectionDoesNotInvertTheRow(t *testing.T) {
 	if sel.GetReverse() {
 		t.Error("the selected row is reverse-video again; the context gauge reads backwards on it")
 	}
-	// Something must still mark the row, or selection is invisible.
-	if !sel.GetBold() && sel.GetBackground() == lipgloss.NoColor(struct{}{}) {
-		t.Error("the selected row carries neither bold nor a background; nothing marks it")
+	// Both markers, asserted separately rather than as "at least one of them".
+	//
+	// They are not interchangeable: the tint is what replaces reverse video on a colour
+	// terminal, and bold is the fallback that survives a profile with no colour at all (the
+	// cost this change accepted). An either-or assertion would keep passing if Background were
+	// dropped, leaving the decision this PR argued for pinned by nothing.
+	if sel.GetBackground() == lipgloss.NoColor(struct{}{}) {
+		t.Error("the selected row has no background; on a colour terminal nothing marks it")
+	}
+	if !sel.GetBold() {
+		t.Error("the selected row is not bold; with no colour profile nothing marks it")
 	}
 }
 

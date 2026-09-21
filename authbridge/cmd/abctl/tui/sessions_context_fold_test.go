@@ -65,26 +65,53 @@ func TestSessionContextFor_RepeatCallIsAHit(t *testing.T) {
 	}
 }
 
-// A WHOLESALE REPLACEMENT OF THE SAME LENGTH must not return the old figure. The length check
-// alone cannot see it, which is why both replacement paths drop the entry — and why this test
-// goes through the message handler rather than calling the helper.
-func TestSessionContextFor_SnapshotReplacementDropsTheRun(t *testing.T) {
+// A WHOLESALE REPLACEMENT OF THE SAME LENGTH is invisible to the length check, so the run is
+// REBASED — the figure kept, the new slice folded on top of it. Driven through the message handler
+// rather than the helper, because the handler is what has to call it.
+//
+// An earlier version of this test asserted the opposite: that the replacement dropped the run and
+// the new events alone answered. That is what blanked the column for every session an operator
+// opened, since a snapshot is projected and carries no candidate — see
+// TestSessionContextFor_AProjectedSnapshotKeepsTheStreamsFigure. Rebasing is the fix, and these
+// two cases are its two halves.
+func TestSessionContextFor_AReplacementRebasesRatherThanDropping(t *testing.T) {
 	base := time.Now()
 	const id = "s"
-	m := &model{events: map[string][]pipeline.SessionEvent{}}
-	m.sessionsTbl = newSessionsTable()
-	m.events[id] = conversation("c1", base, 600, 500_000)
-
-	if got, want := m.sessionContextFor(id), 500_000; got != want {
-		t.Fatalf("before the snapshot: %d, want %d", got, want)
+	newModel := func() *model {
+		m := &model{events: map[string][]pipeline.SessionEvent{
+			id: conversation("c1", base, 600, 500_000),
+		}}
+		m.sessionsTbl = newSessionsTable()
+		if got, want := m.sessionContextFor(id), 500_000; got != want {
+			t.Fatalf("before the snapshot: %d, want %d", got, want)
+		}
+		return m
 	}
 
-	// Same event count, different content — a refetch of the same window after a compaction.
-	m.Update(snapshotLoadedMsg{id: id, events: conversation("c2", base.Add(time.Hour), 40, 62_000)})
+	// A LONGER conversation in the replacement WINS, which is what "re-fold" buys over merely
+	// re-basing the count: nothing here assumes a replacement is the poorer record.
+	t.Run("a longer conversation in the replacement wins", func(t *testing.T) {
+		m := newModel()
+		m.Update(snapshotLoadedMsg{id: id,
+			events: conversation("c2", base.Add(time.Hour), 900, 700_000)})
+		if got, want := m.sessionContextFor(id), 700_000; got != want {
+			t.Errorf("after the snapshot: %d, want %d", got, want)
+		}
+	})
 
-	if got, want := m.sessionContextFor(id), 62_000; got != want {
-		t.Errorf("after the snapshot: %d, want %d — the run survived a replacement", got, want)
-	}
+	// A SHORTER one does not, and this is the knowingly-stale case. If the server has evicted
+	// the pre-compaction request, a refetch carries only the short post-compaction conversation
+	// and the gauge keeps the old figure — the same trade-off sessionContext documents for the
+	// live case, reached by a different route. A dash or a one-shot's figure is worse; the exact
+	// fix is a conversation id from the proxy.
+	t.Run("a shorter one keeps the remembered figure", func(t *testing.T) {
+		m := newModel()
+		m.Update(snapshotLoadedMsg{id: id,
+			events: conversation("c2", base.Add(time.Hour), 40, 62_000)})
+		if got, want := m.sessionContextFor(id), 500_000; got != want {
+			t.Errorf("after the snapshot: %d, want %d", got, want)
+		}
+	})
 }
 
 // Ties keep the LATEST turn, and the fold walks forward where the rescan it replaced walked back,

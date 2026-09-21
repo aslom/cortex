@@ -128,6 +128,15 @@ func (m *model) replaceHeldEvent(sessionID string, full *pipeline.SessionEvent) 
 	for i := range held {
 		if held[i].Seq == full.Seq {
 			held[i] = *full
+			// AND THE GAUGE IS RE-FOLDED, because this write changes the slice's CONTENT at
+			// the same length and sessionContextFor's length check cannot see that.
+			//
+			// Not a hypothetical staleness: this is the one path that puts a manifest and a
+			// message count back into a projected timeline, so it is the only thing that can
+			// give the CONTEXT(1M) column an answer for a session abctl never streamed. Held
+			// behind a cache hit, the operator would open the very event that established the
+			// figure and watch the column go on showing a dash.
+			m.rebaseSessionContext(sessionID, held)
 			return
 		}
 	}

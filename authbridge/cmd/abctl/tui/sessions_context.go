@@ -57,8 +57,27 @@ import (
 // WHY THIS COMES FROM abctl'S OWN CACHE and not from the session summary: the summary carries no
 // per-request field, so there is nothing to read. abctl subscribes to /v1/events unfiltered and
 // appends every event under its session id, so any session with traffic since it attached has a
-// conversation here. One idle since before that shows the dash until an operator drills in and
-// the snapshot fills the cache.
+// conversation here.
+//
+// AND ONLY THE STREAM CAN ESTABLISH IT — the timeline cannot, which is not what an earlier version
+// of this comment claimed. abctl asks for `view=summary` on every timeline fetch, tail and page
+// alike (apiclient/snapshot.go), and sessionapi.summarizeEvent drops exactly the two fields this
+// rule reads: Inference.Messages and Inference.Tools. Measured on one live session, the same
+// 200-event window both ways:
+//
+//	unprojected      62 inference responses   41 carry a manifest   up to 1755 msgs, 997k context
+//	view=summary     62 inference responses    0 carry a manifest    no msgs, no manifest
+//
+// The stream is unprojected (handleStream marshals the whole event), so live traffic answers this
+// question and a timeline fetch never can. A session idle since before abctl attached therefore
+// shows the dash until either a turn arrives on the stream or the operator opens one of its
+// events — the detail pane's fetch is the only path that puts a full event back into the slice.
+//
+// WHICH IS WHY A SNAPSHOT MUST NOT ERASE WHAT THE STREAM ESTABLISHED. Dropping the running answer
+// on a wholesale replacement — the obvious invalidation, and what this did first — blanked the
+// column to a dash the moment an operator opened a session, because the projected events that
+// replaced the streamed ones carry no candidate at all. contextRun rebases instead: see
+// rebaseSessionContext. The figure deliberately outlives the events it was read from.
 // A whole-slice fold, for callers with no running state to keep — the tests, and any future
 // one-shot reader. The sessions pane goes through sessionContextFor instead.
 func sessionContext(events []pipeline.SessionEvent) int {
@@ -74,6 +93,14 @@ func sessionContext(events []pipeline.SessionEvent) int {
 // Measured on this branch before the fold: 6.1ms and 3.49MB per call at 100k events, against
 // ~14ns and no allocation for the tail scan it replaced. Ten sessions of that size is 60ms and
 // 35MB for one arriving event.
+//
+// A REMEMBERED MAXIMUM, not a cache of a pure function over m.events — and the difference is
+// load-bearing, not a convenience. The events abctl holds for a session can stop carrying the
+// evidence the figure was read from: a `view=summary` timeline fetch replaces streamed events with
+// projected copies that carry no manifest and no message count. A cache would be invalidated by
+// that and come back empty; a remembered maximum survives it. What it costs is stated with the
+// compaction trade-off above — a figure this holds is the largest conversation abctl has SEEN for
+// the session, which after a server-side eviction may be larger than anything it still holds.
 type contextRun struct {
 	n      int // events folded so far
 	tokens int
@@ -127,9 +154,9 @@ func foldSessionContext(events []pipeline.SessionEvent, run contextRun) contextR
 // sessionContextFor is the gauge's figure for one session, folded rather than rescanned.
 //
 // Appending is the only growth path that preserves the prefix, so a longer slice folds just its
-// tail. Both wholesale replacements — the snapshot load in app.go and the older-page merge in
-// paging.go — drop the entry, so a replacement of the SAME length cannot return a stale figure
-// through the length check below.
+// tail. Every path that does something else to m.events owes this function an action — see the
+// inventory on model.events — because a replacement of the SAME length is invisible to the length
+// check below.
 func (m *model) sessionContextFor(id string) int {
 	events := m.events[id]
 	run, ok := m.contextRun[id]
@@ -138,20 +165,51 @@ func (m *model) sessionContextFor(id string) int {
 		return run.tokens
 	case ok && run.n < len(events):
 		run = foldSessionContext(events[run.n:], run)
+		m.contextRun[id] = run
 	default:
-		run = foldSessionContext(events, contextRun{})
+		// FEWER EVENTS THAN THE RUN FOLDED, or no run at all: the prefix cannot be trusted,
+		// so the slice is re-folded — but from the figure already established, not from zero.
+		// The picker's release drops a live session's events to reclaim memory
+		// (keys.go), which is a decision about storage and not new information about the
+		// session, so zeroing here would turn the gauge into a dash for a session still
+		// sending traffic.
+		m.rebaseSessionContext(id, events)
+		return m.contextRun[id].tokens
 	}
+	return run.tokens
+}
+
+// rebaseSessionContext re-folds a session whose events were REPLACED rather than appended to,
+// keeping the figure it had already established.
+//
+// Called wherever the length check cannot interpret what happened: the snapshot load (a projected
+// copy of the same window, often the same length), the older-page merge (older events land before
+// the folded ones, and the page cap can drop newer ones off the end), the detail pane's write-back
+// (one event swapped in place for its full self, length unchanged), and sessionContextFor's own
+// fallback for a slice shorter than the run.
+//
+// KEEPS tokens AND msgs, and re-folds the whole new slice on top of them. Keeping the figure is
+// what makes the column survive a `view=summary` snapshot — see sessionContext on why the timeline
+// cannot answer this. Re-folding rather than just re-basing n is what lets the new slice WIN:
+// nothing here assumes the replacement is poorer, so a detail fetch that puts a longer
+// conversation back in place beats the remembered one on message count exactly as a streamed turn
+// would.
+//
+// Costs one whole-slice fold per replacement, which is a keystroke rather than an arriving event:
+// 0.51ms at 100k events, no allocation.
+//
+// THERE IS NO forgetSessionContext, and its absence is deliberate. One existed and dropped the
+// entry on every path that did not append — that is what blanked the column after a projected
+// snapshot. The only thing that genuinely voids a figure is a DIFFERENT WORKLOAD: a pod or
+// endpoint switch, where the same session id means someone else's conversation. backToPodsPane
+// handles that by nilling the whole map beside m.events.
+func (m *model) rebaseSessionContext(id string, events []pipeline.SessionEvent) {
+	prev := m.contextRun[id]
+	run := foldSessionContext(events, contextRun{tokens: prev.tokens, msgs: prev.msgs})
 	if m.contextRun == nil {
 		m.contextRun = map[string]contextRun{}
 	}
 	m.contextRun[id] = run
-	return run.tokens
-}
-
-// forgetSessionContext drops a session's running answer, for the paths that replace its events
-// rather than appending to them.
-func (m *model) forgetSessionContext(id string) {
-	delete(m.contextRun, id)
 }
 
 // contextGauge draws prompt tokens against contextWindowTokens, in exactly width columns.

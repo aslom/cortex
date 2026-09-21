@@ -253,12 +253,20 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   Three things worth knowing. The denominator is fixed at 1M, the largest
   window on any path the proxy sees, so a model with a smaller window reads
-  lower than it really is. The figure comes from abctl's own event cache, so a
-  session idle since before abctl attached shows the dash until you drill into
-  it — the session summary carries no per-request field. And after a compaction
-  the gauge can stay on the pre-compaction context for a while, because the
-  older, longer request still holds the most messages; a stale figure was
-  preferred to one that flips to a one-shot's.
+  lower than it really is.
+
+  The figure comes from the **live stream** and nowhere else. abctl asks for
+  `view=summary` on every timeline fetch, and that projection drops the two
+  fields this rule reads — the tool manifest and the message count — so
+  drilling into a session cannot fill the gauge in, only watching traffic can.
+  A session idle since before abctl attached therefore shows the dash until
+  either a new turn arrives or you open one of its events, which is the one
+  request that returns an event in full. Once a figure is established it is
+  kept: a projected snapshot replacing those events does not erase it.
+
+  And after a compaction the gauge can stay on the pre-compaction context for a
+  while, because the older, longer request still holds the most messages; a
+  stale figure was preferred to one that flips to a one-shot's.
 
   It replaced an `ACTIVE` column whose `●` nobody acted on — `UPDATED` already
   answers "is this live", in seconds rather than as a dot. The `cached` marker
