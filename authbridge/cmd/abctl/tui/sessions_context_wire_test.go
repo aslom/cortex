@@ -8,11 +8,11 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
-// projected models what the TIMELINE delivers: sessionapi.summarizeEvent's inference half.
+// projected models what the TIMELINE delivers: sessionapi.summarizeEvent's inference half — the
+// slices nilled and their LENGTHS recorded in MessageCount / ToolCount first.
 //
 // MIRRORED RATHER THAN CALLED — summarizeEvent is unexported and in another module, and authlib's
-// own tests pin what it strips (Messages, Tools, ToolCalls; Completion is kept because the events
-// filter searches it).
+// own tests pin both halves of it (TestSummarizeEvent_CountsTheConversationItDrops for the counts).
 //
 // EVERY OTHER FIXTURE IN THIS PACKAGE BUILDS Tools BY HAND, and that is exactly how a whole suite
 // stayed green while the column was blank for every row the server sent: the tool-manifest filter
@@ -20,11 +20,29 @@ import (
 // nothing else. Anything asserting on the gauge against server-delivered events has to come
 // through here.
 func projected(events []pipeline.SessionEvent) []pipeline.SessionEvent {
+	return project(events, true)
+}
+
+// projectedNoCounts is the SAME projection from a proxy that predates the counts: it strips the
+// slices and states nothing in their place.
+//
+// That window is real — abctl and the proxy install separately, so a build between the CONTEXT
+// column and MessageCount/ToolCount projects blind — and it is the shape every rebase test below
+// needs, because it is the only one where the timeline genuinely cannot answer and the remembered
+// figure is the sole source left.
+func projectedNoCounts(events []pipeline.SessionEvent) []pipeline.SessionEvent {
+	return project(events, false)
+}
+
+func project(events []pipeline.SessionEvent, counts bool) []pipeline.SessionEvent {
 	out := make([]pipeline.SessionEvent, 0, len(events))
 	for _, e := range events {
 		c := e
 		if e.Inference != nil {
 			inf := *e.Inference
+			if counts {
+				inf.MessageCount, inf.ToolCount = len(inf.Messages), len(inf.Tools)
+			}
 			inf.Messages = nil
 			inf.Tools = nil
 			inf.ToolCalls = nil
@@ -35,21 +53,48 @@ func projected(events []pipeline.SessionEvent) []pipeline.SessionEvent {
 	return out
 }
 
-// THE TIMELINE CANNOT ANSWER THIS QUESTION, stated as a test so nobody has to rediscover it.
+// THE TIMELINE ANSWERS THROUGH THE COUNTS, and could not answer at all before them.
 //
-// Measured against a live proxy, the same 200-event window both ways: 41 of 62 inference responses
-// carry a manifest unprojected, 0 of 62 with view=summary — and abctl asks for view=summary on
-// every timeline fetch. So a projected event is not a one-shot and not a conversation turn; it is
-// unreadable, and the gauge's answer for it has to come from somewhere else (the stream, or a
-// detail fetch).
-func TestSessionContext_IsBlindToProjectedEvents(t *testing.T) {
+// Measured against a live proxy on the same 200-event window, 41 of 62 inference responses carry a
+// manifest unprojected and 0 of 62 do with view=summary — which abctl asks for on every timeline
+// fetch. So the rule was evaluable on streamed events and blank on delivered ones, and the fix is
+// two ints the projection records before dropping the slices.
+func TestSessionContext_ReadsAProjectedTimelineThroughTheCounts(t *testing.T) {
 	full := conversation("c1", time.Now(), 600, 500_000)
 	if got, want := sessionContext(full), 500_000; got != want {
 		t.Fatalf("unprojected fixture = %d, want %d", got, want)
 	}
-	if got := sessionContext(projected(full)); got != 0 {
-		t.Errorf("projected = %d, want 0 — if this now answers, the filter reads a field the "+
-			"projection keeps and the rebase machinery may be unnecessary", got)
+	if got, want := sessionContext(projected(full)), 500_000; got != want {
+		t.Errorf("projected = %d, want %d — the counts are what make a delivered row readable",
+			got, want)
+	}
+	// And a one-shot stays a one-shot through the projection: a manifest of zero is STATED as
+	// zero, which is the same answer the slice gave.
+	if got := sessionContext(projected(oneShot("o1", time.Now(), 282_000))); got != 0 {
+		t.Errorf("a projected one-shot = %d, want 0", got)
+	}
+	// A proxy that projects without stating the counts cannot be read, and must not be guessed
+	// at: this is the case contextRun's remembered figure exists for.
+	if got := sessionContext(projectedNoCounts(full)); got != 0 {
+		t.Errorf("projected with no counts = %d, want 0", got)
+	}
+}
+
+// AN OLD PROXY RETURNS FULL EVENTS, so the len() arm has to stay. eventProjection treats an
+// unrecognised `view` as "no projection", which is the skew a new abctl against an old proxy hits —
+// and there the slices are populated while the counts are absent.
+func TestSessionContext_StillReadsAnOldProxysSlices(t *testing.T) {
+	evs := conversation("c1", time.Now(), 600, 500_000)
+	for i := range evs {
+		if evs[i].Inference != nil {
+			if evs[i].Inference.MessageCount != 0 || evs[i].Inference.ToolCount != 0 {
+				t.Fatal("the fixture states counts; this test is about a proxy that does not")
+			}
+		}
+	}
+	if got, want := sessionContext(evs), 500_000; got != want {
+		t.Errorf("sessionContext = %d, want %d — counts-only reading would blank every row "+
+			"served by a proxy that predates them", got, want)
 	}
 }
 
@@ -69,8 +114,10 @@ func TestSessionContextFor_AProjectedSnapshotKeepsTheStreamsFigure(t *testing.T)
 		t.Fatalf("from the stream: %d, want %d", got, want)
 	}
 
-	// The real handler, and the real shape: same events, same count, projected.
-	m.Update(snapshotLoadedMsg{id: id, events: projected(full), projected: true})
+	// The real handler, and the real shape: same events, same count, projected — and WITHOUT the
+	// counts, because a proxy that states them makes this a question the slice can answer and
+	// stops testing the rebase. The counts-less window is the case the memory exists for.
+	m.Update(snapshotLoadedMsg{id: id, events: projectedNoCounts(full), projected: true})
 
 	if got, want := m.sessionContextFor(id), 500_000; got != want {
 		t.Errorf("after a view=summary snapshot: %d, want %d — the column blanked on drill-in",
@@ -94,11 +141,11 @@ func TestSessionContextFor_AnOlderPageKeepsTheFigure(t *testing.T) {
 		t.Fatalf("from the stream: %d, want %d", got, want)
 	}
 	// The snapshot leaves the slice projected — and clears the paging state, so [o] rebuilds it.
-	m.Update(snapshotLoadedMsg{id: "sess-1", events: projected(full), projected: true})
+	m.Update(snapshotLoadedMsg{id: "sess-1", events: projectedNoCounts(full), projected: true})
 	m.paging = map[string]*pagingState{"sess-1": {pageSizes: []int{len(full)}}}
 
 	// Older in wall-clock terms, or applyOlderPage refuses it as a restarted session.
-	older := projected(conversation("c0", base.Add(-time.Hour), 40, 62_000))
+	older := projectedNoCounts(conversation("c0", base.Add(-time.Hour), 40, 62_000))
 	m.applyOlderPage(olderPageLoadedMsg{id: "sess-1", events: older, serverOldest: 1})
 
 	if got, want := m.sessionContextFor("sess-1"), 500_000; got != want {
@@ -117,8 +164,11 @@ func TestSessionContextFor_ADetailFetchFillsTheGauge(t *testing.T) {
 	for i := range full {
 		full[i].Seq = uint64(i + 1)
 	}
-	// A session abctl attached to after its traffic: the timeline is all it has.
-	m := &model{events: map[string][]pipeline.SessionEvent{id: projected(full)}}
+	// A session abctl attached to after its traffic, served by a proxy that projects without
+	// stating the counts: nothing in the timeline can answer, so the detail fetch is the only
+	// source of a figure at all. Against a current proxy the snapshot answers on its own — see
+	// TestSessionsTable_AnIdleSessionsSnapshotFillsTheGauge.
+	m := &model{events: map[string][]pipeline.SessionEvent{id: projectedNoCounts(full)}}
 	if got := m.sessionContextFor(id); got != 0 {
 		t.Fatalf("a projected timeline: %d, want 0 (the dash)", got)
 	}
@@ -205,7 +255,7 @@ func TestSessionContextFor_ATieAcrossARebaseKeepsTheLaterTurn(t *testing.T) {
 	if got, want := m.sessionContextFor(id), 500_000; got != want {
 		t.Fatalf("from the stream: %d, want %d", got, want)
 	}
-	m.Update(snapshotLoadedMsg{id: id, events: projected(all), projected: true})
+	m.Update(snapshotLoadedMsg{id: id, events: projectedNoCounts(all), projected: true})
 	if got, want := m.sessionContextFor(id), 500_000; got != want {
 		t.Fatalf("after the snapshot: %d, want %d", got, want)
 	}
@@ -216,5 +266,56 @@ func TestSessionContextFor_ATieAcrossARebaseKeepsTheLaterTurn(t *testing.T) {
 	if got, want := m.sessionContextFor(id), 500_000; got != want {
 		t.Errorf("after opening the older turn: %d, want %d — an older tie took the column",
 			got, want)
+	}
+}
+
+// AN IDLE SESSION'S SNAPSHOT NOW FILLS THE GAUGE, with no stream history and no detail fetch.
+//
+// This is the regression the third review measured against main, where the rule read only
+// promptTokens — which the projection keeps — so drilling into an idle row produced a figure. On
+// this branch it produced a dash until the counts landed. Main's figure was the LATEST request's,
+// right at 63% of drill-in moments across six live sessions and off by more than 10% at 37% of them,
+// worst case 6,331 against a true 246,919; the counts make the same rows correct instead.
+func TestSessionsTable_AnIdleSessionsSnapshotFillsTheGauge(t *testing.T) {
+	base := time.Now()
+	const id = "idle"
+	// A one-shot speaks LAST, which is what made main's latest-request reading wrong here.
+	evs := append(conversation("c1", base, 1509, 851_000), oneShot("o1", base.Add(time.Minute), 7_000)...)
+
+	m := &model{events: map[string][]pipeline.SessionEvent{}}
+	m.sessionsTbl = newSessionsTable()
+	if got := m.sessionContextFor(id); got != 0 {
+		t.Fatalf("before the snapshot: %d, want 0 — abctl holds nothing for this session", got)
+	}
+
+	m.Update(snapshotLoadedMsg{id: id, events: projected(evs), projected: true})
+
+	if got, want := m.sessionContextFor(id), 851_000; got != want {
+		t.Errorf("after the snapshot: %d, want %d — the conversation's figure, not the "+
+			"one-shot's 7,000 and not a dash", got, want)
+	}
+}
+
+// AND THE MESSAGE COUNT STILL PICKS THE MAIN THREAD through the projection, which the test above
+// does not prove: there, every projected candidate loses its count equally and the tie-break falls
+// through to time, so the right answer comes out for the wrong reason. Mutation-checked — breaking
+// messageCount's counts arm leaves that test green and fails this one.
+//
+// A tool-carrying SUBAGENT is the case that needs it. It is a legitimate candidate (its own
+// manifest, its own conversation) and it speaks LAST, so only its length keeps it from taking the
+// column from a 1509-message main thread.
+func TestSessionsTable_AProjectedTimelineStillPicksTheMainThread(t *testing.T) {
+	base := time.Now()
+	const id = "idle"
+	evs := append(conversation("main", base, 1509, 851_000),
+		conversation("sub", base.Add(time.Minute), 12, 40_000)...)
+
+	m := &model{events: map[string][]pipeline.SessionEvent{}}
+	m.sessionsTbl = newSessionsTable()
+	m.Update(snapshotLoadedMsg{id: id, events: projected(evs), projected: true})
+
+	if got, want := m.sessionContextFor(id), 851_000; got != want {
+		t.Errorf("after the snapshot: %d, want %d — the subagent spoke last and is a candidate; "+
+			"only the message count keeps the column on the main thread", got, want)
 	}
 }

@@ -89,6 +89,15 @@ func TestSummarizeEvent_DropsPayloadsKeepsTimelineFields(t *testing.T) {
 	if got.Inference.ToolCalls != nil {
 		t.Error("Inference.ToolCalls survived")
 	}
+	// …but their LENGTHS are stated in their place. A third category beside dropped and kept:
+	// derived from a payload that goes, and the only thing left that says what it was.
+	if got.Inference.MessageCount != len(full.Inference.Messages) {
+		t.Errorf("messageCount = %d, want %d", got.Inference.MessageCount,
+			len(full.Inference.Messages))
+	}
+	if got.Inference.ToolCount != len(full.Inference.Tools) {
+		t.Errorf("toolCount = %d, want %d", got.Inference.ToolCount, len(full.Inference.Tools))
+	}
 	if got.A2A.Artifact != "" {
 		t.Error("A2A.Artifact survived")
 	}
@@ -281,7 +290,7 @@ func TestSummarizeEvent_ShapeIsGuarded(t *testing.T) {
 		want int
 	}{
 		{"SessionEvent", reflect.TypeOf(pipeline.SessionEvent{}), 22},
-		{"InferenceExtension", reflect.TypeOf(pipeline.InferenceExtension{}), 22},
+		{"InferenceExtension", reflect.TypeOf(pipeline.InferenceExtension{}), 24},
 		{"A2AExtension", reflect.TypeOf(pipeline.A2AExtension{}), 11},
 		{"MCPExtension", reflect.TypeOf(pipeline.MCPExtension{}), 6},
 	} {
@@ -307,4 +316,69 @@ func bigConversation(n, size int) []pipeline.InferenceMessage {
 		msgs = append(msgs, pipeline.InferenceMessage{Role: "user", Content: strings.Repeat("x", size)})
 	}
 	return msgs
+}
+
+// THE COUNTS ARE THE ONLY THING LEFT THAT DESCRIBES THE CONVERSATION, so they are pinned on their
+// own rather than only inside the big projection test.
+//
+// abctl's CONTEXT gauge asks two questions of a response — did the request carry a tool manifest,
+// and how long is the conversation — to tell an agentic turn from the one-shot completions Claude
+// Code interleaves under the same session id. It asked them of Messages and Tools, which this
+// projection drops, so the column read a dash for every row the timeline served while the
+// unprojected SSE stream kept working. Measured on one live session: 41 of 62 inference responses
+// carry a manifest unprojected, 0 of 62 projected.
+//
+// ZERO MEANS "NOT STATED" for a reader, which is why the no-inference and empty cases below assert
+// zero and the populated one asserts an exact count: a consumer prefers len() and falls back to
+// these, so a wrong non-zero here would be believed.
+func TestSummarizeEvent_CountsTheConversationItDrops(t *testing.T) {
+	t.Run("a conversation with a manifest", func(t *testing.T) {
+		full := fullEvent()
+		full.Inference.Messages = bigConversation(31, 8)
+		full.Inference.Tools = make([]pipeline.InferenceTool, 27)
+		got := summarizeEvent(&full)
+		if got.Inference.MessageCount != 31 || got.Inference.ToolCount != 27 {
+			t.Errorf("counts = %d msgs / %d tools, want 31 / 27",
+				got.Inference.MessageCount, got.Inference.ToolCount)
+		}
+		if got.Inference.Messages != nil || got.Inference.Tools != nil {
+			t.Error("the payloads survived; counting them is not a reason to keep them")
+		}
+	})
+
+	// A one-shot completion: messages but no manifest. The distinction the gauge turns on, so a
+	// stated zero has to stay zero rather than becoming absent-and-therefore-unknown.
+	t.Run("a one-shot with no manifest", func(t *testing.T) {
+		full := fullEvent()
+		full.Inference.Messages = bigConversation(3, 8)
+		full.Inference.Tools = nil
+		got := summarizeEvent(&full)
+		if got.Inference.MessageCount != 3 || got.Inference.ToolCount != 0 {
+			t.Errorf("counts = %d msgs / %d tools, want 3 / 0",
+				got.Inference.MessageCount, got.Inference.ToolCount)
+		}
+	})
+
+	// omitempty on both, so a projected event that carried neither costs no bytes — the whole
+	// point of the projection.
+	t.Run("nothing to count is nothing on the wire", func(t *testing.T) {
+		full := fullEvent()
+		full.Inference.Messages, full.Inference.Tools = nil, nil
+		b, err := json.Marshal(summarizeEvent(&full).Inference)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "messageCount") || strings.Contains(string(b), "toolCount") {
+			t.Errorf("zero counts reached the wire: %s", b)
+		}
+	})
+
+	// The source event must not gain them either: the store hands out pointers to what it keeps.
+	t.Run("the stored event is untouched", func(t *testing.T) {
+		full := fullEvent()
+		_ = summarizeEvent(&full)
+		if full.Inference.MessageCount != 0 || full.Inference.ToolCount != 0 {
+			t.Error("summarizeEvent wrote the counts back onto the stored event")
+		}
+	})
 }

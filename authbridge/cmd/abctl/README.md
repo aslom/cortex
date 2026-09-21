@@ -255,14 +255,18 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   window on any path the proxy sees, so a model with a smaller window reads
   lower than it really is.
 
-  The figure comes from the **live stream** and nowhere else. abctl asks for
-  `view=summary` on every timeline fetch, and that projection drops the two
-  fields this rule reads — the tool manifest and the message count — so
-  drilling into a session cannot fill the gauge in, only watching traffic can.
-  A session idle since before abctl attached therefore shows the dash until
-  either a new turn arrives or you open one of its events, which is the one
-  request that returns an event in full. Once a figure is established it is
-  kept: a projected snapshot replacing those events does not erase it.
+  The figure comes from abctl's own event cache, filled by the live stream or
+  by drilling into a session. The timeline fetch asks for `view=summary`, and
+  that projection drops the two fields this rule reads — the tool manifest and
+  the message count — so it now records their **lengths** before dropping them
+  (`messageCount` / `toolCount`) and the gauge reads either shape. Without that
+  a delivered row could not be read at all, and an idle session showed a dash
+  however long you looked at it.
+
+  Against a proxy older than those fields, an idle row still shows the dash
+  until traffic arrives or you open one of its events — the one request that
+  returns an event in full. Once a figure is established it is kept, so a
+  projection that says nothing cannot erase it.
 
   And after a compaction the gauge can stay on the pre-compaction context for a
   while, because the older, longer request still holds the most messages; a

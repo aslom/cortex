@@ -60,25 +60,29 @@ import (
 // appends every event under its session id, so any session with traffic since it attached has a
 // conversation here.
 //
-// AND ONLY THE STREAM CAN ESTABLISH IT — the timeline cannot, which is not what an earlier version
-// of this comment claimed. abctl asks for `view=summary` on every timeline fetch, tail and page
-// alike (apiclient/snapshot.go), and sessionapi.summarizeEvent drops exactly the two fields this
-// rule reads: Inference.Messages and Inference.Tools. Measured on one live session, the same
-// 200-event window both ways:
+// THE TIMELINE ALMOST COULD NOT ANSWER THIS, and the fix was server-side. abctl asks for
+// `view=summary` on every timeline fetch, tail and page alike (apiclient/snapshot.go), and
+// summarizeEvent drops exactly the two fields this rule reads. Measured on one live session, the
+// same 200-event window both ways, before the counts existed:
 //
 //	unprojected      62 inference responses   41 carry a manifest   up to 1755 msgs, 997k context
 //	view=summary     62 inference responses    0 carry a manifest    no msgs, no manifest
 //
-// The stream is unprojected (handleStream marshals the whole event), so live traffic answers this
-// question and a timeline fetch never can. A session idle since before abctl attached therefore
-// shows the dash until either a turn arrives on the stream or the operator opens one of its
-// events — the detail pane's fetch is the only path that puts a full event back into the slice.
+// So the rule worked on streamed events and read a dash on delivered ones. That was a REGRESSION
+// against the rule it replaced, which keyed on promptTokens alone and survives the projection: on
+// six live sessions the old reading matched the truth exactly after a drill-in — and, simulating
+// every drill-in moment, was off by more than 10% at 37% of them, worst case 6,331 against a true
+// 246,919. A worse answer, but an answer. The projection now records len(Messages) and len(Tools)
+// before dropping them, and toolCount/messageCount read either shape, so a delivered row is
+// correct rather than either blank or a coin flip.
 //
-// WHICH IS WHY A SNAPSHOT MUST NOT ERASE WHAT THE STREAM ESTABLISHED. Dropping the running answer
-// on a wholesale replacement — the obvious invalidation, and what this did first — blanked the
-// column to a dash the moment an operator opened a session, because the projected events that
-// replaced the streamed ones carry no candidate at all. contextRun rebases instead: see
-// rebaseSessionContext. The figure deliberately outlives the events it was read from.
+// A SNAPSHOT STILL MUST NOT ERASE WHAT THE STREAM ESTABLISHED — see rebaseSessionContext, and note
+// that dropping the run on replacement is what blanked the column before the counts landed. Two
+// cases keep that machinery load-bearing even now: a proxy built between the CONTEXT column and the
+// counts projects without stating them, and abctl releases a live session's events for memory
+// (keys.go) without learning anything new about it. The figure deliberately outlives the events it
+// was read from.
+//
 // A whole-slice fold, for callers with no running state to keep — the tests, and any future
 // one-shot reader. The sessions pane goes through sessionContextFor instead.
 func sessionContext(events []pipeline.SessionEvent) int {
@@ -97,11 +101,13 @@ func sessionContext(events []pipeline.SessionEvent) int {
 //
 // A REMEMBERED MAXIMUM, not a cache of a pure function over m.events — and the difference is
 // load-bearing, not a convenience. The events abctl holds for a session can stop carrying the
-// evidence the figure was read from: a `view=summary` timeline fetch replaces streamed events with
-// projected copies that carry no manifest and no message count. A cache would be invalidated by
-// that and come back empty; a remembered maximum survives it. What it costs is stated with the
-// compaction trade-off above — a figure this holds is the largest conversation abctl has SEEN for
-// the session, which after a server-side eviction may be larger than anything it still holds.
+// evidence the figure was read from, and a cache would be invalidated by that and come back empty.
+// Three ways it happens: a proxy that projects without stating the counts (the version window
+// between abctl's CONTEXT column and pipeline.InferenceExtension.MessageCount), the picker
+// releasing a live session's events for memory, and server-side FIFO eviction dropping the turn the
+// figure came from. What it costs is stated with the compaction trade-off above — a figure this
+// holds is the largest conversation abctl has SEEN for the session, which may be larger than
+// anything it still holds.
 type contextRun struct {
 	n      int // events folded so far
 	tokens int
@@ -139,7 +145,8 @@ func foldSessionContext(events []pipeline.SessionEvent, run contextRun) contextR
 		if e.Phase != pipeline.SessionResponse || e.Inference == nil {
 			continue
 		}
-		// The tool manifest is the filter: no tools means a one-shot completion.
+		// The tool manifest is the filter: no tools means a one-shot completion. Read through
+		// toolCount so a PROJECTED event answers too — see manifestCount.
 		//
 		// The REQUEST side is not checked, and the reason is stronger than the 117 paired
 		// samples that showed no divergence. SnapshotInference is `c := *ext`, a shallow copy,
@@ -147,20 +154,46 @@ func foldSessionContext(events []pipeline.SessionEvent, run contextRun) contextR
 		// the same slice header off the same extension and cannot disagree by construction. A
 		// paired check would be dead code, and the map it needed is what made this function
 		// allocate per call.
-		if len(e.Inference.Tools) == 0 {
+		if toolCount(e.Inference) == 0 {
 			continue
 		}
 		n := promptTokens(e.Inference)
 		if n <= 0 {
 			continue
 		}
-		if msgs := len(e.Inference.Messages); msgs > run.msgs ||
+		if msgs := messageCount(e.Inference); msgs > run.msgs ||
 			(msgs == run.msgs && !e.At.Before(run.at)) {
 			run.tokens, run.msgs, run.at = n, msgs, e.At
 		}
 	}
 	run.n += len(events)
 	return run
+}
+
+// toolCount and messageCount answer the two questions this file asks of a conversation, on either
+// shape the API delivers.
+//
+// A PROJECTED EVENT CARRIES COUNTS INSTEAD OF SLICES. sessionapi.summarizeEvent nils Messages and
+// Tools — they are 99.5% of an event — and records their lengths first, because those two lengths
+// are the whole of what this rule needs. len() first, then the count, because zero on the count
+// means "not stated" rather than "none": an old proxy ignores `view` and returns full events, and a
+// proxy built between the CONTEXT column and the counts projects without setting them.
+//
+// That last case is why the gauge remembers its own figure (contextRun) rather than trusting
+// whatever it currently holds: against such a proxy neither source answers, and a remembered figure
+// from the stream is all there is.
+func toolCount(inf *pipeline.InferenceExtension) int {
+	if n := len(inf.Tools); n > 0 {
+		return n
+	}
+	return inf.ToolCount
+}
+
+func messageCount(inf *pipeline.InferenceExtension) int {
+	if n := len(inf.Messages); n > 0 {
+		return n
+	}
+	return inf.MessageCount
 }
 
 // sessionContextFor is the gauge's figure for one session, folded rather than rescanned.
@@ -201,8 +234,9 @@ func (m *model) sessionContextFor(id string) int {
 // fallback for a slice shorter than the run.
 //
 // KEEPS tokens, msgs AND at, and re-folds the whole new slice on top of them. Keeping the figure is
-// what makes the column survive a `view=summary` snapshot — see sessionContext on why the timeline
-// cannot answer this. Re-folding rather than just re-basing n is what lets the new slice WIN:
+// what makes the column survive a snapshot from a proxy whose projection states no counts — see
+// sessionContext for what the timeline can and cannot say. Re-folding rather than just re-basing n
+// is what lets the new slice WIN:
 // nothing here assumes the replacement is poorer, so a detail fetch that puts a longer
 // conversation back in place beats the remembered one on message count exactly as a streamed turn
 // would.
