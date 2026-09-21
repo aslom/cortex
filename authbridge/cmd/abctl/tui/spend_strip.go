@@ -178,9 +178,34 @@ const saturatedNote = "clamped, figures are floors"
 //
 // Marker order is load-bearing and unchanged: damaged outermost so the leftmost glyph is the
 // most serious claim, inexact next to the amount, partial trailing.
+//
+// THE PRECISION IS THE CALLER'S, and splitting it out is what keeps the rule beside
+// formatUSDTotal true. This function used to format as well as mark, so every surface reaching
+// it got one precision — and its callers are on both sides of the boundary: the band's TODAY and
+// LAST are span totals, while moneyFigure below feeds the drawer's PER-MODEL rows, which are
+// per-item. Formatting here in cents silently rounded the model column too, which the rule says
+// it must not be.
+//
+// moneyFigure's OTHER two callers are on the wrong side of that rule and are dead: renderSpendStrip
+// passes it s.TodayUSD and s.WindowUSD, span totals that come out at four decimals, and nothing in
+// production calls renderSpendStrip any more — app.go mentions it only in comments, and
+// renderSpendBand is the live renderer. Said here because this comment is where a reviver of the
+// strip would look for the rule: reviving it means routing those two through moneyTotal.
 func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) string {
-	amount := formatUSDCell(usd)
+	return markMoney(formatUSDCell(usd), unpriced, priceable, incomplete, degraded, saturated)
+}
+
+// moneyTotal is moneyAmount for a SPAN TOTAL — the day's spend, the window's — so it reads in
+// cents. See the precision rule beside formatUSDTotal.
+func moneyTotal(usd float64, unpriced, priceable, incomplete int64,
+	degraded *usage.Degraded, saturated bool) string {
+	return markMoney(formatUSDTotal(usd), unpriced, priceable, incomplete, degraded, saturated)
+}
+
+// markMoney puts the disclosure markers on an already-formatted amount.
+func markMoney(amount string, unpriced, priceable, incomplete int64,
+	degraded *usage.Degraded, saturated bool) string {
 	if incomplete > 0 {
 		amount = inexactMarker + amount
 	}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/costevent"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pricing"
 )
 
 // This file used to turn tool-prune's byte saving into tokens and dollars.
@@ -103,4 +104,72 @@ func formatUSDCell(v float64) string {
 		return "<$" + formatUSD4(usdFloor)
 	}
 	return "$" + formatUSD4(v)
+}
+
+// WHICH PRECISION A MONEY FIGURE GETS, stated here once because it was decided twice.
+//
+// Two decimals — formatUSDTotal — for a figure that answers HOW MUCH HAS THIS COST over a span:
+// the day, the rolling window, the whole endpoint. Four — formatUSDCell — for a figure
+// attributable to ONE thing: one request, one session, one rate tier, one model. The difference
+// is not aggregation, it is magnitude: a day's spend is dollars and a reader wants to see it at
+// a glance, while a single cache-read request is $0.000038 and cents would render every one of
+// them as nothing.
+//
+// It was decided twice because #1042 rounded the Usage pane to cents with its own inline
+// arithmetic while every other surface kept four decimals, so the same money read "$1.01" in one
+// panel and "$1.0060" in the panel above it, and a reader comparing them could not tell rounding
+// from disagreement. The arithmetic now lives in one place and the boundary is a sentence rather
+// than a per-surface habit.
+//
+// NEITHER FORM EVER RENDERS A POSITIVE FIGURE AS ZERO. Cents falls back to "<$0.01" and four
+// decimals to "<$0.0001", which is the rule decodeCostEvent and promptCost already go out of
+// their way to keep: "free" is a claim about the traffic and must not be a rounding artefact.
+//
+// A caller with micros in hand should use formatUSDTotalMicros directly. Going through float64
+// is safe — see MicrosFromUSD — but pointless when the integer is already there.
+func formatUSDTotal(usd float64) string {
+	micros, ok := pricing.MicrosFromUSD(usd)
+	if !ok {
+		// Negative, NaN, or past MaxCostMicros. Not this function's call to make: every
+		// surface that shows a total already has its own word for an impossible figure
+		// ("unavailable", a clamp marker), and inventing a third here would hide theirs.
+		// Four decimals is the honest fallback — it shows whatever the figure actually is.
+		return formatUSDCell(usd)
+	}
+	return formatUSDTotalMicros(micros)
+}
+
+// formatUSDTotalMicros is formatUSDTotal for a caller that already has integer micros.
+//
+// INTEGER ARITHMETIC, not %.2f on micros/1e6, and the reason is #1042's: 1_005_000 micros is
+// exactly $1.005, the float64 nearest it is 1.00499999…, and %.2f prints $1.00. Rounding
+// half-up on the integer gets $1.01. The conversion in formatUSDTotal is safe for the same
+// reason in reverse — MicrosFromUSD rounds, so it recovers 1_005_000 from that float.
+func formatUSDTotalMicros(micros int64) string {
+	// A NEGATIVE FIGURE MUST NOT REACH THE ARITHMETIC BELOW. Go's / and % truncate toward zero,
+	// so -150_000 renders "$0.-15" and -12_345_678 renders "$-12.-34"; worse, anything above
+	// -5_000 rounds to "$0.00", which claims the traffic was free — the reading the floor below
+	// exists to prevent.
+	//
+	// This guard used to be inseparable from the arithmetic: in renderCostSummary the
+	// negativeCost case and the cent branches were arms of one switch, and extracting the
+	// arithmetic left the guard behind at the call site. The float64 entry point is safe by
+	// accident of MicrosFromUSD rejecting a negative, so the two entry points disagreed.
+	//
+	// Four decimals, which is what formatUSDTotal answers for the same input, so they agree.
+	// Naming it — "unavailable" — stays the caller's job: renderCostSummary has its own word
+	// for an impossible figure and a second spelling here would hide it.
+	if micros < 0 {
+		return formatUSDCell(float64(micros) / 1e6)
+	}
+	if micros > 0 && micros < 5_000 {
+		// Positive but under half a cent. The same floor rule formatUSDCell applies at
+		// $0.0001, two decimal places up.
+		return "<$0.01"
+	}
+	cents := micros / 10_000
+	if micros%10_000 >= 5_000 {
+		cents++
+	}
+	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
 }
