@@ -40,6 +40,26 @@ func TestRetentionCutoff_IsTheConfiguredHorizonFromTheClock(t *testing.T) {
 	}
 }
 
+// AND IT IS A DAY IDENTIFIER, NOT THE DAY'S FIRST INSTANT — which its one consumer depends on.
+//
+// dayOf carries every ledger day at dayHour, so this value sits twelve hours LATER than the
+// midnight that opens the same date. sessionapi.daysOutsideRetention differences it against
+// usage.StartOfLocalDay and StartOfLocalMonth, which ARE midnights, and reading this as a bound
+// made a month-to-date request report one day short of itself: the spend band stamped its partial
+// marker on a complete and correct total every 31-day month.
+//
+// The test above compares dates and deliberately ignores the clock, which is exactly what let
+// that through — so the shape is pinned here rather than left implicit in dayOf's doc.
+func TestRetentionCutoff_IsADayIdentifierNotABound(t *testing.T) {
+	now := time.Date(2026, time.March, 31, 15, 0, 0, 0, time.Local)
+	got := newRetentionWriter(t, t.TempDir(), 10, now).RetentionCutoff()
+	if h, m, s := got.Clock(); h != dayHour || m != 0 || s != 0 {
+		t.Errorf("cutoff = %s, want the %02d:00:00 anchor every ledger day is carried at: a "+
+			"consumer differencing this against a local midnight has to know which of the two "+
+			"shapes it is holding", got.Format(time.RFC3339), dayHour)
+	}
+}
+
 // AND IT REPORTS NO LOSS, because it cannot know of one.
 //
 // A ledger with no files at all has the same cutoff as a full one: the horizon is a function of

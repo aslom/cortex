@@ -429,19 +429,44 @@ func writeUsageError(w http.ResponseWriter, err error) {
 // daysOutsideRetention is how many whole days of a window start before a retention cutoff.
 //
 // Zero when the window fits, which is the normal case and says nothing. Counted in DAYS because
-// that is the unit the ledger stores and prunes in: a window reaching back half a day past the
-// cutoff has one day it cannot cover, not half of one.
+// that is the unit the ledger stores and prunes in: a window reaching back part of a day past the
+// cutoff has one date it cannot cover, not a fraction of one.
+//
+// BOTH ARGUMENTS IDENTIFY A DATE AND NEITHER IS A BOUND, which is where two defects lived.
+// cutoff comes from costledger's retentionCutoff, and a ledger day is carried at NOON —
+// costledger.dayOf's doc forbids reading it as the day's first instant — while from is a local
+// MIDNIGHT, from usage.StartOfLocalDay or StartOfLocalMonth. Comparing them as instants made a
+// month-to-date request report one day short of ITSELF: from sits twelve hours before the cutoff
+// of the very date it starts on, so "from is earlier" was true and a floor turned it into 1. With
+// retention_days defaulting to 31, deliberately equal to the longest month, that stamped the
+// partial marker on a complete and correct total every 31-day month, and on the 9th of any month
+// at the 9-day minimum.
+//
+// So both sides are reduced to DATES and differenced as dates. NEVER Truncate(24*time.Hour),
+// which truncates on the absolute UTC-epoch axis rather than to a local date: east of Greenwich a
+// local midnight and a local noon belong to different UTC dates, so the difference gained a day
+// in Berlin and Tokyo while UTC, New_York and Auckland answered correctly. Neither a
+// fixed-offset test zone nor a single-zone one can see that.
 func daysOutsideRetention(from, cutoff time.Time) int64 {
-	if !from.Before(cutoff) {
-		return 0
-	}
-	// Truncated to the day boundary at both ends, so the count is of DATES and not of the hours
-	// between two instants — the ledger keeps whole day files.
-	d := cutoff.Truncate(24 * time.Hour).Sub(from.Truncate(24 * time.Hour))
+	// The LEDGER's zone decides the grid: retention is counted in the ledger's own day files, so
+	// the question is which of its dates the window reaches past, not which of the caller's.
+	d := utcNoonOfDate(cutoff).Sub(utcNoonOfDate(from.In(cutoff.Location())))
 	if n := int64(d / (24 * time.Hour)); n > 0 {
 		return n
 	}
-	return 1
+	return 0
+}
+
+// utcNoonOfDate re-anchors a timestamp's calendar date at noon UTC, so two dates can be
+// differenced as dates.
+//
+// NOON, and in UTC, for the same reason costledger carries its days at noon: UTC has no
+// transitions, so the gap between two of these is always an exact multiple of 24 hours and the
+// division below cannot be off by one — where a local date's length is 22, 23, 24 or 25 hours and
+// subtracting local midnights drifts by the offset change.
+func utcNoonOfDate(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 12, 0, 0, 0, time.UTC)
 }
 
 // degradedFrom is the whole of the Caveats-to-wire conversion, in one place so a field cannot be

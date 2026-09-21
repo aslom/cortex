@@ -97,7 +97,7 @@ func renderTierRows(c usage.Counts, width int) []string {
 			//
 			// THE ZERO CASE IS THE SAME CASE. A tier carrying real money always apportions to
 			// at least one micro, so zero means this tier is absent from the modelled mix —
-			// and formatUSDCell(0) prints "$0.0000", which asserts the tier was FREE. That is
+			// and formatUSDCell(0) prints "$0.00", which asserts the tier was FREE. That is
 			// the "$0.00 for a figure that might be unknown" lie this package refuses in
 			// sessionMoneyCell and in `abctl cost`'s headline, arriving through a third door.
 			// Found by rendering the panel rather than by a test: the fixture populated all

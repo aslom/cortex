@@ -293,6 +293,45 @@ func TestToggleSpendDrawer_RefusesOnAShortTerminalAndExplains(t *testing.T) {
 	}
 }
 
+// AND `$` ON A PANE THAT CANNOT HOST THE DRAWER LEAVES IT ALONE, which is the mirror of the gate
+// esc already has.
+//
+// m.spend.expanded survives a move to the Usage pane, and the close branch tested that flag alone —
+// before the host check, so it never ran there. Pressing `$` on Usage therefore closed a drawer the
+// operator could not see, said nothing, and the breakdown was missing on the way back to Sessions.
+// The flag is left ALONE rather than closed-and-restored: it is a strip expansion and the strip is
+// global, so a pane that can host it should find it as the operator left it.
+//
+// DRIVEN THROUGH handleKey, not toggleSpendDrawer, because half of the defect is the routing:
+// paneUsage's own switch handles m/w/b/s and has no default return, so `$` falls past it into the
+// global drawer keys. A test calling the toggle directly cannot see that at all.
+func TestHandleKey_DollarOnTheUsagePaneKeepsAnOffScreenDrawer(t *testing.T) {
+	m := &model{width: 100, height: 40}
+	m.pane = paneSessions
+	m.handleKey(keyRune('$'))
+	if !m.spendDrawerVisible() {
+		t.Fatalf("the drawer did not open on the sessions pane (expanded=%v), so this test cannot "+
+			"say anything about what $ does to an open one", m.spend.expanded)
+	}
+
+	m.pane = paneUsage
+	m.flash = ""
+	m.handleKey(keyRune('$'))
+	if !m.spend.expanded {
+		t.Error("$ on the usage pane closed the drawer: it is off screen there, so the keypress " +
+			"took away something the operator could neither see nor have meant")
+	}
+	if m.flash == "" {
+		t.Error("$ on the usage pane did nothing and said nothing, which is the broken-key " +
+			"reading toggleSpendDrawer's own doc refuses")
+	}
+
+	m.pane = paneSessions
+	if !m.spendDrawerVisible() {
+		t.Error("the drawer did not come back on returning to a pane that hosts it")
+	}
+}
+
 // The drawer never draws without the strip above it. A breakdown under a bare title, with no
 // summary it is breaking down, is a pane — which is the one thing this is not.
 func TestSpendDrawerVisible_RequiresTheStrip(t *testing.T) {

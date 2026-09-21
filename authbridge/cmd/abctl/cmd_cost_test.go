@@ -77,6 +77,53 @@ func TestRunCost_FullyPricedCarriesNoWarning(t *testing.T) {
 	}
 }
 
+// A WINDOW REACHING PAST RETENTION SAYS SO, which is the coverage statement this CLI was silent
+// about while the TUI band marked the same figure partial.
+//
+// --window month against a ledger keeping less than a month is the ordinary case for it: the total
+// is a subtotal, and printed alone it reads as the month's spend. The line is a COVERAGE claim, so
+// it must not say anything was lost — nothing records the ledger's inception or what prune removed,
+// so a fresh install reaching past its horizon may have lost nothing at all.
+func TestRunCost_DisclosesAWindowPastRetention(t *testing.T) {
+	srv := fakeUsageServer(t, `{"window":"month","totals":{"requests":318,`+
+		`"costMicros":4170000,"pricedRequests":318,"priceableRequests":318},`+
+		`"priced":true,"daysOutsideRetention":21}`)
+	defer srv.Close()
+
+	var out, errOut strings.Builder
+	runCost([]string{"--endpoint", srv.URL, "--window", "month"}, &out, &errOut)
+	got := out.String()
+
+	if !strings.Contains(got, "21") {
+		t.Errorf("output does not disclose the 21 days the ledger cannot reach:\n%s", got)
+	}
+	if !strings.Contains(got, "retention") {
+		t.Errorf("output names no cause for the shortfall:\n%s", got)
+	}
+	// AND IT DOES NOT CLAIM A LOSS. "Pruned" or "missing" asserts spend existed on those days,
+	// which is the false disclosure this whole feature was narrowed away from.
+	for _, forbidden := range []string{"pruned", "missing", "lost"} {
+		if strings.Contains(strings.ToLower(got), forbidden) {
+			t.Errorf("output says %q about days outside retention, which claims a loss nothing "+
+				"here can know about:\n%s", forbidden, got)
+		}
+	}
+}
+
+// AND A WINDOW INSIDE THE HORIZON IS SILENT, so the line above is a signal rather than furniture.
+func TestRunCost_AWindowInsideRetentionSaysNothingAboutIt(t *testing.T) {
+	srv := fakeUsageServer(t, `{"window":"today","totals":{"requests":318,`+
+		`"costMicros":4170000,"pricedRequests":318,"priceableRequests":318},"priced":true}`)
+	defer srv.Close()
+
+	var out, errOut strings.Builder
+	runCost([]string{"--endpoint", srv.URL}, &out, &errOut)
+
+	if strings.Contains(out.String(), "retention") {
+		t.Errorf("a window the ledger covers still mentions retention:\n%s", out.String())
+	}
+}
+
 // An inexact total must SAY it is inexact. A truncated stream's figure is a floor,
 // and printing it beside an exact-looking "$4.17" claims a precision the data does
 // not have — the claim usage.Counts.IncompleteRequests exists to withdraw.

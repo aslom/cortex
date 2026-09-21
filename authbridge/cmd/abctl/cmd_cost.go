@@ -443,7 +443,7 @@ func writeCostSummary(snap *usage.Snapshot, stdout io.Writer) {
 	// aggregate.
 	//
 	// Silent at zero, on this function's standing rule: a deployment not running tool-prune has
-	// nothing to act on, and a permanent "~$0.0000 saved" is the line that teaches an operator
+	// nothing to act on, and a permanent "~$0.00 saved" is the line that teaches an operator
 	// to stop reading these.
 	if t.AvoidedMicros > 0 {
 		fmt.Fprintf(stdout, "  ~%-13s saved   estimate, gross of cache re-warm; not deducted above\n",
@@ -521,6 +521,22 @@ func writeCostSummary(snap *usage.Snapshot, stdout io.Writer) {
 	if gap := t.PriceableRequests - t.PricedRequests; gap > 0 {
 		fmt.Fprintf(stdout, "  ! %s of %s priceable requests unpriced — the total covers only the priced ones\n",
 			plainCount(gap), plainCount(t.PriceableRequests))
+	}
+	// AND HOW MUCH OF THE WINDOW THE LEDGER CANNOT REACH, next to the unpriced gap because it is
+	// the same kind of statement: how much of the traffic the figure covers, rather than whether
+	// the figure is exact. Never a Degraded clause — see
+	// TestUsageDegraded_CarriesNoRetentionCoverageField for that boundary.
+	//
+	// "CANNOT REACH", never "was pruned": nothing records the ledger's inception or what prune
+	// removed, so a window reaching past the horizon may have lost nothing at all. The provable
+	// claim is about configuration, and this is the CLI's only disclosure of it — --window month
+	// against a shorter retention_days printed a clean-looking total, while the TUI band marked
+	// the same figure partial. Two surfaces disagreeing about the same number is worse than
+	// either answer.
+	if snap.DaysOutsideRetention > 0 {
+		fmt.Fprintf(stdout, "  ! the window reaches %s day%s past this ledger's retention — "+
+			"any spend on them is outside the total\n",
+			plainCount(snap.DaysOutsideRetention), plainPlural(snap.DaysOutsideRetention))
 	}
 	if !snap.Priced && t.PriceableRequests == 0 {
 		// Not a gap and not a failure: there was no inference traffic to price. Said out

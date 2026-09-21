@@ -51,6 +51,49 @@ func TestSpanReadings_ANegativeTotalIsUnpricedNotARefund(t *testing.T) {
 	}
 }
 
+// AND A ZERO TOTAL IS CARRIED, which is the other side of the same guard and the easier one to
+// "fix" into a bug.
+//
+// usage.Snapshot.Priced is PricedRequests > 0 and explicitly NOT CostMicros > 0: a window whose
+// every request the gateway SETTLED AT ZERO has priced requests and no dollars, and snapshot.go
+// requires it to render as a zero figure rather than as "cost unavailable" — those are different
+// answers, and only one of them is true here. Tightening this guard to CostMicros > 0 reads like
+// defensive hygiene and silently converts a known answer into "not known here".
+//
+// AT THE READING, not only at the band: the band takes a spanReading, so a test that builds one by
+// hand cannot see this guard at all. That is exactly how the first version of this assertion
+// passed against the change it was written to reject.
+func TestSpanReadings_ASettledFreeWindowIsPricedAtZero(t *testing.T) {
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		def := spendSpanDefs[span]
+		t.Run(def.label, func(t *testing.T) {
+			m := &model{}
+			m.spend.chains[span].snap = &usage.Snapshot{
+				Window: def.window,
+				Totals: usage.Counts{
+					Requests: 10, CostMicros: 0,
+					PricedRequests: 10, PriceableRequests: 10,
+				},
+				Priced: true,
+			}
+			got := m.spanReadings()[span]
+			if !got.Priced {
+				t.Errorf("%s: Priced = false for a window the gateway settled at zero, so the "+
+					"band reports \"cost unavailable\" for traffic whose cost is known to be "+
+					"nothing", def.label)
+			}
+			if got.USD != 0 {
+				t.Errorf("%s: USD = %v, want 0", def.label, got.USD)
+			}
+			// And on screen it is a figure, not the em dash.
+			line := strings.Join(renderSpendBand(spendSummary{Spans: m.spanReadings()}, 200), "\n")
+			if !strings.Contains(line, "$0.00") {
+				t.Errorf("%s: band drew no $0.00 for settled-free traffic:\n%s", def.label, line)
+			}
+		})
+	}
+}
+
 // An unpriced answer is not a zero one, which is the distinction every money surface here rests
 // on: "nothing could be priced" and "this cost nothing" are different claims and only one of them
 // is ever knowable from an empty figure.

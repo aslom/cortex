@@ -228,18 +228,77 @@ func TestRenderSpendBand_HeightIsConstantAndFiguresDropWhole(t *testing.T) {
 		}
 		// A figure that survives is never half a figure.
 		//
-		// PROBE AND WHOLE MUST BE DIFFERENT STRINGS or this asserts nothing, and it briefly
-		// did: the pair was Contains("$3.84") && !Contains("$3.8402"), and retuning the
-		// literals for a two-decimal formatter collapsed both sides onto "$3.84" — an
-		// `x && !x` that can never fire. See TestFormatUSDCell_IsPrefixProbeable.
+		// THROUGH clipsFigure rather than spelled out here, because the detector is the part
+		// that can be silently wrong: this assertion once read Contains("$3.84") &&
+		// !Contains("$3.8402"), and retuning the literals for a two-decimal formatter collapsed
+		// both sides onto "$3.84" — an `x && !x` that could never fire. The detector has its own
+		// guard now; see TestClipsFigure_CanActuallyFail.
 		for span := spendSpan(0); span < numSpendSpans; span++ {
 			whole := formatUSDCell(bandSummary().Spans[span].USD)
-			probe := whole[:3]
-			if strings.Contains(lines[1], probe) && !strings.Contains(lines[1], whole) {
+			if clipsFigure(lines[1], whole) {
 				t.Errorf("width %d: %s's figure was clipped: %q (probe %q, want whole %q)",
-					w, spendSpanDefs[span].label, lines[1], probe, whole)
+					w, spendSpanDefs[span].label, lines[1], figureProbe(whole), whole)
 			}
 		}
+	}
+}
+
+// THE THREE ANSWERS A MONEY CELL CAN GIVE, pinned together because each one is a different truth
+// and two of them look alike.
+//
+//	unpriced            an em dash      nothing here carried a cost figure
+//	priced at zero      "$0.00"         every request was settled free
+//	priced below a cent "<$0.01"        a real charge, too small to state to the cent
+//
+// THE MIDDLE ONE IS DELIBERATE AND IS NOT THE $0.00 THIS PACKAGE REFUSES ELSEWHERE.
+// usage.Snapshot.Priced is PricedRequests > 0 and explicitly NOT CostMicros > 0, because a window
+// whose every request the gateway SETTLED AT ZERO has priced requests and no dollars: snapshot.go
+// requires that to render as a zero figure rather than as "cost unavailable", and they are
+// different answers. sessionMoneyCell and the tier column do use the em dash for their own zeros,
+// but those are per-session and per-tier apportionments where a zero means "absent from the mix" —
+// an aggregate of settled-free traffic means the traffic was free, and withholding it would report
+// an answer we have as one we do not.
+//
+// The reading that WOULD be a lie is the third row, and it is refused one layer down:
+// formatUSDCell floors anything positive under half a cent to "<$0.01". That is why the cell can
+// print $0.00 only for an exact zero — and why both are asserted here, since a reader probing a
+// $0.00 cell cannot otherwise tell which of the two produced it.
+//
+// The expected strings are LITERALS, not formatUSDCell calls: this is a contract about what an
+// operator reads, and deriving the expectation from the formatter would let a formatter change
+// take both sides with it. That is the vacuity TestClipsFigure_CanActuallyFail documents.
+func TestRenderSpendBand_UnpricedZeroAndSubCentAreThreeDifferentCells(t *testing.T) {
+	cell := func(s spendSummary) string { return renderSpendBand(s, 200)[1] }
+
+	unpriced := cell(withSpan(bandSummary(), spanHour, func(r *spanReading) {
+		r.USD, r.Priced = 0, false
+	}))
+	if !strings.Contains(unpriced, emptyCell) {
+		t.Errorf("an unpriced hour rendered %q with no %q: priced:false means cost unavailable, "+
+			"and a figure in its place claims knowledge the snapshot disclaims",
+			unpriced, emptyCell)
+	}
+	if strings.Contains(unpriced, "$0.00") {
+		t.Errorf("an unpriced hour rendered %q, which reads as free traffic", unpriced)
+	}
+
+	free := cell(withSpan(bandSummary(), spanHour, func(r *spanReading) {
+		r.USD, r.Priced = 0, true
+	}))
+	if !strings.Contains(free, "$0.00") {
+		t.Errorf("a settled-free hour rendered %q, want $0.00: the gateway priced every request "+
+			"at nothing, which is an answer and not an absence", free)
+	}
+
+	subCent := cell(withSpan(bandSummary(), spanHour, func(r *spanReading) {
+		r.USD, r.Priced = 0.003, true
+	}))
+	if !strings.Contains(subCent, "<$0.01") {
+		t.Errorf("a $0.003 hour rendered %q, want <$0.01", subCent)
+	}
+	if strings.Contains(subCent, "$0.00") {
+		t.Errorf("a $0.003 hour rendered %q: a known non-zero charge shown as free is the one "+
+			"rounding this band is not allowed to do", subCent)
 	}
 }
 

@@ -345,14 +345,14 @@ func renderUsageSummary(snap *usage.Snapshot) string {
 // is the failure this coverage count exists to prevent.
 func renderCostSummary(snap *usage.Snapshot) string {
 	if !snap.Priced {
-		// Not "$0.0000". A zero cost and an unknown cost are different answers, and
+		// Not "$0.00". A zero cost and an unknown cost are different answers, and
 		// only one of them means the traffic was free.
 		return "COST unavailable"
 	}
 	// Integer cent rounding, not %.2f on float64(micros)/1e6: 1_005_000 micros
 	// is exactly $1.005 but the float is 1.0049999… so %.2f prints $1.00.
 	// A positive-but-sub-cent total falls back to "<$0.01" so small does not
-	// read as free — same floor rule formatUSDCell applies at $0.0001.
+	// read as free — same floor rule formatUSDCell applies at $0.01.
 	micros := snap.Totals.CostMicros
 	var cell string
 	switch {
@@ -549,6 +549,6 @@ func snapshotDamaged(d *usage.Degraded) bool { return d != nil }
 // refund nobody issued.
 //
 // Every caller treats it as UNPRICED, never as a small or clamped figure. An impossible
-// number is not a number to display, and $0.0000 would assert that the traffic was free
+// number is not a number to display, and $0.00 would assert that the traffic was free
 // — the one claim this whole surface exists to refuse.
 func negativeCost(micros int64) bool { return micros < 0 }

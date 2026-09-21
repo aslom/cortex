@@ -179,6 +179,14 @@ type Snapshot struct {
 	// SAME SHAPE AS THE UNPRICED COVERAGE GAP beside it — Unpriced over Priceable — which is
 	// why it sits here rather than with the damage counters: both say "this figure covers less
 	// than the question implied", and neither says anything was destroyed.
+	//
+	// ZERO DOES NOT MEAN THE TOTAL IS COMPLETE, and a client must not read it that way. It is
+	// measured against retention_days AS CONFIGURED NOW, so a day pruned while the setting was
+	// SHORTER is inside today's horizon and reported by nothing: set retention_days to 9, run
+	// for a week, set it back to 31, and the month's total is short with this field at 0. The
+	// same is true of a day prune deleted for any other reason. Closing that needs a persisted
+	// inception date or a prune record and the ledger keeps neither — and inferring one from the
+	// files present is the false-positive design this field replaced.
 	DaysOutsideRetention int64 `json:"daysOutsideRetention,omitempty"`
 	// UnpricedBy counts the requests that could NOT be priced, keyed
 	// "<endpoint> <model>". Present only when something was unpriced — and never
@@ -1335,7 +1343,7 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 	// The COUNTER, never CostMicros > 0. A window whose every request was DECLARED FREE
 	// by the gateway — a settled zero — has priced requests and no dollars, and reading
 	// the total would report it "cost unavailable". Those are different truths: false
-	// must render "cost unavailable", a declared-free window must render $0.0000. See
+	// must render "cost unavailable", a declared-free window must render $0.00. See
 	// costevent.Event.Settled, and TestPricing_SettledZeroIsNotRePriced, which pins it.
 	out.Priced = out.Totals.PricedRequests > 0
 	// A CLAMPED BREAKDOWN IS DISCLOSED ON THE SAME FLAG Counts.Add RAISES for a saturated Requests,

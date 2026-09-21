@@ -26,7 +26,7 @@ const minColumnWidth = 4
 // headers were simply never told, and pointed at nothing:
 //
 //	EVENTS    TOKENS      COST        SAVED       ACTIVE
-//	     4      629.4k     $0.2475    ~$0.0039  ●
+//	     4      629.4k       $0.25      ~$0.04  ●
 //
 // Applied against the width the column will RENDER at, which for the sessions table is its
 // fitted width and not its declared one: fitTableColumns shrinks columns on a narrow terminal,

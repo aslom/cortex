@@ -1034,6 +1034,12 @@ type spanReading struct {
 	USD float64
 	// Priced says a figure exists to show. False means "nothing to say", which the band
 	// renders as an em dash — never $0.00, which would assert the traffic was free.
+	//
+	// TRUE WITH A ZERO USD IS A DIFFERENT STATEMENT and is legal: the gateway settled every
+	// request in the span at nothing, so "this was free" is the answer rather than a
+	// substitute for one. Read as "an em dash unless a figure is known", not as "an em dash
+	// unless the figure is non-zero" — the second reading turns a settled-free window into a
+	// missing one, and usage.Snapshot.Priced exists in that shape deliberately.
 	Priced bool
 	// Failed says this span's own poll errored. Per span, because the chains fail
 	// independently: an older proxy answers the hour fine and 400s on window=month.
@@ -1133,6 +1139,17 @@ func (m *model) spanReadings() [numSpendSpans]spanReading {
 			// non-negative per-request figures, so a negative can only come from a broken
 			// producer, and "-$5.00" on a spend band reads as a refund nobody issued. Treated
 			// as unpriced, which is the honest reading — we do not know what this span cost.
+			//
+			// A ZERO TOTAL IS KEPT, and that is not an oversight here. usage.Snapshot.Priced is
+			// PricedRequests > 0 and deliberately not CostMicros > 0, because a window whose
+			// every request the gateway SETTLED AT ZERO has priced requests and no dollars —
+			// snapshot.go requires that to render as a zero figure rather than as "cost
+			// unavailable", and the two are different answers. Adding a > 0 test here would
+			// withhold a figure we have. The reading that would actually be a lie — a real
+			// charge displayed as free — is refused by formatUSDCell, whose floor renders
+			// anything positive under half a cent as "<$0.01". See
+			// TestRenderSpendBand_UnpricedZeroAndSubCentAreThreeDifferentCells, which pins all
+			// three cells.
 			if snap.Priced && !negativeCost(snap.Totals.CostMicros) {
 				r.USD = float64(snap.Totals.CostMicros) / 1e6
 				r.Priced = true

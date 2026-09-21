@@ -12,40 +12,76 @@ import (
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
 )
 
-// TestFormatUSDCell_IsPrefixProbeable guards every "a surviving figure is never half a figure"
-// assertion in this package. They all work the same way — probe for a short prefix of the
-// figure, then require the whole thing — and that only detects a clip while the two are
-// DIFFERENT strings with the whole one longer.
+// figureProbe is the short prefix every "a surviving figure is never half a figure" assertion in
+// this package probes with — "$1." for "$1.12".
 //
-// RENAMED FROM TestRenderSpendStrip_TheClipAssertionCanActuallyFail, whose subject is gone:
-// paneView stopped calling renderSpendStrip when renderSpendBand replaced it. The PROPERTY is
-// not gone, because the band's clip assertion turns on exactly the same trick, so the guard
-// follows the property rather than the deleted renderer.
+// A NAMED FUNCTION rather than whole[:3] written out at each call site, because the guard below
+// tests the detector itself: a probe shape inlined at four call sites is four things to keep in
+// step, and the one that drifts is the one nobody notices.
+func figureProbe(whole string) string {
+	if len(whole) < 3 {
+		return whole
+	}
+	return whole[:3]
+}
+
+// clipsFigure reports whether line shows a HALF-RENDERED figure: the probe shape is present and
+// the whole figure is not.
 //
-// AND IT HAS NOW CAUGHT WHAT IT WAS WRITTEN FOR. Its original warning was that hardcoded
-// literals would leave a clip test asserting a format the code no longer produces. Moving the
-// formatter to two decimals did precisely that to the band's copy: the pair
-// Contains("$3.84") && !Contains("$3.8402") collapsed into Contains("$3.84") &&
-// !Contains("$3.84") — an `x && !x` that can never fire. Both sides are derived now.
-func TestFormatUSDCell_IsPrefixProbeable(t *testing.T) {
+// This is the detector the band's and the drawer's clip assertions call. It exists as a function
+// so that it can be held to its own contract — see TestClipsFigure_CanActuallyFail.
+func clipsFigure(line, whole string) bool {
+	return strings.Contains(line, figureProbe(whole)) && !strings.Contains(line, whole)
+}
+
+// TestClipsFigure_CanActuallyFail guards the detector every clip assertion in this package uses.
+// A clip test that cannot fail is worse than no clip test, because the suite reports it as
+// coverage.
+//
+// RENAMED TWICE, and the second rename is the point. It began as
+// TestRenderSpendStrip_TheClipAssertionCanActuallyFail, whose subject is gone — paneView stopped
+// calling renderSpendStrip when renderSpendBand replaced it — and became
+// TestFormatUSDCell_IsPrefixProbeable, which asserted the wrong thing:
+//
+//	clipped := whole[:i]                                   // a strict prefix of whole
+//	if strings.Contains(clipped, prefix) && strings.Contains(clipped, whole) { ... }
+//
+// A strict prefix can never contain the whole, so that branch was unreachable; and the companion
+// check on the correct line — !Contains("TODAY  $1.12", "$1.12") — was unreachable the other way.
+// Both t.Errorf bodies were dead code, leaving only the premise Fatalf able to fire. Deriving both
+// literals from formatUSDCell had removed ONE vacuity (the `x && !x` pair) and introduced another,
+// which is what happens when a test asserts a property of its own fixture arithmetic instead of a
+// property of the code.
+//
+// So the subject is now the DETECTOR, whose behaviour can be wrong: it must fire on every
+// truncation, stay silent on the whole figure, and stay silent on a cell that shows no figure at
+// all. Verified by mutation — dropping the "!" and swapping "&&" for "||" each fail here.
+func TestClipsFigure_CanActuallyFail(t *testing.T) {
 	whole := formatUSDCell(1.12)
-	prefix := whole[:3] // "$1." — the probe shape every clip assertion here uses
-	if !strings.HasPrefix(whole, prefix) || len(whole) <= len(prefix) {
+	probe := figureProbe(whole)
+	// THE PREMISE, and the original reason this test exists: the probe and the whole figure have
+	// to be different strings with the whole one longer, or the detector has nothing to compare.
+	if !strings.HasPrefix(whole, probe) || len(whole) <= len(probe) {
 		t.Fatalf("formatUSDCell(1.12) = %q, which the %q probe cannot describe: every clip "+
-			"assertion in this package needs rewriting alongside the formatter", whole, prefix)
+			"assertion in this package needs rewriting alongside the formatter", whole, probe)
 	}
 
-	// EVERY truncation that still trips the prefix probe, rather than a few hand-picked ones:
-	// a formatter with more digits gains more clipped forms, and they all have to be caught.
-	for i := len(prefix); i < len(whole); i++ {
-		clipped := whole[:i]
-		if strings.Contains(clipped, prefix) && strings.Contains(clipped, whole) {
-			t.Errorf("%q satisfied the whole-figure assertion; a clip test is blind to it", clipped)
+	// IT FIRES ON EVERY TRUNCATION that still shows the probe, rather than on a few hand-picked
+	// ones: a formatter with more digits gains more clipped forms and they all have to be caught.
+	for i := len(probe); i < len(whole); i++ {
+		if line := "TODAY  " + whole[:i]; !clipsFigure(line, whole) {
+			t.Errorf("clipsFigure(%q, %q) = false: a clipped figure reads as a real, smaller "+
+				"one, and this is the only thing looking for it", line, whole)
 		}
 	}
-	// ...and passes on the real, unclipped rendering, so it is not vacuously strict.
-	if line := "TODAY  " + whole; strings.Contains(line, prefix) && !strings.Contains(line, whole) {
-		t.Errorf("%q failed the whole-figure assertion; the clip test rejects correct output", line)
+	// AND NOT ON THE WHOLE FIGURE, or every correct render is reported as a clip.
+	if line := "TODAY  " + whole; clipsFigure(line, whole) {
+		t.Errorf("clipsFigure(%q, %q) = true for unclipped output", line, whole)
+	}
+	// AND NOT ON A CELL THAT SHOWS NO FIGURE AT ALL. The band has three outcomes per span — a
+	// figure, an em dash, and a dropped cell — and "not known here" is not a clipped figure.
+	if line := "TODAY  " + emptyCell; clipsFigure(line, whole) {
+		t.Errorf("clipsFigure(%q, %q) = true for a cell carrying no figure", line, whole)
 	}
 }
 
