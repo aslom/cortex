@@ -84,25 +84,9 @@ func TestRenderUnit_BothPlatforms(t *testing.T) {
 		// (cmd/authbridge-proxy/main.go), explicitly — not by accident of whatever
 		// systemd's own default happens to be. See the rationale comment above
 		// renderUnitFor's linux branch.
-		// Assert the actual invariant (greater than 15), not merely that the key is
-		// present: a regression to e.g. TimeoutStopSec=5 would satisfy a bare
-		// Contains check while defeating the entire point of setting it explicitly.
-		const timeoutKey = "TimeoutStopSec="
-		ti := strings.Index(u, timeoutKey)
-		if ti < 0 {
-			t.Fatal("no explicit TimeoutStopSec; stop relies on systemd's undocumented default, " +
-				"which could end up shorter than the proxy's 15s drain")
-		}
-		rest := u[ti+len(timeoutKey):]
-		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
-			rest = rest[:nl]
-		}
-		secs, perr := strconv.Atoi(strings.TrimSpace(rest))
-		if perr != nil {
-			t.Fatalf("TimeoutStopSec value %q is not a plain integer of seconds", rest)
-		}
-		if secs <= 15 {
-			t.Errorf("TimeoutStopSec=%d does not exceed the proxy's 15s drain", secs)
+		if !strings.Contains(u, "TimeoutStopSec=20\n") {
+			t.Error("TimeoutStopSec is missing or not 20; stop relies on an unasserted " +
+				"value, which could end up shorter than the proxy's 15s drain")
 		}
 		// StartLimit* must sit in [Unit]. systemd moved them there in v229 and
 		// deprecated them in [Service], where they can be ignored outright —
