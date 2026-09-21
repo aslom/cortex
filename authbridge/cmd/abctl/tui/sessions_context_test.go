@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,43 +12,143 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
 
-// inferenceAt builds a response event whose prompt side sums to want.
-func inferenceAt(at time.Time, input, cacheRead, cacheWrite int) pipeline.SessionEvent {
-	return pipeline.SessionEvent{
-		At:        at,
-		Direction: pipeline.Outbound,
-		Phase:     pipeline.SessionResponse,
-		Inference: &pipeline.InferenceExtension{
-			Model:            "claude-opus-5",
-			InputTokens:      input,
-			CacheReadTokens:  cacheRead,
-			CacheWriteTokens: cacheWrite,
-		},
+// toolsOf builds a manifest of n tools. Only its LENGTH matters to sessionContext: a request that
+// carries any tools is an agentic conversation, one that carries none is a one-shot completion.
+func toolsOf(n int) []pipeline.InferenceTool {
+	out := make([]pipeline.InferenceTool, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, pipeline.InferenceTool{Name: fmt.Sprintf("Tool%02d", i)})
+	}
+	return out
+}
+
+// exchange is a request/response pair as the store records one: the manifest and the message count
+// on both sides, the token counts on the response, since the provider is the only party that
+// tokenizes.
+func exchange(id string, at time.Time, msgs, ntools, input, cacheRead int) []pipeline.SessionEvent {
+	inf := func() *pipeline.InferenceExtension {
+		return &pipeline.InferenceExtension{
+			Model:    "claude-opus-5",
+			Messages: make([]pipeline.InferenceMessage, msgs),
+			Tools:    toolsOf(ntools),
+		}
+	}
+	respInf := inf()
+	respInf.InputTokens, respInf.CacheReadTokens = input, cacheRead
+	return []pipeline.SessionEvent{
+		{At: at, RequestID: id, Phase: pipeline.SessionRequest,
+			Direction: pipeline.Outbound, Inference: inf()},
+		{At: at.Add(time.Second), RequestID: id, Phase: pipeline.SessionResponse,
+			Direction: pipeline.Outbound, Inference: respInf},
 	}
 }
 
-// THE LATEST REQUEST, not the largest and not the sum.
-//
-// A conversation's context is whatever it currently carries. TOKENS beside this column already
-// answers "how much has this session spent in total", so a gauge fed the sum would be the same
-// question twice — and one fed the maximum would keep showing a context the session has since
-// compacted away.
-func TestSessionContext_ReadsTheLatestRequest(t *testing.T) {
+// conversation is an agentic turn: 27 tools, as every main-thread request measured carried.
+func conversation(id string, at time.Time, msgs, context int) []pipeline.SessionEvent {
+	return exchange(id, at, msgs, 27, 300, context-300)
+}
+
+// oneShot is a title / quota / summary call: no tools, three messages, and — the part that
+// matters — a context that can be large.
+func oneShot(id string, at time.Time, context int) []pipeline.SessionEvent {
+	return exchange(id, at, 3, 0, 300, context-300)
+}
+
+// THE CASE THIS COLUMN WAS REPORTED FOR. Real interleaving from one live session: a conversation
+// at ~1500 messages and 830-851k, with one-shots at 3 messages carrying 282k and 6k landing
+// between its turns. Before this rule the gauge followed whichever spoke last, swinging 83% to
+// 0.7% between adjacent turns.
+func TestSessionContext_IgnoresOneShotsBetweenTurns(t *testing.T) {
 	base := time.Now()
-	events := []pipeline.SessionEvent{
-		inferenceAt(base, 500, 900_000, 0),                          // the largest, and not the answer
-		{At: base.Add(time.Second), Phase: pipeline.SessionRequest}, // no Inference at all
-		inferenceAt(base.Add(2*time.Second), 300, 120_000, 4_000),
+	at := func(n int) time.Time { return base.Add(time.Duration(n) * time.Minute) }
+	var evs []pipeline.SessionEvent
+	for _, e := range [][]pipeline.SessionEvent{
+		conversation("c1", at(1), 1491, 830_000),
+		oneShot("o1", at(2), 282_145),
+		oneShot("o2", at(3), 282_493),
+		conversation("c2", at(4), 1494, 835_000),
+		oneShot("o3", at(5), 6_538),
+		conversation("c3", at(6), 1509, 851_000),
+		oneShot("o4", at(7), 7_000), // the most recent event of all
+	} {
+		evs = append(evs, e...)
 	}
 
-	if got, want := sessionContext(events), 124_300; got != want {
-		t.Errorf("sessionContext = %d, want %d (input+cacheRead+cacheWrite of the LAST one)",
+	if got, want := sessionContext(evs), 851_000; got != want {
+		t.Errorf("sessionContext = %d, want %d — the conversation's latest turn, not the "+
+			"one-shot that spoke after it", got, want)
+	}
+}
+
+// A ONE-SHOT RUN OF ANY LENGTH MUST NOT WIN, which is why there is no window: the conversation
+// goes silent while a subagent works, and that silence is structural rather than evidence it has
+// gone. Thirty one-shots after the last conversation turn is past any last-N window.
+func TestSessionContext_SurvivesALongSilence(t *testing.T) {
+	base := time.Now()
+	evs := conversation("c1", base, 700, 445_000)
+	for i := 0; i < 30; i++ {
+		evs = append(evs, oneShot(fmt.Sprintf("o%d", i),
+			base.Add(time.Duration(i+1)*time.Minute), 186_870)...)
+	}
+
+	if got, want := sessionContext(evs), 445_000; got != want {
+		t.Errorf("sessionContext = %d, want %d — a silent conversation must not age out",
 			got, want)
+	}
+}
+
+// Among conversation turns the most messages wins, and equal counts keep the most recent. The
+// message count is what identifies the main thread: a subagent carrying its own tools IS a
+// candidate, and cannot out-message a long conversation.
+func TestSessionContext_MostMessagesWinsTiesGoToTheLatest(t *testing.T) {
+	base := time.Now()
+	var evs []pipeline.SessionEvent
+	for _, e := range [][]pipeline.SessionEvent{
+		conversation("main", base, 700, 445_000),
+		conversation("sub", base.Add(time.Minute), 12, 40_000),       // a tool-carrying subagent
+		conversation("main2", base.Add(2*time.Minute), 700, 448_000), // ties on messages
+	} {
+		evs = append(evs, e...)
+	}
+
+	if got, want := sessionContext(evs), 448_000; got != want {
+		t.Errorf("sessionContext = %d, want %d", got, want)
+	}
+}
+
+// Belt and braces: a response carrying tools whose REQUEST did not is not a candidate. The two
+// have never been seen to disagree — 117 pairs, no divergence — so this guards a shape that has
+// not happened rather than one that has.
+func TestSessionContext_RequiresTheRequestToCarryToolsToo(t *testing.T) {
+	base := time.Now()
+	evs := conversation("c1", base, 40, 90_000)
+	odd := conversation("c2", base.Add(time.Minute), 900, 500_000)
+	odd[0].Inference.Tools = nil // the request lost its manifest
+
+	if got, want := sessionContext(append(evs, odd...)), 90_000; got != want {
+		t.Errorf("sessionContext = %d, want %d — the unpaired response must not win", got, want)
+	}
+}
+
+// An event with no RequestID cannot be paired, and excluding it would blank the column against an
+// older proxy. Its own manifest stands in.
+func TestSessionContext_UnpairableEventFallsBackToItsOwnManifest(t *testing.T) {
+	evs := []pipeline.SessionEvent{{
+		At: time.Now(), Phase: pipeline.SessionResponse, Direction: pipeline.Outbound,
+		Inference: &pipeline.InferenceExtension{
+			Model: "claude-opus-5", Messages: make([]pipeline.InferenceMessage, 50),
+			Tools: toolsOf(27), InputTokens: 1_000, CacheReadTokens: 99_000,
+		},
+	}}
+
+	if got, want := sessionContext(evs), 100_000; got != want {
+		t.Errorf("sessionContext = %d, want %d", got, want)
 	}
 }
 
 // Nothing to say is zero, which the gauge renders as a dash rather than an empty track.
 func TestSessionContext_ZeroWhenNothingCanBeSaid(t *testing.T) {
+	base := time.Now()
 	for _, tc := range []struct {
 		name   string
 		events []pipeline.SessionEvent
@@ -56,9 +157,12 @@ func TestSessionContext_ZeroWhenNothingCanBeSaid(t *testing.T) {
 		{"no inference on any event", []pipeline.SessionEvent{
 			{Phase: pipeline.SessionRequest}, {Phase: pipeline.SessionResponse},
 		}},
-		{"an inference with no prompt counts", []pipeline.SessionEvent{
-			inferenceAt(time.Now(), 0, 0, 0),
-		}},
+		// Every request a one-shot: there is no conversation to report on, and reporting a
+		// one-shot's own context is the defect this rule exists to fix.
+		{"one-shots only", append(oneShot("o1", base, 60_000), oneShot("o2", base, 61_000)...)},
+		// A conversation whose response reported no token counts at all — through exchange
+		// directly, because conversation() takes a context and cannot express zero.
+		{"a conversation with no prompt counts", exchange("c1", base, 40, 27, 0, 0)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := sessionContext(tc.events); got != 0 {
@@ -81,17 +185,12 @@ func TestContextGauge(t *testing.T) {
 		{"full", 1_000_000, 10, "▕████████▏"},
 		// A NON-ZERO CONTEXT NEVER RENDERS AS AN EMPTY TRACK. tierBar's rule, inherited: 8,200
 		// of a million is 0.8%, which rounds to no block at all, so it gets the sliver instead.
-		// An empty track beside a live session reads as a rendering fault.
 		{"a sliver rather than nothing", 8_200, 10, "▕▏       ▏"},
 		// Unknown is the em dash COST and SAVED use, and it must not be confusable with the
 		// sliver above — which is the whole reason the brackets are drawn.
 		{"unknown", 0, 10, emptyCell},
-		// Over the window: capped rather than overflowing its column.
 		{"past the window", 1_400_000, 10, "▕████████▏"},
-		// Narrow terminals shrink the track with the column.
 		{"the narrowest useful gauge", 500_000, 3, "▕▌▏"},
-		// Below that there is nothing to draw; a bracket pair alone would claim a scale it
-		// cannot show.
 		{"too narrow to say anything", 500_000, 2, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,8 +198,6 @@ func TestContextGauge(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("contextGauge(%d, %d) = %q, want %q", tc.tokens, tc.width, got, tc.want)
 			}
-			// Exactly the column's width, so every row's gauge starts and ends in the same
-			// place and the fills can be compared down the column by eye.
 			if tc.want != "" && tc.want != emptyCell {
 				if w := lipgloss.Width(got); w != tc.width {
 					t.Errorf("gauge is %d columns, want %d: %q", w, tc.width, got)
@@ -119,7 +216,7 @@ func TestSessionsTable_ContextColumnReplacesActive(t *testing.T) {
 		ID: "ctx", UpdatedAt: time.Now(), EventCount: 3, TotalTokens: 500_000,
 	}}
 	m.events = map[string][]pipeline.SessionEvent{
-		"ctx": {inferenceAt(time.Now(), 1_000, 499_000, 0)},
+		"ctx": conversation("c1", time.Now(), 600, 500_000),
 	}
 	m.rebuildSessionsTable()
 
@@ -133,7 +230,6 @@ func TestSessionsTable_ContextColumnReplacesActive(t *testing.T) {
 	if last != contextColumnTitle {
 		t.Fatalf("last column is %q, want %s", last, contextColumnTitle)
 	}
-	// The heading states the denominator, because a gauge with no scale is a decoration.
 	if !strings.Contains(contextColumnTitle, "1M") {
 		t.Errorf("the heading does not name its denominator: %q", contextColumnTitle)
 	}
@@ -142,7 +238,6 @@ func TestSessionsTable_ContextColumnReplacesActive(t *testing.T) {
 	if len(row) != len(cols) {
 		t.Fatalf("row has %d cells against %d columns", len(row), len(cols))
 	}
-	// 500k of 1M: a gauge half full, drawn to the fitted width.
 	cell := row[len(row)-1]
 	if !strings.Contains(cell, "▕") || !strings.Contains(cell, "█") {
 		t.Errorf("last cell is not a gauge: %q", cell)

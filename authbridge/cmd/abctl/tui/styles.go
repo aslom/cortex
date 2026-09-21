@@ -24,6 +24,15 @@ var (
 	// of the ramp to stay legible — white on the darker light-theme grounds, near
 	// black on the lighter dark-theme ones.
 	colorOnSeries = lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#111827"}
+
+	// colorSelectedBg is the row a table's cursor is on — see tableStyles for why selection is
+	// a tint rather than a reverse.
+	//
+	// A BACKGROUND, so the cells' own ink is left alone: the sessions table's context gauge
+	// encodes its value as ink, and anything that swaps ink for background reads it backwards.
+	// Mid-tone in both themes for the same reason colorOnSeries is inverted relative to the
+	// palette — it has to sit under default-foreground text without hiding it.
+	colorSelectedBg = lipgloss.AdaptiveColor{Light: "#D7D7FF", Dark: "#303050"}
 )
 
 var (
@@ -78,19 +87,38 @@ func protoStyle(proto string) lipgloss.Style {
 // bubbles' DefaultStyles so cell padding, borders, and other layout rules
 // come through unchanged.
 //
-// The Selected style is intentionally minimal (Reverse only, no fg/bg) so
-// per-cell protocol coloring survives the nesting: bubbles/table wraps the
-// whole row with Selected.Render, which would otherwise be clobbered by
-// the inner \x1b[0m reset my styled cells emit. Reverse uses a small
-// escape (\x1b[7m) that reappears reliably after full resets in most
-// terminals, giving a clear selection indicator without fighting per-cell
-// color.
+// SELECTION IS A BACKGROUND TINT, NOT A REVERSE, and the reason is the sessions table's
+// CONTEXT(1M) gauge. bubbles wraps the whole row in Selected.Render, so reverse video swapped
+// ink and background for every cell in it — and a gauge encodes its value AS ink. The filled
+// blocks rendered in the background colour (reading as empty) while the blank track rendered in
+// the foreground (reading as filled), so the highlighted row showed 44% as ~56%, from the wrong
+// side. Any density-encoded figure has the same problem; only position and pattern survive an
+// inversion.
+//
+// The previous comment here said Reverse was deliberate, to keep per-cell protocol colouring
+// from being clobbered by the row style. That colouring does not exist: protoStyle and the
+// styleProto* palette have no callers outside styles.go, so nothing was being protected.
+//
+// Colouring the GAUGE instead was the first thing tried and is not possible in this table: a
+// styled cell carries escape bytes, runewidth.StringWidth counts them (an 11-column gauge
+// measures 24), and renderRow truncates with runewidth BEFORE styling — so the cell comes back
+// as a lone "…". Same mechanism as the mangled marker that
+// TestSessionsPicker_CachedMarkerRendersIntact pins. bubbles v1.0.0 has no per-column style, so
+// the row style is the only lever there is.
+//
+// What this costs: a terminal with no colour (the Ascii profile) drops the background and the
+// selected row is left bold only, where reverse video would have survived. Accepted knowingly —
+// a bold row is still marked, and a gauge that lies on the selected row is worse than a
+// selection that is merely quieter in monochrome.
+//
+// ONE STYLE FOR EVERY TABLE. Scoping this to the sessions table would have left one pane
+// tinting its selection and five inverting theirs.
 func tableStyles() table.Styles {
 	s := table.DefaultStyles()
 	s.Header = s.Header.
 		Foreground(colorAccent).
 		BorderForeground(colorMuted).
 		Bold(true)
-	s.Selected = lipgloss.NewStyle().Reverse(true).Bold(true)
+	s.Selected = lipgloss.NewStyle().Bold(true).Background(colorSelectedBg)
 	return s
 }
