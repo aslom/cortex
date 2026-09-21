@@ -22,7 +22,24 @@ func TestSpanReadings_ANegativeTotalIsUnpricedNotARefund(t *testing.T) {
 	for span := spendSpan(0); span < numSpendSpans; span++ {
 		def := spendSpanDefs[span]
 		t.Run(def.label, func(t *testing.T) {
+			// EVERY OTHER CHAIN ANSWERS HEALTHILY, so the em-dash assertion below can only be
+			// satisfied by the refusal under test. With one chain populated the other three have
+			// no snapshot and render em dashes of their own, which made that check pass whatever
+			// this guard did — true for a reason unrelated to the property.
 			m := &model{}
+			for other := spendSpan(0); other < numSpendSpans; other++ {
+				if other == span {
+					continue
+				}
+				m.spend.chains[other].snap = &usage.Snapshot{
+					Window: spendSpanDefs[other].window,
+					Totals: usage.Counts{
+						Requests: 10, CostMicros: 4_040_000,
+						PricedRequests: 10, PriceableRequests: 10,
+					},
+					Priced: true,
+				}
+			}
 			m.spend.chains[span].snap = &usage.Snapshot{
 				Window: def.window,
 				Totals: usage.Counts{
@@ -45,7 +62,13 @@ func TestSpanReadings_ANegativeTotalIsUnpricedNotARefund(t *testing.T) {
 					def.label, line)
 			}
 			if !strings.Contains(line, emptyCell) {
-				t.Errorf("%s: band has no %q for a total it refused:\n%s", def.label, emptyCell, line)
+				t.Errorf("%s: band has no %q for a total it refused, so the impossible figure was "+
+					"rendered as a number:\n%s", def.label, emptyCell, line)
+			}
+			// And exactly one cell is withheld: the refusal is this span's, not the band's.
+			if n := strings.Count(line, emptyCell); n != 1 {
+				t.Errorf("%s: %d cells carry %q, want 1 — one impossible total must not blank its "+
+					"neighbours:\n%s", def.label, n, emptyCell, line)
 			}
 		})
 	}

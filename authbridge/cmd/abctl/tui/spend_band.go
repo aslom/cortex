@@ -1,8 +1,9 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // spendBandLines is the band's height: labels, then values.
@@ -21,11 +22,24 @@ const bandGutter = 2
 type bandCell struct{ label, value string }
 
 // width is what the pair needs: the wider of its halves, since they share a column.
+//
+// lipgloss.Width, never len() and never a rune count — the rule this package states at
+// renderSpendStrip and the one footer.go records the cost of breaking. It is not merely style
+// here: the values carry markers and an em dash, and the PADDING below measures with the same
+// function, so measurement and padding cannot disagree about a cell.
+//
+// It does NOT fix an East-Asian ambiguous width, and it is worth saying so rather than leaving
+// the next reader to assume it did. U+2014 is ambiguous-width, and a terminal under an EA locale
+// gives it two columns while lipgloss v1.1.0 reports 1 either way — measured, including with
+// go-runewidth's EastAsianWidth forced on, where runewidth says 2 and lipgloss still says 1. So
+// an em-dash band under that locale under-counts no matter which of these two functions is used;
+// what changes is that the band now under-counts the same way the table, the strip and the footer
+// do, instead of in its own private way.
 func (c bandCell) width() int {
-	if n := len([]rune(c.value)); n > len([]rune(c.label)) {
+	if n := lipgloss.Width(c.value); n > lipgloss.Width(c.label) {
 		return n
 	}
-	return len([]rune(c.label))
+	return lipgloss.Width(c.label)
 }
 
 // bandDropOrder is the order cells are given up in as the terminal narrows, FIRST DROPPED
@@ -118,8 +132,11 @@ func renderSpendBand(s spendSummary, width int) []string {
 			values.WriteString(strings.Repeat(" ", bandGutter))
 		}
 		first = false
-		fmt.Fprintf(&labels, "%*s", cw, cells[span].label)
-		fmt.Fprintf(&values, "%*s", cw, cells[span].value)
+		// padLeft, not Fprintf("%*s"): fmt pads to a RUNE count, so a cell measured in display
+		// columns and padded in runes disagree with each other the moment either half of a cell
+		// is not plain ASCII.
+		labels.WriteString(padLeft(cells[span].label, cw))
+		values.WriteString(padLeft(cells[span].value, cw))
 	}
 	// Two lines whatever happened, including when nothing survived: an empty band is two
 	// blank lines, never zero. See spendBandLines.

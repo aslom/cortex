@@ -111,6 +111,18 @@ func TestStartOfLocalMonth_TheNaiveFirstOfMonthExpressionIsStillWrong(t *testing
 // month. Stated as a test because it is the reason StartOfLocalMonth is four lines rather than
 // forty: a boundary derived twice is a boundary that drifts, which is the lesson
 // StartOfLocalDay's own doc records about the copy sessionapi used to keep.
+//
+// AND IT IS AN IDENTITY CHECK, NOT ZONE COVERAGE — worth saying, because the loop below looks
+// like eight zones' worth of evidence and is not. `want` is StartOfLocalMonth's own body written
+// out, so every one of these iterations compares the implementation with itself and they cannot
+// disagree while the delegation stands. What the sweep is FOR is the case where it stops standing:
+// a reimplementation that is only wrong in some zones or some months fails here rather than
+// passing a single hand-picked date.
+//
+// The zone-specific power in this file is elsewhere and should be counted there:
+// TestStartOfLocalMonth_FindsTheFirstInstantThatExists derives its expectation from the returned
+// value rather than from the expression, and the Asunción case is the negative control that fails
+// the naive first-of-month expression.
 func TestStartOfLocalMonth_IsStartOfLocalDayOnTheFirst(t *testing.T) {
 	for _, zone := range monthZones {
 		loc := mustZone(t, zone)

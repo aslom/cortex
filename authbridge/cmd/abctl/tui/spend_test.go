@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
@@ -985,7 +987,10 @@ func TestSpendSummary_AFreshFigureCarriesNoAge(t *testing.T) {
 	// after lastFetch is set, so an age of exactly spendStaleAfter is already past it by
 	// the time spendSummary looks. Pinning the exact boundary would need an injected
 	// clock, and what matters is that a figure inside the window is silent.
-	for _, age := range []time.Duration{0, time.Second, spendPollInterval, spendStaleAfter - time.Second} {
+	// The last entry keeps HALF A POLL INTERVAL of margin rather than one second: the age is
+	// measured against wall time, so a second is a second of budget for -race or a loaded runner
+	// before "inside the window" becomes "past it" for reasons unrelated to freshness.
+	for _, age := range []time.Duration{0, time.Second, spendPollInterval, spendStaleAfter - spendPollInterval/2} {
 		m := &model{}
 		m.spend.chains[spanHour].snap = &usage.Snapshot{
 			Window: "1h",
@@ -1289,5 +1294,34 @@ func TestSpendSummary_AFailedWindowPollStillCarriesTheDayFigure(t *testing.T) {
 	}
 	if !strings.Contains(band, "TODAY") {
 		t.Errorf("band %q carries the figure without labelling its span", band)
+	}
+}
+
+// A NON-POSITIVE CADENCE MUST NOT BECOME AN UNBOUNDED POLL. spendSpanDefs is a keyed array
+// literal, so a span added without an interval carries zero — and tea.Tick(0) fires at once and
+// reschedules at zero, which is one /v1/usage request per event-loop iteration against the proxy.
+//
+// TestSpendSpanDefs_EverySpanIsComplete is the guard that catches the mistake; this asserts what it
+// costs if that guard is ever bypassed, and that the answer is not "a request storm". Asserted by
+// timing the command rather than by reading the constant: tea.Tick's duration is not observable, so
+// the only honest evidence is that the message does not arrive immediately.
+func TestSpendTick_AZeroCadenceDoesNotFireImmediately(t *testing.T) {
+	saved := spendSpanDefs[spanMonth].interval
+	spendSpanDefs[spanMonth].interval = 0
+	defer func() { spendSpanDefs[spanMonth].interval = saved }()
+
+	cmd := spendTick(spanMonth, 1)
+	if cmd == nil {
+		t.Fatal("spendTick returned nil for a zero cadence: the span is then never polled, which " +
+			"is a permanent em dash with no explanation")
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	select {
+	case msg := <-done:
+		t.Errorf("a zero-cadence tick delivered %T immediately; rescheduling on that would poll "+
+			"the proxy once per loop iteration", msg)
+	case <-time.After(250 * time.Millisecond):
+		// Still waiting, which is the whole assertion: the cadence was clamped to something real.
 	}
 }

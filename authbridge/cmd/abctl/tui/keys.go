@@ -193,6 +193,16 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// should find it as the operator left it.
 			if m.spendDrawerVisible() {
 				m.spend.expanded = false
+				// AND THE SAME INVALIDATION `$` DOES, for the same reason: the drawer owns a poll
+				// chain, a reply already in the air outlives the keypress by up to
+				// spendFetchTimeout, and storing it would leave a snapshot the next open renders
+				// before its own first poll lands. Closing by esc and closing by `$` are the same
+				// event and must leave the same state.
+				//
+				// It is currently harmless to omit only because the OPEN path invalidates too —
+				// and that call is there for snapshot freshness, so an esc close relying on it is
+				// relying on something that is not about closing at all. See toggleSpendDrawer.
+				m.spend.drawer.invalidate()
 				// Same reason toggleSpendDrawer re-lays out: the reserved rows have to go back.
 				m.layout()
 				return nil

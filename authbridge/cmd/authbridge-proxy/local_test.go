@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -572,11 +573,22 @@ func TestBuiltinConfig_CommentedRetentionDoesNotTruncateAMonth(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 
+	// THE SKIP IS GATED ON THE SETTING BEING ABSENT, not on this pattern matching.
+	//
+	// t.Skip when the regexp misses turns any reformatting of that comment — a different indent, a
+	// quoted value, the line wrapped — into a silently passing no-op, on exactly the assertion that
+	// keeps the generated config from suggesting a retention that truncates window=month. So
+	// absence is checked separately and coarsely: if "retention_days" appears anywhere, the example
+	// exists and a pattern that cannot read it is this test's own bug, reported as a failure. Only
+	// a file that never mentions it has nothing to uncomment.
 	re := regexp.MustCompile(`(?m)^\s*#\s*retention_days:\s*(\d+)`)
 	m := re.FindSubmatch(raw)
 	if m == nil {
-		// Not a failure if the example is gone entirely — there is then nothing to uncomment.
-		t.Skip("the generated config carries no commented retention_days example")
+		if !bytes.Contains(raw, []byte("retention_days")) {
+			t.Skip("the generated config carries no retention_days example at all")
+		}
+		t.Fatalf("the generated config mentions retention_days but %v does not match it, so this "+
+			"test would have passed while checking nothing. Config:\n%s", re, raw)
 	}
 	got, err := strconv.Atoi(string(m[1]))
 	if err != nil {

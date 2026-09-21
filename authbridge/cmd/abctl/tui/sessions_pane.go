@@ -403,7 +403,7 @@ const emptyCell = "—"
 // them there. A marker that rides ON the figure is the point: a cell can be truncated to
 // nothing but while the number is on screen its caveat is too.
 // budget is the column's FITTED width, and the figure is rendered less precisely rather than
-// wider when four decimals will not fit.
+// wider when the cents form will not fit.
 //
 // A bubbles table does not re-flow an overflowing cell, it truncates — and truncating a money
 // figure produces a smaller figure that reads as real, which is the one thing every surface here
@@ -412,11 +412,12 @@ const emptyCell = "—"
 // ("~$9223372036854.7754+", twenty-one) because the marker that says "this is a floor" is
 // appended to the longest value there is.
 //
-// PRECISION IS WHAT YIELDS, in order: four decimals, two, none, then humanizeCount's compact
-// form, which is itself width-bounded and clamps at ">999T". Four decimals are worth having on a
-// cent-scale figure and are noise on a four-figure one, so the ladder costs nothing where it
-// matters. The last candidate always fits a sane column, and is returned unconditionally so this
-// cannot fall through to an unbounded string.
+// PRECISION IS WHAT YIELDS, in order: cents, whole dollars, then humanizeCount's compact form,
+// which is itself width-bounded and clamps at ">999T". THREE RUNGS, not four — the four-decimal
+// rung went when formatUSDCell became two decimals, because the two then rendered the identical
+// string and the ladder had a step that could not change the outcome. The last candidate always
+// fits a sane column, and is returned unconditionally so this cannot fall through to an unbounded
+// string.
 // NO avoided PARAMETER any more. It existed only to add inexactMarker, and once that moved to
 // the SAVED heading this function rendered COST and SAVED identically — so the flag selected
 // between two paths that had become one. Kept as a parameter it would have been a lie about
@@ -468,9 +469,16 @@ func sessionMoneyCell(micros int64, saturated bool, budget int) string {
 		}
 	}
 	// NOTHING FITS — or nothing that can be shown WITHOUT rounding a real charge to zero — so
-	// nothing is shown. Both are reachable at the narrowest width these columns survive at: the
-	// compact form plus both markers is seven columns against a budget the fitter can squeeze to
-	// six, and a sub-cent charge has no honest form shorter than "<$0.0001".
+	// nothing is shown.
+	//
+	// A GUARD, NOT A LIVE PATH, as the columns are fitted today, and the measurements say so: the
+	// narrowest fitted budget either money column reaches is EIGHT, and at eight every case has a
+	// form that fits — a sub-cent charge is "<$0.01" at six, and a saturated near-int64 total is
+	// "$9.2G+" at six. It becomes reachable below six columns, which this fitter does not produce.
+	//
+	// An earlier version of this comment claimed both halves were reachable "at a budget the
+	// fitter can squeeze to six" with "<$0.0001" as the sub-cent form. Neither is true after the
+	// move to cents: that form is now two columns shorter and the floor is eight, not six.
 	//
 	// The em dash rather than a truncation, and rather than dropping the markers to buy two
 	// columns: a clipped figure is a smaller figure that reads as real, and the markers are the

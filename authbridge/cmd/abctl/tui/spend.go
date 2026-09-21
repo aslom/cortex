@@ -842,6 +842,20 @@ func spendTick(span spendSpan, gen uint64) tea.Cmd {
 		return nil
 	}
 	d := spendSpanDefs[span].interval
+	// A NON-POSITIVE CADENCE IS CLAMPED, NOT HONOURED. spendSpanDefs is a keyed array literal, so a
+	// fifth span added without an interval compiles with zero — and tea.Tick(0) fires immediately,
+	// reschedules at zero, and turns the poll chain into an unbounded stream of /v1/usage requests
+	// at the proxy. TestSpendSpanDefs_EverySpanIsComplete is the guard that catches that at
+	// development time and is where the mistake should be reported; this bounds what it costs if it
+	// ever reaches a terminal.
+	//
+	// CLAMPED RATHER THAN DROPPED, because returning nil here would leave the new span silently
+	// unpolled — the precise failure startSpendPolling's doc promises cannot happen. A span polled
+	// too slowly is a dated figure that says so; a span never polled is a permanent em dash with no
+	// explanation.
+	if d <= 0 {
+		d = spendPollInterval
+	}
 	return tea.Tick(d, func(time.Time) tea.Msg { return spendTickMsg{span: span, gen: gen} })
 }
 

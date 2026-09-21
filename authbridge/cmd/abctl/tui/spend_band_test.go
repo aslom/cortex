@@ -233,6 +233,18 @@ func TestRenderSpendBand_HeightIsConstantAndFiguresDropWhole(t *testing.T) {
 		// !Contains("$3.8402"), and retuning the literals for a two-decimal formatter collapsed
 		// both sides onto "$3.84" — an `x && !x` that could never fire. The detector has its own
 		// guard now; see TestClipsFigure_CanActuallyFail.
+		//
+		// IT CANNOT FIRE AS THE BAND IS WRITTEN TODAY, and that is deliberate rather than
+		// overlooked. renderSpendBand emits every cell through padLeft and then trims trailing
+		// spaces, so it only ever PADS: under width pressure it gives up whole cells and has no
+		// path that shortens one. This is a guard against a CHANGE, not a claim about current
+		// behaviour — and the change it guards against is one this package has already been bitten
+		// by, where a width budget met by truncation ate the end of a cell (the table layer's
+		// runewidth.Truncate hazard, which is not ANSI-aware either).
+		//
+		// Note how this differs from the assertions this branch deleted for being unreachable:
+		// those could not fail because of their own arithmetic, where this cannot fail because the
+		// subject is currently correct. The first is a broken test; the second is an invariant.
 		for span := spendSpan(0); span < numSpendSpans; span++ {
 			whole := formatUSDCell(bandSummary().Spans[span].USD)
 			if clipsFigure(lines[1], whole) {
@@ -469,13 +481,21 @@ func TestSpanReadings_StalenessIsMeasuredAgainstEachSpansOwnCadence(t *testing.T
 			}
 			// Just inside twice its own interval: still healthy, so one dropped reply is not
 			// an alarm.
-			m.spend.chains[span].lastFetch = now.Add(-2*def.interval + time.Second)
+			//
+			// HALF AN INTERVAL OF MARGIN, not one second. `now` is captured once above and reused
+			// across four subtests, and the threshold is an inequality against wall time — so a
+			// second of margin is a second of budget for the race detector, a loaded CI runner or
+			// a GC pause, after which "just inside" silently becomes "past" and the assertion
+			// fails for a reason that has nothing to do with staleness. The margin scales with the
+			// cadence, so the hour keeps twenty seconds and the slow spans keep two and a half
+			// minutes, and the property under test is unchanged: the threshold is 2x the interval.
+			m.spend.chains[span].lastFetch = now.Add(-2*def.interval + def.interval/2)
 			if got := m.spanReadings()[span]; got.Stale {
 				t.Errorf("%s: stale just inside 2x its %v interval; one missed reply must not "+
 					"alarm", def.label, def.interval)
 			}
 			// Past twice its own interval: now it is worth saying.
-			m.spend.chains[span].lastFetch = now.Add(-2*def.interval - time.Second)
+			m.spend.chains[span].lastFetch = now.Add(-2*def.interval - def.interval/2)
 			got := m.spanReadings()[span]
 			if !got.Stale {
 				t.Errorf("%s: not stale past 2x its %v interval — a wedged chain is "+
@@ -540,6 +560,71 @@ func TestRenderSpendBand_HealthySlowSpansDoNotWidenTheBand(t *testing.T) {
 		if !strings.Contains(lines[0], spendSpanDefs[span].label) {
 			t.Errorf("at width 40, %s was dropped from a band where every chain answered on "+
 				"schedule:\n%s", spendSpanDefs[span].label, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// bandDropOrder MUST BE A PERMUTATION of the spans, and that is a structural hazard rather than a
+// style point: it is a POSITIONAL array literal, so raising numSpendSpans to five leaves element
+// four at the zero value — spanHour, a duplicate — and the new span is then never dropped at all.
+//
+// The fit loop walks this order exactly numSpendSpans times, so a duplicate costs it one of its
+// only chances to shed a cell: it can exit with bandWidth still above the terminal width, the band
+// renders wider than its column budget, wraps to three lines against layout()'s two-line
+// reservation, and pushes the footer off the bottom. That is the failure the whole drop ladder
+// exists to prevent, reintroduced by an array literal that compiled.
+func TestBandDropOrder_IsAPermutationOfEverySpan(t *testing.T) {
+	var seen [numSpendSpans]int
+	for i, span := range bandDropOrder {
+		if !span.valid() {
+			t.Fatalf("bandDropOrder[%d] = %d, which is not a span", i, span)
+		}
+		seen[span]++
+	}
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		switch seen[span] {
+		case 1:
+		case 0:
+			t.Errorf("%s is missing from bandDropOrder, so it can never be dropped and the band "+
+				"can render wider than the terminal", spendSpanDefs[span].label)
+		default:
+			t.Errorf("%s appears %d times in bandDropOrder, which spends another span's turn to "+
+				"drop", spendSpanDefs[span].label, seen[span])
+		}
+	}
+}
+
+// THE FOUR FIXTURE PROBES MUST BE PAIRWISE DISTINCT, or the clip assertion above can be satisfied
+// by the wrong cell.
+//
+// clipsFigure looks for a three-rune prefix anywhere in the value row — "$21" for $216.44 — so two
+// fixture amounts sharing a prefix ("$216.44" and "$21.50") would let one cell's text answer for
+// the other, and a genuinely clipped figure could pass because its neighbour happened to contain
+// the probe. The current amounts are distinct by luck of choosing four magnitudes; this makes it a
+// requirement, so a future fixture edit fails here rather than quietly weakening the clip check.
+func TestBandFixtureProbes_DoNotCrossMatch(t *testing.T) {
+	s := bandSummary()
+	seen := map[string]spendSpan{}
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		probe := figureProbe(formatUSDCell(s.Spans[span].USD))
+		if other, dup := seen[probe]; dup {
+			t.Errorf("%s and %s both probe as %q, so either cell can satisfy the other's "+
+				"whole-figure assertion", spendSpanDefs[other].label, spendSpanDefs[span].label, probe)
+		}
+		seen[probe] = span
+	}
+	// And no probe is a substring of another whole figure, which is the same hazard by a longer
+	// route: "$70" would match inside "$1,708.20" if the fixtures ever grew a thousands separator.
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		probe := figureProbe(formatUSDCell(s.Spans[span].USD))
+		for other := spendSpan(0); other < numSpendSpans; other++ {
+			if other == span {
+				continue
+			}
+			if whole := formatUSDCell(s.Spans[other].USD); strings.Contains(whole, probe) {
+				t.Errorf("%s's probe %q appears inside %s's figure %q", spendSpanDefs[span].label,
+					probe, spendSpanDefs[other].label, whole)
+			}
 		}
 	}
 }
