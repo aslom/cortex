@@ -20,11 +20,13 @@ import (
 // Query parameters:
 //
 //	window      10m (default), or any multiple of the bucket width up to the ring's
-//	            maximum, or the SYMBOLIC windows "today" (LOCAL midnight to now, so a
-//	            laptop crossing a timezone does not reset its day mid-afternoon) and
-//	            "7d" (a rolling 7x24h). Symbolic windows are served from the durable
-//	            cost ledger; where it is off, the ring's maximum is served instead and
-//	            the response's own "window" field names what was served.
+//	            maximum, or one of the three SYMBOLIC windows: "today" (LOCAL midnight to
+//	            now, so a laptop crossing a timezone does not reset its day
+//	            mid-afternoon), "7d" (a rolling 7x24h) and "month" (the start of the
+//	            LOCAL month to now, which is month-to-date and grows through the month
+//	            rather than being a fixed span). Symbolic windows are served from the
+//	            durable cost ledger; where it is off, the ring's maximum is served
+//	            instead and the response's own "window" field names what was served.
 //	resolution  bucket width to return; defaults to the 1m storage resolution. Folded
 //	            here rather than in the client so every consumer gets the same
 //	            arithmetic — see usage.fold for why latency cannot be folded naively.

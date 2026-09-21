@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/rossoctl/cortex/authbridge/authlib/pricing"
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
@@ -159,13 +161,33 @@ func tierBar(v, peak int64, budget int) string {
 // clipRow is the last resort at a width narrower than one label. Rows here are built from
 // fixed-width parts rather than the strip's droppable figures, so there is nothing to give
 // up whole — and a reservation that overflows its terminal is the worse failure.
+//
+// IN DISPLAY COLUMNS, and it was in runes: `len([]rune(row)) <= width` passes for a string of wide
+// characters that renders at twice that, and slicing by rune index then produces a line wider than
+// the budget it was clipped to. That is precisely the bug footer.go records — a budget computed in
+// columns and sliced by rune index rendering 55 columns for a 40-column one — and it reached a
+// SERVER-SUPPLIED string: the drawer's error row carries err.Error() verbatim, so a remote message
+// of wide runes overflowed the reservation, wrapped, and pushed the footer off the bottom.
+// sanitizeLabel does not help, because a wide rune is not a control character.
+//
+// Plain text only, which is what every caller passes. An ANSI-styled row would be cut mid-sequence
+// here; this package keeps escapes out of these rows deliberately — see the table's own rule.
 func clipRow(row string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	r := []rune(row)
-	if len(r) <= width {
+	if lipgloss.Width(row) <= width {
 		return row
 	}
-	return string(r[:width])
+	var b strings.Builder
+	used := 0
+	for _, r := range row {
+		w := lipgloss.Width(string(r))
+		if used+w > width {
+			break
+		}
+		b.WriteRune(r)
+		used += w
+	}
+	return b.String()
 }

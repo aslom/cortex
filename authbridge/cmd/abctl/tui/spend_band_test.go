@@ -724,3 +724,85 @@ func TestRenderSpendBand_ACleanSpanCarriesNoMarker(t *testing.T) {
 		}
 	}
 }
+
+// THE SURVIVING SET IS MAXIMAL, not merely narrow enough — dropping alone is not.
+//
+// Every cell shares one width, so giving up a WIDE cell can leave room for a narrower one the
+// drop loop has already passed. Measured before the restore pass: with a stale TODAY, whose label
+// carries an age and so runs nine columns, the band drew MONTH alone at every width from 16 to 19
+// while LAST 1H and MONTH together need 16. Three cells of information surrendered to fit one,
+// with room for two going unused.
+//
+// The priority is asserted as well as the count, because "more cells" is not the goal on its own:
+// at a width that holds two, the two must be the ones bandDropOrder keeps.
+func TestRenderSpendBand_RestoresACellThatStillFits(t *testing.T) {
+	stale := withSpan(bandSummary(), spanToday, func(r *spanReading) {
+		r.Age, r.Stale = 12*time.Minute, true
+	})
+
+	kept := func(line string) []string {
+		var out []string
+		for span := spendSpan(0); span < numSpendSpans; span++ {
+			if strings.Contains(line, spendSpanDefs[span].label) {
+				out = append(out, spendSpanDefs[span].label)
+			}
+		}
+		return out
+	}
+
+	for w := 16; w <= 19; w++ {
+		lines := renderSpendBand(stale, w)
+		got := kept(lines[0])
+		if len(got) < 2 {
+			t.Errorf("width %d: kept %v — LAST 1H and MONTH fit in 16 columns, so a single cell "+
+				"gives up a reading for nothing:\n%s", w, got, strings.Join(lines, "\n"))
+		}
+		// MONTH is the budget figure and outlives everything; the second survivor is the hour,
+		// because TODAY cannot fit at this width once its label carries an age.
+		if len(got) == 2 && (got[0] != "LAST 1H" || got[1] != "MONTH") {
+			t.Errorf("width %d: kept %v, want LAST 1H and MONTH — the restore pass must not let a "+
+				"lower-priority cell take a higher one's place", w, got)
+		}
+		if n := lipgloss.Width(lines[1]); n > w {
+			t.Errorf("width %d: restoring a cell overflowed to %d columns: %q", w, n, lines[1])
+		}
+	}
+
+	// And where the preferred pair DOES fit, it is still the one chosen.
+	if got := kept(renderSpendBand(stale, 20)[0]); len(got) != 2 || got[0] != "TODAY" {
+		t.Errorf("at width 20 kept %v, want TODAY and MONTH: the restore pass must not reorder the "+
+			"priority when the more valued cell fits", got)
+	}
+}
+
+// EVERY MONEY SURFACE ROUNDS THE SAME MICROS TO THE SAME CENT, which two of them did not.
+//
+// usage_render.go rounds integer micros half-up; formatUSDCell used %.2f over a float, which
+// rounds the BINARY value — a shade under the exact half for figures like $1.005 — and then
+// half-to-even. Measured: 1_005_000 micros printed "COST $1.01" in the headline and "$1.00" in a
+// cell, and 9_995_000 printed "$10.00" against "$9.99". usage_render.go's own comment claimed
+// these surfaces "cannot disagree"; they agreed about negatives and not about rounding.
+//
+// THE HALF-CENT CASES ARE THE FIXTURE, because they are the only ones that can differ: the ledger
+// and the aggregator both count in micros, so any figure landing exactly on a half-cent is where
+// a float copy and the integer part company.
+func TestMoneyRounding_TheCellAndTheHeadlineAgree(t *testing.T) {
+	for _, micros := range []int64{
+		1_005_000,  // $1.005 — half-up is $1.01
+		9_995_000,  // $9.995 — half-up is $10.00, and carries into the dollars
+		30_935_000, // $30.935 — the band fixture's own figure
+		2_345_000,  // a value with no half-cent, as a control
+		4_170_000,
+	} {
+		snap := &usage.Snapshot{Priced: true, Totals: usage.Counts{
+			Requests: 1, CostMicros: micros, PricedRequests: 1, PriceableRequests: 1,
+		}}
+		headline := renderCostSummary(snap)
+		cell := formatUSDCell(float64(micros) / 1e6)
+		if !strings.Contains(headline, cell) {
+			t.Errorf("%d micros: the pane headline says %q and a table cell says %q — one figure, "+
+				"two answers, and an operator comparing two screens cannot tell which is the money",
+				micros, headline, cell)
+		}
+	}
+}

@@ -468,7 +468,7 @@ func (c *Client) GetUsage(ctx context.Context, window, resolution time.Duration,
 }
 
 // GetUsageWindow fetches a snapshot for a symbolic window the server names —
-// "today", "7d" — which a time.Duration cannot express.
+// "today", "7d", "month" — which a time.Duration cannot express.
 //
 // A sibling of GetUsage rather than a widened signature: GetUsage has several
 // callers and its duration parameters are the right shape for the chart windows,

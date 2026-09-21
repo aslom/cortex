@@ -107,7 +107,7 @@ type Snapshot struct {
 	// Window is the span this snapshot ACTUALLY covers, e.g. "10m", "6h0m0s" or
 	// "today". Not necessarily the span requested.
 	//
-	// The difference matters: the symbolic windows ("today", "7d") are served from the
+	// The difference matters: the symbolic windows ("today", "7d", "month") are served from the
 	// durable cost ledger, and a proxy with no ledger — Kubernetes by design — answers
 	// them from the ring's maximum window instead and reports THAT here. A client must
 	// read this field rather than echo its own request, or it will label six hours of
@@ -597,7 +597,7 @@ func seriesCost(series map[string]Counts) CostSum {
 
 // ParseWindow validates a window parameter against the storage resolution.
 //
-// Durations ONLY. It rejects the symbolic windows "today" and "7d", because a
+// Durations ONLY. It rejects the symbolic windows "today", "7d" and "month", because a
 // time.Duration genuinely cannot express a boundary and silently substituting a
 // length would report a number for a span nobody asked for. Callers that accept
 // those use ParseWindowSpec, which delegates here for every fixed length so the
@@ -611,7 +611,11 @@ func ParseWindow(s string) (time.Duration, error) {
 		// Not wrapped with the caller's string, for the reason in ParseGroup.
 		// time.ParseDuration's own error quotes the input, so it is not
 		// forwarded either.
-		return 0, errors.New("bad window (want a duration such as 10m, 1h or 6h)")
+		// NAMES THE SYMBOLIC WINDOWS TOO. This is the only guidance a mistyped window gets, and
+		// ?window=mtd was told to pick a duration — advice that cannot lead to "month". The
+		// duration examples stay first because a duration is the default shape.
+		return 0, errors.New("bad window (want a duration such as 10m, 1h or 6h, " +
+			"or one of today, 7d, month)")
 	}
 	if d < BucketWidth {
 		return 0, fmt.Errorf("window %s is shorter than the %s bucket width", d, BucketWidth)

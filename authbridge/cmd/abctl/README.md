@@ -252,7 +252,7 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   LAST 1H    TODAY   7 DAYS    MONTH
     $2.91   $30.93  $216.44  $703.18
 
-   SESSION         UPDATED    EVENTS   TOKENS     COST   SAVED ~  ACTIVE
+   SESSION         UPDATED    EVENTS    TOKENS    COST   SAVED ~  ACTIVE
    ctx-abc-1234…   3s ago         42     48.2k   $0.12    <$0.01  ●
    ctx-def-5678…   18m ago        15      1.2k  <$0.01         —
    default         1h ago          8         —       —         —

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
@@ -100,6 +102,38 @@ func assertNoControlChars(t *testing.T, where, s string) {
 			t.Errorf("%s: control character %#U at byte %d in %q — a server-supplied label "+
 				"reached the terminal unsanitised", where, r, i, s)
 			return
+		}
+	}
+}
+
+// A WIDE-RUNE ERROR MESSAGE MUST NOT OVERFLOW THE DRAWER'S RESERVATION, which is the other half of
+// "the server's bytes reach this row" — and the half sanitizeLabel cannot cover, because a wide
+// rune is not a control character.
+//
+// clipRow counted RUNES: len([]rune(row)) <= width passes for a string of CJK that renders at twice
+// that, and slicing by rune index then produces a line wider than the budget it was clipped to.
+// Measured before the fix: 45 display columns against a 40-column budget. A line over budget wraps,
+// which costs a row the reservation does not have, so spendDrawerLines stops being the height and
+// the footer goes off the bottom of the terminal.
+//
+// The message is SERVER-SUPPLIED — err.Error() is rendered verbatim — so this is reachable from the
+// other end of the connection, not just from a wide locale.
+func TestRenderSpendDrawer_AWideErrorMessageStaysInsideTheReservation(t *testing.T) {
+	wide := errors.New("unexpected status 500: " + strings.Repeat("過", 40))
+	for _, width := range []int{20, 40, 72, 120} {
+		lines := renderSpendDrawer(nil, wide, usage.GroupModel, "MONTH", width)
+		if len(lines) != spendDrawerLines {
+			t.Errorf("width %d: %d lines, want %d — the reservation is the height, so an extra "+
+				"line pushes the footer off the bottom", width, len(lines), spendDrawerLines)
+		}
+		for i, line := range lines {
+			if n := lipgloss.Width(line); n > width {
+				t.Errorf("width %d: line %d renders %d display columns: a rune count would have "+
+					"passed this and wrapped:\n%q", width, i, n, line)
+			}
+			if strings.Contains(line, "\n") {
+				t.Errorf("width %d: line %d carries a newline", width, i)
+			}
 		}
 	}
 }

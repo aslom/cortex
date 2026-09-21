@@ -140,8 +140,11 @@ func TestRunCost_DisclosesAnInexactTotal(t *testing.T) {
 	if !strings.Contains(got, "inexact") {
 		t.Errorf("output does not say the total is inexact:\n%s", got)
 	}
-	if !strings.Contains(got, "4") {
-		t.Errorf("output does not name how many figures are inexact:\n%s", got)
+	// THE PHRASE, not the digit "4" — which "$4.17" satisfies whatever incompleteRequests holds,
+	// so the assertion could not fail on its own fixture.
+	if !strings.Contains(got, "4 of 318 priced requests carry an inexact figure") {
+		t.Errorf("output does not name how many figures are inexact, or how many they are out "+
+			"of:\n%s", got)
 	}
 	// Disclosed, not deducted: the dollar total still stands.
 	if !strings.Contains(got, "$4.17") {

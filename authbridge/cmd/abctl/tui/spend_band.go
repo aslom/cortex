@@ -109,6 +109,27 @@ func renderSpendBand(s spendSummary, width int) []string {
 	for i := spendSpan(0); i < numSpendSpans && bandWidth(cells, dropped) > width; i++ {
 		dropped[bandDropOrder[i]] = true
 	}
+	// AND THEN PUT BACK WHAT STILL FITS, most-valued first, because dropping alone is not
+	// maximal. Every cell shares one width, so giving up a WIDE cell can leave room for a
+	// narrower one that was surrendered earlier — and the loop above has already moved past it.
+	//
+	// Measured, with a stale TODAY whose label carries an age ("TODAY 12m", nine columns): at any
+	// width from 16 to 19 the band drew MONTH alone, while LAST 1H and MONTH together need 16.
+	// Three cells' worth of information given up to fit one, with the room for two sitting unused.
+	//
+	// IN REVERSE DROP ORDER, which is what keeps the priority honest: the last cell dropped is the
+	// most valued of those surrendered, so it gets the first chance to come back and a
+	// lower-priority cell can never take a higher one's place.
+	for i := numSpendSpans - 1; i >= 0; i-- {
+		span := bandDropOrder[i]
+		if !dropped[span] {
+			continue
+		}
+		dropped[span] = false
+		if bandWidth(cells, dropped) > width {
+			dropped[span] = true
+		}
+	}
 
 	// ONE WIDTH FOR EVERY SURVIVOR, measured after the drops: a cell that is gone must not go
 	// on widening the ones that remain.

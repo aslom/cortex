@@ -77,7 +77,7 @@ Verified against `a62664bc`, not assumed.
 | Ledger path grouping | `ledgerSnapshot(ctx, spec, group)` | unchanged — already right |
 | `spendDrawerWindows` | `{15m, 1h, 6h}` (`time.Duration`) | `{1h, today, 7d, month}` (string) |
 | `spendDrawerAxes` | model, endpoint, agent | unchanged |
-| `formatWindowLabel` | takes `time.Duration` | takes a span string |
+| `formatWindowLabel` | takes `time.Duration` | **unchanged** — see §3.3 |
 | `spendDrawerLines` | `numTierRows + 2` = 6 | unchanged |
 | `tierColumnWidth` / two-column min | 34 / 72 | unchanged |
 | Band poll chains | 2 (window, today) | 4 band + 1 drawer (§3.4) |
@@ -138,8 +138,12 @@ first, zero is the
 correct default and `windowStep` becomes a plain index. Delete
 `spendDrawerWindowDefault` and the modulus-with-offset arithmetic.
 
-`formatWindowLabel(time.Duration)` becomes span-string-based. It is still needed:
-`15m`/`1h` want display forms, and `today`/`7d`/`month` want upper-cased words.
+`formatWindowLabel(time.Duration)` was to become span-string-based. **It did not, and
+still takes a `time.Duration`.** The span-string case went to `spanLabelFor`, which looks a
+served window up in `spendSpanDefs` and falls back to `formatWindowLabel` for anything that
+parses as a duration — so the duration form kept its only caller instead of absorbing a
+second responsibility, and a span the band names comes back as the band's own label rather
+than as a re-derived string.
 
 The comment at `spend_drawer.go:83-89` that excluded `today` and `7d` from `w` is now
 wrong on both of its reasons, and should be replaced rather than deleted silently:
@@ -372,8 +376,8 @@ that same relationship rather than as a fourth independent number.
 ### 3.9 Not re-breaking PR #1071
 
 PR #1071 (`Fix: Align abctl table headers with the values they name`, branch
-`fix/header-align`) is open against `main` and fixes a defect this proposal could
-reintroduce in three places. Its rule: **alignment is declared on the column and applied
+`fix/header-align`) **has since landed** — `headerTitle` is in the base — and fixed a defect
+this proposal could reintroduce in three places. Its rule: **alignment is declared on the column and applied
 to both halves from one field**, so a cell can never align itself in a way its heading
 does not know about.
 
@@ -398,10 +402,10 @@ bubbles truncates."* §3.6 changes every money cell's width, which changes what
 since the padding is derived from the fitted width — but it means §3.6 cannot be reviewed
 by diffing expected strings alone; the cell/heading agreement test is the check.
 
-**Ordering.** This work overlaps #1071 in `sessions_pane.go` and `table_width.go`, and
-commits 1 and 3 (§4) edit `headerTitle` — a function #1071 introduces. So the branch
-**rebases onto #1071 after that merges** rather than being developed in parallel; there is
-no version of it correct against today's `main` *and* against `main` once #1071 lands.
+**Ordering — RESOLVED.** This work overlapped #1071 in `sessions_pane.go` and
+`table_width.go`, and two commits (§4) edit `headerTitle`, which that PR introduced. The
+branch was rebased onto it after it merged, as planned; the one real conflict was
+`table_width.go`, where both sides had introduced a `headerTitle`.
 
 If #1071 stalls, commits 1–3 are the pieces to hold back. Everything from commit 4 onward
 — the cents change, the scope-note deletion, the `month` window, the band — is independent
@@ -414,9 +418,8 @@ of it, which is the other reason the commit order puts the marker work first.
 literals, 25 non-test lines touch the money formatters, and `spend_band.go` is a 120-line
 file getting a rewrite. Well inside the 10K ceiling.
 
-It **rebases onto PR #1071** (§3.9). Two of the commits below edit `headerTitle`, a
-function that PR introduces, so there is no ordering in which this work is correct against
-today's `main` as well as post-merge `main`.
+It **was rebased onto PR #1071** (§3.9), which has landed. Two of the commits below edit
+`headerTitle`, which that PR introduced.
 
 Reviewability comes from the commit sequence rather than from splitting the PR. Each
 commit below builds, passes tests, and leaves the surface self-consistent — so the diff can

@@ -119,6 +119,15 @@ type Caveats struct {
 // an always-present object read as "checked, fine" from a producer that never checked.
 func (c Caveats) Clean() bool { return c == Caveats{} }
 
+// RetentionDays is how many day files this ledger keeps, AFTER the zero-means-default and
+// clamp-to-maximum resolution New performs.
+//
+// Exported so a caller can log what it got rather than what it asked for. The proxy logged
+// cfg.CostLedger.RetentionDays, which is 0 on a default install — so the line that tells an
+// operator how much history they have said "retentionDays=0" for a ledger keeping 31 days, on the
+// setting that decides whether window=month can be answered in full.
+func (w *Writer) RetentionDays() int { return w.store.retainDays }
+
 // RetentionCutoff is the oldest day this ledger's configuration reaches back to, measured from
 // this writer's own clock.
 //

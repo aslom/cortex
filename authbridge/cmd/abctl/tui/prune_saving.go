@@ -80,7 +80,39 @@ func formatCompact(v float64) string {
 // making the figures harder to compare at a glance. A magnitude-varying ladder was the
 // other candidate and is why the previous `formatUSD` existed; it was already dead code by
 // the time this changed, for the alignment reason above.
-func formatUSDAmount(v float64) string { return fmt.Sprintf("%.2f", v) }
+// ROUNDED FROM MICROS, HALF-UP, not by %.2f — because the headline does, and the two disagreed
+// about the same money. %.2f rounds the BINARY float, which is a shade under the exact half for
+// figures like $1.005, and then rounds half-to-even: renderCostSummary printed "COST $1.01" for
+// 1_005_000 micros while this printed "$1.00", and "$10.00" against "$9.99" for 9_995_000.
+// usage_render.go's own comment claimed these surfaces "cannot disagree"; they agreed about
+// negatives and not about rounding.
+//
+// The ledger and the aggregator both count in micros, so the integer is the real figure and the
+// float is a lossy copy of it. Recovering it with math.Round and rounding half-up from there is
+// what makes every money surface answer identically.
+//
+// BEYOND int64 MICROS IT FALLS BACK, which is reachable rather than theoretical: a saturated
+// aggregate carries a near-int64 micros total, and multiplying that dollar figure back up by 1e6
+// overflows. %.2f is wrong by less than a cent on a figure already marked as a floor.
+func formatUSDAmount(v float64) string {
+	const maxMicroDollars = 9e12 // 1e6 x this stays inside int64
+	if v > maxMicroDollars || v < -maxMicroDollars {
+		return fmt.Sprintf("%.2f", v)
+	}
+	micros := int64(math.Round(v * 1e6))
+	neg := micros < 0
+	if neg {
+		micros = -micros
+	}
+	cents := micros / 10_000
+	if micros%10_000 >= 5_000 {
+		cents++
+	}
+	if neg {
+		return fmt.Sprintf("-%d.%02d", cents/100, cents%100)
+	}
+	return fmt.Sprintf("%d.%02d", cents/100, cents%100)
+}
 
 // usdFloor is the smallest amount two decimal places can state. Anything
 // positive below half of it rounds to "0.00".

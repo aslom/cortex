@@ -235,7 +235,7 @@ type costJSON struct {
 	// here has to be the reason string on the wire and in pricing.ReasonOutputUncounted.
 	//
 	// ABSENT IS NOT A CLAIM OF EXACTNESS, and a consumer must not read it as one. It is
-	// never present on a ledger-backed window — "today" and "7d", this command's default
+	// never present on a ledger-backed window — "today", "7d" and "month", this command's default
 	// and its only durable windows — because the reason is no part of a persisted row's
 	// key, so a per-minute row cannot say which way its inexact figures were inexact.
 	// Totals.IncompleteRequests is the field that answers exactness on both window kinds.
@@ -748,7 +748,7 @@ func costIncompleteReasonLines(by map[string]int64) []string {
 // through untouched.
 //
 // time.Duration.String() emits every unit, so the aggregator's own Window field
-// reads "6h0m0s" where "6h" would do. A symbolic window ("today", "7d") is not a
+// reads "6h0m0s" where "6h" would do. A symbolic window ("today", "7d", "month") is not a
 // duration at all and must survive verbatim — it is the server's own word for what
 // it served, and rewriting it is how a label stops matching its data.
 func costWindowLabel(window string) string {

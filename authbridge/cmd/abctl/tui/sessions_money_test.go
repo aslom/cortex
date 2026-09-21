@@ -365,17 +365,22 @@ func TestSessionMoneyCell_NeverRendersAKnownChargeAsZero(t *testing.T) {
 
 	for budget := range budgets {
 		for _, micros := range []int64{1, 12, 1200, 5_000, 499_000} { // $0.000001 … $0.499
-			for _, avoided := range []bool{false, true} {
-				for _, saturated := range []bool{false, true} {
+			for _, saturated := range []bool{false, true} {
+				{
 					got := sessionMoneyCell(micros, saturated, budget)
 					// A zero-valued amount is the defect; the em dash is the honest fallback.
 					// "$0.00" covers the cents rung, "$0"/"$0 " the whole-dollar and compact ones.
+					//
+					// NO inexactMarker FORMS, and no `avoided` dimension either. This cell stopped
+					// taking an avoided flag when the SAVED marker moved to the column heading, so
+					// the loop was running every case twice over a parameter that no longer exists,
+					// and two of the four disjuncts here could not match anything: nothing in
+					// sessions_pane.go emits inexactMarker on a value any more.
 					for _, zero := range []string{"$0.00", "$0 ", "$0"} {
-						if got == zero || got == inexactMarker+zero ||
-							got == zero+partialMarker || got == inexactMarker+zero+partialMarker {
-							t.Errorf("micros=%d budget=%d avoided=%v saturated=%v: cell %q shows a "+
+						if got == zero || got == zero+partialMarker {
+							t.Errorf("micros=%d budget=%d saturated=%v: cell %q shows a "+
 								"real charge as nothing — free is a claim about the traffic",
-								micros, budget, avoided, saturated, got)
+								micros, budget, saturated, got)
 						}
 					}
 					if n := len([]rune(got)); n > budget {

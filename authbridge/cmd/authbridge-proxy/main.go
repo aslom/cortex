@@ -616,7 +616,10 @@ func main() {
 					}
 					sessions.AddRecorder(costLedger)
 					slog.Info("cost ledger enabled — durable cost history for window=today, window=month and window=7d",
-						"dir", dir, "retentionDays", retention,
+						// THE RESOLVED VALUE, not the configured one: `retention` is 0 on a
+						// default install and the store turns that into its default, so logging
+						// the request told an operator "retentionDays=0" for a ledger keeping 31.
+						"dir", dir, "retentionDays", costLedger.RetentionDays(),
 						// WHY it is on, because the default is now derived rather than
 						// keyed on a flag: an operator reading this line can tell an
 						// explicit choice from a resolved one without reading main.go.
