@@ -26,6 +26,16 @@ func TestFormatUSDTotal_RoundsHalfUpOnTheInteger(t *testing.T) {
 		{"one micro is the floor", 1, "<$0.01"},
 		{"exactly half a cent rounds up instead", 5_000, "$0.01"},
 		{"dollars carry", 159_548_300, "$159.55"},
+		// NEGATIVES, which the table did not reach and the float path cannot: MicrosFromUSD
+		// rejects a negative before the arithmetic sees it, so formatUSDTotal(-5) tested the
+		// guard and not this. Bare, the integer arithmetic truncates toward zero and produced
+		// "$0.-15" and "$-12.-34" — and anything above -5_000 rounded to "$0.00", claiming
+		// traffic was free. Four decimals here, matching what formatUSDTotal answers, so the
+		// two entry points cannot disagree about the same input.
+		{"a small negative is not rounded to free", -1, "$-0.0000"},
+		{"a negative under half a cent is not free either", -4_999, "$-0.0050"},
+		{"a negative does not truncate into $0.-15", -150_000, "$-0.1500"},
+		{"a negative dollar figure keeps one sign", -12_345_678, "$-12.3457"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := formatUSDTotalMicros(tc.micros); got != tc.want {

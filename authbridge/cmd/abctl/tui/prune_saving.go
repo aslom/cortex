@@ -146,9 +146,25 @@ func formatUSDTotal(usd float64) string {
 // half-up on the integer gets $1.01. The conversion in formatUSDTotal is safe for the same
 // reason in reverse — MicrosFromUSD rounds, so it recovers 1_005_000 from that float.
 func formatUSDTotalMicros(micros int64) string {
+	// A NEGATIVE FIGURE MUST NOT REACH THE ARITHMETIC BELOW. Go's / and % truncate toward zero,
+	// so -150_000 renders "$0.-15" and -12_345_678 renders "$-12.-34"; worse, anything above
+	// -5_000 rounds to "$0.00", which claims the traffic was free — the reading the floor below
+	// exists to prevent.
+	//
+	// This guard used to be inseparable from the arithmetic: in renderCostSummary the
+	// negativeCost case and the cent branches were arms of one switch, and extracting the
+	// arithmetic left the guard behind at the call site. The float64 entry point is safe by
+	// accident of MicrosFromUSD rejecting a negative, so the two entry points disagreed.
+	//
+	// Four decimals, which is what formatUSDTotal answers for the same input, so they agree.
+	// Naming it — "unavailable" — stays the caller's job: renderCostSummary has its own word
+	// for an impossible figure and a second spelling here would hide it.
+	if micros < 0 {
+		return formatUSDCell(float64(micros) / 1e6)
+	}
 	if micros > 0 && micros < 5_000 {
-		// Positive but under half a cent. Same floor rule as formatUSDCell's, one decimal
-		// place up.
+		// Positive but under half a cent. The same floor rule formatUSDCell applies at
+		// $0.0001, two decimal places up.
 		return "<$0.01"
 	}
 	cents := micros / 10_000

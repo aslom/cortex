@@ -185,6 +185,12 @@ const saturatedNote = "clamped, figures are floors"
 // LAST are span totals, while moneyFigure below feeds the drawer's PER-MODEL rows, which are
 // per-item. Formatting here in cents silently rounded the model column too, which the rule says
 // it must not be.
+//
+// moneyFigure's OTHER two callers are on the wrong side of that rule and are dead: renderSpendStrip
+// passes it s.TodayUSD and s.WindowUSD, span totals that come out at four decimals, and nothing in
+// production calls renderSpendStrip any more — app.go mentions it only in comments, and
+// renderSpendBand is the live renderer. Said here because this comment is where a reviver of the
+// strip would look for the rule: reviving it means routing those two through moneyTotal.
 func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) string {
 	return markMoney(formatUSDCell(usd), unpriced, priceable, incomplete, degraded, saturated)
