@@ -100,7 +100,7 @@ func (u *usageState) window() (window, resolution time.Duration) {
 	return w.window, w.resolution
 }
 
-// cycleMetric advances [t] across the count metrics and latency. Latency uses a
+// cycleMetric advances [m] across the count metrics, latency and cost. Latency uses a
 // different renderer (mean-with-whiskers) because a bar encodes magnitude from a
 // zero baseline and mean latency has no meaningful zero.
 func (u *usageState) cycleMetric() {
@@ -184,6 +184,39 @@ func (m *model) resumeUsagePolling() tea.Cmd {
 	return tea.Batch(m.beginFetch(), usageTick(m.usage.tickGen))
 }
 
+// usagePaneChromeRows is how many of the pane's rows are spent outside the chart: the
+// header line and its blank above, and the blank, summary and refresh note below.
+//
+// Measured, not estimated — TestUsageChartHeight_MatchesTheRenderedChrome keeps it equal
+// to what renderUsage actually spends, so the caption's height gate cannot drift out of
+// agreement with the layout it is protecting.
+const usagePaneChromeRows = 6
+
+// usageChartHeight converts the pane's row budget into the rows available to the chart.
+//
+// Zero (an unknown budget) passes straight through as zero, which the renderers read as
+// "not measuring a terminal" and render at full fidelity.
+func usageChartHeight(paneHeight int) int {
+	if paneHeight <= 0 {
+		return 0
+	}
+	// Exactly the chrome, with nothing held back. An earlier version subtracted one more
+	// row: at the time renderUsage's output fit bodyHeight exactly at 80x24 while the
+	// composed view still came out a row past the terminal, and dropping the caption was
+	// what closed it. That is no longer what happens — the pane overflows 80x24 by one row
+	// on the merge-base too, with no caption in existence there, because a row was added
+	// above the body without the budget following. So the extra subtraction now fixes
+	// nothing and costs the chart a row it can afford. Removed rather than kept as
+	// insurance: a budget that is not the real affordance is a number no later reader can
+	// check against anything.
+	if h := paneHeight - usagePaneChromeRows; h > 0 {
+		return h
+	}
+	// A budget this small cannot fit the chart at all; 1 is enough to say "no room to
+	// spare" without claiming a negative height.
+	return 1
+}
+
 // renderUsageChart picks the form the data calls for.
 //
 // Three renderers rather than one parameterised one, because the forms differ in
@@ -191,17 +224,26 @@ func (m *model) resumeUsagePolling() tea.Cmd {
 // sub-row precision; a stack trades that precision for a breakdown, since a
 // fractional top cell cannot also encode a segment boundary; and latency is a
 // distribution whose zero is meaningless, so it gets marks and a range instead.
-func renderUsageChart(snap *usage.Snapshot, m usageMetric, group usage.Group, width int) []string {
+func renderUsageChart(snap *usage.Snapshot, m usageMetric, group usage.Group, width, height int) []string {
 	if m.isLatency() {
 		// Grouping is ignored here: the aggregator carries no per-label latency,
 		// so a "by status" latency chart would silently show the bucket-wide mean
 		// under a heading implying otherwise.
+		//
+		// HEIGHT IS DROPPED HERE, deliberately and not silently: renderWhiskers is a
+		// fixed plotRows+5 frame with no optional row to trade away, so there is nothing
+		// for a budget to decide. It predates the budget mechanism and ignored the
+		// terminal's height before this branch existed too, so a latency chart overflows
+		// a short pane exactly as much as it always did — pre-existing, tracked with the
+		// other half of the pane's height debt (see fitModel's paneUsage note), and not
+		// something a caption gate can reach. Passing height in to be discarded inside
+		// the renderer would only move the discard somewhere less visible.
 		return renderWhiskers(snap.Buckets, width)
 	}
 	if group != "" && group != usage.GroupNone {
-		return renderStackedBars(snap.Buckets, m, group, width)
+		return renderStackedBars(snap.Buckets, m, group, width, height)
 	}
-	return renderBars(snap.Buckets, m, width)
+	return renderBars(snap.Buckets, m, width, height)
 }
 
 // renderUsage draws the pane.
@@ -242,7 +284,7 @@ func (m *model) renderUsage(width, height int) string {
 	case m.usage.snap == nil:
 		b.WriteString("  (no data)\n")
 	default:
-		for _, line := range renderUsageChart(m.usage.snap, m.usage.metric, m.usage.group, width) {
+		for _, line := range renderUsageChart(m.usage.snap, m.usage.metric, m.usage.group, width, usageChartHeight(height)) {
 			b.WriteString(line)
 			b.WriteString("\n")
 		}

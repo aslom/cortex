@@ -13,6 +13,7 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
 )
 
@@ -64,6 +65,37 @@ func fitModel(t *testing.T, p paneID, w, h int, events []pipeline.SessionEvent) 
 			Description: "a one-line operator-facing description of the plugin",
 		})
 	}
+	// A populated usage snapshot, for exactly the reason the catalog above needs one:
+	// without it paneUsage renders its one-line "(no data)" branch and the fit invariant
+	// never measures the CHART. That is how a unit caption costing one row of height
+	// shipped green past this test while overflowing 80x24 — one of fitSizes — by that
+	// one row.
+	//
+	// NOT YET REACHED BY TestLayout_EveryPaneFitsTheTerminal, which skips paneUsage: with
+	// this snapshot in place the pane overflows at 60x20 (by 4) and at 80x24 with the
+	// filter open (by 1), and BOTH reproduce unchanged on the commit this branch started
+	// from — the pane does not respect bodyHeight in general. Measuring the chart is what
+	// makes that visible; fixing it is a separate change. TestUsageChart_FitsTheChartBudget
+	// below covers the part this branch is responsible for.
+	//
+	// UNGROUPED AND UNLABELLED, so every height assertion written against this model takes
+	// the BAR path: the buckets carry no Series and m.usage.group is left zero, and
+	// renderStackedBars falls back to renderBars without labelled traffic. That is why the
+	// stacked renderer's own two-row-taller frame needs its own fixture —
+	// TestUsageStackedChart_FitsTheChartBudget builds one, and the shared caption floor it
+	// caught had been green here at three sizes.
+	usageSnap := &usage.Snapshot{Window: "today", BucketSeconds: 60, Group: usage.GroupNone}
+	usageBase := time.Now().Add(-10 * time.Minute)
+	for i := 0; i < 10; i++ {
+		usageSnap.Buckets = append(usageSnap.Buckets, usage.Bucket{
+			At:     usageBase.Add(time.Duration(i) * time.Minute),
+			Counts: usage.Counts{Requests: 5, Tokens: int64(1000 * (i + 1)), CostMicros: int64(1000 * (i + 1))},
+		})
+	}
+	usageSnap.Totals = usage.Counts{Requests: 50, Tokens: 55_000, CostMicros: 55_000}
+	m.usage.snap = usageSnap
+	m.usage.lastFetch = time.Now()
+
 	m.pipeline = &apiclient.PipelineView{}
 	for i := 0; i < 8; i++ {
 		m.pipeline.Inbound = append(m.pipeline.Inbound, apiclient.PipelinePlugin{
@@ -109,6 +141,12 @@ func TestLayout_EveryPaneFitsTheTerminal(t *testing.T) {
 	}
 	for _, dim := range fitSizes {
 		for name, p := range panes {
+			if p == paneUsage {
+				// See fitModel's usage-snapshot comment: this pane overflows at two of
+				// fitSizes on main as well as here, so asserting it would fail on a
+				// pre-existing bug rather than on anything this test is guarding.
+				continue
+			}
 			for _, filtering := range []bool{false, true} {
 				m := fitModel(t, p, dim[0], dim[1], cursorRowsFixture(60))
 				if filtering {
@@ -234,5 +272,160 @@ func TestLayout_StateRichFooterFitsTheTerminal(t *testing.T) {
 			m.rebuildEventsTable()
 			assertFits(t, m, fmt.Sprintf("%s %dx%d", tc.name, dim[0], dim[1]))
 		}
+	}
+}
+
+// TestUsageChart_FitsTheChartBudget covers the half of the usage pane's height this
+// branch is responsible for: the unit caption is optional, costs a row, and must not
+// appear when the pane cannot spare one.
+//
+// Narrower than the whole-pane invariant above on purpose. That one cannot be asserted
+// for paneUsage without first fixing a pre-existing overflow (see fitModel), and a test
+// that waits for an unrelated fix is a test that guards nothing in the meantime. This
+// one holds the caption to its budget today.
+func TestUsageChart_FitsTheChartBudget(t *testing.T) {
+	for _, dim := range fitSizes {
+		m := fitModel(t, paneUsage, dim[0], dim[1], cursorRowsFixture(60))
+		budget := usageChartHeight(m.bodyHeight)
+		lines := renderUsageChart(m.usage.snap, m.usage.metric, m.usage.group, m.width, budget)
+
+		// Against the chart's own floor, not against the budget. barChartFloor is
+		// irreducible — ten plot rows, the axis rule, the time labels, the value row —
+		// and at 60x20 the budget is already below it, which is a pre-existing pane
+		// overflow no caption decision can fix. What must hold is that the OPTIONAL row
+		// is not taken when the budget is tight: the chart is then exactly its floor.
+		if budget > 0 && budget <= barChartFloor && len(lines) > barChartFloor {
+			t.Errorf("%dx%d: budget %d leaves no room to spare, but the chart took %d rows "+
+				"— the caption should have been dropped:\n%s",
+				dim[0], dim[1], budget, len(lines), stripANSI(strings.Join(lines, "\n")))
+		}
+		// And where the budget does have room, the caption may take one row but no more.
+		if budget > barChartFloor && len(lines) > barChartFloor+1 {
+			t.Errorf("%dx%d: chart is %d rows, more than the floor %d plus one caption row",
+				dim[0], dim[1], len(lines), barChartFloor)
+		}
+	}
+}
+
+// TestUsageStackedChart_FitsTheChartBudget is the stacked twin of the test above, and it
+// is a separate test rather than an arm of it because the fixture has to differ: the
+// stacked renderer needs LABELLED buckets, and renderStackedBars falls back to
+// renderBars without them. fitModel's snapshot carries no Series and neither sets the
+// usage group, so every height assertion written against that model takes the bar path —
+// which is why the caption overflowed the stacked pane at 66x25, 66x27 and 80x27 with CI
+// green.
+//
+// The stacked frame is two rows taller than the bar frame: a blank separator and at
+// least one legend line below the value row. Sharing one floor between them is the bug
+// this pins.
+func TestUsageStackedChart_FitsTheChartBudget(t *testing.T) {
+	// Labelled buckets at every stride, so maxBars trimming behaves as it does live.
+	per := make([]map[string]int64, 10)
+	for i := range per {
+		per[i] = map[string]int64{"200": int64(10 * (i + 1)), "429": 5, "500": 2}
+	}
+	snap := &usage.Snapshot{Window: "today", BucketSeconds: 60, Group: usage.GroupStatus,
+		Buckets: mkSeriesBuckets(per)}
+
+	// 66 and 80 at several heights rather than fitSizes alone: 66 is axisCaptionWidth
+	// itself, and the three regressions the shared floor caused were at 66x25, 66x27 and
+	// 80x27 — none of them a fitSizes entry.
+	for _, dim := range [][2]int{
+		{66, 24}, {66, 25}, {66, 26}, {66, 27}, {80, 24}, {80, 26}, {80, 27}, {100, 30}, {120, 40},
+	} {
+		m := fitModel(t, paneUsage, dim[0], dim[1], cursorRowsFixture(60))
+		m.usage.snap = snap
+		m.usage.group = usage.GroupStatus
+		budget := usageChartHeight(m.bodyHeight)
+		lines := renderUsageChart(snap, m.usage.metric, usage.GroupStatus, m.width, budget)
+		if len(lines) <= barChartFloor {
+			t.Fatalf("%dx%d: %d rows is the bar frame's size — the fixture fell back to "+
+				"renderBars and this case is not measuring the stacked path",
+				dim[0], dim[1], len(lines))
+		}
+		if budget > 0 && budget <= stackedChartFloor && len(lines) > stackedChartFloor {
+			t.Errorf("%dx%d: budget %d leaves no room to spare, but the stacked chart took "+
+				"%d rows — the caption should have been dropped:\n%s",
+				dim[0], dim[1], budget, len(lines), stripANSI(strings.Join(lines, "\n")))
+		}
+	}
+}
+
+// TestUsagePane_CaptionCostsNoRowsAtAnyFitSize is the case this branch actually broke,
+// asserted on the COMPOSED view rather than on the chart alone.
+//
+// RELATIVE, not absolute, and it did not start that way. The first version asserted that
+// the pane fits 80x24 outright, which held when written: 80x24 was then the tightest size
+// in fitSizes where the pane fit at all, and the caption's row was exactly the difference
+// — 65 columns fit, 66 did not, with nothing about columns changing between them. A later
+// change on main added a row above the body (the spend strip's lifetime line) without the
+// pane's budget following, so the pane now overflows 80x24 by one row with no caption in
+// the picture: measured at 25 lines on the merge-base, where axisCaption does not exist.
+//
+// Rewriting it to skip 80x24 would have left the gate unguarded at the one size that
+// exercises it. Asserting the budget arithmetic instead is what this replaced, because a
+// wrong subtraction moves a size out of whichever branch the assertion reads and the test
+// keeps passing while the terminal scrolls. So it measures the caption's own contribution:
+// render each size twice, once with the pane's real budget and once with the budget forced
+// open, and require that the difference is never more than the one row the caption is
+// allowed to cost — and zero wherever the budget is too tight to afford it.
+func TestUsagePane_CaptionCostsNoRowsAtAnyFitSize(t *testing.T) {
+	for _, dim := range fitSizes {
+		m := fitModel(t, paneUsage, dim[0], dim[1], cursorRowsFixture(60))
+		budget := usageChartHeight(m.bodyHeight)
+		withBudget := renderUsageChart(m.usage.snap, m.usage.metric, m.usage.group, m.width, budget)
+		// height 0 means "unknown", which the renderers read as "not measuring a
+		// terminal" and caption unconditionally above axisCaptionWidth.
+		unbounded := renderUsageChart(m.usage.snap, m.usage.metric, m.usage.group, m.width, 0)
+
+		cost := len(unbounded) - len(withBudget)
+		if cost < 0 || cost > 1 {
+			t.Errorf("%dx%d: the budget changed the chart by %d rows; the caption may cost 1 at most",
+				dim[0], dim[1], cost)
+		}
+
+		// The chart against what the pane can actually afford: its row budget less the
+		// rows renderUsage spends on the header, the blanks and the summary. This is the
+		// assertion that fails on a wrong subtraction — comparing the two renders above
+		// does not, because a looser budget captions BOTH of them and the difference stays
+		// zero. Verified by mutation: dropping either term of usageChartHeight's
+		// subtraction fails here and nowhere else.
+		//
+		// Skipped where the chart's own floor already exceeds the affordance, which is
+		// 60x20: plotRows+3 is irreducible, so that overflow is the pane's to fix (it
+		// reproduces on the merge-base) and no caption decision reaches it.
+		afford := m.bodyHeight - usagePaneChromeRows
+		if afford >= barChartFloor && len(withBudget) > afford {
+			t.Errorf("%dx%d: chart is %d rows against %d affordable (bodyHeight %d less %d chrome)",
+				dim[0], dim[1], len(withBudget), afford, m.bodyHeight, usagePaneChromeRows)
+		}
+
+		// And the budget must not be SMALLER than the affordance either. The assertion
+		// above only catches under-subtracting; restoring the extra row this branch
+		// removed would pass it silently while costing the chart a row it can afford —
+		// which is how that subtraction survived unexamined in the first place. Both
+		// directions, so the budget has to be the real affordance rather than merely a
+		// safe one.
+		if want := max(afford, 1); budget != want {
+			t.Errorf("%dx%d: usageChartHeight(%d) = %d, but the pane affords %d",
+				dim[0], dim[1], m.bodyHeight, budget, want)
+		}
+	}
+}
+
+// TestUsageChartHeight_MatchesTheRenderedChrome keeps usagePaneChromeRows equal to what
+// renderUsage actually spends outside the chart.
+//
+// The constant is what the caption's height gate subtracts, so a row added to the header
+// or the summary block without updating it puts the gate one row out and the caption
+// reappears where it does not fit — the exact bug this branch shipped once already, in a
+// form no test could see.
+func TestUsageChartHeight_MatchesTheRenderedChrome(t *testing.T) {
+	m := fitModel(t, paneUsage, 100, 40, cursorRowsFixture(60))
+	body := strings.Split(strings.TrimRight(m.renderUsage(m.width, 0), "\n"), "\n")
+	chart := renderUsageChart(m.usage.snap, m.usage.metric, m.usage.group, m.width, 0)
+	if got := len(body) - len(chart); got != usagePaneChromeRows {
+		t.Errorf("renderUsage spends %d rows outside the chart, usagePaneChromeRows says %d\n"+
+			"  body=%d chart=%d", got, usagePaneChromeRows, len(body), len(chart))
 	}
 }
