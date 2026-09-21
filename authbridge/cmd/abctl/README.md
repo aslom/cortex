@@ -227,8 +227,26 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
 - **Sessions** (default): table of active sessions in the store, most
   recently updated first. Columns: session (truncated), updated (relative),
-  event count, tokens, cost, saved, active marker. Numerics are right-aligned
-  so the digits line up between rows.
+  event count, tokens, cost, saved, context. Numerics are right-aligned so the
+  digits line up between rows.
+
+  `CONTEXT(1M)` is a gauge, not a figure: how full the session's context was on
+  its **latest** request, against a fixed one-million-token window. The
+  brackets are the scale, drawn on every row, so a nearly-empty session reads
+  as empty-out-of-something rather than as a blank cell — and an em dash, which
+  means *no context known*, stays distinguishable from the sliver a barely-used
+  session gets.
+
+  Two things worth knowing about it. The denominator is fixed at 1M, the
+  largest window on any path the proxy sees, so a model with a smaller window
+  reads lower than it really is. And the figure comes from abctl's own event
+  cache: a session idle since before abctl attached shows the dash until you
+  drill into it, because the session summary carries no per-request field.
+
+  It replaced an `ACTIVE` column whose `●` nobody acted on — `UPDATED` already
+  answers "is this live", in seconds rather than as a dot. The `cached` marker
+  that column also carried, for sessions the server has forgotten but abctl
+  still holds events for, moved into `UPDATED`.
 
   **Every figure in this table is a lifetime total for its session** — which is
   what the title says, and why the TOKENS column does not sum to the token count
@@ -246,10 +264,11 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   TODAY   SAVED   LAST 1H  TOKENS 1H  CACHE HIT 1H
   $30.94  ~$0.18  $2.91    9.9M       81%
   ───────────────────────────────────────────────────────────────────────────
-   SESSION         UPDATED    EVENTS   TOKENS      COST      SAVED  ACTIVE
-   ctx-abc-1234…   3s ago         42     48.2k   $0.1214   ~$0.0038  ●
-   ctx-def-5678…   18m ago        15      1.2k   $0.0031          —
-   default         1h ago          8         —         —          —
+   SESSION         UPDATED    EVENTS   TOKENS      COST      SAVED  CONTEXT(1M)
+   ctx-abc-1234…   3s ago         42     48.2k   $0.1214   ~$0.0038  ▕███████▌ ▏
+   ctx-def-5678…   18m ago        15      1.2k   $0.0031          —  ▕▎        ▏
+   ctx-ghi-9012…   cached          7      2.9k         —          —  ▕████▍    ▏
+   default         1h ago          8         —         —          —            —
 
   ● connected   2.1 events/sec
   cost/saved: lifetime   [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
