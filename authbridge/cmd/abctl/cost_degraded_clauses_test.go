@@ -77,9 +77,14 @@ func TestCostDegradedText_HasAClauseForEveryCounter(t *testing.T) {
 			t.Errorf("Degraded{%s: %d, SkippedLines: 3} rendered %q — %s vanished when mixed "+
 				"with a counter that does have a clause", name, marker, got, name)
 		}
-		if !strings.Contains(got, "3 ") && !strings.Contains(got, " 3") {
-			t.Errorf("Degraded{%s: %d, SkippedLines: 3} rendered %q — the skipped lines vanished",
-				name, marker, got)
+		// THE CLAUSE, not the digit. "3 " or " 3" cannot fail while the marker is 37: the other
+		// counter renders inside a phrase, so " 37" satisfies " 3" and both halves of the
+		// condition were false for every field — a third instance of the unreachable-assertion
+		// class this PR fixes twice elsewhere. Naming the phrase also makes the failure legible:
+		// what must survive the mixture is the skipped-lines clause, not the character "3".
+		if !strings.Contains(got, "skipped 3 unreadable line") {
+			t.Errorf("Degraded{%s: %d, SkippedLines: 3} rendered %q — the skipped-lines clause "+
+				"vanished when mixed with %s", name, marker, got, name)
 		}
 	}
 }

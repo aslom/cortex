@@ -71,7 +71,7 @@ Verified against `a62664bc`, not assumed.
 | `usage.ParseWindowSpec` symbolic windows | `today`, `7d` | + `month` |
 | `usage.StartOfLocalDay` | yes, DST-safe sweep | + `StartOfLocalMonth` |
 | Ring `MaxWindow` | 6h (`360 × 1m`) | unchanged |
-| `costledger` default retention | 30 days (`store.go:25`) | 32 (see §3.8) |
+| `costledger` default retention | 30 days (`costledger.defaultRetentionDays`) | 31 (see §3.8) |
 | `config` retention floor / ceiling | 9 / 3650 (`config.go:122,140`) | floor unchanged |
 | `apiclient.GetUsageWindow` | takes a **string** window | unchanged — already right |
 | Ledger path grouping | `ledgerSnapshot(ctx, spec, group)` | unchanged — already right |
@@ -133,7 +133,8 @@ filter.
 This **removes** a documented footgun rather than adding one. `windowStep` is currently
 an *offset* from `spendDrawerWindowDefault` specifically because `spendWindow` (1h) sits
 in the middle of an ascending slice, so a zero value read as an index would silently
-move the band's own poll to 15m (`spend.go:127-132`). With `1h` first, zero is the
+move the band's own poll to 15m (see `spendDrawerWindows` and `windowStepIndex`). With `1h`
+first, zero is the
 correct default and `windowStep` becomes a plain index. Delete
 `spendDrawerWindowDefault` and the modulus-with-offset arithmetic.
 
@@ -346,12 +347,19 @@ assert rendered text need escape-aware comparison, which is why this is its own 
 
 ### 3.8 Retention
 
-`defaultRetentionDays` is 30 (`costledger/store.go:25`), so on the 31st of a 31-day month
-the ledger is one day file short of answering `month`. Raise the default to 32 — one
+`defaultRetentionDays` is 30, so on the 31st of a 31-day month
+the ledger is one day file short of answering `month`. Raise the default to 31 — one
 extra file, roughly 300 KB at the volumes this ledger is sized for.
 
+**31, not 32.** `prune` keeps `[ref-(retainDays-1), ref]`, which is `retainDays` DISTINCT
+DATES, so 31 files span the 1st to the 31st inclusive and nothing further is needed. An
+earlier draft of this section said 32 and it was an off-by-one in the proposal, not in the
+code; `TestDaysOutsideRetention_ACompleteMonthIsNotShort` is what holds the shipped value to
+its claim.
+
 The floor (`minCostLedgerRetentionDays = 9`) stays where it is, derived from
-`Window7dLocalDays`. Deliberately **not** raised to 32: that would make a 9-day
+`Window7dLocalDays`. THE FLOOR is deliberately **not** raised to match the default: that
+would make a 9-day
 deployment invalid for a window it never asked for. Instead, a `month` query whose span
 reaches past retention is a *partial* answer and must wear `partialMarker` — the existing
 glyph for "the real figure is larger than the number shown". This is the same disclosure
@@ -423,7 +431,7 @@ the rest.
 | 4 | `fix(abctl): render money to cents, not ten-thousandths` | 3.6 | 300 |
 | 5 | `fix(abctl): drop the misleading lifetime-totals note` | 1c | 40 |
 | 6 | `feat(usage): add a month-to-date symbolic window` | 3.1 | 200 |
-| 7 | `feat(costledger): retain 32 days so a 31-day month can be answered` | 3.8 | 100 |
+| 7 | `feat(costledger): retain 31 days so a 31-day month can be answered` | 3.8 | 100 |
 | 8 | `refactor(abctl): make the spend polls a table of span chains` | 3.4 | 350 |
 | 9 | `feat(abctl): show the four budget spans in the band` | 3.3 | 300 |
 | 10 | `feat(abctl): cycle the four budget spans with w` | 3.2 | 150 |

@@ -62,7 +62,7 @@ Usage:
   abctl tools <action>       tool-definition costs: scan
   abctl pipeline <action>    the plugin pipeline in effect: get
   abctl pricing              show the model rates in effect (--host <gateway>)
-  abctl cost                 what your agents have spent (--window today|7d|1h)
+  abctl cost                 what your agents have spent (--window today|month|7d|1h)
   abctl experimental <action>
                              unstable helpers: read-claude-sessions
 

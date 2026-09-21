@@ -247,10 +247,15 @@ func (e usageError) Error() string { return e.msg }
 
 var errSessionIDTooLong = usageError{"session id too long"}
 
-// errSessionWithSymbolicWindow refuses session= alongside window=today|7d. A fixed
+// errSessionWithSymbolicWindow refuses session= alongside window=today|7d|month. A fixed
 // string, like every other message this endpoint returns — see writeUsageError.
+//
+// EVERY SYMBOLIC WINDOW IS NAMED, because a caller who asked for the one the message omits
+// reads it as being about a different request than the one they made. "month" joined the
+// symbolic set without joining this list, so window=month&session= was refused for
+// "(today, 7d)". TestUsageErrorNamesEverySymbolicWindow keeps the two in step.
 var errSessionWithSymbolicWindow = usageError{
-	"session= cannot be combined with a symbolic window (today, 7d); " +
+	"session= cannot be combined with a symbolic window (today, 7d, month); " +
 		"the durable cost ledger holds no session ids — ask for a duration window such as 1h or 6h"}
 
 // ledgerSnapshot builds a Snapshot from persisted rows.
@@ -293,7 +298,15 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 	// ledger because it is a fact about the REQUEST measured against the ledger's horizon, and
 	// the ledger does not know what was asked for. See usage.Snapshot.DaysOutsideRetention for
 	// why this is coverage rather than damage.
-	outside := daysOutsideRetention(spec.From, s.ledger.RetentionCutoff())
+	//
+	// MEASURED AGAINST THE WINDOW'S OWN INSTANT, not a second reading of the clock.
+	// RetentionCutoff() would call time.Now() again, and the two sides of this comparison are only
+	// sound if no day boundary fell between the two reads — a margin that is exactly zero in the
+	// default configuration, so a month-to-date request crossing local midnight reported a
+	// complete total as one day short. spec.To is the instant ParseWindowSpec built this window
+	// from, and this path is symbolic-only, so it is always set: the Window call above already
+	// depends on it.
+	outside := daysOutsideRetention(spec.From, s.ledger.RetentionCutoffAt(spec.To))
 	// THE GROUPING THIS SOURCE CAN APPLY, which is not always the one that was asked for,
 	// and the response says which it was.
 	//

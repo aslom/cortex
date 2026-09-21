@@ -147,18 +147,19 @@ does survive a restart; see below.
 **A local install keeps a cost ledger on disk, on by default.** Sessions themselves —
 prompts, completions, tool arguments — stay in memory and die with the process. Per-minute
 cost totals do not: they are appended to `~/.cortex/cost/YYYY-MM-DD.jsonl`, one file per
-local day, **kept for 30 days**.
+local day, **kept for 31 days** — the length of the longest month, so `window=month` can be
+answered in full on the 31st.
 
 **Sizing, because "roughly 10 MB" was a laptop figure and is not general.** A row is about 418
 bytes, and there is one per minute *per distinct (endpoint, model, agent, provenance)*. A laptop
 writes rows only for minutes with traffic, which is where 10 MB comes from. Continuous traffic
 populates all 1,440 minutes of a day:
 
-| Distinct combinations per minute | Per day | Per 30 days |
+| Distinct combinations per minute | Per day | Per 31 days (the default retention) |
 |---|---|---|
-| 2 | 1.2 MB | 36 MB |
-| 8 | 4.8 MB | 144 MB |
-| 64 (the per-minute cap) | 38.5 MB | 1.16 GB |
+| 2 | 1.2 MB | 37 MB |
+| 8 | 4.8 MB | 149 MB |
+| 64 (the per-minute cap) | 38.5 MB | 1.19 GB |
 
 Size a mounted volume from that table, not from the laptop number, and lower
 `retention_days` if the top row is closer to your traffic.
@@ -239,7 +240,7 @@ Two other knobs, same restart rule:
 | Setting | Default | Notes |
 |---|---|---|
 | `cost_ledger.dir` | `~/.cortex/cost` | Must be an absolute path. A relative one is refused, because it would resolve against whatever directory the proxy started from |
-| `cost_ledger.retention_days` | 30 | Minimum **9** when set. `window=7d` is a rolling 7×24h, not seven calendar days, so it can open **nine** local day files: one extra because a rolling span starts part-way through a date, and one more because a spring-forward week is 167 hours, so the span reaches an hour further back. A shorter retention answers `window:"7d"` over a partial week with nothing saying so |
+| `cost_ledger.retention_days` | 31 | The longest month, so `window=month` is answerable in full on the 31st; a shorter value makes that total a partial one and it is marked as such. Minimum **9** when set. `window=7d` is a rolling 7×24h, not seven calendar days, so it can open **nine** local day files: one extra because a rolling span starts part-way through a date, and one more because a spring-forward week is 167 hours, so the span reaches an hour further back. A shorter retention answers `window:"7d"` over a partial week with nothing saying so |
 
 ## `abctl: command not found`
 

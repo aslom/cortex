@@ -60,6 +60,39 @@ func TestRetentionCutoff_IsADayIdentifierNotABound(t *testing.T) {
 	}
 }
 
+// RetentionCutoffAt USES THE CALLER'S INSTANT, which is the whole reason it exists.
+//
+// Its caller derives a window from one reading of the clock; asking RetentionCutoff() would read
+// the clock a second time, and the comparison between the two is only sound while no day boundary
+// falls in between. The margin is exactly zero in the default configuration — retention_days 31
+// against month-to-date on the 31st — so a request straddling local midnight measured its window
+// against one month and its horizon against the next day, and published a complete total as short.
+//
+// THE FIXTURE IS THAT STRADDLE: a writer whose own clock has already ticked past midnight into the
+// 1st, asked for the cutoff as of the last instant of the 31st. Taking the argument, the horizon is
+// the 1st of the previous month and the month is covered; taking w.now(), it is a day later and the
+// month is reported one day short of itself.
+func TestRetentionCutoffAt_UsesTheGivenInstantNotTheWritersClock(t *testing.T) {
+	justAfterMidnight := time.Date(2026, time.February, 1, 0, 0, 0, int(time.Millisecond), time.Local)
+	lastInstantOfJanuary := time.Date(2026, time.January, 31, 23, 59, 59, int(999*time.Millisecond), time.Local)
+	w := newRetentionWriter(t, t.TempDir(), 31, justAfterMidnight)
+
+	got := w.RetentionCutoffAt(lastInstantOfJanuary)
+	if gy, gm, gd := got.Date(); gy != 2026 || gm != time.January || gd != 1 {
+		t.Errorf("RetentionCutoffAt(%s) = %s, want the 1 January identifier: the argument names "+
+			"the day the horizon is measured from, and a writer clock that has already crossed "+
+			"midnight must not move it",
+			lastInstantOfJanuary.Format(dayLayout), got.Format(dayLayout))
+	}
+	// And the two really do differ here, or the assertion above proves nothing about which clock
+	// was read.
+	if own := w.RetentionCutoff(); own.Equal(got) {
+		t.Fatalf("RetentionCutoff() and RetentionCutoffAt(%s) both return %s, so this fixture no "+
+			"longer straddles a day boundary and cannot tell the two clocks apart",
+			lastInstantOfJanuary.Format(dayLayout), own.Format(dayLayout))
+	}
+}
+
 // AND IT REPORTS NO LOSS, because it cannot know of one.
 //
 // A ledger with no files at all has the same cutoff as a full one: the horizon is a function of

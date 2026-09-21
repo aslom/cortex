@@ -443,12 +443,21 @@ func TestSessionsShowMoney_EveryKeptWidthFitsASubCentCharge(t *testing.T) {
 // 200, where fitted and declared are both 10. A regression passing the declared 10 instead
 // passed every other test in this file.
 //
-// The gap is real and narrow: measured across every width, COST fits to 9 rather than 10 at
-// terminal widths 72-76 (SAVED at 72-75), the band just above the floor where sessionsShowMoney
-// drops them. So the fixture is a charge whose honest form needs all ten runes — $1234.5678 —
-// because a $36.58 cell fits either budget and cannot tell the two apart.
+// The gap is real and narrow: measured across every width, the only fitted COST budgets below the
+// declared 10 are 9 (five widths) and 8 (three) — the band just above the floor where
+// sessionsShowMoney drops the columns. So the fixture has to be a charge whose honest cents form
+// needs all ten runes, because a cell that fits either budget cannot tell the two apart.
+//
+// AND THE CENTS CHANGE BROKE THAT, which is why the amount moved. $1234.5678 needed ten runes at
+// four decimals and needs eight at two ("$1234.57"), so it fitted every budget: `wide` came back
+// identical to `want`, len(wide) > budget was 8 > 8 and 8 > 9, and the regression detector below
+// could not fire at either width. A fixture chosen for a format the code no longer produces is a
+// test that has quietly stopped testing.
+//
+// $123456.78 restores it — ten runes at two decimals, and the ladder's next rung down is the
+// whole-dollar "$123457" at seven, so the two widths produce visibly different cells.
 func TestSessionsMoneyCells_UseTheFittedWidthNotTheDeclaredOne(t *testing.T) {
-	const bigCost = 1_234_567_800 // $1234.5678, ten runes
+	const bigCost = 123_456_780_000 // $123456.78 — ten runes at cents, "$123457" when shrunk
 	shrunken := 0
 	for termWidth := 1; termWidth <= 200; termWidth++ {
 		if !sessionsShowMoney(termWidth) {

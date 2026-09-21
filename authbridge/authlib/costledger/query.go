@@ -119,13 +119,29 @@ type Caveats struct {
 // an always-present object read as "checked, fine" from a producer that never checked.
 func (c Caveats) Clean() bool { return c == Caveats{} }
 
-// RetentionCutoff is the oldest day this ledger's configuration reaches back to.
+// RetentionCutoff is the oldest day this ledger's configuration reaches back to, measured from
+// this writer's own clock.
 //
 // EXPORTED FOR THE COVERAGE STATEMENT, and for nothing else. A caller comparing a requested
 // window's start against this learns whether the answer CAN cover the whole window — which is a
 // fact about configuration, not about data. It deliberately does not, and cannot, say whether
 // anything was deleted: see store.retentionCutoff.
-func (w *Writer) RetentionCutoff() time.Time { return w.store.retentionCutoff(w.now()) }
+func (w *Writer) RetentionCutoff() time.Time { return w.RetentionCutoffAt(w.now()) }
+
+// RetentionCutoffAt is RetentionCutoff measured from an instant the CALLER already holds.
+//
+// THE POINT IS ONE CLOCK READ, not two. A caller that derives a window from time.Now() and then
+// asks RetentionCutoff() has read the clock twice, and the coverage comparison between them is
+// only sound if no day boundary fell in between. In the default configuration the margin is
+// exactly zero — retention_days is 31 and a month-to-date request on the 31st reaches precisely
+// the 1st — so a request straddling local midnight computed its window for one month and its
+// horizon for the next day, and reported a complete total as one day short. Sub-millisecond, once
+// a month, and indistinguishable from the real disclosure when it happens.
+//
+// Passing the window's own instant makes the race structurally impossible rather than unlikely.
+func (w *Writer) RetentionCutoffAt(now time.Time) time.Time {
+	return w.store.retentionCutoff(now)
+}
 
 // Query returns every row whose minute falls in [from, to], inclusive at minute
 // granularity.

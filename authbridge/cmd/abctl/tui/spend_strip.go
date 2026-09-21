@@ -170,32 +170,6 @@ func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
 	return amount
 }
 
-// moneyFigure builds one dollar reading together with the caveats that belong to IT.
-//
-// label is the figure's own suffix — "today", "/1h" — and it is why this takes one at
-// all: the coverage note used to ride at the END of the line, describing the rolling
-// window, while the today figure sat at the front as the headline. "SPEND $4.1700
-// today  $1.1200 /1h  40 of 40 unpriced" reads as qualifying the day and describes the
-// hour. A caveat attached to its own figure cannot be misread that way, and a figure
-// with no caveat of its own now says so by carrying no marker.
-//
-// Exactness and coverage are separate claims about the same number — whether the figure
-// is the real one, and how much of the traffic it covers — and both can be true at once.
-// They are stated in that order, matching cmd_cost.go, whose comment records why: the
-// exactness caveat qualifies the dollar figure itself, where coverage qualifies how much
-// of the traffic the figure is about.
-//
-// degraded is a THIRD claim and it goes first, because it is the only one of the three that
-// says the SUM is incomplete rather than qualifying a figure the sum contains. nil means
-// the read was clean and nothing is rendered for it — see snapshotDamaged, which is where
-// the pointer semantics are argued. Only a ledger-backed figure can carry one, so the
-// window reading passes nil.
-//
-// saturated is a FOURTH claim that SHARES the third one's glyph, because it makes the same
-// demand of a reader: this figure is short of real spend by an amount nothing can state. It is
-// also the only claim on this line that BOTH readings can carry — usage.Counts.Saturated lives
-// on Counts, so the ring's window totals and the ledger's day totals can each clamp, where a
-// damaged read is ledger-only. See figureIsShort and damagedMarker.
 // damagedNote is the strip's spelling of a damaged ledger read: the shortest form that
 // still says WHAT was lost, because "incomplete" on its own gives a reader nothing to act
 // on where "1 day file lost" names something to go and look at.
@@ -235,6 +209,32 @@ func damagedNote(d *usage.Degraded) string {
 	}
 }
 
+// moneyFigure builds one dollar reading together with the caveats that belong to IT.
+//
+// label is the figure's own suffix — "today", "/1h" — and it is why this takes one at
+// all: the coverage note used to ride at the END of the line, describing the rolling
+// window, while the today figure sat at the front as the headline. "SPEND $4.1700
+// today  $1.1200 /1h  40 of 40 unpriced" reads as qualifying the day and describes the
+// hour. A caveat attached to its own figure cannot be misread that way, and a figure
+// with no caveat of its own now says so by carrying no marker.
+//
+// Exactness and coverage are separate claims about the same number — whether the figure
+// is the real one, and how much of the traffic it covers — and both can be true at once.
+// They are stated in that order, matching cmd_cost.go, whose comment records why: the
+// exactness caveat qualifies the dollar figure itself, where coverage qualifies how much
+// of the traffic the figure is about.
+//
+// degraded is a THIRD claim and it goes first, because it is the only one of the three that
+// says the SUM is incomplete rather than qualifying a figure the sum contains. nil means
+// the read was clean and nothing is rendered for it — see snapshotDamaged, which is where
+// the pointer semantics are argued. Only a ledger-backed figure can carry one, so the
+// window reading passes nil.
+//
+// saturated is a FOURTH claim that SHARES the third one's glyph, because it makes the same
+// demand of a reader: this figure is short of real spend by an amount nothing can state. It is
+// also the only claim on this line that BOTH readings can carry — usage.Counts.Saturated lives
+// on Counts, so the ring's window totals and the ledger's day totals can each clamp, where a
+// damaged read is ledger-only. See figureIsShort and damagedMarker.
 func moneyFigure(usd float64, label string, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) stripFigure {
 	amount := moneyAmount(usd, unpriced, priceable, incomplete, degraded, saturated, false)

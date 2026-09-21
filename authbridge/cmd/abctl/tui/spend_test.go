@@ -1233,18 +1233,17 @@ func TestCacheHitPct_ReportedKindsWithZeroCountersIsNotNaN(t *testing.T) {
 		t.Errorf("pct = %v alongside ok=false; a suppressed figure must carry no value for a "+
 			"caller to render by mistake", got)
 	}
-	// And the figure really is suppressed at the LIVE renderer, not merely at the arithmetic.
-	// Against renderSpendBand: this used to assert through renderSpendStrip, which paneView
-	// stopped calling when the band replaced it, so the "really is suppressed at the renderer"
-	// half was vouching for a renderer nobody could see.
-	s := spendSummary{WindowLabel: "1h", Priced: true, WindowUSD: 1.12, HasSnapshot: true}
-	s.CacheHitPct, s.HasCacheHit = cacheHitPct(usage.Counts{
-		PresentKinds: usage.KindInput | usage.KindCacheRead | usage.KindCacheWrite,
-	})
-	out := strings.Join(renderSpendBand(s, 200), "\n")
-	if strings.Contains(out, "NaN") || strings.Contains(out, "CACHE") {
-		t.Errorf("band %q renders a cache figure derived from a zero prompt", out)
-	}
+	// NO RENDERER HALF, deliberately. There used to be one asserting that renderSpendStrip drew no
+	// "cache NaN%", and re-pointing it at renderSpendBand made it non-falsifiable instead of dead:
+	// the band reads only s.Spans, so no value of CacheHitPct or HasCacheHit can put "NaN" or
+	// "CACHE" in its output, and the assertion held for a reason that had nothing to do with the
+	// guard under test. A test that cannot fail is worse than a missing one, because the suite
+	// reports it as coverage.
+	//
+	// There is nothing to re-point it to: no live renderer reads a cache figure since the band
+	// replaced the strip, which is a real coverage loss and is recorded as one rather than papered
+	// over. The arithmetic above is the falsifiable part — removing cacheHitPct's `prompt <= 0`
+	// guard fails it — and it is what this test is for.
 }
 
 // The DATA half of "a failed window poll must not blank the day figure".
