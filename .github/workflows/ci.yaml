@@ -177,19 +177,11 @@ jobs:
             echo "::endgroup::"
           done
 
-      # cmd_service_systemd_integration_test.go drives a REAL systemd --user session
-      # to prove Restart=on-failure actually restarts a crashed unit — the Linux
-      # counterpart to TestWaitBootedOut_RealLaunchd, which has skipped in every CI
-      # run since it was written because no workflow gives it a real launchd or sets
-      # its required-env-var escape hatch. Don't repeat that here: this step gives the
-      # abctl leg a real, reachable systemd --user session, and the Test step below
-      # sets ABCTL_SYSTEMD_TESTS=required for this leg only, so a skip here is a
-      # failure, not a silent no-op.
-      #
-      # The runner user has no interactive login, so nothing has started a user
-      # manager or created /run/user/<uid> yet. enable-linger asks logind to start
-      # one and keep it running; wait for its bus socket rather than assuming it is
-      # instant.
+      # Gives the abctl leg a real systemd --user session for
+      # cmd_service_systemd_integration_test.go. The runner has no interactive login, so
+      # nothing has started one yet; enable-linger asks logind to start and keep one
+      # running. ABCTL_SYSTEMD_TESTS=required (below) makes a setup failure here show up
+      # as a failed test, not a silently skipped one.
       - name: Enable a systemd --user session (abctl leg only)
         if: matrix.binary == 'abctl'
         run: |
