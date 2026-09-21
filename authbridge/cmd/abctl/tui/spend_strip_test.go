@@ -223,10 +223,10 @@ func TestPaneView_NoStripRowOnAShortTerminal(t *testing.T) {
 		Priced: true,
 	}
 
-	// AGAINST THE BAND'S OWN LABELS, not against a "SPEND" prefix. This asserted the absence of
-	// stripLabel, which renderSpendStrip put at the head of its line — and the band has no such
-	// prefix, so the condition became unfalsifiable the moment the band replaced the strip: it
-	// could not have failed on a band drawn in full. The labels ARE the band's identity now.
+	// AGAINST THE BAND'S OWN LABELS, not against a "SPEND" prefix. This used to assert the absence
+	// of the constant the old strip put at the head of its line — and the band has no such prefix,
+	// so the condition became unfalsifiable the moment the band replaced the strip: it could not
+	// have failed on a band drawn in full. The labels ARE the band's identity now.
 	if got := m.paneView(); bandIsDrawn(got) {
 		t.Errorf("19-row terminal drew the band rows it did not reserve: %q", got)
 	}
