@@ -71,7 +71,7 @@ func runTransientUnit(t *testing.T, name, script string) {
 	stop() // in case a previous, aborted run of this test left it behind
 
 	args := []string{
-		"--user", "run", "--unit=" + name,
+		"--user", "--unit=" + name,
 		"-p", "Restart=on-failure",
 		"-p", "RestartSec=1",
 		script,
