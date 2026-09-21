@@ -126,14 +126,24 @@ func TestRenderSpendDrawer_ShowsAPerSeriesSavingWithoutAddingItToCost(t *testing
 	if opus == "" {
 		t.Fatal("no row for claude-opus-5")
 	}
-	if !strings.Contains(opus, inexactMarker+"$0.1804") {
-		t.Errorf("row %q is missing the saving or its %q marker", opus, inexactMarker)
+	// "saved $0.18", in cents and with no marker — see renderTierRows for why this panel no
+	// longer marks its figures. The WORD is asserted along with the figure because it is what
+	// keeps the saving apart from the cost now that the marker is gone: a bare "$0.18" beside
+	// "$11.12" is two spend figures with nothing telling them apart.
+	if !strings.Contains(opus, "saved $0.18") {
+		t.Errorf("row %q is missing the saving or the word that identifies it", opus)
 	}
-	if !strings.Contains(opus, "$11.1214") {
+	if strings.Contains(opus, inexactMarker) {
+		t.Errorf("row %q carries %q; this panel states no per-row caveat", opus, inexactMarker)
+	}
+	if !strings.Contains(opus, "$11.12") {
 		t.Errorf("row %q lost its cost", opus)
 	}
-	// 11.1214 + 0.1804.
-	if strings.Contains(opus, "$11.3018") {
+	if strings.Contains(opus, "$11.1214") {
+		t.Errorf("row %q kept four decimals; this column reads in cents", opus)
+	}
+	// 11.1214 + 0.1804, in cents.
+	if strings.Contains(opus, "$11.30") {
 		t.Errorf("row %q added the saving to the cost", opus)
 	}
 }
@@ -646,7 +656,7 @@ func TestRenderSpendDrawer_ANegativeSeriesTotalIsUnpricedNotARefund(t *testing.T
 		t.Errorf("row %q blames coverage for an impossible figure", row)
 	}
 	// And the healthy series in the same drawer still shows its figure.
-	if !strings.Contains(joined, "$11.1214") {
+	if !strings.Contains(joined, "$11.12") {
 		t.Errorf("the good row lost its figure:\n%s", joined)
 	}
 }

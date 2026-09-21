@@ -60,13 +60,17 @@ func TestFormatUSDTotal_LeavesTheImpossibleToItsCaller(t *testing.T) {
 	}
 }
 
-// THE BOUNDARY ITSELF, across two surfaces, because this is the regression the rule is for.
+// THE BOUNDARY ITSELF, because this is the regression the rule is for. Both precisions still come
+// out of one marking path, so a change to either formatter can move a surface that did not ask to
+// be moved — which is how the drawer's PER-MODEL column got rounded once already, silently,
+// since the drawer's own tests assert whole rendered rows and a narrower figure matches most of
+// them.
 //
-// Span totals read in cents and per-item figures in four decimals. Both used to come out of one
-// function that formatted as well as marked, so moving the band to cents moved the drawer's
-// PER-MODEL column with it — silently, since the drawer's own tests assert whole rendered rows
-// and a narrower figure still matches most of them.
-func TestPrecisionRule_SpanTotalsInCentsPerItemInFourDecimals(t *testing.T) {
+// WHERE THE LINE NOW SITS: cents wherever a reader scans and compares, four decimals for ONE
+// REQUEST and only there. It used to sit at "span versus one thing", which put the sessions table
+// and this drawer on the four-decimal side; both have since moved, and the carve-out is what is
+// left. See the rule beside formatUSDTotal.
+func TestPrecisionRule_CentsWhereScannedFourDecimalsForOneRequest(t *testing.T) {
 	// One figure, both sides of the boundary: $1.0601, which is what the model column showed
 	// when this was found.
 	const usd = 1.0601
@@ -76,12 +80,17 @@ func TestPrecisionRule_SpanTotalsInCentsPerItemInFourDecimals(t *testing.T) {
 		t.Errorf("a span total rendered %q, want cents", total)
 	}
 
+	// The four-decimal path still exists and still formats four decimals — it is what the events
+	// table's per-request COST reads through. Asserted so the carve-out cannot quietly vanish:
+	// with every other surface moved to cents, nothing else would notice if it did.
 	item := moneyAmount(usd, 0, 0, 0, nil, false)
 	if item != "$1.0601" {
-		t.Errorf("a per-item figure rendered %q, want four decimals", item)
+		t.Errorf("a per-request figure rendered %q, want four decimals", item)
 	}
 
-	// And through the drawer's own row builder, which is the live caller that regressed.
+	// And through the drawer's own row builder, the live caller that moved. It reads in cents now,
+	// so the assertion is inverted from what it was: this is the one line in the file that says
+	// which side the drawer is on.
 	figs := drawerFigures(drawerRow{
 		label:  "claude-opus-5",
 		counts: usage.Counts{CostMicros: 1_060_100, PricedRequests: 11, PriceableRequests: 11},
@@ -90,8 +99,32 @@ func TestPrecisionRule_SpanTotalsInCentsPerItemInFourDecimals(t *testing.T) {
 	for _, f := range figs {
 		joined += f.full + " "
 	}
-	if !strings.Contains(joined, "$1.0601") {
-		t.Errorf("the drawer's model row lost its four decimals: %q", joined)
+	if !strings.Contains(joined, "$1.06") {
+		t.Errorf("the drawer's model row is not in cents: %q", joined)
+	}
+	if strings.Contains(joined, "$1.0601") {
+		t.Errorf("the drawer's model row kept four decimals: %q", joined)
+	}
+}
+
+// The sessions table reads in cents too, through its own ladder rather than through moneyTotal.
+//
+// A SEPARATE ASSERTION because it is a separate code path: sessionMoneyCell formats from micros
+// directly, so nothing above would catch it drifting back to four decimals. The half-cent case is
+// the one that proves it goes through formatUSDTotalMicros rather than a "%.2f" of its own —
+// 1_005_000 micros is exactly $1.005 and the float form prints "$1.00".
+func TestPrecisionRule_TheSessionsTableReadsInCents(t *testing.T) {
+	for _, tc := range []struct {
+		micros int64
+		want   string
+	}{
+		{1_060_100, "$1.06"},
+		{1_005_000, "$1.01"},
+		{20, "<$0.01"},
+	} {
+		if got := sessionMoneyCell(tc.micros, false, sessionsMoneyWidth); got != tc.want {
+			t.Errorf("sessionMoneyCell(%d) = %q, want %q", tc.micros, got, tc.want)
+		}
 	}
 }
 
@@ -103,6 +136,6 @@ func TestMarkMoney_WrapsEitherPrecision(t *testing.T) {
 		t.Errorf("a marked span total = %q", got)
 	}
 	if got := moneyAmount(1.0601, 1, 4, 1, deg, true); got != damagedMarker+inexactMarker+"$1.0601"+partialMarker {
-		t.Errorf("a marked per-item figure = %q", got)
+		t.Errorf("a marked per-request figure = %q", got)
 	}
 }
