@@ -424,9 +424,9 @@ func TestSpendSummary_NoErrorMeansNotFailed(t *testing.T) {
 	}
 }
 
-// The label must come from what the server ANSWERED with, never from the spendWindow
-// constant we asked for. The two are not the same promise: spendWindow is 1h, and a reply
-// covering 30m labelled "/1h" is a wrong number wearing a right-looking label.
+// The label must come from what the server ANSWERED with, never from the window that was
+// requested. The two are not the same promise: the hour chain asks for 1h, and a reply covering
+// 30m labelled "/1h" is a wrong number wearing a right-looking label.
 //
 // This was the burn rate's test — the rate divided by the wrong span — and the concern
 // outlived the rate, because the label is derived from exactly the same parse.
@@ -444,7 +444,7 @@ func TestSpendSummary_WindowLabelComesFromTheSnapshotNotTheRequest(t *testing.T)
 	got := m.spendSummary()
 
 	if got.WindowLabel != "30m" {
-		t.Errorf("WindowLabel = %q, want %q — the reply covered 30 minutes and spendWindow "+
+		t.Errorf("WindowLabel = %q, want %q — the reply covered 30 minutes and the hour chain "+
 			"asks for an hour, so %q is the requested span echoed back", got.WindowLabel, "30m",
 			got.WindowLabel)
 	}

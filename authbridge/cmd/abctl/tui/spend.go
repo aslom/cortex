@@ -60,19 +60,22 @@ const spendFetchTimeout = 5 * time.Second
 // warning about nothing.
 const spendStaleAfter = 2 * spendPollInterval
 
-// spendWindow is the span the strip REQUESTS, and spendResolution asks for it as
-// a SINGLE bucket. One bucket means the server folds and the client does no
-// arithmetic over buckets — a client-side sum would be a second implementation of
+// spendResolution asks for a span as a SINGLE bucket. One bucket means the server folds and the
+// client does no arithmetic over buckets — a client-side sum would be a second implementation of
 // the fold, and the one place cost is settled is the aggregator.
 //
-// Requested, not covered: what the answer actually spans is snap.Window, and
-// nothing may assume the two agree. Deriving the burn rate from this constant
-// instead of from the snapshot is a real defect (a rate over a span the label
-// contradicts), so the divisor is parsed from the answer — see spendSummary.
-const (
-	spendWindow     = time.Hour
-	spendResolution = time.Hour
-)
+// THE REQUESTED-SPAN CONSTANT THAT SAT BESIDE THIS IS GONE. Every span now names its own window in
+// spendSpanDefs, so a single "the span we ask for" value described nothing: the four chains ask for
+// four different windows. It survived as dead code because staticcheck's unused treats a GROUPED
+// const declaration as used when any member of the group is used — verified by splitting it into
+// its own declaration, which the linter then reported immediately — so the group was hiding it.
+// Hence one declaration per constant here.
+//
+// Requested is still not covered: what an answer actually spans is snap.Window and nothing may
+// assume the two agree. spanReadings compares them per span through servedAsRequested, and a cell
+// whose served window is not the one asked for is drawn as unavailable rather than as a figure
+// under the wrong label.
+const spendResolution = time.Hour
 
 // spendState is the always-on spend summary behind the strip.
 //
@@ -616,10 +619,9 @@ func (m *model) spendHourAndDaySummary() spendSummary {
 	if gap := snap.Totals.PriceableRequests - snap.Totals.PricedRequests; gap > 0 {
 		out.Unpriced = gap
 	}
-	// The label comes from the span the SNAPSHOT reports, never from the spendWindow
-	// constant. spendWindow is what we ASKED for; snap.Window is what the server answered
-	// with, and the two are not the same promise — labelling the answer with the request
-	// is a wrong number wearing a right-looking label, which is worse than no number.
+	// The label comes from the span the SNAPSHOT reports, never from the window that was
+	// REQUESTED. The request and the answer are not the same promise — labelling the answer with
+	// the request is a wrong number wearing a right-looking label, which is worse than no number.
 	//
 	// It also fixes a mismatch that is live today rather than hypothetical: the aggregator
 	// sets Window from time.Duration.String(), so a one-hour request comes back as
