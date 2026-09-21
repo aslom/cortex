@@ -11,6 +11,23 @@ import (
 	"time"
 )
 
+// This file's two tests deliberately don't mirror TestWaitBootedOut_RealLaunchd's
+// shape, because the two platforms don't need the same thing proved.
+//
+// macOS: launchd does not reliably restart an agent added mid-session (measured
+// and documented on renderUnitFor's darwin branch), so this codebase runs its own
+// supervisor process (supervise.go) and has launchd supervise THAT instead.
+// TestWaitBootedOut_RealLaunchd proves our own supervisor's bootout/restart
+// handling — a mechanism this repo had to build because launchd would not do it.
+//
+// Linux: systemd's Restart=on-failure is trusted to work natively, so
+// renderUnitFor's linux branch runs the proxy directly — one process, no
+// supervisor. The two tests below instead prove systemd's OWN restart mechanism
+// actually behaves as documented: TestSupervisorRestartsAfterCrash_RealSystemd is
+// a claim about systemd, not about code this repo wrote — which is also why it's
+// simpler than the darwin test: there's no supervisor layer or bootout race to
+// reproduce, just the bare Restart=on-failure claim itself.
+
 // requireRealSystemd skips (or, with ABCTL_SYSTEMD_TESTS=required, fails) unless
 // this process can actually drive a live systemd --user session — mirroring the
 // four skip guards in TestWaitBootedOut_RealLaunchd (cmd_service_bootout_test.go).
