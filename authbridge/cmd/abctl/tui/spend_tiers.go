@@ -58,8 +58,18 @@ var tierOrder = [numTierRows]pricing.Tier{
 // from and a block is both unambiguous and legible. Colour stays decoration — the label
 // carries the identity, so this survives a monochrome terminal and a screenshot.
 //
-// EVERY FIGURE WEARS inexactMarker. The mix is the rate table's while the total may be the
-// gateway's, so no figure here is exact even though the column sums to one that is.
+// NO FIGURE WEARS inexactMarker, and it is worth saying what was given up. Every figure here IS
+// inexact — the mix is the rate table's while the total may be the gateway's — and each one used
+// to carry the glyph saying so. It was dropped deliberately: unlike the sessions table and the
+// band, this panel has no money column HEADER to move the caveat onto ("WHERE IT WENT" names the
+// column, not the figures), so the choice was a glyph on every row or nothing, and nothing won.
+//
+// What is left to carry it is this comment and the README. If a reader needs to know these are
+// apportioned rather than measured, a header for the money column is the thing to add — not the
+// per-row marker back.
+//
+// Figures read in CENTS, like every other scanned money surface; see the precision rule beside
+// formatUSDTotal.
 func renderTierRows(c usage.Counts, width int) []string {
 	tiers, ok := c.ApportionTiers()
 
@@ -106,12 +116,12 @@ func renderTierRows(c usage.Counts, width int) []string {
 			// four tiers, so no assertion could see it.
 			row = fmt.Sprintf("%-*s %s", tierLabelWidth, label, emptyCell)
 		case budget > 0:
-			row = fmt.Sprintf("%-*s %-*s %s%s", tierLabelWidth, label,
+			row = fmt.Sprintf("%-*s %-*s %s", tierLabelWidth, label,
 				budget, tierBar(tiers[tier], peak, budget),
-				inexactMarker, formatUSDCell(float64(tiers[tier])/1e6))
+				formatUSDTotalMicros(tiers[tier]))
 		default:
-			row = fmt.Sprintf("%-*s %s%s", tierLabelWidth, label,
-				inexactMarker, formatUSDCell(float64(tiers[tier])/1e6))
+			row = fmt.Sprintf("%-*s %s", tierLabelWidth, label,
+				formatUSDTotalMicros(tiers[tier]))
 		}
 		out[i] = clipRow(row, width)
 	}

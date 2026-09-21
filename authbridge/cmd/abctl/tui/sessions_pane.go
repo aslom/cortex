@@ -18,7 +18,7 @@ import (
 // resize: fitting the LIVE columns would be cumulative, and a terminal that got narrower once
 // would keep its narrowed columns after being widened again.
 //
-// These widths sum to 90 rendered columns (80 declared plus bubbles' two per cell), which is
+// These widths sum to 91 rendered columns (77 declared plus bubbles' two per cell), which is
 // why they are fitted rather than used as-is — see fitTableColumns.
 func sessionsColumns() []table.Column {
 	return []table.Column{
@@ -42,10 +42,7 @@ func sessionsColumns() []table.Column {
 		// while the strip's "today" figure does not — both are correct, and neither is a
 		// check on the other.
 		{Title: "COST", Width: 10},
-		// SAVED wears headerMarker: every figure in this column is an estimate, so the caveat
-		// belongs to the column and not to any row. It is still ADDRESSED as "SAVED"
-		// everywhere — headerTitle strips the annotation, which is what keeps the name the key.
-		{Title: "SAVED" + headerMarker, Width: 10},
+		{Title: "SAVED", Width: 10},
 		// CONTEXT(1M) replaces an ACTIVE column that carried a ● for a flag nobody acted on.
 		// UPDATED already says whether a session is live, in seconds rather than as a dot.
 		//
@@ -60,24 +57,8 @@ func sessionsColumns() []table.Column {
 //
 // The width follows the title rather than the gauge: the gauge scales to whatever the fitter
 // leaves, and a column narrower than its own heading would have bubbles truncate the heading to
-// "CTX(1…", which states no scale at all.
-//
-// ABBREVIATED, BECAUSE THE DECLARED WIDTH IS NOT THE FITTED ONE. It read "CONTEXT(1M)" — eleven
-// columns, declared at exactly its own length so the heading could not be clipped — and
-// fitTableColumns shrinks the widest column repeatedly against ONE global floor of four, so the
-// heading was squeezed to ten columns at an 80-column terminal and eight at fifty. The truncation
-// this width was chosen to prevent happened anyway, two terminal sizes down.
-//
-// Seven columns fits every width the column survives at, so the scale is stated everywhere rather
-// than on wide terminals only — which is the requirement, the denominator being the whole reason
-// the title carries it. Dropping the column instead was tried and is worse: it changes what the
-// table shows at narrow widths, and it frees so much width that the money columns are never
-// fitted below their declared size, which silently retires the guard on rendering cells against
-// their FITTED width.
-//
-// Found by TestSessionsHeaders_CarryNoANSIUnderAForcedColourProfile, which measures every heading
-// against the width it will RENDER at rather than the one it asked for.
-const contextColumnTitle = "CTX(1M)"
+// "CONTEXT(1…", which states no scale at all.
+const contextColumnTitle = "CONTEXT(1M)"
 
 // contextWindowTokens is the denominator every gauge is drawn against.
 //
@@ -120,21 +101,29 @@ var sessionsRightAligned = map[string]bool{
 // comes from a package-level constructor, and writing through it would make the result
 // permanent for every later caller instead of per-rebuild.
 //
-// Idempotent, because each heading is re-derived rather than padded again: re-aligning an
-// already-aligned set is a no-op rather than a heading pushed off its column.
+// Idempotent, because each heading is re-derived from headerTitle rather than padded again:
+// re-aligning an already-aligned set is a no-op rather than a heading pushed off its column.
+// headerTitle strips the estimate marker as well as the padding, which is what keeps that true
+// for SAVED — otherwise each pass would add another "~".
 //
-// SELECTED BY NAME, PADDED AS A HEADING, and the two are different functions on purpose. The
-// set is keyed on the bare name, so a column carrying headerMarker still matches it — against
-// the raw title "SAVED" matches nothing once the column is named "SAVED ~", and the heading
-// would quietly stop being right-aligned. But what gets PADDED is headerHeading, which keeps
-// the marker: padding headerTitle would strip "~" off the rendered heading and delete the
-// caveat from the screen while every name-keyed lookup went on working.
+// THE ESTIMATE MARKER IS ADDED HERE, at render time, and the declared Title stays the bare name.
+// A saving is always an estimate, so the caveat is the column's rather than any row's and is
+// stated once above them instead of on every cell — see sessionMoneyCell. Doing it here rather
+// than in sessionsColumns is what keeps "SAVED" the lookup key: four callers address this column
+// by that literal string, and a declared Title of "SAVED~" would make all four read it as absent
+// and render every saving as "—".
 func alignSessionsHeaders(cols []table.Column) []table.Column {
 	out := make([]table.Column, len(cols))
 	copy(out, cols)
 	for i, c := range out {
+		title := headerTitle(c)
+		if title == "SAVED" {
+			title += inexactMarker
+		}
 		if sessionsRightAligned[headerTitle(c)] {
-			out[i].Title = rightAlignHeader(headerHeading(c), c.Width)
+			out[i].Title = rightAlignHeader(title, c.Width)
+		} else {
+			out[i].Title = title
 		}
 	}
 	return out
@@ -178,7 +167,7 @@ func (m *model) rebuildSessionsTable() {
 	//     and layout() did exactly that on any resize across 53 columns. A tmux split was
 	//     enough. Appending a rebuild after SetColumns cannot help; the panic is inside it.
 	//   - The other direction does not crash, it MISALIGNS: a 5-cell row under a 7-column
-	//     header puts the last cell under COST.
+	//     header puts ACTIVE's dot under COST.
 	//
 	// Reading the flag off the table's own columns fixed the disagreement WITHIN a rebuild and
 	// did nothing for this, because the columns were still set somewhere else. Derived once
@@ -210,14 +199,6 @@ func (m *model) rebuildSessionsTable() {
 		if m.filter != "" && !strings.Contains(s.ID, m.filter) {
 			continue
 		}
-		// NO STYLING ON ANY CELL IN THIS TABLE, and none is possible with this widget.
-		//
-		// bubbles v1.0.0 renderRow does runewidth.Truncate(value, col.Width, "…") on the
-		// FINISHED cell, and runewidth is not ANSI-aware, so every byte of an escape sequence
-		// is charged against the column width: a one-rune glyph wrapped in a colour and a
-		// reset measures eleven-odd runes and gets truncated to "…". Learned on an ACTIVE
-		// column that carried a green ●, which main has since replaced with the context
-		// gauge — the column is gone and the constraint is not.
 		row := table.Row{
 			trunc(s.ID, idW),
 			relTime(now, s.UpdatedAt),
@@ -395,8 +376,9 @@ func (m *model) selectedSessionID() string {
 // a surface that used "0" in one column and "—" in another would erase it.
 const emptyCell = "—"
 
-// sessionMoneyCell renders one session's lifetime cost, or its lifetime saving when
-// avoided is set.
+// sessionMoneyCell renders one session's lifetime cost or its lifetime saving. The two are the
+// same cell: they differ only in which micros the caller passes and in the column heading above
+// them, not in how a figure is formatted or marked.
 //
 // UNKNOWN AND ZERO ARE THE SAME CELL HERE, and deliberately: micros == 0 means either the
 // session's traffic could not be priced or it genuinely charged nothing, and this function
@@ -409,25 +391,22 @@ const emptyCell = "—"
 // sums non-negative per-request figures, so a negative can only come from a broken producer,
 // and "-$5.00" in a column of costs reads as a refund nobody issued.
 //
-// A SAVING NO LONGER WEARS inexactMarker ON THE VALUE; the COLUMN carries it instead, as
-// headerMarker. It is still an estimate for every reason it always was — computed from a
-// bytes-to-tokens ratio, gross of the prompt-cache re-warm (see usage.Counts.AvoidedMicros),
-// and the per-request flags recording which caveats applied do not survive summation. What
-// changed is where saying so belongs.
+// A saving is estimated — from a bytes-to-tokens ratio, gross of the prompt-cache re-warm, see
+// usage.Counts.AvoidedMicros — and that caveat is NOT on this cell. It is on the column HEADER,
+// which reads "SAVED~"; see alignSessionsHeaders.
 //
-// A MARKER TRUE OF EVERY ROW IS A PROPERTY OF THE COLUMN. Applied per value it was
-// unconditional, so it distinguished no row from any other and carried no information down the
-// column — while spending a display column in every one of them. Worse, it DILUTED the same
-// glyph where it is conditional: "~" on a COST figure means that particular total is a lower
-// bound, and a reader who has learned to see "~" on every SAVED cell stops reading it as a
-// claim at all. Moving it up makes "~" on a money value mean something again.
+// THE MARKER MOVED BECAUSE IT IS A PROPERTY OF THE COLUMN, not of the row. It applied to every
+// saving this cell has ever rendered — the per-request flags recording which caveats applied do
+// not survive summation, so it could never be conditional — and a glyph repeated down every row
+// of a column states one fact as many times as there are sessions. The general rule this package
+// now follows: an UNCONDITIONAL caveat belongs on the header, a CONDITIONAL one rides the figure.
+// partialMarker below is conditional and stays here.
 //
-// THIS IS NOT THE "MARKER RIDES ON THE FIGURE" RULE BEING BROKEN. That rule exists because a
-// width-fitted surface may shorten a caveat to nothing while the number survives, so a
-// CONDITIONAL caveat has to travel with its figure or a qualified total can be published as an
-// unqualified one. partialMarker and damagedMarker still do exactly that, below. An
-// unconditional column property cannot be lost that way: the heading is fitted with the column
-// it names, so the two appear and disappear together.
+// This is a deliberate exception to "a marker rides ON the figure" (see partialMarker's own doc),
+// and it is narrow: a bubbles table always renders its header, so unlike the spend strip's
+// fitter — which can drop the words beside a figure while the figure stays — there is no width at
+// which these cells are visible and their header is not. sessionsShowMoney drops the columns
+// whole rather than letting them narrow far enough to clip the heading.
 //
 // saturated marks the figure as a FLOOR: the session's total reached the int64 ceiling and
 // was clamped, so the real number is larger by an amount nothing can state. It arrives from
@@ -441,7 +420,7 @@ const emptyCell = "—"
 // them there. A marker that rides ON the figure is the point: a cell can be truncated to
 // nothing but while the number is on screen its caveat is too.
 // budget is the column's FITTED width, and the figure is rendered less precisely rather than
-// wider when the cents form will not fit.
+// wider when cents will not fit.
 //
 // A bubbles table does not re-flow an overflowing cell, it truncates — and truncating a money
 // figure produces a smaller figure that reads as real, which is the one thing every surface here
@@ -451,15 +430,16 @@ const emptyCell = "—"
 // appended to the longest value there is.
 //
 // PRECISION IS WHAT YIELDS, in order: cents, whole dollars, then humanizeCount's compact form,
-// which is itself width-bounded and clamps at ">999T". THREE RUNGS, not four — the four-decimal
-// rung went when formatUSDCell became two decimals, because the two then rendered the identical
-// string and the ladder had a step that could not change the outcome. The last candidate always
-// fits a sane column, and is returned unconditionally so this cannot fall through to an unbounded
-// string.
-// NO avoided PARAMETER any more. It existed only to add inexactMarker, and once that moved to
-// the SAVED heading this function rendered COST and SAVED identically — so the flag selected
-// between two paths that had become one. Kept as a parameter it would have been a lie about
-// the cell's behaviour that every caller had to keep supplying.
+// which is itself width-bounded and clamps at ">999T". The last candidate always fits a sane
+// column, so this cannot fall through to an unbounded string.
+//
+// CENTS AT THE TOP, not four decimals, and that is a reversal. This column read "$1.8140" — four
+// decimals — on the reasoning that a per-session figure is attributable to one thing and is
+// routinely sub-cent. It is the wrong trade for a column a reader SCANS: four decimals are two
+// digits of noise on every row of a table whose purpose is comparing sessions to each other, and
+// the sub-cent case is served by the floor below rather than by widening every other row. The
+// cost is real and accepted: two sessions that differ below a cent now read alike. See the
+// precision rule beside formatUSDTotal, which this change rewrote.
 func sessionMoneyCell(micros int64, saturated bool, budget int) string {
 	if micros == 0 || negativeCost(micros) {
 		return emptyCell
@@ -471,14 +451,15 @@ func sessionMoneyCell(micros int64, saturated bool, budget int) string {
 		return amount
 	}
 	usd := float64(micros) / 1e6
-	// A RUNG THAT ROUNDS THE FIGURE TO ZERO IS SKIPPED, not rendered. %.2f turns a sub-cent
-	// charge into "$0.00" and %.0f turns anything under fifty cents into "$0" — and a known
-	// non-zero cost displayed as free is worse than the unknown one emptyCell stands for. This
-	// cell's own rule, fifty lines up, is never $0.00 for a figure that might be unknown; a figure
-	// that is KNOWN and shown as nothing breaks it harder.
+	// A RUNG THAT ROUNDS THE FIGURE TO ZERO IS SKIPPED, not rendered. %.0f turns anything under
+	// fifty cents into "$0" — and a known non-zero cost displayed as free is worse than the
+	// unknown one emptyCell stands for. This cell's own rule, fifty lines up, is never $0.00 for a
+	// figure that might be unknown; a figure that is KNOWN and shown as nothing breaks it harder.
 	//
-	// Measured before the guard: at the narrowest widths these columns survive (a six-column
-	// budget), $0.0012 rendered "$0.00" in COST and "~$0.00" in SAVED.
+	// THE GUARD NOW PROTECTS ONLY THE LOWER RUNGS. It used to be what kept a sub-cent charge off
+	// the cents rung, because that rung was a bare fmt.Sprintf("%.2f") with no floor of its own and
+	// printed "$0.00". formatUSDTotalMicros has the floor built in, so the top rung is honest for
+	// every positive figure and the guard never fires on it.
 	//
 	// Each rung carries the rounded value it would print, so "is this rung honest" is one
 	// comparison rather than a guess about the format string.
@@ -488,14 +469,16 @@ func sessionMoneyCell(micros int64, saturated bool, budget int) string {
 	}
 	compact := rung{"$" + humanizeCount(int64(usd)), math.Trunc(usd)}
 	for _, r := range []rung{
-		// formatUSDCell has its own floor: anything positive under half a CENT renders
-		// "<$0.01" rather than "$0.00", so this rung never claims zero for a real charge.
+		// THROUGH MICROS, not usd: formatUSDTotalMicros rounds half-up on the integer, which is
+		// the whole reason it exists — 1_005_000 micros is exactly $1.005, the nearest float64 is
+		// 1.00499999…, and %.2f prints "$1.00". The integer is already in hand here, so there is
+		// no reason to launder it through a float and back.
 		//
-		// THE %.2f RUNG THAT USED TO SIT BELOW THIS ONE IS GONE, because formatUSDCell now IS
-		// two decimals — the two rendered the identical string, so the ladder had a step that
-		// could never change the outcome and only obscured which rung a cell came from. The
-		// ladder is now three rungs: cents, whole dollars, compact.
-		{formatUSDCell(usd), usd},
+		// rounded is usd, NOT the rounded cents value, for the same reason the four-decimal rung
+		// carried it: this formatter has its own floor — anything positive under half a cent
+		// renders "<$0.01" rather than "$0.00" — so it never claims zero for a real charge and
+		// must not be skipped by the guard below.
+		{formatUSDTotalMicros(micros), usd},
 		{"$" + fmt.Sprintf("%.0f", usd), math.Round(usd)},
 		compact,
 	} {
@@ -507,24 +490,48 @@ func sessionMoneyCell(micros int64, saturated bool, budget int) string {
 		}
 	}
 	// NOTHING FITS — or nothing that can be shown WITHOUT rounding a real charge to zero — so
-	// nothing is shown.
+	// nothing is shown. The floor is "<$0.01" at six columns, seven with the clamp marker, which
+	// sessionMoneyCellMin is derived from: the columns are dropped whole rather than narrowed past
+	// it, so this is unreachable through sessionsShowMoney and is kept for a caller that passes a
+	// budget of its own.
 	//
-	// A GUARD, NOT A LIVE PATH, as the columns are fitted today, and the measurements say so: the
-	// narrowest fitted budget either money column reaches is EIGHT, and at eight every case has a
-	// form that fits — a sub-cent charge is "<$0.01" at six, and a saturated near-int64 total is
-	// "$9.2G+" at six. It becomes reachable below six columns, which this fitter does not produce.
-	//
-	// An earlier version of this comment claimed both halves were reachable "at a budget the
-	// fitter can squeeze to six" with "<$0.0001" as the sub-cent form. Neither is true after the
-	// move to cents: that form is now two columns shorter and the floor is eight, not six.
-	//
-	// The em dash rather than a truncation, and rather than dropping the markers to buy two
-	// columns: a clipped figure is a smaller figure that reads as real, and the markers are the
-	// figure's meaning — "~" says estimated and "+" says floor, so a bare number in their place
-	// is a different claim. If it cannot be said correctly it is not said, which is the rule the
-	// spend strip's ladder follows for the same reason.
+	// The em dash rather than a truncation, and rather than dropping the marker to buy a column:
+	// a clipped figure is a smaller figure that reads as real, and "+" says the figure is a floor,
+	// so a bare number in its place is a different claim. If it cannot be said correctly it is not
+	// said, which is the rule the spend strip's ladder follows for the same reason.
 	return emptyCell
 }
+
+// sessionsScopeNote states the span of every figure in this table, in the pane's title.
+//
+// IT EXISTS BECAUSE THE SCOPE WAS ONLY EVER IN THIS FILE'S COMMENTS. sessionsColumns' own doc
+// explains at length that COST, SAVED and TOKENS are lifetime figures and that the strip's
+// rolling window "is not a check on the other" — and a reader has none of that. What they have is
+// a spend strip reporting one hour directly above a table whose TOKENS column sums to a different
+// number, with nothing on screen distinguishing the two. Measured on a local proxy: 84.6M on the
+// strip against 123.8M down the column, both correct.
+//
+// IN THE TITLE, and that placement is the one that survived three candidates:
+//
+//   - NOT in the column headers. TOKENS is squeezed to six runes on a narrow terminal — see
+//     sessionTokensCellMin — so a header carrying a word would be CLIPPED, which is the one thing
+//     this file refuses in both directions ("DROP WHOLE COLUMNS, NEVER CLIP A CELL"). Six runes
+//     is the budget, and "TOKENS" already spends it.
+//   - NOT in the hint line. fitHintLine drops whole hints from the FRONT, so anything added there
+//     is paid for by the hints ahead of it — and helpView's own comment records that [u] usage and
+//     [$] spend were deliberately placed to survive an 80-column cut. A note that costs the two
+//     keys which reach cost, in order to explain a cost column, is a bad trade at any width.
+//   - THE TITLE, where paneUsage already states its own scope ("abctl · … · usage · all"). One
+//     statement for the whole table is also the right GRAIN: every numeric column here is
+//     lifetime, EVENTS included, so a per-column marker would repeat one fact four times.
+//
+// "lifetime" rather than "all time", because the figures do not span all time: the store resets
+// when the proxy restarts, as sessionsColumns says. A session's lifetime is exactly what they sum.
+//
+// DROPPED WHEN IT DOES NOT FIT, by the caller. The title is not width-fitted, so an unconditional
+// suffix would wrap on a narrow terminal — and a wrapped title costs a row of the table, which is
+// the failure the spend strip's whole fitting ladder exists to avoid.
+const sessionsScopeNote = " · lifetime totals"
 
 // sessionsColumnWidth is the fitted width of one named column, or 0 when it is not present.
 //
@@ -547,51 +554,34 @@ func sessionsColumnWidth(cols []table.Column, title string) int {
 // and TestSessionTokens_FitsEveryFittedWidth, which walks the same boundary.
 const sessionTokensCellMin = 6
 
-// sessionUpdatedCellMin is the narrowest UPDATED cell that holds relTime's widest RELATIVE
-// form: "just now", eight runes. Every other relative form is shorter ("59s ago", "23h ago"
-// are seven).
+// sessionMoneyCellMin is the width below which sessionsShowMoney drops the COST and SAVED
+// columns rather than render them dishonestly.
 //
-// RELATIVE ONLY, and that limit is a known gap rather than an oversight. Past 24 hours relTime
-// switches to an absolute stamp, and "Jan 12 15:04" is TWELVE runes — so a column fitted below
-// twelve clips a day-old session's timestamp. The fitter only reaches twelve at about 83
-// terminal columns, which means an 80-column terminal — the documented default this table's
-// whole fitting ladder was built for — renders "Jan 12 15…" today.
+// NINE, WHICH IS NO LONGER THE MONEY CELL'S OWN FLOOR, and the gap is deliberate. The cell's
+// floor came down to seven when this column moved to cents: sessionMoneyCell's top rung is
+// formatUSDTotalMicros, whose own floor is "<$0.01" at six runes, plus partialMarker for a
+// clamped total — "<$0.01+", seven. The estimate marker used to make it nine ("~<$0.0001") and
+// it no longer rides the figure at all.
 //
-// NOT FIXED HERE, and not papered over by raising this constant to twelve either: twelve would
-// decline the money columns on every terminal under ~83, which is a much larger regression than
-// the clip it prevents, and it would be choosing a display for the common case (a session
-// touched seconds ago) to protect the rare one. The real fix is for relTime to offer a narrow
-// absolute form and be told its budget, the way sessionTokens already yields precision to its
-// column. That is a separate change to a separate function; this constant is deliberately
-// scoped to what it can honestly promise.
-const sessionUpdatedCellMin = 8
-
-// sessionMoneyCellMin is the narrowest a money column may be fitted to and still say something
-// honest. It covers BOTH HALVES of the column, and which half binds has changed twice:
+// SO WHY NOT SEVEN. Because this constant does not only gate the money cell — it is what keeps
+// the fitter away from the rest of the table. fitTableColumns shrinks the widest column first,
+// so SESSION and UPDATED are what pay for two extra money columns, and MEASURED at seven the
+// money columns survive down to terminal width 59, where the fitter has taken UPDATED to six or
+// seven runes and relTime's "just now" needs eight — a clipped cell, which is the one thing this
+// file refuses. Guarding UPDATED instead is worse in the other direction: its widest output is
+// the date form past a day ("Jan 12 15:04", twelve), and holding twelve drops the money columns
+// below width 86, thirteen columns worse than today.
 //
-//   - THE CELL needs six runes. sessionMoneyCell's last honest rung is formatUSDCell's floor,
-//     "<$0.01". Below that every rung either rounds a real charge to zero — which the ladder
-//     skips — or does not fit, so the cell can only come out as emptyCell.
-//   - THE HEADING needs seven. "SAVED ~" carries headerMarker, and bubbles TRUNCATES a heading
-//     that does not fit its column ("SAVED…"), which is the same clip this file refuses in
-//     cells. A column too narrow to name itself is no better than one too narrow to fill.
-//
-// So the answer is seven, and the HEADING is what binds — which is worth stating because it
-// was the cell twice before. It was nine when money rendered at four decimals and SAVED wore
-// the marker on every value ("~<$0.0001"); it became six when cents shortened the floor form
-// and the marker moved to the heading; and it is seven because the marker made the heading a
-// rune wider than the cell it labels.
+// Nine is therefore the empirical width at which this WHOLE table still renders honestly, and it
+// is the number the drop is keyed on until UPDATED can degrade its own cell the way this one
+// does. Both figures are here because a later reader will otherwise re-derive seven from the
+// cell and wonder why the constant disagrees.
 //
 // Deliberately NOT ten, the declared width, even though the fitter's shrink order means the
-// columns are at their declared width whenever they survive today. Ten is what the widest value
-// happens to need; seven is what honesty needs, and only the second stays true if a column's
-// declared width changes.
-//
-// A VALUE TOO LARGE FAILS SILENTLY, which is why TestSessionMoneyCellMin_CoversCellAndHeading
-// derives it from both halves rather than restating the digit: a cell wider than necessary
-// still renders an honest figure, so the cost is paid invisibly, as money columns declined on
-// terminals that could have afforded them. That is exactly how nine survived the move to cents.
-const sessionMoneyCellMin = 7
+// columns are at their declared width whenever they survive today. Ten is what the widest
+// value happens to need; nine is what the table needs, and only the second one stays true if a
+// column's declared width changes.
+const sessionMoneyCellMin = 9
 
 // sessionsShowMoney reports whether this terminal can afford the COST and SAVED columns.
 //
@@ -620,7 +610,7 @@ const sessionMoneyCellMin = 7
 // "$0.00" for a sub-cent figure, read from the other end, and the rule this file states fifty
 // lines above sessionMoneyCell forbids it in both directions.
 //
-// The cost is real and measured: the columns now disappear below 72 columns, where an ordinary
+// The cost is real and measured: the columns now disappear below 73 columns, where an ordinary
 // "$36.58" would still have fitted. Dropping a whole column is this file's stated answer to
 // not being able to render a cell honestly, and a reader who cannot see COST at all goes
 // looking for the width; one who sees "—" against a session that definitely spent money
@@ -630,26 +620,15 @@ func sessionsShowMoney(termWidth int) bool {
 		return true
 	}
 	fitted := fitTableColumns(sessionsColumns(), termWidth)
-	for _, c := range fitted {
-		if headerTitle(c) == "TOKENS" && c.Width < sessionTokensCellMin {
-			return false
-		}
-		// UPDATED is measured on the same footing as TOKENS, and it has to be: the money
-		// columns are paid for out of EVERY other column's width, so any column with a
-		// minimum of its own is a reason to decline them.
-		//
-		// LEAVING IT OUT HID WHICH CONSTRAINT WAS BINDING. Between 59 and 68 columns the
-		// fitter left UPDATED 6 or 7 runes where "just now" needs 8, and the money columns
-		// were only declined there because sessionMoneyCellMin was two columns wider than
-		// the money cells actually needed. So the right answer came out of the wrong
-		// reason, and narrowing that constant to what it claims to measure turned a
-		// correct decision into a clipped cell.
-		if headerTitle(c) == "UPDATED" && c.Width < sessionUpdatedCellMin {
-			return false
-		}
-	}
-	for _, title := range []string{"COST", "SAVED"} {
-		if sessionsColumnWidth(fitted, title) < sessionMoneyCellMin {
+	for _, c := range []struct {
+		title string
+		min   int
+	}{
+		{"TOKENS", sessionTokensCellMin},
+		{"COST", sessionMoneyCellMin},
+		{"SAVED", sessionMoneyCellMin},
+	} {
+		if sessionsColumnWidth(fitted, c.title) < c.min {
 			return false
 		}
 	}

@@ -69,50 +69,112 @@ func formatCompact(v float64) string {
 	}
 }
 
-// formatUSDMicros renders a dollar amount at FIXED precision from integer micros — the
-// caller places that, since a saving needs it inside the parentheses.
+func formatUSD(v float64) string {
+	switch {
+	case v >= 1:
+		return fmt.Sprintf("%.2f", v)
+	case v >= 0.01:
+		return fmt.Sprintf("%.3f", v)
+	default:
+		return fmt.Sprintf("%.4f", v)
+	}
+}
+
+// formatUSD4 is formatUSD at fixed precision, for the case where two amounts of
+// different magnitude share one column and their decimal points must line up.
+// Neither returns a "$" — the caller places it, since a saving needs it inside
+// the parentheses.
+func formatUSD4(v float64) string { return fmt.Sprintf("%.4f", v) }
+
+// usdFloor is the smallest amount four decimal places can state. Anything
+// positive below half of it rounds to "0.0000".
+const usdFloor = 0.0001
+
+// formatUSDCell renders a dollar amount for a table cell, with the "$" attached
+// and a floor below which it says so rather than rounding to zero.
 //
-// Fixed rather than varied by magnitude, because these amounts are stacked in one column
-// and compared down it: "$0.255" above "−$0.0037" misaligns the decimal point and reads as
-// though the two figures were measured to different accuracy.
+// The floor exists because %.4f renders anything under $0.00005 as "$0.0000",
+// which reads as "this was free" — the exact reading decodeCostEvent (declining a
+// cost of 0) and promptCost (declining an unpriced model rather than showing
+// $0.00) both go out of their way to avoid. Reintroducing it at the formatting
+// layer would undo both. Reachable on a small cache-read-only request: 100
+// cache-read tokens at a typical rate is $0.000038.
+func formatUSDCell(v float64) string {
+	if v > 0 && v < usdFloor/2 {
+		return "<$" + formatUSD4(usdFloor)
+	}
+	return "$" + formatUSD4(v)
+}
+
+// WHICH PRECISION A MONEY FIGURE GETS, stated here once because it was decided twice.
 //
-// TWO DECIMALS, not four. Four is finer than any decision made from this screen — nobody
-// acts on the fourth decimal of a dollar — and it cost width in every money column while
-// making the figures harder to compare at a glance. A magnitude-varying ladder was the
-// other candidate and is why the previous `formatUSD` existed; it was already dead code by
-// the time this changed, for the alignment reason above.
-// formatUSDMicros is THE cent arithmetic, and the only one: every money figure in abctl reads in
-// cents, so there is one function that turns micros into a rendered amount and every surface calls
-// it.
+// Two decimals — formatUSDTotal — WHEREVER A READER SCANS AND COMPARES: the day, the rolling
+// window, the endpoint, the sessions table's COST and SAVED, the Usage pane's COST, the drawer's
+// tiers and models. Four — formatUSDCell — for ONE REQUEST, and only there: the events table's
+// COST and the cost-event cells behind it.
 //
-// INTEGER ARITHMETIC, not %.2f on micros/1e6 — #1042's lesson and #1077's: 1_005_000 micros is
-// exactly $1.005, the float64 nearest it is 1.00499999…, and %.2f prints $1.00 where half-up on
-// the integer gets $1.01. The ledger and the aggregator both count in micros, so the integer is
-// the real figure and a float is a lossy copy of it.
+// THE CARVE-OUT IS MAGNITUDE, NOT AGGREGATION, and it is narrow on purpose. A single cache-read
+// request is $0.000038; cents renders it "<$0.01" and renders the whole column identically, so
+// four decimals is the only precision at which one request says anything at all. Everywhere else
+// the figures are cent-scale or larger, and there the extra two digits are noise on every row of
+// a surface whose job is comparing rows to each other.
 //
-// A NEGATIVE FIGURE MUST NOT REACH THE ARITHMETIC. Go's / and % truncate toward zero, so -150_000
-// renders "$0.-15" and -12_345_678 renders "$-12.-34"; worse, anything above -5_000 rounds to
-// "$0.00", which claims the traffic was free. The sign is kept and the magnitude rendered, because
-// NAMING an impossible figure is the caller's job — renderCostSummary says "unavailable" and the
-// band draws an em dash, and a second spelling here would hide theirs.
+// AN EARLIER VERSION OF THIS RULE DREW THE LINE AT "span versus one thing", which put the sessions
+// table and the drawer on the four-decimal side. That was wrong about what those surfaces are for:
+// a per-session figure is attributable to one session, but the COLUMN exists to be read down, and
+// "$1.8140" against "$2.8984" is two digits of precision nobody is comparing. The cost is real and
+// was accepted knowingly — two sessions differing below a cent now read alike.
 //
-// The guard used to be inseparable from this arithmetic: in renderCostSummary the negativeCost case
-// and the cent branches were arms of one switch, and extracting the arithmetic left the guard at
-// the call site, so the two entry points disagreed about the same input.
-func formatUSDMicros(micros int64) string {
+// It was decided twice because #1042 rounded the Usage pane to cents with its own inline
+// arithmetic while every other surface kept four decimals, so the same money read "$1.01" in one
+// panel and "$1.0060" in the panel above it, and a reader comparing them could not tell rounding
+// from disagreement. The arithmetic now lives in one place and the boundary is a sentence rather
+// than a per-surface habit.
+//
+// NEITHER FORM EVER RENDERS A POSITIVE FIGURE AS ZERO. Cents falls back to "<$0.01" and four
+// decimals to "<$0.0001", which is the rule decodeCostEvent and promptCost already go out of
+// their way to keep: "free" is a claim about the traffic and must not be a rounding artefact.
+//
+// A caller with micros in hand should use formatUSDTotalMicros directly. Going through float64
+// is safe — see MicrosFromUSD — but pointless when the integer is already there.
+func formatUSDTotal(usd float64) string {
+	micros, ok := pricing.MicrosFromUSD(usd)
+	if !ok {
+		// Negative, NaN, or past MaxCostMicros. Not this function's call to make: every
+		// surface that shows a total already has its own word for an impossible figure
+		// ("unavailable", a clamp marker), and inventing a third here would hide theirs.
+		// Four decimals is the honest fallback — it shows whatever the figure actually is.
+		return formatUSDCell(usd)
+	}
+	return formatUSDTotalMicros(micros)
+}
+
+// formatUSDTotalMicros is formatUSDTotal for a caller that already has integer micros.
+//
+// INTEGER ARITHMETIC, not %.2f on micros/1e6, and the reason is #1042's: 1_005_000 micros is
+// exactly $1.005, the float64 nearest it is 1.00499999…, and %.2f prints $1.00. Rounding
+// half-up on the integer gets $1.01. The conversion in formatUSDTotal is safe for the same
+// reason in reverse — MicrosFromUSD rounds, so it recovers 1_005_000 from that float.
+func formatUSDTotalMicros(micros int64) string {
+	// A NEGATIVE FIGURE MUST NOT REACH THE ARITHMETIC BELOW. Go's / and % truncate toward zero,
+	// so -150_000 renders "$0.-15" and -12_345_678 renders "$-12.-34"; worse, anything above
+	// -5_000 rounds to "$0.00", which claims the traffic was free — the reading the floor below
+	// exists to prevent.
+	//
+	// This guard used to be inseparable from the arithmetic: in renderCostSummary the
+	// negativeCost case and the cent branches were arms of one switch, and extracting the
+	// arithmetic left the guard behind at the call site. The float64 entry point is safe by
+	// accident of MicrosFromUSD rejecting a negative, so the two entry points disagreed.
+	//
+	// Four decimals, which is what formatUSDTotal answers for the same input, so they agree.
+	// Naming it — "unavailable" — stays the caller's job: renderCostSummary has its own word
+	// for an impossible figure and a second spelling here would hide it.
 	if micros < 0 {
-		if s := formatUSDMicros(-micros); s == "$0.00" {
-			// Under half a cent in magnitude. "-$0.00" would read as free with a stray sign.
-			return "-<$0.01"
-		}
-		return "-" + formatUSDMicros(-micros)
+		return formatUSDCell(float64(micros) / 1e6)
 	}
 	if micros > 0 && micros < 5_000 {
-		// Positive but under half a cent, which is a REAL charge and must not read as free. The
-		// floor matters more at two decimals than it did at four: it used to catch only amounts
-		// under $0.00005 and now catches everything under half a cent, which on
-		// cache-read-dominated agent traffic is a real share of requests. "<$0.01" says less than
-		// "$0.0038" did, and says it honestly.
+		// Positive but under half a cent. The same floor rule formatUSDCell applies at
+		// $0.0001, two decimal places up.
 		return "<$0.01"
 	}
 	cents := micros / 10_000
@@ -120,28 +182,4 @@ func formatUSDMicros(micros int64) string {
 		cents++
 	}
 	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
-}
-
-// usdFloor is the smallest amount two decimal places can state.
-const usdFloor = 0.01
-
-// formatUSDCell renders a dollar amount that arrived as a float.
-//
-// A THIN SHELL OVER formatUSDMicros, so a caller holding a float and a caller holding micros
-// cannot round the same money two ways — which is exactly what happened between this function and
-// renderCostSummary before both were routed here. pricing.MicrosFromUSD rounds, so it recovers
-// 1_005_000 from the float64 nearest $1.005 and the two entry points agree by construction.
-//
-// A caller that HAS micros should call formatUSDMicros: going through a float is safe but pointless
-// when the integer is already there.
-func formatUSDCell(v float64) string {
-	micros, ok := pricing.MicrosFromUSD(v)
-	if !ok {
-		// Negative, NaN, or past MaxCostMicros — the last reachable on a saturated aggregate,
-		// whose near-int64 total cannot be multiplied back up without overflowing. %.2f is wrong
-		// by less than a cent on a figure already marked as a floor, and NAMING it stays the
-		// caller's job for the reason formatUSDMicros gives.
-		return fmt.Sprintf("$%.2f", v)
-	}
-	return formatUSDMicros(micros)
 }

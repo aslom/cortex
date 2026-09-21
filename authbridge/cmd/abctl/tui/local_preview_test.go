@@ -103,11 +103,7 @@ func TestSplitColumnsRender(t *testing.T) {
 	if reqTokens != "681,300(−9.9k)" {
 		t.Errorf("request TOKENS = %q, want %q", reqTokens, "681,300(−9.9k)")
 	}
-	// The saving's own form is left open: at two decimals this one is below the floor and
-	// renders "<$0.01", so pinning "−$" here would assert a precision the formatter no longer
-	// has. What this test is about is that the request row carries a prompt total AND a
-	// saving — see TestCostCellPhases for the exact rendering.
-	if !strings.HasPrefix(reqCost, "$0.26(−") {
+	if !strings.HasPrefix(reqCost, "$0.2633(−$") {
 		t.Errorf("request COST = %q, want a prompt total with a saving", reqCost)
 	}
 	// Response: generated tokens only, and what those generated tokens cost —
@@ -116,8 +112,8 @@ func TestSplitColumnsRender(t *testing.T) {
 	if respTokens != "1,850" {
 		t.Errorf("response TOKENS = %q, want %q", respTokens, "1,850")
 	}
-	if respCost != "$0.04" {
-		t.Errorf("response COST = %q, want %q", respCost, "$0.04")
+	if respCost != "$0.0352" {
+		t.Errorf("response COST = %q, want %q", respCost, "$0.0352")
 	}
 	// The halves must not both claim the prompt: that was the pre-split bug.
 	if reqTokens == respTokens {

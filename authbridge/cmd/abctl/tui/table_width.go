@@ -25,8 +25,8 @@ const minColumnWidth = 4
 // cells were right-aligned deliberately, so figures could be compared down a column; the
 // headers were simply never told, and pointed at nothing:
 //
-//	EVENTS    TOKENS      COST        SAVED       ACTIVE
-//	     4      629.4k       $0.25      ~$0.04  ●
+//	EVENTS    TOKENS      COST       SAVED~      ACTIVE
+//	     4      629.4k      $0.25       $0.01  ●
 //
 // Applied against the width the column will RENDER at, which for the sessions table is its
 // fitted width and not its declared one: fitTableColumns shrinks columns on a narrow terminal,
@@ -36,44 +36,32 @@ const minColumnWidth = 4
 // number and tableColumns passes eventColumn.width directly.
 func rightAlignHeader(title string, width int) string { return padLeft(title, width) }
 
-// headerMarker annotates a column whose EVERY value carries the same caveat, so the caveat
-// belongs to the heading rather than to any cell.
-//
-// One marker, and it is inexactMarker's own glyph: SAVED is estimated in every row — see
-// sessionMoneyCell — so a "~" on each value carried no per-row information while diluting the
-// same glyph on a COST figure, where it IS conditional and does mean something. Moving it to
-// the heading makes "~" on a money figure informative again.
-//
-// A RENDERING DETAIL, NOT PART OF THE NAME, which is why headerTitle strips it and
-// headerHeading does not — see both.
-const headerMarker = " ~"
-
-// headerHeading is a column's heading AS IT SHOULD APPEAR: any alignment padding
-// rightAlignHeader added stripped back off, but the column marker kept.
-//
-// THE FORM THAT GETS PADDED, which is the whole reason it is separate from headerTitle. A
-// heading has to be re-derived rather than padded again, so that re-aligning an
-// already-aligned set is a no-op — but deriving it through headerTitle would strip the marker
-// along with the padding, and "SAVED ~" would silently render as "SAVED". The caveat would be
-// gone from the screen while every test that looks the column up by name went on passing,
-// because the NAME is what they look up.
-func headerHeading(c table.Column) string { return strings.TrimSpace(c.Title) }
-
-// headerTitle is a column's NAME: the heading with any alignment padding AND any column marker
-// stripped back off.
+// headerTitle is a column's NAME, with any alignment padding rightAlignHeader added stripped
+// back off.
 //
 // Every lookup by title goes through this. The sessions table addresses its columns by name in
 // half a dozen places — "which width did COST get fitted to", "is TOKENS still legible" — and
-// a padded or marked title silently matches none of them: the money columns would read as
-// absent and be rendered with a zero budget, which sessionMoneyCell turns into "not known
-// here" for every real charge in the column. Trimming here keeps the name the key, and keeps
-// both the padding and the marker rendering details — which is what they are.
+// a padded title silently matches none of them: the money columns would read as absent and be
+// rendered with a zero budget. Trimming here keeps the name the key and the padding a
+// rendering detail, which is what it is.
 //
 // The events table's sort glyph is NOT stripped: it rides at the name's right edge, so a
 // caller comparing "TIME" against a sorted header sees "TIME▲" either way. Nothing addresses
 // the events columns by title — they have eventColumnIDs — so there is nothing here to fix.
+//
+// inexactMarker IS stripped, for exactly the reason the padding is. The sessions table's SAVED
+// heading carries it — the saving is an estimate, and that is a property of the column rather
+// than of any row, so it is stated once above them (see sessionMoneyCell). Which makes "SAVED~"
+// the rendered heading while "SAVED" is still the NAME every lookup uses, and the four callers
+// that key on the literal string — sessionsRightAligned, sessionsColumnWidth,
+// sessionsShowMoney and sessionsColumnsFor — would otherwise all miss it at once. The failure
+// mode is not a wrong heading: a money column that reads as absent is rendered against a zero
+// budget, and every charge in it comes out as "—".
+//
+// A suffix, so it composes with the padding in either order: TrimSpace then TrimSuffix handles
+// an aligned "    SAVED~", and a bare "SAVED~" too.
 func headerTitle(c table.Column) string {
-	return strings.TrimSuffix(headerHeading(c), headerMarker)
+	return strings.TrimSuffix(strings.TrimSpace(c.Title), inexactMarker)
 }
 
 // tableWidth is the width a table with these columns actually renders at: columnsWidth for

@@ -67,7 +67,7 @@ func TestDecodeCostEvent(t *testing.T) {
 	if ce.DailyTotalUSD != 1.4207 || ce.DailyMaxUSD != 5 {
 		t.Errorf("daily fields did not decode: %+v", ce)
 	}
-	// Absent, malformed, and unpriced all decline rather than render $0.00,
+	// Absent, malformed, and unpriced all decline rather than render $0.0000,
 	// which would read as a call that cost nothing.
 	for _, bad := range []*pipeline.SessionEvent{
 		nil,
@@ -153,14 +153,14 @@ func TestCostCellPhases(t *testing.T) {
 
 	// Prompt: 1,300 × 3.8e-6 + 680,000 × 3.8e-7 = 0.00494 + 0.2584 = 0.26334.
 	// Saving: 9.9k tokens at the cache-read rate = 0.0038.
-	if got := m.costCell(rows, partner, 0, req); got != "$0.26(−<$0.01)" {
-		t.Errorf("request COST = %q, want %q", got, "$0.26(−<$0.01)")
+	if got := m.costCell(rows, partner, 0, req); got != "$0.2633(−$0.0038)" {
+		t.Errorf("request COST = %q, want %q", got, "$0.2633(−$0.0038)")
 	}
 	// Output: 1,850 × 1.9e-5 = 0.03515. NOT the 0.2824 exchange total also on that
 	// record — the response row answers for the response, and 0.2824 beside 1,850
 	// output tokens implies a $153/MTok output rate to anyone reading the row alone.
-	if got := m.costCell(rows, partner, 1, resp); got != "$0.04" {
-		t.Errorf("response COST = %q, want %q", got, "$0.04")
+	if got := m.costCell(rows, partner, 1, resp); got != "$0.0352" {
+		t.Errorf("response COST = %q, want %q", got, "$0.0352")
 	}
 	// And the column must not read as cumulative: the response cell is strictly less
 	// than the prompt cell for this turn, where the old total was greater.
@@ -370,51 +370,34 @@ func TestEventMethodSharesTheColumnWidth(t *testing.T) {
 	}
 }
 
-// TestFormatUSDCellNeverRendersAFreeCall: %.2f turns anything under $0.005 into
-// "$0.00", which reads as a call that cost nothing. decodeCostEvent declines a
+// TestFormatUSDCellNeverRendersAFreeCall: %.4f turns anything under $0.00005 into
+// "$0.0000", which reads as a call that cost nothing. decodeCostEvent declines a
 // zero cost and promptCost declines an unpriced model precisely so that reading
 // never appears, and rounding at the formatting layer would undo both.
 //
 // Reachable: 100 cache-read tokens at a typical rate is $0.000038.
-//
-// THE FLOOR MOVED WITH THE PRECISION. At four decimals a sub-cent charge had an exact
-// rendering and only $0.00005 needed the floor; at two decimals every charge under half a
-// cent needs it, which is a far larger share of real traffic. The guarantee is unchanged —
-// a known non-zero charge is never drawn as nothing — but it now carries much more weight,
-// so the boundary is asserted from both sides rather than at one point.
 func TestFormatUSDCellNeverRendersAFreeCall(t *testing.T) {
 	tiny := 100 * 3.8e-7 // $0.000038
-	if got := formatUSDCell(tiny); got != "<$0.01" {
-		t.Errorf("formatUSDCell(%v) = %q, want %q", tiny, got, "<$0.01")
+	if got := formatUSDCell(tiny); got != "<$0.0001" {
+		t.Errorf("formatUSDCell(%v) = %q, want %q", tiny, got, "<$0.0001")
 	}
 	// Zero is genuinely zero and keeps its plain rendering: callers already
 	// decline to show a cell at all in that case.
-	if got := formatUSDCell(0); got != "$0.00" {
-		t.Errorf("formatUSDCell(0) = %q, want %q", got, "$0.00")
+	if got := formatUSDCell(0); got != "$0.0000" {
+		t.Errorf("formatUSDCell(0) = %q, want %q", got, "$0.0000")
 	}
-	for v, want := range map[float64]string{
-		// BELOW the floor: what four decimals used to state exactly.
-		0.0001: "<$0.01",
-		0.0049: "<$0.01",
-		// AT and above it: %.2f rounds up to a cent, which is honest — the charge is
-		// real and "$0.01" overstates it by less than the floor notation would.
-		0.005:  "$0.01",
-		0.01:   "$0.01",
-		0.2633: "$0.26",
-		12.5:   "$12.50",
-		// The figure that prompted this change, from a live band.
-		18.7994: "$18.80",
-	} {
+	// At and above the floor, exact figures are unchanged.
+	for v, want := range map[float64]string{0.0001: "$0.0001", 0.2633: "$0.2633", 12.5: "$12.5000"} {
 		if got := formatUSDCell(v); got != want {
 			t.Errorf("formatUSDCell(%v) = %q, want %q", v, got, want)
 		}
 	}
 	// A sub-floor saving beside a normal total must not read as "saved nothing".
 	cell := formatUSDWithSaving(0.2633, tiny, false)
-	if !strings.Contains(cell, "(−<$0.01)") {
+	if !strings.Contains(cell, "(−<$0.0001)") {
 		t.Errorf("cell = %q, want the saving marked as below the floor", cell)
 	}
-	if strings.Contains(cell, "$0.00") {
+	if strings.Contains(cell, "$0.0000") {
 		t.Errorf("cell = %q still rounds a real amount to zero", cell)
 	}
 	// The widest cell the formatter can produce must fit the column.
