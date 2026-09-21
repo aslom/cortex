@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 // statusRow returns the first line of the footer — the status row, where the
@@ -46,7 +47,7 @@ func TestFooterStatusRowFitsNarrowWidth(t *testing.T) {
 		model *model
 	}{
 		{"plain connected", &model{width: width, pane: paneSessions, connState: connStateInfo{phase: connOpen}}},
-		{"with drops and paused", &model{width: width, pane: paneEvents, connState: connStateInfo{phase: connOpen}, drops: 12, paused: true}},
+		{"paused", &model{width: width, pane: paneEvents, connState: connStateInfo{phase: connOpen}, paused: true}},
 		// The timed (non-sticky) flash path also appends to the status row before
 		// the feedback link, so it is the tightest case. flashUntil in the future
 		// keeps the flash live.
@@ -68,21 +69,33 @@ func TestFooterStatusRowFitsNarrowWidth(t *testing.T) {
 // sorted column may be one fitColumns dropped and there is then no header on screen
 // carrying the glyph.
 func TestFooterShowsActiveSort(t *testing.T) {
+	// The indicator is styleWarn-rendered and CI has no TTY, so without forcing a
+	// profile every assertion below runs against unstyled text and the styled path —
+	// the one users see — is never exercised. stripANSI then does real work.
+	orig := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(orig) })
+
 	for _, tc := range []struct {
 		name    string
+		pane    paneID
 		col     eventColumnID
 		desc    bool
 		want    string
 		notWant string
 	}{
-		{name: "descending", col: colDuration, desc: true, want: "[sort: DURATION" + sortGlyphDesc + "]"},
-		{name: "ascending", col: colDuration, desc: false, want: "[sort: DURATION" + sortGlyphAsc + "]"},
-		{name: "cost", col: colCost, desc: true, want: "[sort: COST" + sortGlyphDesc + "]"},
-		{name: "chronological", col: "", desc: false, notWant: "[sort:"},
+		{name: "descending", pane: paneEvents, col: colDuration, desc: true, want: "[sort: DURATION" + sortGlyphDesc + "]"},
+		{name: "ascending", pane: paneEvents, col: colDuration, desc: false, want: "[sort: DURATION" + sortGlyphAsc + "]"},
+		{name: "cost", pane: paneEvents, col: colCost, desc: true, want: "[sort: COST" + sortGlyphDesc + "]"},
+		{name: "chronological", pane: paneEvents, col: "", desc: false, notWant: "[sort:"},
+		// sortCol is model-global and restored from settings, so it is set here exactly
+		// as it would be after sorting the events table and pressing [u]. The Usage pane
+		// is a chart in time order: naming an ordering it does not have is #1060.
+		{name: "not on the usage pane", pane: paneUsage, col: colCost, desc: true, notWant: "[sort:"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &model{
-				pane: paneEvents, width: 200, eventColumns: defaultColumnSelection(),
+				pane: tc.pane, width: 200, eventColumns: defaultColumnSelection(),
 				sortCol: tc.col, sortDesc: tc.desc,
 			}
 			got := stripANSI(statusRow(m.footerView()))
@@ -91,6 +104,41 @@ func TestFooterShowsActiveSort(t *testing.T) {
 			}
 			if tc.notWant != "" && strings.Contains(got, tc.notWant) {
 				t.Errorf("status row = %q, want no %q with no sort active", got, tc.notWant)
+			}
+		})
+	}
+}
+
+// The [filter: …] indicator has the same defect the sort indicator above was fixed for:
+// m.filter is model-global and restored from settings, so it survived onto panes that
+// filter nothing. The Usage pane fetches an aggregate the filter never reaches.
+//
+// Two panes want it rather than one, which is the difference from sort: sessions_pane.go
+// and events_pane.go both read m.filter.
+func TestFooterShowsFilterOnlyWhereItApplies(t *testing.T) {
+	orig := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(orig) })
+
+	for _, tc := range []struct {
+		name string
+		pane paneID
+		want bool
+	}{
+		{name: "sessions filters its list", pane: paneSessions, want: true},
+		{name: "events filters its table", pane: paneEvents, want: true},
+		{name: "usage plots an unfiltered aggregate", pane: paneUsage, want: false},
+		{name: "pipeline has nothing to filter", pane: panePipeline, want: false},
+		{name: "catalog has nothing to filter", pane: paneCatalog, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{
+				pane: tc.pane, width: 200, eventColumns: defaultColumnSelection(),
+				filter: "github-tool",
+			}
+			got := stripANSI(statusRow(m.footerView()))
+			if has := strings.Contains(got, "[filter: github-tool]"); has != tc.want {
+				t.Errorf("status row = %q; indicator present=%v, want %v", got, has, tc.want)
 			}
 		})
 	}

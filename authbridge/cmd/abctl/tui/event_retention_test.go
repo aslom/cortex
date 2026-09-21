@@ -90,12 +90,22 @@ func TestSessionsPicker_ListsCachedOnlySessions(t *testing.T) {
 	if got := strings.TrimSpace(row[2]); got != "3" {
 		t.Errorf("row event count = %q, want %q", got, "3")
 	}
-	// The LAST cell, not a fixed index. ACTIVE is the final column and the marker rides
-	// there; addressing it by number broke the moment COST and SAVED were inserted ahead of
-	// it, reporting a missing marker for a row that had one. What this test is about is the
-	// marker, not the column count.
-	if last := row[len(row)-1]; last != "cached" {
-		t.Errorf("row not marked as cached-only (last cell %q): %v", last, row)
+	// FOUND BY COLUMN, not by position. The marker used to ride in ACTIVE, addressed here as
+	// the last cell — which broke once before when COST and SAVED were inserted ahead of it, and
+	// again when ACTIVE was replaced by CONTEXT(1M) and the marker moved into UPDATED. What this
+	// test is about is the marker, not where the row happens to keep it.
+	col := -1
+	for i, c := range m.sessionsTbl.Columns() {
+		if headerTitle(c) == "UPDATED" {
+			col = i
+			break
+		}
+	}
+	if col < 0 {
+		t.Fatalf("no UPDATED column in %v", m.sessionsTbl.Columns())
+	}
+	if got := strings.TrimSpace(row[col]); got != cachedMarker {
+		t.Errorf("row not marked as cached-only (UPDATED cell %q): %v", got, row)
 	}
 }
 

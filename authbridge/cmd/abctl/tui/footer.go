@@ -18,7 +18,7 @@ import (
 // This is the same destination the docs point at (see rossoctl#977).
 const feedbackURL = "https://github.com/rossoctl/cortex/issues/new/choose"
 
-// footerView renders the bottom two lines: status (connection + rate + drops
+// footerView renders the bottom two lines: status (connection + rate
 // + optional transient flash, then a muted feedback link) and a
 // context-sensitive keybinding hint. No lipgloss borders; parent view handles
 // the frame.
@@ -29,7 +29,7 @@ func (m *model) footerView() string {
 	//
 	// Yank is the case this exists for: the path is the longest thing the footer
 	// ever carries, and appending it after the ~32 columns of connection state,
-	// rate and drops pushed it off the right edge on a narrow terminal — the user
+	// rate pushed it off the right edge on a narrow terminal — the user
 	// saw "yanked → /Users/you/.cortex/abctl-" and could not read the filename,
 	// which is the whole point of showing it. Dropping the prefix while the notice
 	// is up buys those columns back; the prefix returns on the next keypress, and
@@ -61,14 +61,13 @@ func (m *model) footerView() string {
 
 	status.WriteString(styleMuted.Render("  "))
 
-	// Rate + drops.
-	status.WriteString(styleMuted.Render(fmt.Sprintf("%.1f ev/s", m.rate)))
-	status.WriteString(styleMuted.Render("   "))
-	if m.drops > 0 {
-		status.WriteString(styleWarn.Render(fmt.Sprintf("drops: %d", m.drops)))
-	} else {
-		status.WriteString(styleMuted.Render("drops: 0"))
-	}
+	// Rate. Spelled out rather than "ev/s", which reads as a unit the operator has to
+	// decode before it tells them anything.
+	//
+	// A "drops: N" counter used to sit beside it. Nothing ever incremented it, so it
+	// displayed a hardcoded zero — which is worse than showing nothing, because it
+	// teaches that no event is ever dropped. Removed with its field; see #1060.
+	status.WriteString(styleMuted.Render(fmt.Sprintf("%.1f events/sec", m.rate)))
 	if m.paused {
 		status.WriteString(styleWarn.Render("   [paused]"))
 	}
@@ -77,7 +76,17 @@ func (m *model) footerView() string {
 	// silently truncated the list with nothing on screen explaining it. Shown here
 	// rather than in the hint line because it is state, not a keybinding — the same
 	// reason [paused] sits above.
-	if m.filter != "" && !m.filtering {
+	//
+	// Pane-gated for the same reason as [sort: …] below, and it is the same defect:
+	// m.filter is model-global and restored from settings, so it survived onto panes
+	// that filter nothing — the Usage pane fetches an aggregate the filter never
+	// reaches, so "[filter: github-tool]" there claims the chart is narrowed when
+	// every bucket in it is unfiltered.
+	//
+	// Two panes rather than one, unlike the sort indicator: sessions_pane.go and
+	// events_pane.go both read m.filter (the namespaces picker has its own model and
+	// its own copy). Nothing else in the tree does.
+	if m.filter != "" && !m.filtering && (m.pane == paneSessions || m.pane == paneEvents) {
 		status.WriteString(styleWarn.Render("   [filter: " + m.filter + "]"))
 	}
 	// A non-chronological sort, for the same reason as [filter: …] above: it is
@@ -88,7 +97,16 @@ func (m *model) footerView() string {
 	// fitColumns dropped on a narrow terminal — and then there is no header on
 	// screen to carry the glyph, which is precisely when the reordering is most
 	// confusing.
-	if m.sortCol != "" {
+	//
+	// Gated on the pane as well as the column, because sortCol is model-global and
+	// restored from settings at startup: it survives into panes that hold no sortable
+	// table, where "[sort: COST▼]" names an ordering nothing on screen has. The Usage
+	// pane is a chart in time order and that is the case #1060 reports.
+	//
+	// paneEvents alone, not a list of panes: the events table is the only sortable one
+	// in the TUI — sessions_pane.go never reads sortCol, and the [s]/[d] keys that set
+	// it are handled under paneEvents only.
+	if m.sortCol != "" && m.pane == paneEvents {
 		glyph := sortGlyphAsc
 		if m.sortDesc {
 			glyph = sortGlyphDesc
@@ -102,7 +120,7 @@ func (m *model) footerView() string {
 	}
 
 	// Feedback link, quiet and last on the status line. It has the weakest claim
-	// on the columns — the connection state, rate, drops and any flash are what a
+	// on the columns — the connection state, rate and any flash are what a
 	// user is actively debugging with — so it is the first thing to drop when the
 	// line would otherwise overflow the terminal and wrap onto a third row. It is
 	// dropped whole rather than truncated: half a URL is not clickable and reads
@@ -128,8 +146,8 @@ func (m *model) footerView() string {
 //
 // Truncates from the RIGHT, unlike fitHintLine's drop-from-the-front. The two lines
 // rank their contents oppositely: the hint line's last entries are the escape hatches
-// a stuck operator needs, while this row leads with the connection state, rate and
-// drops — what someone is actively debugging with — and trails into optional state
+// a stuck operator needs, while this row leads with the connection state and the
+// rate — what someone is actively debugging with — and trails into optional state
 // markers. So the tail is what should go.
 func fitStatusLine(status string, width int) string {
 	if width <= 0 || lipgloss.Width(status) <= width {

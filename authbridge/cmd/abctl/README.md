@@ -227,8 +227,26 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
 - **Sessions** (default): table of active sessions in the store, most
   recently updated first. Columns: session (truncated), updated (relative),
-  event count, tokens, cost, saved, active marker. Numerics are right-aligned
-  so the digits line up between rows.
+  event count, tokens, cost, saved, context. Numerics are right-aligned so the
+  digits line up between rows.
+
+  `CONTEXT(1M)` is a gauge, not a figure: how full the session's context was on
+  its **latest** request, against a fixed one-million-token window. The
+  brackets are the scale, drawn on every row, so a nearly-empty session reads
+  as empty-out-of-something rather than as a blank cell — and an em dash, which
+  means *no context known*, stays distinguishable from the sliver a barely-used
+  session gets.
+
+  Two things worth knowing about it. The denominator is fixed at 1M, the
+  largest window on any path the proxy sees, so a model with a smaller window
+  reads lower than it really is. And the figure comes from abctl's own event
+  cache: a session idle since before abctl attached shows the dash until you
+  drill into it, because the session summary carries no per-request field.
+
+  It replaced an `ACTIVE` column whose `●` nobody acted on — `UPDATED` already
+  answers "is this live", in seconds rather than as a dot. The `cached` marker
+  that column also carried, for sessions the server has forgotten but abctl
+  still holds events for, moved into `UPDATED`.
 
   **Every figure in this table is a per-session total**, summed over that
   session's whole history rather than over a clock window — which is why the
@@ -250,19 +268,19 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   ```
   abctl · http://localhost:9094 · [Sessions] Pipeline
   LAST 1H    TODAY   7 DAYS    MONTH
-    $2.91   $30.93  $216.44  $703.18
+    $2.91   $30.94  $216.44  $703.18
+  ──────────────────────────────────────────────────────────────────────────────
+   SESSION    UPDATED       EVENTS      TOKENS        COST     SAVED ~  CTX(1M)
+   ctx-abc-…  3s ago            42       48.2k       $0.12      <$0.01  ▕███▋ ▏
+   ctx-def-…  18m ago           15        1.2k      <$0.01           —  ▕▎    ▏
+   default    1h ago             8           —           —           —        —
 
-   SESSION         UPDATED    EVENTS    TOKENS    COST   SAVED ~  ACTIVE
-   ctx-abc-1234…   3s ago         42     48.2k   $0.12    <$0.01  ●
-   ctx-def-5678…   18m ago        15      1.2k  <$0.01         —
-   default         1h ago          8         —       —         —
-
-  ● connected   2.1 ev/s   drops: 0
+  ● connected   2.1 events/sec
   [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
   ```
 
-  Labels sit above their values rather than beside them: `$30.93 today`
-  reads as a list, `TODAY` over `$30.93` reads as a figure.
+  Labels sit above their values rather than beside them: `$30.94 today`
+  reads as a list, `TODAY` over `$30.94` reads as a figure.
 
   **One cell per span a budget is read against**, ascending left to right, and
   every cell's label names the period its figure covers. That last part is the
@@ -419,7 +437,7 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
    3     14:23:09.01   out   req      modify    token-exchange      tools/call                                                                       github-tool-mcp
    3     14:23:09.10   out   resp     —         —                   tools/call          503      96ms                                                github-tool-mcp
 
-  ● connected   2.1 ev/s   drops: 0   [sort: DURATION▼]   [filter: anthropic]
+  ● connected   2.1 events/sec   [sort: DURATION▼]   [filter: anthropic]
   [↑↓] nav  [b/f] page  [↵] detail  [c] columns  [u] usage  [s] hide passthru/skip  [p] pause  [/] filter  [esc] back  ·  → 4 more columns ([c] to choose)  [?] keys  [q] quit
   ```
 
@@ -459,15 +477,18 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   same history, including traffic from before they attached. Refetches
   every 20s while in view.
 
-  `m` cycles the metric. Counts (tokens/requests/errors) render as bars;
-  latency renders as mean-with-whiskers (`┼` mean, `┬`/`┴` ±1σ), because
-  a bar encodes magnitude from a zero baseline and mean latency has no
-  meaningful zero. `b` cycles the breakdown, which stacks each bar by
-  status, model, plugin or host — each series marked with a letter derived
-  from its name (`s` for claude-sonnet-5) on a coloured ground, so the
-  chart reads without colour too. Statuses ≥400 render red. `b` is not
-  offered for latency: the aggregator holds no per-label latency, so
-  there is no per-status mean to plot.
+  `m` cycles the metric. Counts (tokens/requests/errors) and cost render
+  as bars; latency renders as mean-with-whiskers (`┼` mean, `┬`/`┴` ±1σ),
+  because a bar encodes magnitude from a zero baseline and mean latency
+  has no meaningful zero. On a terminal with room to spare the bar chart
+  captions its y-axis with the metric's unit (`tok`, `req`, `err`, `USD`);
+  latency has no caption, because its own labels carry the unit per
+  magnitude (`820ms`, `4.1s`). `b` cycles the breakdown, which stacks each
+  bar by status, model, plugin or host — each series marked with a letter
+  derived from its name (`s` for claude-sonnet-5) on a coloured ground, so
+  the chart reads without colour too. Statuses ≥400 render red. `b` is not
+  offered for latency: the aggregator holds no per-label latency, so there
+  is no per-status mean to plot.
 
   The host breakdown answers "where is my traffic going" — one band per
   upstream, so two agents sharing one Cortex are told apart by the hosts
@@ -623,7 +644,7 @@ Layered on top of all of them:
 | `$` | every pane except the two pickers and usage | expand the spend strip into a per-model breakdown, in place — the table stays on screen. Needs 26 rows; refuses on the two pickers (nothing is connected yet) and on the usage pane, which is already a breakdown with its own cycles |
 | `a` | while the breakdown is open | cycle the axis: model / endpoint / agent. Not `g`, which is the global "jump to top" |
 | `w` | while the breakdown is open | cycle the span: the band's four — last 1h / today / 7 days / month. Without a cost ledger only the hour is distinct; see [Spans and the cost ledger](#spans-and-the-cost-ledger) |
-| `m` | usage | cycle metric: tokens / requests / errors / latency |
+| `m` | usage | cycle metric: tokens / requests / errors / latency / cost |
 | `w` | usage | cycle window: 10m / 1h / 6h |
 | `b` | usage | cycle breakdown: none / status / method / plugin (not offered for latency — there is no per-label latency) |
 | `s` | usage | toggle between this session and all sessions |
@@ -683,7 +704,7 @@ filter: github-tool
 | `events.sortColumn` | string | unset | sort by this column; unset means arrival order. `#` is not sortable, being arrival order already |
 | `events.sortDesc` | bool | `false` | sort descending; ignored unless `sortColumn` names a sortable column |
 | `filter` | string | empty | the active filter |
-| `usage.metric` | string | `tokens` | usage-pane metric: `tokens`, `requests`, `errors` or `latency` |
+| `usage.metric` | string | `tokens` | usage-pane metric: `tokens`, `requests`, `errors`, `latency` or `cost` |
 | `usage.window` | string | `10m0s` | usage-pane window: `10m0s`, `1h0m0s` or `6h0m0s` |
 | `usage.group` | string | `none` | usage-pane breakdown. `[b]` cycles `none`, `status`, `method`, `plugin`, `host`; a hand-edited file may also use `model`, `endpoint`, `session` or `agent` |
 

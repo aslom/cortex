@@ -155,9 +155,23 @@ const saturatedNote = "clamped, figures are floors"
 // exactly partialMarker's claim ("the real total is LARGER than the number shown") arrived at by
 // a different route. Smuggling it in through `unpriced` would have said requests went unpriced,
 // which is a different fact.
+//
+// ONE PRECISION, so there is no moneyTotal beside this. #1077 split the formatting out of here
+// precisely because its callers straddled a per-item/span-total boundary — the band's cells are
+// span totals and the drawer's rows are per-model — and that boundary is gone: every money figure
+// in abctl now reads in cents, so a second entry point would differ from this one in name only.
+// The factoring that split survives, because it was right for its own reason: markMoney composes
+// markers over an ALREADY-FORMATTED amount, so a caller that has its own string (the drawer's
+// apportioned tiers) marks it without going through a formatter it does not need.
 func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated, alsoPartial bool) string {
-	amount := formatUSDCell(usd)
+	return markMoney(formatUSDCell(usd), unpriced, priceable, incomplete, degraded, saturated,
+		alsoPartial)
+}
+
+// markMoney puts the disclosure markers on an already-formatted amount.
+func markMoney(amount string, unpriced, priceable, incomplete int64,
+	degraded *usage.Degraded, saturated, alsoPartial bool) string {
 	if incomplete > 0 {
 		amount = inexactMarker + amount
 	}

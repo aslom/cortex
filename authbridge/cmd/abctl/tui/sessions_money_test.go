@@ -267,11 +267,13 @@ func TestSessionsPicker_ResizingAcrossTheMoneyBoundaryNeitherPanicsNorMisaligns(
 		// And the last column really is the one the last cell belongs to, which is what
 		// misalignment actually looks like on screen.
 		//
-		// headerTitle, though ACTIVE is deliberately not in sessionsRightAligned and so arrives
-		// unpadded: this reads a LIVE header set, and the assertion should survive ACTIVE
-		// joining that set rather than start reporting a wrong last column.
-		if last := headerTitle(cols[len(cols)-1]); last != "ACTIVE" {
-			t.Errorf("width %d: last column is %q, want ACTIVE — the header itself is wrong", w, last)
+		// Through headerTitle, which is what lets this keep working now that the last column IS
+		// right-aligned and arrives padded: CONTEXT(1M) replaced ACTIVE, and the assertion is
+		// about the row's last cell belonging to the header's last column, not about which
+		// column that is.
+		if last := headerTitle(cols[len(cols)-1]); last != contextColumnTitle {
+			t.Errorf("width %d: last column is %q, want %s — the header itself is wrong",
+				w, last, contextColumnTitle)
 		}
 	}
 }

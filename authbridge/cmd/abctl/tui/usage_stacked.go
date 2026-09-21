@@ -205,7 +205,7 @@ func isErrorStatus(label string) bool {
 // a segment boundary, so the ungrouped renderer keeps sub-row precision and this
 // one trades it for the breakdown. That is the reason "ungrouped" is its own
 // cycle state rather than a special case of grouping.
-func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group, width int) []string {
+func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group, width, height int) []string {
 	if len(buckets) == 0 {
 		return []string{"  (no data)"}
 	}
@@ -222,7 +222,7 @@ func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group,
 		// Grouped view with no labelled traffic yet: fall back to the ungrouped
 		// bars rather than an empty frame, so the pane still shows the volume it
 		// does know about.
-		return renderBars(buckets, m, width)
+		return renderBars(buckets, m, width, height)
 	}
 
 	// Fold everything past maxNamedSeries into one band BEFORE drawing, so every
@@ -259,12 +259,25 @@ func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group,
 	// same thing in every bucket and in the legend.
 	letters := assignLetters(legendSeries)
 
-	out := make([]string, 0, plotRows+4)
+	out := make([]string, 0, plotRows+5)
+	if caption := axisCaption(m, width, height, stackedChartFloor); caption != "" {
+		out = append(out, caption)
+	}
+	lastAxisLabel := ""
 	for row := plotRows; row >= 1; row-- {
 		var sb strings.Builder
+		// Suppressing a repeat, as renderBars and renderWhiskers both do: when the peak
+		// is small every gridline rounds to the same string, and a column of identical
+		// labels reads as a bug rather than as a collapsed scale.
+		labelled := false
 		if row%2 == 0 && peak > 0 {
-			sb.WriteString(fmt.Sprintf("%5s ", humanizeCount(peak*int64(row)/int64(plotRows))))
-		} else {
+			if label := m.label(peak * int64(row) / int64(plotRows)); label != lastAxisLabel {
+				lastAxisLabel = label
+				sb.WriteString(fmt.Sprintf("%5s ", label))
+				labelled = true
+			}
+		}
+		if !labelled {
 			sb.WriteString(strings.Repeat(" ", axisLabel))
 		}
 		for _, b := range buckets {
@@ -278,7 +291,7 @@ func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group,
 	out = append(out, renderTimeLabels(buckets))
 	out = append(out, renderValues(buckets, m))
 	out = append(out, "")
-	out = append(out, renderLegend(legendSeries, group, letters, rank, width)...)
+	out = append(out, renderLegend(legendSeries, group, m, letters, rank, width)...)
 	return out
 }
 
@@ -465,7 +478,7 @@ func paintSegment(text, label string, group usage.Group) string {
 // ("claude-haiku-4-5-20251001") that three of them do not fit 80 columns on one
 // line. Only series past maxNamedSeries fold into a count, and those share a
 // colour anyway.
-func renderLegend(series []seriesKey, group usage.Group,
+func renderLegend(series []seriesKey, group usage.Group, m usageMetric,
 	letters map[string]rune, rank map[string]int, width int) []string {
 	const sep = "   "
 	const indent = "  "
@@ -492,7 +505,7 @@ func renderLegend(series []seriesKey, group usage.Group,
 	for _, s := range named {
 		mark := seriesStyle(rank[s.label], isErrorSeries(s.label, group)).
 			Render(string(letters[s.label]))
-		text := fmt.Sprintf(" %s (%s)", s.label, humanizeCount(s.total))
+		text := fmt.Sprintf(" %s (%s)", s.label, m.label(s.total))
 		// Measured on the plain text: the mark is one column however many bytes of
 		// escape sequence it carries.
 		cost := 1 + len([]rune(text))
