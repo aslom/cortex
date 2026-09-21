@@ -43,9 +43,35 @@ func sessionsColumns() []table.Column {
 		// check on the other.
 		{Title: "COST", Width: 10},
 		{Title: "SAVED", Width: 10},
-		{Title: "ACTIVE", Width: 8},
+		// CONTEXT(1M) replaces an ACTIVE column that carried a ● for a flag nobody acted on.
+		// UPDATED already says whether a session is live, in seconds rather than as a dot.
+		//
+		// The denominator is IN THE TITLE because it is fixed at one million and a gauge with
+		// no stated scale is a decoration. See contextWindowTokens for why it is fixed and what
+		// that costs.
+		{Title: contextColumnTitle, Width: len(contextColumnTitle)},
 	}
 }
+
+// contextColumnTitle names the column and its denominator together.
+//
+// The width follows the title rather than the gauge: the gauge scales to whatever the fitter
+// leaves, and a column narrower than its own heading would have bubbles truncate the heading to
+// "CONTEXT(1…", which states no scale at all.
+const contextColumnTitle = "CONTEXT(1M)"
+
+// contextWindowTokens is the denominator every gauge is drawn against.
+//
+// FIXED AT ONE MILLION, which is the largest window on any path this proxy sees — the Claude
+// [1m] beta — and the same figure authlib/usage and authlib/pricing already reason against.
+//
+// WHAT THAT COSTS, stated because the gauge is only as honest as its scale: a model with a
+// 200k window at 180k tokens is 90% full and draws here as 18%, near-empty, at exactly the
+// moment a reader most needs to see otherwise. The fix is a per-model window table, and it is
+// deliberately not in this change — it needs the model on the session summary, which the server
+// does not publish today. Until then the gauge reads as "how much of a 1M window", which the
+// title says, and not as "how close to this model's limit".
+const contextWindowTokens = 1_000_000
 
 // sessionsRightAligned names the columns whose cells rebuildSessionsTable right-aligns with
 // padLeft, and whose HEADINGS therefore have to be right-aligned too.
@@ -56,13 +82,16 @@ func sessionsColumns() []table.Column {
 // the flag on here: the sessions table is a []table.Column whose cells are built inline against
 // each column's fitted width, so the set is named instead.
 //
-// ACTIVE is deliberately absent. Its ● and "cached" are marks rather than figures, nothing is
-// compared down the column, and the left edge is where a reader looks for them.
+// CONTEXT(1M) is here for its EMPTY cell rather than its full one. Every gauge is exactly the
+// column's width, so where one sits is moot — but an unknown context renders as the same em dash
+// COST and SAVED use, and a reader scanning for "nothing known here" should find all three in
+// one vertical line.
 var sessionsRightAligned = map[string]bool{
-	"EVENTS": true,
-	"TOKENS": true,
-	"COST":   true,
-	"SAVED":  true,
+	"EVENTS":           true,
+	"TOKENS":           true,
+	"COST":             true,
+	"SAVED":            true,
+	contextColumnTitle: true,
 }
 
 // alignSessionsHeaders right-aligns the headings of the numeric columns, against the widths
@@ -146,15 +175,14 @@ func (m *model) rebuildSessionsTable() {
 	idW := sessionsColumnWidth(want, "SESSION")
 	eventsW := sessionsColumnWidth(want, "EVENTS")
 	tokensW := sessionsColumnWidth(want, "TOKENS")
+	// The gauge is drawn to the FITTED width like every other cell, so a narrow terminal gets a
+	// shorter track rather than a wrapped one. Every row shares it, so the fills stay comparable.
+	contextW := sessionsColumnWidth(want, contextColumnTitle)
 	rows := make([]table.Row, 0, len(m.sessions))
 	ids := make([]string, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		if m.filter != "" && !strings.Contains(s.ID, m.filter) {
 			continue
-		}
-		active := ""
-		if s.Active {
-			active = "●"
 		}
 		row := table.Row{
 			trunc(s.ID, idW),
@@ -173,7 +201,7 @@ func (m *model) rebuildSessionsTable() {
 				padLeft(sessionMoneyCell(s.CostMicros, false, s.Saturated, costW), costW),
 				padLeft(sessionMoneyCell(s.AvoidedMicros, true, s.Saturated, savedW), savedW))
 		}
-		row = append(row, active)
+		row = append(row, padLeft(contextGauge(sessionContext(m.events[s.ID]), contextW), contextW))
 		rows = append(rows, row)
 		// APPENDED IN LOCKSTEP, one line apart, so the two cannot drift: the row carries what
 		// a reader sees and this carries what the code acts on.
@@ -190,7 +218,12 @@ func (m *model) rebuildSessionsTable() {
 		cached := m.events[id]
 		row := table.Row{
 			trunc(id, idW),
-			emptyCell,
+			// "cached" sits in UPDATED now, where an em dash used to, because ACTIVE is gone
+			// and that marker is the only thing on the row saying why it has no server
+			// figures. It answers this column's question as well as anything can: the server
+			// has forgotten the session, so there is no update time to report, and what a
+			// reader needs to know is that these events are local.
+			cachedMarker,
 			padLeft(fmt.Sprintf("%d", len(cached)), eventsW),
 			padLeft(sessionTokens(0, cached), tokensW),
 		}
@@ -202,7 +235,9 @@ func (m *model) rebuildSessionsTable() {
 			// say the session was free.
 			row = append(row, emptyCell, emptyCell)
 		}
-		row = append(row, "cached")
+		// These rows DO have a context, and it is the one case where abctl's cache is the only
+		// possible source: the server has forgotten the session, so nothing else could answer.
+		row = append(row, padLeft(contextGauge(sessionContext(cached), contextW), contextW))
 		rows = append(rows, row)
 		ids = append(ids, id)
 	}
