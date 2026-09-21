@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
@@ -18,8 +19,24 @@ import (
 // resize: fitting the LIVE columns would be cumulative, and a terminal that got narrower once
 // would keep its narrowed columns after being widened again.
 //
-// These widths sum to 90 rendered columns (80 declared plus bubbles' two per cell), which is
-// why they are fitted rather than used as-is — see fitTableColumns.
+// These widths sum to 88 declared columns, or 104 rendered once bubbles adds its two of padding
+// per cell, which is why they are fitted rather than used as-is — see fitTableColumns.
+//
+// THIS PARAGRAPH HAS CARRIED WRONG NUMBERS TWICE: 104/116 before a rebase, then 98/114 after one
+// replaced ACTIVE with CONTEXT(1M). Both were stale rather than mistaken, which is the failure
+// mode to expect here — any column added or resized moves them, and nothing recomputes them.
+//
+// TITLE is the widest optional column, and it is dropped rather than shrunk when the terminal
+// cannot seat it — see sessionsShowTitle, which decides after the money columns so that
+// widening the window never takes a column away. Where TITLE does render, fitTableColumns
+// shrinks the widest column rather than dropping any, so it and SESSION pay for each other:
+// measured, SESSION is 12 at 100 columns and 14 from 116 up. A 12-character id prefix still
+// distinguishes sessions in practice, and an unnamed session is what this column exists to fix.
+//
+// A terminal WIDER than 104 rendered is handled by sessionsColumnsFor rather than here:
+// fitTableColumns only ever shrinks, so these declared widths are simultaneously the
+// narrow-terminal budget and the wide-terminal ceiling, and titles are mostly directory paths
+// with nothing to gain from a ceiling of 24 when there are spare columns on the screen.
 func sessionsColumns() []table.Column {
 	return []table.Column{
 		// SESSION, and 14 wide rather than 40. A session id is a 36-character UUID whose
@@ -27,6 +44,10 @@ func sessionsColumns() []table.Column {
 		// columns it was spending are the ones the money columns need. `/` filters on the
 		// FULL id, so nothing is lost for finding a session — only for reading one.
 		{Title: "SESSION", Width: 14},
+		// After SESSION, never before it: rebuildSessionsTable and selectedSessionID both
+		// read row[0] as the session id, so a column at index 0 would silently make the
+		// cursor restore and every Enter act on a title instead.
+		{Title: "TITLE", Width: sessionsTitleWidth},
 		{Title: "UPDATED", Width: 14},
 		{Title: "EVENTS", Width: 8},
 		{Title: "TOKENS", Width: 10},
@@ -103,16 +124,56 @@ var sessionsRightAligned = map[string]bool{
 //
 // Idempotent, because each heading is re-derived from headerTitle rather than padded again:
 // re-aligning an already-aligned set is a no-op rather than a heading pushed off its column.
+// headerTitle strips the estimate marker as well as the padding, which is what keeps that true
+// for SAVED — otherwise each pass would add another "~".
+//
+// THE ESTIMATE MARKER IS ADDED HERE, at render time, and the declared Title stays the bare name.
+// A saving is always an estimate, so the caveat is the column's rather than any row's and is
+// stated once above them instead of on every cell — see sessionMoneyCell. Doing it here rather
+// than in sessionsColumns is what keeps "SAVED" the lookup key: four callers address this column
+// by that literal string, and a declared Title of "SAVED~" would make all four read it as absent
+// and render every saving as "—".
 func alignSessionsHeaders(cols []table.Column) []table.Column {
 	out := make([]table.Column, len(cols))
 	copy(out, cols)
 	for i, c := range out {
+		title := headerTitle(c)
+		if title == "SAVED" {
+			title += inexactMarker
+		}
 		if sessionsRightAligned[headerTitle(c)] {
-			out[i].Title = rightAlignHeader(headerTitle(c), c.Width)
+			out[i].Title = rightAlignHeader(title, c.Width)
+		} else {
+			out[i].Title = title
 		}
 	}
 	return out
 }
+
+// sessionsTitleWidth is TITLE's floor: the narrowest cell worth granting the column, and its
+// width at the declared layout.
+//
+// 11, and the arithmetic an earlier revision gave for it was wrong. It said "the columns TITLE
+// does not displace render 67 wide, and 67 + 11 + 2 is 80" — 67 is right, but the gate does not
+// add up declared widths any more: it asks the fitter what TITLE is left with, and the fitter
+// narrows the two wider columns before it touches TITLE. So the real threshold is 73, not 80.
+//
+// 11 is the narrowest cell where a left-truncated path still says which session it is:
+// "…claudesessions" fits, where 8 columns give a leaf fragment identifying nothing. Picked for
+// that reason and then checked against the layout, rather than derived from a budget — which is
+// what the wrong derivation above invited the next reader to redo.
+//
+// Re-derived once already. It was 14 until main replaced ACTIVE with CONTEXT(1M), which widened
+// that base by three and pushed TITLE's threshold to 83 — caught by
+// TestSessionsShowTitle_RendersAtTheCommonWidth, which exists because an earlier revision let a
+// 20-column error through with nothing asserting the threshold. Any future column added to this
+// table moves this number again, and that test is what says so.
+//
+// Narrow for a path, deliberately: truncLeft keeps the TAIL, so 14 columns of
+// "…s/claudesessions" still says which session this is, where the same 14 from the left would
+// say "/Users/snible/" and distinguish nothing. Wider terminals grow it from slack — see
+// growSessionsTitle — so this is a floor rather than the usual case.
+const sessionsTitleWidth = 11
 
 // newSessionsTable builds an empty sessions table. Columns are fitted to the terminal by
 // layout(), which is called on every WindowSizeMsg.
@@ -158,6 +219,11 @@ func (m *model) rebuildSessionsTable() {
 	// did nothing for this, because the columns were still set somewhere else. Derived once
 	// here now, and used for both, so the two cannot be produced by separate decisions at all.
 	showMoney := sessionsShowMoney(m.width)
+	// The SAME predicates the header used, for the reason its own comment gives: the columns
+	// and the rows are decided by two separate calls, and one consulted here and not there
+	// makes every cell after it render under the wrong heading — or, when the arity differs,
+	// panics inside bubbles' SetColumns.
+	showTitle := sessionsShowTitle(m.width)
 	// The header this rebuild will install, computed first because the money cells are rendered
 	// against their column's FITTED width — the fitter shrinks columns on a narrow terminal, so
 	// the declared 10 is a ceiling rather than the budget.
@@ -173,6 +239,8 @@ func (m *model) rebuildSessionsTable() {
 	// reason this table read as ragged — "5" and "105" began at the same column and ended
 	// two apart, so no two rows could be compared by eye.
 	idW := sessionsColumnWidth(want, "SESSION")
+	// From `want`, the header about to be installed, not from the table's current one.
+	titleW := sessionsColumnWidth(want, "TITLE")
 	eventsW := sessionsColumnWidth(want, "EVENTS")
 	tokensW := sessionsColumnWidth(want, "TOKENS")
 	// The gauge is drawn to the FITTED width like every other cell, so a narrow terminal gets a
@@ -186,6 +254,11 @@ func (m *model) rebuildSessionsTable() {
 		}
 		row := table.Row{
 			trunc(s.ID, idW),
+		}
+		if showTitle {
+			row = append(row, m.sessionTitleCell(s.ID, titleW))
+		}
+		row = append(row,
 			relTime(now, s.UpdatedAt),
 			// The server's count, and only ever the server's: it is the complete one.
 			// abctl's own cache holds what it snapshotted plus what it has streamed
@@ -195,11 +268,11 @@ func (m *model) rebuildSessionsTable() {
 			// use len(cached) because the server does not list those at all.
 			padLeft(fmt.Sprintf("%d", s.EventCount), eventsW),
 			padLeft(sessionTokens(s.TotalTokens, m.events[s.ID]), tokensW),
-		}
+		)
 		if showMoney {
 			row = append(row,
-				padLeft(sessionMoneyCell(s.CostMicros, false, s.Saturated, costW), costW),
-				padLeft(sessionMoneyCell(s.AvoidedMicros, true, s.Saturated, savedW), savedW))
+				padLeft(sessionMoneyCell(s.CostMicros, s.Saturated, costW), costW),
+				padLeft(sessionMoneyCell(s.AvoidedMicros, s.Saturated, savedW), savedW))
 		}
 		row = append(row, padLeft(contextGauge(m.sessionContextFor(s.ID), contextW), contextW))
 		rows = append(rows, row)
@@ -218,6 +291,11 @@ func (m *model) rebuildSessionsTable() {
 		cached := m.events[id]
 		row := table.Row{
 			trunc(id, idW),
+		}
+		if showTitle {
+			row = append(row, m.sessionTitleCell(id, titleW))
+		}
+		row = append(row,
 			// "cached" sits in UPDATED now, where an em dash used to, because ACTIVE is gone
 			// and that marker is the only thing on the row saying why it has no server
 			// figures. It answers this column's question as well as anything can: the server
@@ -226,7 +304,7 @@ func (m *model) rebuildSessionsTable() {
 			cachedMarker,
 			padLeft(fmt.Sprintf("%d", len(cached)), eventsW),
 			padLeft(sessionTokens(0, cached), tokensW),
-		}
+		)
 		if showMoney {
 			// No figures for a session the server no longer lists. abctl holds these
 			// events and never held their costs: the money is summed server-side from the
@@ -289,6 +367,116 @@ func (m *model) cachedOnlySessionIDs() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// sessionTitle names a session from the harvested metadata, or "" when nothing names it.
+//
+// Nil-safe by construction rather than by a guard: a read on a nil map yields the zero
+// SessionMetadata, so a session nobody harvested, an id not in the file, and the file being
+// absent altogether all render the same empty cell. That is the right answer for all three —
+// none of them is a fact about the session, only about whether anyone has run the harvester.
+func (m *model) sessionTitle(id string) string {
+	// SANITISED AT THE ACCESSOR, so every consumer is covered by one line. The title is
+	// LLM-generated transcript text — sessions_metadata.go says so — and it reaches a table
+	// cell, the title bar, and two headers. The cell path stripped newlines but not escape
+	// sequences or carriage returns, and the title-bar path constrained neither: a newline
+	// splits the frame and an ESC recolours the pane from a string nobody here wrote.
+	//
+	// sanitizeLabel is the package's existing answer for exactly this, introduced with a
+	// CWE-150 citation. Severity is bounded — the file lives under the operator's own home
+	// directory — which is why this is a one-line routing rather than a redesign.
+	return sanitizeLabel(m.sessionsData[id].Title)
+}
+
+// sessionTitleCell is sessionTitle fitted to the TITLE column, truncated from the LEFT.
+//
+// Truncating from the left because the titles are mostly paths. bubbles truncates every cell
+// from the right, which on "/Users/snible/src/cortex/.worktrees/claudesessions" keeps
+// "/Users/snible/src/cor…" — the half every session on the machine shares, and none of the
+// half that says which one this is. Keeping the tail instead gives "…es/claudesessions".
+//
+// Pre-truncated here rather than left to bubbles because bubbles offers no choice of side, so
+// the cell has to arrive already short enough. That means reading the LIVE column width, not
+// the declared one: layout() fits the columns and this reads back what it decided, which is
+// why layout() must also rebuild these rows — see its call to rebuildSessionsTable.
+//
+// Left alone when it is not a path: a title is prose, and prose reads from the left.
+func (m *model) sessionTitleCell(id string, titleW int) string {
+	title := m.sessionTitle(id)
+	if title == "" {
+		return title
+	}
+	// EVERY CELL IS BOUNDED, whichever branch it takes. Prose was returned untouched on the
+	// reasoning that it reads from the left and so loses nothing to a right-side cut — true, but
+	// it left the cell UNBUDGETED, and bubbles then truncated it in the fixed-width box anyway.
+	// A Windows-style path took this branch too and came out 63 columns wide against a budget of
+	// 11: that was previously dismissed as unreachable on this platform, which confused where the
+	// string comes FROM with where it is rendered. Titles are harvested text; the renderer does
+	// not get to assume their shape.
+	if !strings.HasPrefix(title, "/") {
+		if titleW <= 0 {
+			return title
+		}
+		// From the RIGHT for prose, which reads left-to-right — the opposite of a path, whose
+		// tail is the distinguishing end. trunc counts runes rather than display columns, which
+		// is wrong for CJK prose in the same way truncLeft was; bounding it at all is the fix
+		// here, and narrowing that gap is a change to trunc's other callers too.
+		return trunc(title, titleW)
+	}
+	// THE WIDTH IS PASSED IN, not read back off the live table. The rows are built before
+	// SetColumns installs the new header, so reading the table gave the PREVIOUS width: on a
+	// narrowing resize the cell came out too wide, reached the table's fixed-width box, and was
+	// re-truncated from the RIGHT — destroying the tail this function exists to keep, which is
+	// the inversion it was written to prevent. Bounded in practice, since the next poll rebuilt
+	// it correctly, so it showed only while polling was stalled.
+	//
+	// Passing it in also removes the header lookup, which had to go through headerTitle and
+	// silently returned the untruncated title if it ever found nothing.
+	if titleW <= 0 {
+		return title
+	}
+	return truncLeft(title, titleW)
+}
+
+// truncLeft clips s to n runes keeping the RIGHT end, marking the cut with a leading ellipsis.
+//
+// The mirror of trunc, for values whose distinguishing end is the last one: a path, where every
+// sibling shares the prefix. n < 1 yields "" and n == 1 yields just the ellipsis, so the result
+// never exceeds the cell it was measured for.
+func truncLeft(s string, n int) string {
+	// DISPLAY COLUMNS, not runes. Every caller budgets in columns — a table cell's fitted
+	// width, a header's remaining space — and a rune count is a different number the moment
+	// the title is not ASCII. Titles are model-generated text or filesystem paths, which this
+	// package documents as content nobody here controls, so CJK and emoji are expected rather
+	// than exotic: measured, a 14-column budget returned 27 columns of CJK.
+	//
+	// The two failures differ and both are bad. In a header the over-wide string wraps the
+	// terminal, costing a body row. In the table the library re-truncates from the RIGHT,
+	// destroying the tail that left-truncation exists to keep — so the feature inverts for
+	// exactly the titles that need it.
+	//
+	// lipgloss.Width, mirroring padLeft, which measures this way for the same reason.
+	if lipgloss.Width(s) <= n {
+		return s
+	}
+	if n < 1 {
+		return ""
+	}
+	// Runes are dropped from the front until the remainder fits the budget less the ellipsis.
+	// One at a time rather than by arithmetic: a rune's width is 1 or 2, so there is no index
+	// that can be computed from the total.
+	r := []rune(s)
+	for i := range r {
+		// The ELLIPSIS PLUS THE TAIL is measured, not the tail plus one. A tail that begins
+		// with a combining mark or a variation selector fuses onto the ellipsis, so the pair
+		// is narrower than the sum of its parts — and assuming the ellipsis always adds
+		// exactly one column let the result exceed the budget. Measuring what is actually
+		// returned cannot be wrong about it.
+		if out := "…" + string(r[i:]); lipgloss.Width(out) <= n {
+			return out
+		}
+	}
+	return "…"
 }
 
 // relTime renders "Ns", "Nm", "Nh" for small deltas; absolute time otherwise.
@@ -361,8 +549,9 @@ func (m *model) selectedSessionID() string {
 // a surface that used "0" in one column and "—" in another would erase it.
 const emptyCell = "—"
 
-// sessionMoneyCell renders one session's lifetime cost, or its lifetime saving when
-// avoided is set.
+// sessionMoneyCell renders one session's lifetime cost or its lifetime saving. The two are the
+// same cell: they differ only in which micros the caller passes and in the column heading above
+// them, not in how a figure is formatted or marked.
 //
 // UNKNOWN AND ZERO ARE THE SAME CELL HERE, and deliberately: micros == 0 means either the
 // session's traffic could not be priced or it genuinely charged nothing, and this function
@@ -375,10 +564,23 @@ const emptyCell = "—"
 // sums non-negative per-request figures, so a negative can only come from a broken producer,
 // and "-$5.00" in a column of costs reads as a refund nobody issued.
 //
-// A saving wears inexactMarker unconditionally. It is estimated from a bytes-to-tokens ratio
-// and gross of the prompt-cache re-warm — see usage.Counts.AvoidedMicros — and the per-request
-// flags that record which caveats applied do not survive summation, so the marker cannot be
-// conditional on them without claiming an exactness nothing here can verify.
+// A saving is estimated — from a bytes-to-tokens ratio, gross of the prompt-cache re-warm, see
+// usage.Counts.AvoidedMicros — and that caveat is NOT on this cell. It is on the column HEADER,
+// which reads "SAVED~"; see alignSessionsHeaders.
+//
+// THE MARKER MOVED BECAUSE IT IS A PROPERTY OF THE COLUMN, not of the row. It applied to every
+// saving this cell has ever rendered — the per-request flags recording which caveats applied do
+// not survive summation, so it could never be conditional — and a glyph repeated down every row
+// of a column states one fact as many times as there are sessions. The general rule this package
+// now follows: an UNCONDITIONAL caveat belongs on the header, a CONDITIONAL one rides the figure.
+// partialMarker below is conditional and stays here.
+//
+// This is a deliberate exception to "a marker rides ON the figure" (see partialMarker's own doc),
+// and it is narrow: a bubbles table always renders its header, so unlike the spend strip's
+// fitter — which can drop the words beside a figure while the figure stays — there is no width at
+// which these cells are visible and their header is not. sessionsShowMoney drops the columns
+// whole rather than letting them narrow far enough to clip the heading.
+//
 // saturated marks the figure as a FLOOR: the session's total reached the int64 ceiling and
 // was clamped, so the real number is larger by an amount nothing can state. It arrives from
 // session.SessionSummary.Saturated, which exists because MaxInt64 micros is about
@@ -391,7 +593,7 @@ const emptyCell = "—"
 // them there. A marker that rides ON the figure is the point: a cell can be truncated to
 // nothing but while the number is on screen its caveat is too.
 // budget is the column's FITTED width, and the figure is rendered less precisely rather than
-// wider when four decimals will not fit.
+// wider when cents will not fit.
 //
 // A bubbles table does not re-flow an overflowing cell, it truncates — and truncating a money
 // figure produces a smaller figure that reads as real, which is the one thing every surface here
@@ -400,33 +602,37 @@ const emptyCell = "—"
 // ("~$9223372036854.7754+", twenty-one) because the marker that says "this is a floor" is
 // appended to the longest value there is.
 //
-// PRECISION IS WHAT YIELDS, in order: four decimals, two, none, then humanizeCount's compact
-// form, which is itself width-bounded and clamps at ">999T". Four decimals are worth having on a
-// cent-scale figure and are noise on a four-figure one, so the ladder costs nothing where it
-// matters. The last candidate always fits a sane column, and is returned unconditionally so this
-// cannot fall through to an unbounded string.
-func sessionMoneyCell(micros int64, avoided, saturated bool, budget int) string {
+// PRECISION IS WHAT YIELDS, in order: cents, whole dollars, then humanizeCount's compact form,
+// which is itself width-bounded and clamps at ">999T". The last candidate always fits a sane
+// column, so this cannot fall through to an unbounded string.
+//
+// CENTS AT THE TOP, not four decimals, and that is a reversal. This column read "$1.8140" — four
+// decimals — on the reasoning that a per-session figure is attributable to one thing and is
+// routinely sub-cent. It is the wrong trade for a column a reader SCANS: four decimals are two
+// digits of noise on every row of a table whose purpose is comparing sessions to each other, and
+// the sub-cent case is served by the floor below rather than by widening every other row. The
+// cost is real and accepted: two sessions that differ below a cent now read alike. See the
+// precision rule beside formatUSDTotal, which this change rewrote.
+func sessionMoneyCell(micros int64, saturated bool, budget int) string {
 	if micros == 0 || negativeCost(micros) {
 		return emptyCell
 	}
 	decorate := func(amount string) string {
-		if avoided {
-			amount = inexactMarker + amount
-		}
 		if saturated {
 			amount += partialMarker
 		}
 		return amount
 	}
 	usd := float64(micros) / 1e6
-	// A RUNG THAT ROUNDS THE FIGURE TO ZERO IS SKIPPED, not rendered. %.2f turns a sub-cent
-	// charge into "$0.00" and %.0f turns anything under fifty cents into "$0" — and a known
-	// non-zero cost displayed as free is worse than the unknown one emptyCell stands for. This
-	// cell's own rule, fifty lines up, is never $0.00 for a figure that might be unknown; a figure
-	// that is KNOWN and shown as nothing breaks it harder.
+	// A RUNG THAT ROUNDS THE FIGURE TO ZERO IS SKIPPED, not rendered. %.0f turns anything under
+	// fifty cents into "$0" — and a known non-zero cost displayed as free is worse than the
+	// unknown one emptyCell stands for. This cell's own rule, fifty lines up, is never $0.00 for a
+	// figure that might be unknown; a figure that is KNOWN and shown as nothing breaks it harder.
 	//
-	// Measured before the guard: at the narrowest widths these columns survive (a six-column
-	// budget), $0.0012 rendered "$0.00" in COST and "~$0.00" in SAVED.
+	// THE GUARD NOW PROTECTS ONLY THE LOWER RUNGS. It used to be what kept a sub-cent charge off
+	// the cents rung, because that rung was a bare fmt.Sprintf("%.2f") with no floor of its own and
+	// printed "$0.00". formatUSDTotalMicros has the floor built in, so the top rung is honest for
+	// every positive figure and the guard never fires on it.
 	//
 	// Each rung carries the rounded value it would print, so "is this rung honest" is one
 	// comparison rather than a guess about the format string.
@@ -436,30 +642,39 @@ func sessionMoneyCell(micros int64, avoided, saturated bool, budget int) string 
 	}
 	compact := rung{"$" + humanizeCount(int64(usd)), math.Trunc(usd)}
 	for _, r := range []rung{
-		// formatUSDCell has its own floor: anything positive under half a ten-thousandth renders
-		// "<$0.0001" rather than "$0.0000", so this rung never claims zero for a real charge.
-		{formatUSDCell(usd), usd},
-		{"$" + fmt.Sprintf("%.2f", usd), math.Round(usd*100) / 100},
+		// THROUGH MICROS, not usd: formatUSDTotalMicros rounds half-up on the integer, which is
+		// the whole reason it exists — 1_005_000 micros is exactly $1.005, the nearest float64 is
+		// 1.00499999…, and %.2f prints "$1.00". The integer is already in hand here, so there is
+		// no reason to launder it through a float and back.
+		//
+		// rounded is usd, NOT the rounded cents value, for the same reason the four-decimal rung
+		// carried it: this formatter has its own floor — anything positive under half a cent
+		// renders "<$0.01" rather than "$0.00" — so it never claims zero for a real charge and
+		// must not be skipped by the guard below.
+		{formatUSDTotalMicros(micros), usd},
 		{"$" + fmt.Sprintf("%.0f", usd), math.Round(usd)},
 		compact,
 	} {
 		if r.rounded == 0 {
 			continue
 		}
-		if cell := decorate(r.text); len([]rune(cell)) <= budget {
+		// lipgloss.Width, like everything else that budgets a cell here. Safe as a rune count
+		// today — the output is ASCII digits with width-one markers — but it is the same class
+		// of bug truncLeft had, and the cost of being right is one call.
+		if cell := decorate(r.text); lipgloss.Width(cell) <= budget {
 			return cell
 		}
 	}
 	// NOTHING FITS — or nothing that can be shown WITHOUT rounding a real charge to zero — so
-	// nothing is shown. Both are reachable at the narrowest width these columns survive at: the
-	// compact form plus both markers is seven columns against a budget the fitter can squeeze to
-	// six, and a sub-cent charge has no honest form shorter than "<$0.0001".
+	// nothing is shown. The floor is "<$0.01" at six columns, seven with the clamp marker, which
+	// sessionMoneyCellMin is derived from: the columns are dropped whole rather than narrowed past
+	// it, so this is unreachable through sessionsShowMoney and is kept for a caller that passes a
+	// budget of its own.
 	//
-	// The em dash rather than a truncation, and rather than dropping the markers to buy two
-	// columns: a clipped figure is a smaller figure that reads as real, and the markers are the
-	// figure's meaning — "~" says estimated and "+" says floor, so a bare number in their place
-	// is a different claim. If it cannot be said correctly it is not said, which is the rule the
-	// spend strip's ladder follows for the same reason.
+	// The em dash rather than a truncation, and rather than dropping the marker to buy a column:
+	// a clipped figure is a smaller figure that reads as real, and "+" says the figure is a floor,
+	// so a bare number in its place is a different claim. If it cannot be said correctly it is not
+	// said, which is the rule the spend strip's ladder follows for the same reason.
 	return emptyCell
 }
 
@@ -515,15 +730,32 @@ func sessionsColumnWidth(cols []table.Column, title string) int {
 // and TestSessionTokens_FitsEveryFittedWidth, which walks the same boundary.
 const sessionTokensCellMin = 6
 
-// sessionMoneyCellMin is the narrowest money cell that can hold an honest figure for ANY
-// non-zero charge. sessionMoneyCell's last honest rung is formatUSDCell's own floor,
-// "<$0.0001" at eight runes, and SAVED wears the estimate marker on top: "~<$0.0001", nine.
-// Below that every rung either rounds a real charge to zero — which the ladder skips — or does
-// not fit, so the cell can only ever come out as emptyCell.
+// sessionMoneyCellMin is the width below which sessionsShowMoney drops the COST and SAVED
+// columns rather than render them dishonestly.
+//
+// NINE, WHICH IS NO LONGER THE MONEY CELL'S OWN FLOOR, and the gap is deliberate. The cell's
+// floor came down to seven when this column moved to cents: sessionMoneyCell's top rung is
+// formatUSDTotalMicros, whose own floor is "<$0.01" at six runes, plus partialMarker for a
+// clamped total — "<$0.01+", seven. The estimate marker used to make it nine ("~<$0.0001") and
+// it no longer rides the figure at all.
+//
+// SO WHY NOT SEVEN. Because this constant does not only gate the money cell — it is what keeps
+// the fitter away from the rest of the table. fitTableColumns shrinks the widest column first,
+// so SESSION and UPDATED are what pay for two extra money columns, and MEASURED at seven the
+// money columns survive down to terminal width 59, where the fitter has taken UPDATED to six or
+// seven runes and relTime's "just now" needs eight — a clipped cell, which is the one thing this
+// file refuses. Guarding UPDATED instead is worse in the other direction: its widest output is
+// the date form past a day ("Jan 12 15:04", twelve), and holding twelve drops the money columns
+// below width 86, thirteen columns worse than today.
+//
+// Nine is therefore the empirical width at which this WHOLE table still renders honestly, and it
+// is the number the drop is keyed on until UPDATED can degrade its own cell the way this one
+// does. Both figures are here because a later reader will otherwise re-derive seven from the
+// cell and wonder why the constant disagrees.
 //
 // Deliberately NOT ten, the declared width, even though the fitter's shrink order means the
 // columns are at their declared width whenever they survive today. Ten is what the widest
-// value happens to need; nine is what honesty needs, and only the second one stays true if a
+// value happens to need; nine is what the table needs, and only the second one stays true if a
 // column's declared width changes.
 const sessionMoneyCellMin = 9
 
@@ -554,7 +786,7 @@ const sessionMoneyCellMin = 9
 // "$0.00" for a sub-cent figure, read from the other end, and the rule this file states fifty
 // lines above sessionMoneyCell forbids it in both directions.
 //
-// The cost is real and measured: the columns now disappear below 72 columns, where an ordinary
+// The cost is real and measured: the columns now disappear below 73 columns, where an ordinary
 // "$36.58" would still have fitted. Dropping a whole column is this file's stated answer to
 // not being able to render a cell honestly, and a reader who cannot see COST at all goes
 // looking for the width; one who sees "—" against a session that definitely spent money
@@ -563,14 +795,36 @@ func sessionsShowMoney(termWidth int) bool {
 	if termWidth <= 0 {
 		return true
 	}
-	fitted := fitTableColumns(sessionsColumns(), termWidth)
-	for _, c := range fitted {
-		if headerTitle(c) == "TOKENS" && c.Width < sessionTokensCellMin {
-			return false
+	// WITH TITLE when TITLE renders, so the set measured here is the set the header will carry.
+	// TITLE is decided first (see sessionsShowTitle) and these yield to it, which is why its
+	// floor is one of the minimums below rather than a check somewhere else: each column
+	// individually "fitting" while the row as a whole was unreadable is the failure that reached
+	// review, with TITLE squeezed to eight columns beside money cells that all passed.
+	cols := make([]table.Column, 0, len(sessionsColumns()))
+	title := sessionsShowTitle(termWidth)
+	for _, c := range sessionsColumns() {
+		if headerTitle(c) == "TITLE" && !title {
+			continue
 		}
+		cols = append(cols, c)
 	}
-	for _, title := range []string{"COST", "SAVED"} {
-		if sessionsColumnWidth(fitted, title) < sessionMoneyCellMin {
+	fitted := fitTableColumns(cols, termWidth)
+	mins := []struct {
+		title string
+		min   int
+	}{
+		{"TOKENS", sessionTokensCellMin},
+		{"COST", sessionMoneyCellMin},
+		{"SAVED", sessionMoneyCellMin},
+	}
+	if title {
+		mins = append(mins, struct {
+			title string
+			min   int
+		}{"TITLE", sessionsTitleWidth})
+	}
+	for _, c := range mins {
+		if sessionsColumnWidth(fitted, c.title) < c.min {
 			return false
 		}
 	}
@@ -581,15 +835,126 @@ func sessionsShowMoney(termWidth int) bool {
 // sessionsShowMoney in rebuildSessionsTable so the row arity always matches the header.
 func sessionsColumnsFor(termWidth int) []table.Column {
 	cols := sessionsColumns()
-	if sessionsShowMoney(termWidth) {
-		return cols
+	// TITLE YIELDS FIRST, before the money columns do. It is the widest optional column and
+	// the only one whose absence costs nothing a `/` filter cannot recover — the id is still
+	// there, and the title is a convenience for reading a row rather than for finding one.
+	// Keeping it at a width where TOKENS truncates would trade a legible figure for a
+	// truncated phrase, which is the trade sessionsShowMoney already refuses for COST.
+	if !sessionsShowTitle(termWidth) {
+		out := make([]table.Column, 0, len(cols))
+		for _, c := range cols {
+			if headerTitle(c) == "TITLE" {
+				continue
+			}
+			out = append(out, c)
+		}
+		cols = out
 	}
-	out := make([]table.Column, 0, len(cols))
-	for _, c := range cols {
-		if t := headerTitle(c); t == "COST" || t == "SAVED" {
+	if !sessionsShowMoney(termWidth) {
+		out := make([]table.Column, 0, len(cols))
+		for _, c := range cols {
+			if t := headerTitle(c); t == "COST" || t == "SAVED" {
+				continue
+			}
+			out = append(out, c)
+		}
+		cols = out
+	}
+	return growSessionsTitle(cols, termWidth)
+}
+
+// sessionsShowTitle reports whether this terminal is wide enough to afford TITLE.
+//
+// Decided FIRST, and the money columns read this rather than the reverse: TITLE is the column
+// this pane gained and the only one whose absence nothing else recovers, where a session's cost
+// is also in the Usage pane, `abctl cost` and the spend strip. So COST and SAVED yield to it and
+// return at the width where the whole set holds every minimum at once.
+func sessionsShowTitle(termWidth int) bool {
+	if termWidth <= 0 {
+		return true
+	}
+	// ONE STATEMENT, REPLACING SIX. Earlier revisions stacked a paragraph per attempt without
+	// retiring the last, so this block named thresholds of 78, 80, 82, 98 and 104 — none of them
+	// the answer — and two of its paragraphs were near-verbatim duplicates contradicting each
+	// other about whether a change raised or lowered the threshold. In a file where the comments
+	// are the only statement of design intent, that leaves the next reader unable to tell which
+	// paragraph is live.
+	//
+	// What the function does: TITLE is granted when the FITTED set leaves it its floor, measured
+	// without the money columns because those are what yield to it. TITLE renders from 73; COST
+	// and SAVED are absent from 73 to 96 and return at 97, where the whole set holds every
+	// minimum at once.
+	//
+	// Why in that order: TITLE is the column this pane gained and the only one whose absence
+	// nothing else recovers — a session's cost is also in the Usage pane, `abctl cost` and the
+	// spend strip, while a nameless session is nameless everywhere.
+	//
+	// VALIDATED AGAINST THE FITTED SET, the way sessionsMoneyFits validates the money cells.
+	// Admission arithmetic alone was not a floor: it only asked whether the declared widths
+	// summed under the terminal, and the fitter then shrank TITLE freely — measured at EIGHT
+	// columns from width 83, not recovering 11 until 100. Eight columns of a path is a leaf
+	// fragment that identifies nothing, which is the failure left-truncation exists to prevent,
+	// so a column that cannot hold its floor is not worth granting at all.
+	//
+	// Measured WITHOUT the money columns, because they are what yields: this gate is decided
+	// first and sessionsShowMoney reads it, so COST and SAVED take only what is left once a
+	// legible title has its room. They are absent from 73 to 96 for that reason and return at
+	// 97, where the full set holds every minimum at once.
+	keep := make([]table.Column, 0, len(sessionsColumns()))
+	for _, c := range sessionsColumns() {
+		switch headerTitle(c) {
+		case "COST", "SAVED":
 			continue
 		}
-		out = append(out, c)
+		keep = append(keep, c)
+	}
+	return sessionsColumnWidth(fitTableColumns(keep, termWidth), "TITLE") >= sessionsTitleWidth
+}
+
+// growSessionsTitle widens TITLE into whatever slack the terminal leaves, and only TITLE.
+//
+// fitTableColumns, which every other table here relies on, only SHRINKS — the right rule for
+// columns holding bounded things (a count, a status, a plugin name) that gain nothing from
+// extra room. TITLE is the exception: it holds a session title that is usually a directory
+// path, and measured on one machine 107 of 109 were longer than the declared 24. So that 24
+// was acting as a ceiling on a 200-column terminal with columns going spare.
+//
+// AFTER the money columns are decided, not before: dropping COST and SAVED frees 20 columns,
+// and computing the slack first would hand TITLE a width that the narrower set then leaves
+// stale. Growing only into slack that already exists means widening never costs another
+// column anything, and a terminal with none hands the set back untouched.
+func growSessionsTitle(cols []table.Column, termWidth int) []table.Column {
+	slack := termWidth - tableWidth(cols)
+	if slack <= 0 || termWidth <= 0 {
+		return cols
+	}
+	// SLACK THE MONEY COLUMNS WILL CLAIM IS NOT SLACK. Taking every spare column made TITLE'S
+	// WIDTH non-monotonic: at 96 the money columns are absent and TITLE absorbed all 27 columns
+	// of room, then at 97 they returned and the fitter clawed the shortfall back until TITLE
+	// landed on its floor — 27 to 11 as the terminal got WIDER, a legible path becoming a leaf
+	// fragment, which is the harm this column's floor exists to prevent.
+	//
+	// So growth stops at what survives their return. Below the width where they fit, the room
+	// they will take is reserved rather than lent: TITLE grows steadily instead of ballooning
+	// and collapsing. Column PRESENCE was already monotonic; this is what makes width so.
+	if !sessionsShowMoney(termWidth) {
+		reserved := 0
+		for _, c := range sessionsColumns() {
+			if t := headerTitle(c); t == "COST" || t == "SAVED" {
+				reserved += c.Width + 2
+			}
+		}
+		if slack -= reserved; slack <= 0 {
+			return cols
+		}
+	}
+	out := make([]table.Column, len(cols))
+	copy(out, cols)
+	for i := range out {
+		if headerTitle(out[i]) == "TITLE" {
+			out[i].Width += slack
+			break
+		}
 	}
 	return out
 }

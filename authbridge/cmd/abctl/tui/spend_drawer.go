@@ -547,7 +547,11 @@ func drawerFigures(r drawerRow) []stripFigure {
 		// wrong and naming it would point a reader at the rate table.
 		figs = append(figs, plainFigure("cost unavailable"))
 	case r.counts.PricedRequests > 0 || r.counts.CostMicros > 0:
-		figs = append(figs, moneyFigure(float64(r.counts.CostMicros)/1e6, "",
+		// Cents, through moneyFigureTotal: this column is scanned and compared down its length,
+		// which is the side of the precision rule cents is for. It read four decimals until the
+		// sessions table moved, and a drawer at "$1.0601" under a band at "$1.06" was the same
+		// two-precisions-for-one-figure the rule exists to prevent, one panel lower.
+		figs = append(figs, moneyFigureTotal(float64(r.counts.CostMicros)/1e6, "",
 			gapOf(r.counts), r.counts.PriceableRequests, r.counts.IncompleteRequests, nil,
 			r.counts.Saturated))
 	case r.counts.PriceableRequests > 0:
@@ -591,10 +595,16 @@ func drawerFigures(r drawerRow) []stripFigure {
 			compact: humanizeCount(r.counts.Tokens),
 		})
 	}
+	// THE COMPACT FORM KEEPS THE WORD "saved", which the other figures here drop. It used to be a
+	// bare "~$0.1804", distinguishable from this row's cost only by the marker — and this panel no
+	// longer marks its money (see renderTierRows for why), so a bare "$0.18" beside a cost of
+	// "$1.06" would read as a second spend figure with no way to tell which is which. The word is
+	// this figure's identity rather than an explanation of it, so it is not the part that yields;
+	// savedFigure's own doc makes the same argument for the strip.
 	if r.counts.AvoidedMicros > 0 {
 		figs = append(figs, stripFigure{
-			full:    "saved " + inexactMarker + formatUSDCell(float64(r.counts.AvoidedMicros)/1e6),
-			compact: inexactMarker + formatUSDCell(float64(r.counts.AvoidedMicros)/1e6),
+			full:    "saved " + formatUSDTotalMicros(r.counts.AvoidedMicros),
+			compact: "saved " + formatUSDTotalMicros(r.counts.AvoidedMicros),
 		})
 	}
 	return figs

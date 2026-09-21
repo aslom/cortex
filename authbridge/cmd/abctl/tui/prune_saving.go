@@ -108,12 +108,22 @@ func formatUSDCell(v float64) string {
 
 // WHICH PRECISION A MONEY FIGURE GETS, stated here once because it was decided twice.
 //
-// Two decimals — formatUSDTotal — for a figure that answers HOW MUCH HAS THIS COST over a span:
-// the day, the rolling window, the whole endpoint. Four — formatUSDCell — for a figure
-// attributable to ONE thing: one request, one session, one rate tier, one model. The difference
-// is not aggregation, it is magnitude: a day's spend is dollars and a reader wants to see it at
-// a glance, while a single cache-read request is $0.000038 and cents would render every one of
-// them as nothing.
+// Two decimals — formatUSDTotal — WHEREVER A READER SCANS AND COMPARES: the day, the rolling
+// window, the endpoint, the sessions table's COST and SAVED, the Usage pane's COST, the drawer's
+// tiers and models. Four — formatUSDCell — for ONE REQUEST, and only there: the events table's
+// COST and the cost-event cells behind it.
+//
+// THE CARVE-OUT IS MAGNITUDE, NOT AGGREGATION, and it is narrow on purpose. A single cache-read
+// request is $0.000038; cents renders it "<$0.01" and renders the whole column identically, so
+// four decimals is the only precision at which one request says anything at all. Everywhere else
+// the figures are cent-scale or larger, and there the extra two digits are noise on every row of
+// a surface whose job is comparing rows to each other.
+//
+// AN EARLIER VERSION OF THIS RULE DREW THE LINE AT "span versus one thing", which put the sessions
+// table and the drawer on the four-decimal side. That was wrong about what those surfaces are for:
+// a per-session figure is attributable to one session, but the COLUMN exists to be read down, and
+// "$1.8140" against "$2.8984" is two digits of precision nobody is comparing. The cost is real and
+// was accepted knowingly — two sessions differing below a cent now read alike.
 //
 // It was decided twice because #1042 rounded the Usage pane to cents with its own inline
 // arithmetic while every other surface kept four decimals, so the same money read "$1.01" in one

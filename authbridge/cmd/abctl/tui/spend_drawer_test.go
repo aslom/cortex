@@ -126,15 +126,69 @@ func TestRenderSpendDrawer_ShowsAPerSeriesSavingWithoutAddingItToCost(t *testing
 	if opus == "" {
 		t.Fatal("no row for claude-opus-5")
 	}
-	if !strings.Contains(opus, inexactMarker+"$0.1804") {
-		t.Errorf("row %q is missing the saving or its %q marker", opus, inexactMarker)
+	// "saved $0.18", in cents and with no marker — the SAVED figure's caveat was unconditional and
+	// this panel has no money heading to move it onto, so it was dropped (see renderTierRows). The
+	// WORD is asserted along with the figure because it is what keeps the saving apart from the
+	// cost now that the marker is gone: a bare "$0.18" beside "$11.12" is two spend figures with
+	// nothing telling them apart.
+	if !strings.Contains(opus, "saved $0.18") {
+		t.Errorf("row %q is missing the saving or the word that identifies it", opus)
 	}
-	if !strings.Contains(opus, "$11.1214") {
+	// NO MARKER *ON THIS FIXTURE*, which has IncompleteRequests == 0 — not "no marker ever on this
+	// panel". The cost figure's marker is conditional and is still emitted; see the sibling test
+	// below, which exists because the sentence this assertion invites is the one that was wrong in
+	// inexactMarker's own doc.
+	if strings.Contains(opus, inexactMarker) {
+		t.Errorf("row %q carries %q with nothing inexact behind it", opus, inexactMarker)
+	}
+	if !strings.Contains(opus, "$11.12") {
 		t.Errorf("row %q lost its cost", opus)
 	}
-	// 11.1214 + 0.1804.
-	if strings.Contains(opus, "$11.3018") {
+	if strings.Contains(opus, "$11.1214") {
+		t.Errorf("row %q kept four decimals; this column reads in cents", opus)
+	}
+	// 11.1214 + 0.1804, in cents.
+	if strings.Contains(opus, "$11.30") {
 		t.Errorf("row %q added the saving to the cost", opus)
+	}
+}
+
+// A per-model COST figure KEEPS its inexact marker, because that marker is conditional.
+//
+// THE SIBLING OF THE ASSERTION ABOVE, and the reason both exist. Dropping the tier rows' marker
+// and the saved figure's is easy to over-remember as "the drawer no longer marks anything" — which
+// is exactly what inexactMarker's doc claimed until this test was written, while the code had gone
+// on emitting it here the whole time. The rule is that an unconditional caveat moves to a heading
+// and a conditional one rides the figure; IncompleteRequests is per-row, so it rides.
+//
+// Asserted through drawerFigures rather than the rendered panel, because the caveat clause is what
+// distinguishes this from a coverage note and fitStripFigures may drop it at a narrow width.
+func TestDrawerFigures_APerModelCostKeepsItsConditionalMarker(t *testing.T) {
+	figures := func(incomplete int64) string {
+		figs := drawerFigures(drawerRow{
+			label: "claude-opus-5",
+			counts: usage.Counts{CostMicros: 1_060_100, PricedRequests: 11,
+				PriceableRequests: 11, IncompleteRequests: incomplete},
+		})
+		var joined string
+		for _, f := range figs {
+			joined += f.full + " "
+		}
+		return joined
+	}
+
+	marked := figures(3)
+	if !strings.Contains(marked, inexactMarker+"$1.06") {
+		t.Errorf("3 inexact requests behind the figure and it rendered %q — the conditional "+
+			"marker was dropped with the unconditional ones", marked)
+	}
+	// And the prose caveat that says how many, so the glyph is not the only disclosure.
+	if !strings.Contains(marked, "3 inexact") {
+		t.Errorf("the count behind the marker is missing: %q", marked)
+	}
+	// The control, so this cannot pass by marking everything.
+	if clean := figures(0); strings.Contains(clean, inexactMarker) {
+		t.Errorf("nothing inexact behind the figure and it still rendered %q", clean)
 	}
 }
 
@@ -646,7 +700,7 @@ func TestRenderSpendDrawer_ANegativeSeriesTotalIsUnpricedNotARefund(t *testing.T
 		t.Errorf("row %q blames coverage for an impossible figure", row)
 	}
 	// And the healthy series in the same drawer still shows its figure.
-	if !strings.Contains(joined, "$11.1214") {
+	if !strings.Contains(joined, "$11.12") {
 		t.Errorf("the good row lost its figure:\n%s", joined)
 	}
 }

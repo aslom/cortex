@@ -24,17 +24,43 @@ const stripGap = "   "
 // amount is a LOWER BOUND, or a gateway that reported only a total. It reads
 // "approximately", and the real number is at least this much.
 //
-// ONE SPELLING, EVERYWHERE. This is the marker the strip puts on the today and window
-// figures, the sessions table puts on its SAVED cell (see sessionMoneyCell) and the Usage
-// pane puts on its cost cell (see renderCostSummary). A branch that carries a commit
-// titled "Stop publishing a truncated stream's floor as an exact total" had three money
-// surfaces republishing that floor with no annotation at all, and three different
-// annotations would have been barely better: a marker a reader has to learn twice is a
-// marker they learn once and misread thereafter.
+// ONE SPELLING, EVERYWHERE. This is the marker the band puts on its TODAY and LAST figures, the
+// drawer puts on a per-model COST, and the strip puts on its own two — all four through
+// markMoney, all four when incomplete > 0. A branch that carries a commit titled "Stop
+// publishing a truncated stream's floor as an exact total" had three money surfaces republishing
+// that floor with no annotation at all, and three different annotations would have been barely
+// better: a marker a reader has to learn twice is a marker they learn once and misread
+// thereafter.
+//
+// ON A VALUE ONLY WHEN IT IS CONDITIONAL, which is the rule that decides where it goes. Every
+// case above is earned per reading — incomplete > 0 — so it rides the figure. An UNCONDITIONAL
+// caveat is a property of the whole column and goes on the heading instead: the sessions table's
+// SAVED heading reads "SAVED~" and the band's label reads "SAVED~", because a saving is always an
+// estimate and a glyph on every row states one fact once per session.
+//
+// WHERE IT IS GONE, precisely, because the difference is easy to overstate:
+//
+//   - The drawer's TIER rows, which format through formatUSDTotalMicros directly. Their caveat was
+//     unconditional and the panel has no money heading to move it onto, so it was a glyph on every
+//     row or nothing — renderTierRows records the choice.
+//   - The drawer's SAVED figure, for the same reason.
+//   - The sessions table's COST and SAVED VALUES. Not because the caveat moved in both cases —
+//     SAVED's did, to the heading — but because sessionMoneyCell takes no incomplete count at all.
+//     Its only value marker is partialMarker for a clamped total.
+//
+// The drawer's per-model COST is NOT in that list and keeps its conditional marker, which is what
+// the rule says should happen. Said explicitly because an earlier version of this comment claimed
+// the drawer's "tier and model rows" both dropped it, and the model half was wrong.
+//
+// The Usage pane never carried it — a claim that sat here stale for some time; renderCostSummary
+// emits no marker. The events table's "~" is a different marker with a different meaning
+// (savingSign, "projected"), deliberately not this one.
 //
 // One display column, so it survives every width the strip's fitter can produce and
 // every width fitTableColumns can leave the COST column at. The burn rate has always
 // worn the same "~" for the same reason — a derived rate is not an exact figure either.
+//
+// headerTitle strips it, so a heading that carries it is still addressable by its bare name.
 const inexactMarker = "~"
 
 // partialMarker follows a dollar figure that covers only PART of the traffic it
@@ -181,16 +207,15 @@ const saturatedNote = "clamped, figures are floors"
 //
 // THE PRECISION IS THE CALLER'S, and splitting it out is what keeps the rule beside
 // formatUSDTotal true. This function used to format as well as mark, so every surface reaching
-// it got one precision — and its callers are on both sides of the boundary: the band's TODAY and
-// LAST are span totals, while moneyFigure below feeds the drawer's PER-MODEL rows, which are
-// per-item. Formatting here in cents silently rounded the model column too, which the rule says
-// it must not be.
+// it got one precision whether or not the rule said it should.
 //
-// moneyFigure's OTHER two callers are on the wrong side of that rule and are dead: renderSpendStrip
-// passes it s.TodayUSD and s.WindowUSD, span totals that come out at four decimals, and nothing in
-// production calls renderSpendStrip any more — app.go mentions it only in comments, and
-// renderSpendBand is the live renderer. Said here because this comment is where a reviver of the
-// strip would look for the rule: reviving it means routing those two through moneyTotal.
+// WHAT IS LEFT ON THIS FOUR-DECIMAL PATH IS ONLY THE DEAD STRIP. moneyAmount's single production
+// caller was moneyFigure, and the drawer — moneyFigure's only live caller — now goes through
+// moneyFigureTotal instead, because its per-model column is scanned and compared. So the callers
+// of moneyAmount today are renderSpendStrip's two figures and the tests, and renderSpendStrip has
+// no production caller: app.go mentions it only in comments, and renderSpendBand is the live
+// renderer. Said here because this comment is where a reviver of the strip would look for the
+// rule — reviving it means routing those two through moneyTotal, since they are span totals.
 func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) string {
 	return markMoney(formatUSDCell(usd), unpriced, priceable, incomplete, degraded, saturated)
@@ -244,9 +269,30 @@ func markMoney(amount string, unpriced, priceable, incomplete int64,
 // also the only claim on this line that BOTH readings can carry — usage.Counts.Saturated lives
 // on Counts, so the ring's window totals and the ledger's day totals can each clamp, where a
 // damaged read is ledger-only. See figureIsShort and damagedMarker.
+// THE PRECISION IS THE CALLER'S here too, split the same way moneyAmount and moneyTotal are:
+// moneyFigure formats four decimals and moneyFigureTotal formats cents, over one shared body.
+// The two live side by side because this function's callers are on opposite sides of the
+// precision rule — the drawer's per-model rows read in cents, while renderSpendStrip's two
+// callers are four-decimal (and dead; see moneyAmount's doc).
 func moneyFigure(usd float64, label string, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) stripFigure {
-	amount := moneyAmount(usd, unpriced, priceable, incomplete, degraded, saturated)
+	return moneyFigureFrom(moneyAmount(usd, unpriced, priceable, incomplete, degraded, saturated),
+		label, unpriced, priceable, incomplete, degraded, saturated)
+}
+
+// moneyFigureTotal is moneyFigure for a figure that reads in CENTS — see the precision rule
+// beside formatUSDTotal.
+func moneyFigureTotal(usd float64, label string, unpriced, priceable, incomplete int64,
+	degraded *usage.Degraded, saturated bool) stripFigure {
+	return moneyFigureFrom(moneyTotal(usd, unpriced, priceable, incomplete, degraded, saturated),
+		label, unpriced, priceable, incomplete, degraded, saturated)
+}
+
+// moneyFigureFrom builds the reading and its caveat list around an already-formatted, already-
+// marked amount. The counters are passed again because the CAVEAT LIST needs them in prose even
+// though markMoney has already spent them on glyphs.
+func moneyFigureFrom(amount, label string, unpriced, priceable, incomplete int64,
+	degraded *usage.Degraded, saturated bool) stripFigure {
 	// A gap is only readable with a denominator, and a denominator of zero is not a
 	// gap at all — it is a window with nothing to price, which the caller handles.
 	// Recomputed here for the caveat list; moneyAmount owns the MARKER.

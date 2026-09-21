@@ -93,10 +93,21 @@ func renderSpendBand(s spendSummary, width int) []string {
 	// below with the window's — its span decides where it sits, not its name. The fallback
 	// exists for a deployment with no durable ledger (Kubernetes, by design).
 	//
-	// The marker is part of the value, and the value never joins the spend figures:
-	// usage.Counts.AvoidedMicros forbids any consumer adding it, in either direction.
+	// THE MARKER IS ON THE LABEL, not the value — "SAVED~" over a bare "$2.69". A saving is always
+	// an estimate (from a bytes-to-tokens ratio, gross of the prompt-cache re-warm; see
+	// usage.Counts.AvoidedMicros), so the caveat qualifies the cell rather than this particular
+	// reading of it, and a glyph on the value claims it might sometimes be absent. The spend
+	// figures' markers stay on their values because theirs ARE conditional — moneyTotal adds one
+	// only when incomplete > 0. Same split as the sessions table's SAVED heading.
+	//
+	// Width-neutral for the day cell, which is why it is free: bandCell.width() is
+	// max(label, value), and "SAVED~" at six is what "~$2.69" was. The window fallback's label was
+	// already the wider half, so that one does grow by a column.
+	//
+	// The value never joins the spend figures: usage.Counts.AvoidedMicros forbids any consumer
+	// adding it, in either direction.
 	if s.HasTodaySaved {
-		cells = append(cells, bandCell{"SAVED", inexactMarker + formatUSDTotal(s.TodaySavedUSD)})
+		cells = append(cells, bandCell{"SAVED" + inexactMarker, formatUSDTotal(s.TodaySavedUSD)})
 	}
 	// Gated on Priced, matching the strip: the window figure exists when the snapshot could
 	// price something, and there is no separate HasWindow to consult.
@@ -108,8 +119,8 @@ func renderSpendBand(s spendSummary, width int) []string {
 	}
 	if !s.HasTodaySaved && s.HasSaved {
 		cells = append(cells, bandCell{
-			"SAVED" + suffix,
-			inexactMarker + formatUSDTotal(s.SavedUSD),
+			"SAVED" + suffix + inexactMarker,
+			formatUSDTotal(s.SavedUSD),
 		})
 	}
 	// TOKENS before CACHE HIT, so the two widest window cells are not adjacent at the end where
