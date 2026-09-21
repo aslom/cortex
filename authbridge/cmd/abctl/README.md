@@ -261,9 +261,11 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   `SAVED~` carries the tilde in its **heading** rather than on every row: a
   saving is always an estimate, so the caveat belongs to the column rather than
-  to any one figure in it. A marker on a *value* is one that figure earned —
-  `COST` wears it when some of the requests behind it could not be settled
-  exactly.
+  to any one figure in it. Neither money column in this table marks a *value* —
+  the only glyph a cell here can wear is `+`, meaning the session's total hit the
+  int64 ceiling and the figure is a floor. The conditional `~`, earned by a figure
+  whose requests could not all be settled exactly, appears on the band's `TODAY`
+  and `LAST 1H` and on the `$` drawer's per-model cost.
 
   ```
   abctl · http://localhost:9094 · [Sessions] Pipeline · lifetime totals
@@ -271,10 +273,10 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   $30.94  $0.18   $2.91    9.9M       81%
   ───────────────────────────────────────────────────────────────────────────
    SESSION         UPDATED    EVENTS   TOKENS    COST  SAVED~  CONTEXT(1M)
-   ctx-abc-1234…   3s ago         42     48.2k   $0.12   $0.02  ▕███████▌ ▏
-   ctx-def-5678…   18m ago        15      1.2k  <$0.01       —  ▕▎        ▏
-   ctx-ghi-9012…   cached          7      2.9k       —       —  ▕████▍    ▏
-   default         1h ago          8         —       —       —            —
+   ctx-abc-1234…   3s ago         42    48.2k   $0.12  <$0.01  ▕███████▌ ▏
+   ctx-def-5678…   18m ago        15     1.2k  <$0.01       —  ▕▎        ▏
+   ctx-ghi-9012…   cached          7     2.9k       —       —  ▕████▍    ▏
+   default         1h ago          8        —       —       —            —
 
   ● connected   2.1 events/sec
   cost/saved: lifetime   [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit

@@ -24,23 +24,37 @@ const stripGap = "   "
 // amount is a LOWER BOUND, or a gateway that reported only a total. It reads
 // "approximately", and the real number is at least this much.
 //
-// ONE SPELLING, EVERYWHERE. This is the marker the band puts on its TODAY and LAST figures
-// (via markMoney, when incomplete > 0) and the strip puts on the same two. A branch that
-// carries a commit titled "Stop publishing a truncated stream's floor as an exact total" had
-// three money surfaces republishing that floor with no annotation at all, and three different
-// annotations would have been barely better: a marker a reader has to learn twice is a
-// marker they learn once and misread thereafter.
+// ONE SPELLING, EVERYWHERE. This is the marker the band puts on its TODAY and LAST figures, the
+// drawer puts on a per-model COST, and the strip puts on its own two — all four through
+// markMoney, all four when incomplete > 0. A branch that carries a commit titled "Stop
+// publishing a truncated stream's floor as an exact total" had three money surfaces republishing
+// that floor with no annotation at all, and three different annotations would have been barely
+// better: a marker a reader has to learn twice is a marker they learn once and misread
+// thereafter.
 //
-// ON A VALUE ONLY WHEN IT IS CONDITIONAL, which is the rule that decides where it goes. The
-// marker above is earned per reading — incomplete > 0 — so it rides the figure. An
-// UNCONDITIONAL caveat is a property of the whole column and goes on the heading instead: the
-// sessions table's SAVED heading reads "SAVED~" and the band's label reads "SAVED~", because a
-// saving is always an estimate and a glyph on every row states one fact once per session.
+// ON A VALUE ONLY WHEN IT IS CONDITIONAL, which is the rule that decides where it goes. Every
+// case above is earned per reading — incomplete > 0 — so it rides the figure. An UNCONDITIONAL
+// caveat is a property of the whole column and goes on the heading instead: the sessions table's
+// SAVED heading reads "SAVED~" and the band's label reads "SAVED~", because a saving is always an
+// estimate and a glyph on every row states one fact once per session.
 //
-// Two surfaces that used to carry it no longer do. The Usage pane never did — that claim was
-// stale here for some time; renderCostSummary emits no marker. And the drawer's tier and model
-// rows dropped it: they have no money heading to move it onto, so it was a glyph on every row
-// or nothing, and renderTierRows records the choice.
+// WHERE IT IS GONE, precisely, because the difference is easy to overstate:
+//
+//   - The drawer's TIER rows, which format through formatUSDTotalMicros directly. Their caveat was
+//     unconditional and the panel has no money heading to move it onto, so it was a glyph on every
+//     row or nothing — renderTierRows records the choice.
+//   - The drawer's SAVED figure, for the same reason.
+//   - The sessions table's COST and SAVED VALUES. Not because the caveat moved in both cases —
+//     SAVED's did, to the heading — but because sessionMoneyCell takes no incomplete count at all.
+//     Its only value marker is partialMarker for a clamped total.
+//
+// The drawer's per-model COST is NOT in that list and keeps its conditional marker, which is what
+// the rule says should happen. Said explicitly because an earlier version of this comment claimed
+// the drawer's "tier and model rows" both dropped it, and the model half was wrong.
+//
+// The Usage pane never carried it — a claim that sat here stale for some time; renderCostSummary
+// emits no marker. The events table's "~" is a different marker with a different meaning
+// (savingSign, "projected"), deliberately not this one.
 //
 // One display column, so it survives every width the strip's fitter can produce and
 // every width fitTableColumns can leave the COST column at. The burn rate has always

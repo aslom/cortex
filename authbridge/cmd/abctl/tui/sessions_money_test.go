@@ -411,9 +411,12 @@ func TestSessionMoneyCell_NeverRendersAKnownChargeAsZero(t *testing.T) {
 // ordinary $36.58 fits in six runes and would pass at widths this test rejects.
 //
 // The floor it has to fit is two runes shorter than it was — "<$0.01" rather than "~<$0.0001",
-// cents plus the estimate marker moving to the heading — which is what let sessionMoneyCellMin
-// come down to seven. Asserted here rather than restated: this walks every width the predicate
-// keeps, so it holds whatever that constant is.
+// cents plus the estimate marker moving to the heading. That did NOT lower sessionMoneyCellMin,
+// which stays at 9: the money cell could live in 7, but the fitter reaches UPDATED before it
+// reaches these columns and "just now" clips at 6. The constant's own doc has the measurements.
+//
+// Which is why this test asserts rather than restates: it walks every width the predicate keeps,
+// so it holds for whatever that constant is and does not have to know why.
 func TestSessionsShowMoney_EveryKeptWidthFitsASubCentCharge(t *testing.T) {
 	const subCent = 1_200 // $0.0012
 	kept := 0
