@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -1343,5 +1344,73 @@ func TestClosingTheDrawer_DisownsItsPollChainByEitherKey(t *testing.T) {
 					tc.name, seq)
 			}
 		})
+	}
+}
+
+// THE ROW SAYS HOW MANY FIGURES ARE INEXACT, not just that some are.
+//
+// The glyph and the count are different claims: markMoney's "~" says "this total is a lower bound",
+// the caveat says how much of the row is behind it — "3 inexact" on a series of forty requests is a
+// blip, on a series of three it is the whole row. The drawer is the only surface with room for both,
+// and it passes r.counts.IncompleteRequests for exactly that.
+//
+// UNASSERTED UNTIL NOW: the base covered it through two strip tests that went with the strip, and
+// the band's tests see only the marker. Verified — dropping the `if incomplete > 0` block left the
+// whole package green.
+func TestSpendDrawerRows_StateHowManyFiguresAreInexact(t *testing.T) {
+	figs := drawerFigures(drawerRow{
+		label: "claude-opus-5",
+		counts: usage.Counts{
+			Requests: 40, CostMicros: 11_121_400,
+			PricedRequests: 40, PriceableRequests: 40, IncompleteRequests: 3,
+		},
+	})
+	var joined string
+	for _, f := range figs {
+		joined += f.full + " "
+	}
+	if !strings.Contains(joined, "3 inexact") {
+		t.Errorf("row %q does not say how many of its figures are lower bounds", joined)
+	}
+	// And the marker is there too — they are not alternatives.
+	if !strings.Contains(joined, inexactMarker) {
+		t.Errorf("row %q carries the count without the marker on the figure", joined)
+	}
+	// A clean row says neither, so the count is a signal rather than furniture.
+	clean := drawerFigures(drawerRow{
+		label:  "claude-opus-5",
+		counts: usage.Counts{Requests: 40, CostMicros: 11_121_400, PricedRequests: 40, PriceableRequests: 40},
+	})
+	var cleanJoined string
+	for _, f := range clean {
+		cleanJoined += f.full + " "
+	}
+	if strings.Contains(cleanJoined, "inexact") {
+		t.Errorf("a row with nothing inexact still says so: %q", cleanJoined)
+	}
+}
+
+// AND paneView READS drawer.err, which is the half no test reached.
+//
+// Every other test here passes an error straight to renderSpendDrawer, so they pin the RENDERER and
+// say nothing about whether anything hands it the stored error. Verified: changing the call site to
+// pass nil left the package green — the same data-half/renderer-half split that let a failed poll
+// render as silence in the first place.
+func TestPaneView_DrawsTheDrawersStoredError(t *testing.T) {
+	m := &model{width: 120, height: 40}
+	m.pane = paneSessions
+	m.sessionsTbl = newSessionsTable()
+	m.handleKey(keyRune('$'))
+	if !m.spendDrawerVisible() {
+		t.Fatalf("the drawer did not open, so this cannot say what paneView does with its error")
+	}
+	m.spend.drawer.snap = nil
+	m.spend.drawer.err = errors.New("dial tcp: connection refused")
+	m.layout()
+
+	out := m.paneView()
+	if !strings.Contains(out, "unavailable") {
+		t.Errorf("paneView drew no diagnostic for a drawer whose poll failed — a stored error with "+
+			"no reader is the defect renderSpendDrawer's error path exists to end:\n%s", out)
 	}
 }

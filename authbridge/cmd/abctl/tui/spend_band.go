@@ -102,32 +102,43 @@ func renderSpendBand(s spendSummary, width int) []string {
 		cells[span] = bandSpanCell(spendSpanDefs[span].label, s.Spans[span])
 	}
 
-	// DROP BY PRIORITY, RENDER IN VISUAL ORDER. Walk bandDropOrder marking cells gone until
-	// what remains fits, then emit the survivors left to right. Dropping from either END is
-	// what would cost the month or the hour first; see bandDropOrder.
+	// THE BEST FITTING SET, chosen by enumeration rather than by dropping until it fits.
+	//
+	// Four spans is sixteen subsets, so the whole space is cheap to search — and searching it is
+	// what makes the answer both MAXIMAL and MONOTONE IN WIDTH. Dropping greedily is neither.
+	// Every cell shares one width, so a single wide cell inflates the budget for all of them, and
+	// a loop that stops the moment the set fits keeps whichever wide cell it has not reached yet:
+	//
+	//	measured, with a five-figure TODAY carrying all three markers ("!~$17265.97+", 12 columns)
+	//	  width 25 -> LAST 1H  7 DAYS  MONTH      three cells, 3x7 + 2x2 = 25
+	//	  width 26 -> TODAY  MONTH                two, because 2x12 + 2 = 26 also fits
+	//
+	// Widening the terminal by one column LOST a reading, and it stayed lost through width 39. A
+	// put-back pass cannot repair that: it can only un-drop cells, never surrender the wide one
+	// that is inflating the shared width, so it never reaches the three-cell set.
+	//
+	// TIES GO TO THE MORE VALUED SET, which is what keeps bandDropOrder meaningful: among sets of
+	// the same size, the weight below prefers the one keeping cells later in that order — the
+	// month over the week, the hour over nothing — so "more cells" never quietly overrides "the
+	// right cells".
 	var dropped [numSpendSpans]bool
-	for i := spendSpan(0); i < numSpendSpans && bandWidth(cells, dropped) > width; i++ {
-		dropped[bandDropOrder[i]] = true
-	}
-	// AND THEN PUT BACK WHAT STILL FITS, most-valued first, because dropping alone is not
-	// maximal. Every cell shares one width, so giving up a WIDE cell can leave room for a
-	// narrower one that was surrendered earlier — and the loop above has already moved past it.
-	//
-	// Measured, with a stale TODAY whose label carries an age ("TODAY 12m", nine columns): at any
-	// width from 16 to 19 the band drew MONTH alone, while LAST 1H and MONTH together need 16.
-	// Three cells' worth of information given up to fit one, with the room for two sitting unused.
-	//
-	// IN REVERSE DROP ORDER, which is what keeps the priority honest: the last cell dropped is the
-	// most valued of those surrendered, so it gets the first chance to come back and a
-	// lower-priority cell can never take a higher one's place.
-	for i := numSpendSpans - 1; i >= 0; i-- {
-		span := bandDropOrder[i]
-		if !dropped[span] {
+	bestCount, bestWeight := -1, -1
+	for mask := 0; mask < 1<<int(numSpendSpans); mask++ {
+		var try [numSpendSpans]bool
+		count, weight := 0, 0
+		for i := 0; i < int(numSpendSpans); i++ {
+			if mask&(1<<i) != 0 {
+				try[bandDropOrder[i]] = true
+				continue
+			}
+			count++
+			weight |= 1 << i
+		}
+		if bandWidth(cells, try) > width {
 			continue
 		}
-		dropped[span] = false
-		if bandWidth(cells, dropped) > width {
-			dropped[span] = true
+		if count > bestCount || (count == bestCount && weight > bestWeight) {
+			bestCount, bestWeight, dropped = count, weight, try
 		}
 	}
 

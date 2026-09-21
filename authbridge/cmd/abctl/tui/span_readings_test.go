@@ -56,10 +56,18 @@ func TestSpanReadings_ANegativeTotalIsUnpricedNotARefund(t *testing.T) {
 				t.Errorf("%s: USD = %v carried off a negative total", def.label, got.USD)
 			}
 			// And on screen it is the em dash, never a minus sign.
+			//
+			// PROBED AS "$-", which is the shape the formatter actually produces: formatUSDCell
+			// puts the sigil first, so a refused figure that slipped through renders "$-5.0000"
+			// and the "-$" this used to look for could never appear. The clause was dead —
+			// dropping the negative guard left it false and only the em-dash count below caught
+			// the regression. spend_drawer_test.go had it right.
 			line := strings.Join(renderSpendBand(spendSummary{Spans: m.spanReadings()}, 200), "\n")
-			if strings.Contains(line, "-$") || strings.Contains(line, "−$") {
-				t.Errorf("%s: band drew a negative figure, which reads as a refund:\n%s",
-					def.label, line)
+			for _, shape := range []string{"$-", "-$", "−$", "$−"} {
+				if strings.Contains(line, shape) {
+					t.Errorf("%s: band drew %q, a negative figure that reads as a refund:\n%s",
+						def.label, shape, line)
+				}
 			}
 			if !strings.Contains(line, emptyCell) {
 				t.Errorf("%s: band has no %q for a total it refused, so the impossible figure was "+

@@ -213,13 +213,21 @@ const saturatedNote = "clamped, figures are floors"
 // no production caller: app.go mentions it only in comments, and renderSpendBand is the live
 // renderer. Said here because this comment is where a reviver of the strip would look for the
 // rule — reviving it means routing those two through moneyTotal, since they are span totals.
-// NO PRODUCTION CALLER SINCE THE STRIP WENT, and that is left for main rather than deleted here.
-// This is the per-item half of main's precision rule — the side that keeps four decimals so one
-// cache-read request at $0.000038 says something — and main's rule comment and its
-// money_precision_test both address it by name. renderSpendStrip and moneyFigure were its only
-// callers; deleting the renderer nothing calls left them behind, which `golangci-lint -E unused`
-// reports. Removing a documented API of main's inside a branch about spend spans is the wrong
-// place for that decision; the drawer's live path is moneyFigureTotal.
+// PRODUCTION-DEAD, AND SO IS THE CHAIN UNDER IT. An earlier version of this comment said moneyFigure
+// keeps it alive; moneyFigure has no non-test caller either, so both are reachable only from tests —
+// and damagedNote with them, because moneyFigureTotal's one live call site (renderTierRows) passes
+// nil for degraded, so the branch that spells out a damaged read cannot be reached from production
+// at all.
+//
+// TESTS COUNT AS USES, which is why `golangci-lint -E unused` says nothing and the suite reports
+// coverage over code no screen can render. That is the write-only-surface defect this branch exists
+// to remove, so naming it here rather than leaving it to be rediscovered.
+//
+// NOT DELETED HERE, deliberately: this is the per-item half of main's precision rule — the side that
+// keeps four decimals so one cache-read request at $0.000038 says something — and main's rule
+// comment and its money_precision_test address it by name. Removing a documented API of main's
+// inside a branch about spend spans is the wrong place for that call. What has to move with it:
+// moneyFigure, damagedNote, and the tests that reach all three.
 func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) string {
 	return markMoney(formatUSDCell(usd), unpriced, priceable, incomplete, degraded, saturated, false)

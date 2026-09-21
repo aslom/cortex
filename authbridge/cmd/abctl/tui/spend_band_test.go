@@ -806,3 +806,62 @@ func TestMoneyRounding_TheCellAndTheHeadlineAgree(t *testing.T) {
 		}
 	}
 }
+
+// THE SURVIVING SET NEVER SHRINKS AS THE TERMINAL GROWS, which greedy dropping did not guarantee.
+//
+// Every cell shares one width, so one wide cell inflates the budget for all of them — and a loop
+// that stops the moment the set fits keeps whichever wide cell it has not reached yet. Measured
+// before the fix, with a five-figure TODAY carrying all three markers:
+//
+//	width 25 -> LAST 1H  7 DAYS  MONTH    three cells
+//	width 26 -> TODAY  MONTH              two, and still two at width 39
+//
+// Widening the terminal by one column lost a reading. A put-back pass cannot repair it, because it
+// can only un-drop cells and never surrender the wide one doing the inflating.
+//
+// ASSERTED AS MONOTONICITY OVER EVERY WIDTH rather than at the two that happened to show it: the
+// pair above is one instance of a property, and a fixture chosen to reproduce a known case cannot
+// tell you the case is gone everywhere.
+func TestRenderSpendBand_WideningNeverLosesACell(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		build func() spendSummary
+	}{
+		{"the healthy fixture", bandSummary},
+		{"a five-figure TODAY wearing all three markers", func() spendSummary {
+			return withSpan(bandSummary(), spanToday, func(r *spanReading) {
+				r.USD = 17265.97
+				r.Incomplete, r.Unpriced, r.Priceable = 3, 40, 100
+				r.Degraded = &usage.Degraded{UnreadableDays: 1}
+			})
+		}},
+		{"a wide MONTH, the last cell to be dropped", func() spendSummary {
+			return withSpan(bandSummary(), spanMonth, func(r *spanReading) {
+				r.USD = 998877.66
+				r.Clamped = true
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.build()
+			count := func(w int) int {
+				line := renderSpendBand(s, w)[0]
+				n := 0
+				for span := spendSpan(0); span < numSpendSpans; span++ {
+					if strings.Contains(line, spendSpanDefs[span].label) {
+						n++
+					}
+				}
+				return n
+			}
+			for w := 1; w < 200; w++ {
+				if got, next := count(w), count(w+1); next < got {
+					t.Errorf("width %d draws %d cells and width %d draws %d — widening the "+
+						"terminal lost a reading:\n%s\n%s", w, got, w+1, next,
+						strings.Join(renderSpendBand(s, w), "\n"),
+						strings.Join(renderSpendBand(s, w+1), "\n"))
+				}
+			}
+		})
+	}
+}

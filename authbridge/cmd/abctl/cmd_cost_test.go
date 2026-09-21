@@ -1445,3 +1445,46 @@ func TestRunCost_JSONOmitsTiersWithNoMix(t *testing.T) {
 		t.Errorf("tiers emitted for a window with no modelled mix:\n%s", out.String())
 	}
 }
+
+// AND --json CARRIES THE SAME COVERAGE FIGURE THE HUMAN SUMMARY PRINTS.
+//
+// costJSON re-keys the snapshot field by field, so a disclosure added to the server reaches a
+// script only when someone adds a line here — and this one was missed: `--window month` against a
+// shorter retention_days printed the "!" line for a reader and returned a total short by weeks,
+// with no trace of it, to the consumer with nobody watching. That is the disagreement this
+// command's own comment calls worse than either answer, on the surface where nothing notices.
+func TestRunCost_JSONCarriesTheRetentionCoverage(t *testing.T) {
+	srv := fakeUsageServer(t, `{"window":"month","totals":{"requests":318,`+
+		`"costMicros":4170000,"pricedRequests":318,"priceableRequests":318},`+
+		`"priced":true,"daysOutsideRetention":21}`)
+	defer srv.Close()
+
+	var out, errOut strings.Builder
+	if code := runCost([]string{"--endpoint", srv.URL, "--window", "month", "--json"},
+		&out, &errOut); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr = %s", code, errOut.String())
+	}
+	var got struct {
+		DaysOutsideRetention int64 `json:"daysOutsideRetention"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &got); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out.String())
+	}
+	if got.DaysOutsideRetention != 21 {
+		t.Errorf("daysOutsideRetention = %d, want 21 — a script cannot see that the month is "+
+			"short by three weeks:\n%s", got.DaysOutsideRetention, out.String())
+	}
+}
+
+// And it is absent when the window fits, so a consumer can treat presence as the signal.
+func TestRunCost_JSONOmitsTheCoverageWhenThereIsNone(t *testing.T) {
+	srv := fakeUsageServer(t, `{"window":"today","totals":{"requests":318,`+
+		`"costMicros":4170000,"pricedRequests":318,"priceableRequests":318},"priced":true}`)
+	defer srv.Close()
+
+	var out, errOut strings.Builder
+	runCost([]string{"--endpoint", srv.URL, "--json"}, &out, &errOut)
+	if strings.Contains(out.String(), "daysOutsideRetention") {
+		t.Errorf("a window the ledger covers still carries the key:\n%s", out.String())
+	}
+}

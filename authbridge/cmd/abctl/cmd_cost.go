@@ -270,6 +270,18 @@ type costJSON struct {
 	// this printed before — absence keeps meaning "the read was clean" rather than becoming
 	// zeros a consumer has to interpret.
 	Degraded *usage.Degraded `json:"degraded,omitempty"`
+	// DaysOutsideRetention is how many days of the requested window fall before the ledger's
+	// horizon, carried verbatim from usage.Snapshot.
+	//
+	// HERE BECAUSE THE HUMAN SUMMARY HAS IT AND A SCRIPT HAD NOT, which is the disagreement this
+	// command's own comment calls worse than either answer: `--window month` against a shorter
+	// retention_days printed the "!" coverage line for a reader and returned a total short by
+	// weeks, with no trace of it, to the consumer with nobody watching. A figure a human is
+	// warned about and a script is not is the shape of a silent wrong number.
+	//
+	// NOT a Degraded counter, for the reason that type documents: this says the configuration
+	// cannot reach part of the window, not that rows are missing from the sum.
+	DaysOutsideRetention int64 `json:"daysOutsideRetention,omitempty"`
 	// SeriesOvershootMicros says the answer CONTRADICTS ITSELF: the breakdown summed to more
 	// than the total, by this much. It is a defect report rather than a figure — see
 	// usage.Snapshot.SeriesOvershootMicros, which states that a reconcilable group's series can
@@ -352,14 +364,15 @@ func writeCostJSON(snap *usage.Snapshot, stdout, stderr io.Writer) int {
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	out := costJSON{
-		Window:       snap.Window,
-		Priced:       snap.Priced,
-		Totals:       snap.Totals,
-		Tiers:        tiersJSONOf(snap.Totals),
-		PricedBy:     snap.PricedBy,
-		UnpricedBy:   snap.UnpricedBy,
-		IncompleteBy: snap.IncompleteBy,
-		Degraded:     snap.Degraded,
+		Window:               snap.Window,
+		Priced:               snap.Priced,
+		Totals:               snap.Totals,
+		Tiers:                tiersJSONOf(snap.Totals),
+		PricedBy:             snap.PricedBy,
+		UnpricedBy:           snap.UnpricedBy,
+		IncompleteBy:         snap.IncompleteBy,
+		Degraded:             snap.Degraded,
+		DaysOutsideRetention: snap.DaysOutsideRetention,
 		// usage.Counts.Saturated and usage.Counts.RefusedTokenRequests need no line here: Totals
 		// is usage.Counts embedded verbatim, so both travel with their own field names and their
 		// own omitempty. That is the whole point of not re-keying the struct — a disclosure added

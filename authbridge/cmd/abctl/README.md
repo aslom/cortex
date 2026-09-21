@@ -261,10 +261,6 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   the durable cost ledger and survives restarts. `[?]` states both facts; the
   title deliberately does not, since no single span is true of every row.
 
-  The two money columns are dropped entirely — below 69 columns — rather than
-  rounded to `$0.00` or blanked, on a terminal too narrow to show a sub-cent
-  charge honestly and still leave every other column its own minimum.
-
   ```
   abctl · http://localhost:9094 · [Sessions] Pipeline
   LAST 1H    TODAY   7 DAYS    MONTH
@@ -275,6 +271,10 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
    ctx-def-5678…  18m ago               15        1.2k      <$0.01           —  ▕▎        ▏
    ctx-ghi-9012…  cached                 7        2.9k           —           —  ▕████▍    ▏
    default        1h ago                 8           —           —           —            —
+
+  ● connected   2.1 events/sec
+  [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
+  ```
 
   The two money columns are dropped entirely on a terminal too narrow to show a
   sub-cent charge honestly — below 73 columns — rather than rounded to `$0.00`
@@ -338,18 +338,17 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   cadence (20s for the ring-served hour, a minute for today, five minutes for the
   two that walk many day files), so the age is per cell rather than per band.
 
-  Money is shown to the cent. A charge below half a cent reads `<$0.01`
-  rather than `$0.00`, because a known charge displayed as free is a claim
-  about the traffic.
+  **How precise a figure is depends on whether you scan it.** Anything read down a
+  column or compared against its neighbours is shown **to the cent**, and a charge
+  below half a cent reads `<$0.01` rather than `$0.00`, because a known charge
+  displayed as free is a claim about the traffic.
 
-  **Cents everywhere, and what that costs.** One spelling on every screen, so two
-  surfaces can never disagree about the same money. The trade is weakest in the
-  events pane, whose unit is a single request rather than a period total: on
-  cache-read-dominated agent traffic a real share of individual events cost under
-  half a cent, and those rows all read `<$0.01` and stop being comparable with each
-  other. Full precision is still there when you need a single event's exact figure —
-  the detail pane (`↵` on a row) shows the raw cost record, and `abctl cost --json`
-  reports `CostMicros`, which is the unrounded integer the ledger stores.
+  The events table is the exception, and deliberately: its unit is **one request**,
+  not a period total. A single cache-read request costs about $0.000038, so cents
+  would render every one of them `<$0.01` — the whole column identically — and four
+  decimals is the only precision at which one request says anything. Everywhere else
+  the figures are cent-scale or larger, where two extra digits are noise on a surface
+  whose job is comparing rows.
 
   The `~` on `SAVED` sits in the **heading**, not on every value. A saving is
   estimated in every row, so a per-row marker distinguished nothing while
@@ -462,7 +461,7 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
    #     TIME          DIR   PHASE    ACTION    PLUGIN              METHOD              STATUS   DURATION    TOKENS             COST                 HOST
    1     14:23:07.41   in    req      allow     jwt-validation                                                                                       weather-agent
    1     14:23:07.52   in    resp     —         —                                       200      118ms                                               weather-agent
-   2     14:23:07.71   out   req      observe   inference-parser    claude-sonnet-5                                            681,300(−9.9k)   $0.25(−<$0.01)   api.anthropic.com
+   2     14:23:07.71   out   req      observe   inference-parser    claude-sonnet-5                                            681,300(−9.9k)   $0.2546(−$0.0037)   api.anthropic.com
    2     14:23:08.91   out   resp     —         —                   claude-sonnet-5     200      1.20s       412                                     api.anthropic.com
    3     14:23:09.01   out   req      modify    token-exchange      tools/call                                                                       github-tool-mcp
    3     14:23:09.10   out   resp     —         —                   tools/call          503      96ms                                                github-tool-mcp
