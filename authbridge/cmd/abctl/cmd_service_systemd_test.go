@@ -83,6 +83,9 @@ func TestSupervisorRunning_Linux(t *testing.T) {
 
 	// systemctl is-active exits non-zero for every state except "active", but still
 	// prints the real state on stdout. Only the exit-0 case may read as running.
+	// The fakes below all use exit 3, but the specific nonzero value is arbitrary:
+	// supervisorRunning's Linux branch only checks err != nil and stdout content, never
+	// a particular exit code, so any nonzero value here exercises the same path.
 	for _, state := range []string{"activating", "failed", "deactivating", "inactive"} {
 		t.Run(state+" does not read as running", func(t *testing.T) {
 			fakeSystemctl(t, "#!/bin/sh\necho '"+state+"'\nexit 3\n")
@@ -127,10 +130,11 @@ func TestLoadService_Linux(t *testing.T) {
 	t.Run("daemon-reload failure is reported, enable is never attempted", func(t *testing.T) {
 		p := servicePathsFixture(t)
 		fakeSystemctl(t, `#!/bin/sh
-if [ "$2" = "daemon-reload" ]; then
-  echo "boom: unit has a syntax error" >&2
-  exit 1
-fi
+case "$*" in
+  *daemon-reload*)
+    echo "boom: unit has a syntax error" >&2
+    exit 1 ;;
+esac
 echo "enable --now should not have run" >&2
 exit 1
 `)
@@ -143,9 +147,9 @@ exit 1
 	t.Run("enable --now failure is reported", func(t *testing.T) {
 		p := servicePathsFixture(t)
 		fakeSystemctl(t, `#!/bin/sh
-if [ "$2" = "daemon-reload" ]; then
-  exit 0
-fi
+case "$*" in
+  *daemon-reload*) exit 0 ;;
+esac
 echo "nope: unit not found" >&2
 exit 1
 `)
@@ -159,10 +163,11 @@ exit 1
 		p := servicePathsFixture(t)
 		fakeSystemctl(t, "#!/bin/sh\nexit 0\n")
 		fakeLoginctl(t, `#!/bin/sh
-if [ "$1" = "show-user" ]; then
-  echo "Linger=yes"
-  exit 0
-fi
+case "$*" in
+  *show-user*)
+    echo "Linger=yes"
+    exit 0 ;;
+esac
 echo "enable-linger should not have run" >&2
 exit 1
 `)
@@ -178,10 +183,11 @@ exit 1
 		p := servicePathsFixture(t)
 		fakeSystemctl(t, "#!/bin/sh\nexit 0\n")
 		fakeLoginctl(t, `#!/bin/sh
-if [ "$1" = "show-user" ]; then
-  echo "Linger=no"
-  exit 0
-fi
+case "$*" in
+  *show-user*)
+    echo "Linger=no"
+    exit 0 ;;
+esac
 exit 0
 `)
 		if err := loadService("linux", p, io.Discard); err != nil {
@@ -196,10 +202,11 @@ exit 0
 		p := servicePathsFixture(t)
 		fakeSystemctl(t, "#!/bin/sh\nexit 0\n")
 		fakeLoginctl(t, `#!/bin/sh
-if [ "$1" = "show-user" ]; then
-  echo "Linger=no"
-  exit 0
-fi
+case "$*" in
+  *show-user*)
+    echo "Linger=no"
+    exit 0 ;;
+esac
 exit 1
 `)
 		err := loadService("linux", p, io.Discard)
