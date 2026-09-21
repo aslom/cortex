@@ -218,29 +218,49 @@ const saturatedNote = "clamped, figures are floors"
 // rule — reviving it means routing those two through moneyTotal, since they are span totals.
 func moneyAmount(usd float64, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) string {
-	return markMoney(formatUSDCell(usd), unpriced, priceable, incomplete, degraded, saturated)
+	return markMoney(formatUSDCell(usd), unpriced, priceable, incomplete, degraded, saturated, false)
 }
 
 // moneyTotal is moneyAmount for a SPAN TOTAL — the day's spend, the window's — so it reads in
 // cents. See the precision rule beside formatUSDTotal.
 func moneyTotal(usd float64, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) string {
-	return markMoney(formatUSDTotal(usd), unpriced, priceable, incomplete, degraded, saturated)
+	return markMoney(formatUSDTotal(usd), unpriced, priceable, incomplete, degraded, saturated, false)
 }
 
 // markMoney puts the disclosure markers on an already-formatted amount.
+// alsoPartial is a SECOND reason the figure covers less than the question implied, independent of
+// the unpriced gap — and a parameter rather than another counter, because the caller's reasons are
+// not this function's business: it composes markers.
+//
+// Today the only extra reason is a window reaching past the ledger's retention: the total cannot
+// include days the configuration does not keep, which is exactly partialMarker's claim ("the real
+// total is LARGER than the number shown") arrived at by a different route. Smuggling it in through
+// `unpriced` would have said requests went unpriced, which is a different fact.
 func markMoney(amount string, unpriced, priceable, incomplete int64,
-	degraded *usage.Degraded, saturated bool) string {
+	degraded *usage.Degraded, saturated, alsoPartial bool) string {
 	if incomplete > 0 {
 		amount = inexactMarker + amount
 	}
 	if figureIsShort(degraded, saturated) {
 		amount = damagedMarker + amount
 	}
-	if unpriced > 0 && priceable > 0 {
+	if (unpriced > 0 && priceable > 0) || alsoPartial {
 		amount += partialMarker
 	}
 	return amount
+}
+
+// markMoneyTotal is markMoney over a figure that reads in cents — a span total, which is what the
+// band's four cells are. See the precision rule beside formatUSDTotal.
+//
+// It exists so the band can pass alsoPartial without every other caller of moneyTotal growing a
+// parameter it has no reason for: the retention shortfall is a fact about a ledger-backed SPAN, so
+// only a span total can carry it.
+func markMoneyTotal(usd float64, unpriced, priceable, incomplete int64,
+	degraded *usage.Degraded, saturated, alsoPartial bool) string {
+	return markMoney(formatUSDTotal(usd), unpriced, priceable, incomplete, degraded, saturated,
+		alsoPartial)
 }
 
 // moneyFigure builds one dollar reading together with the caveats that belong to IT.

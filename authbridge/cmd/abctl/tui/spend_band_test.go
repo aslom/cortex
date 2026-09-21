@@ -56,7 +56,7 @@ func TestRenderSpendBand_EverySpanIsLabelledWithItsPeriod(t *testing.T) {
 	}
 	// And the figures are all there, under them.
 	for span := spendSpan(0); span < numSpendSpans; span++ {
-		want := formatUSDCell(bandSummary().Spans[span].USD)
+		want := formatUSDTotal(bandSummary().Spans[span].USD)
 		if !strings.Contains(lines[1], want) {
 			t.Errorf("value row %q is missing %s's figure %q",
 				lines[1], spendSpanDefs[span].label, want)
@@ -93,7 +93,7 @@ func TestRenderSpendBand_FiguresShareAColumnStride(t *testing.T) {
 	lines := renderSpendBand(bandSummary(), 200)
 	var ends []int
 	for span := spendSpan(0); span < numSpendSpans; span++ {
-		fig := formatUSDCell(bandSummary().Spans[span].USD)
+		fig := formatUSDTotal(bandSummary().Spans[span].USD)
 		i := strings.Index(lines[1], fig)
 		if i < 0 {
 			t.Fatalf("value row %q is missing %q", lines[1], fig)
@@ -165,7 +165,7 @@ func TestRenderSpendBand_AnUnanswerableSpanIsNotANumber(t *testing.T) {
 		t.Errorf("value row %q has no %q for the unanswerable span", lines[1], emptyCell)
 	}
 	// The spans that CAN be answered are untouched: one degraded cell must not blank the band.
-	if !strings.Contains(lines[1], formatUSDCell(4.04)) {
+	if !strings.Contains(lines[1], formatUSDTotal(4.04)) {
 		t.Errorf("value row %q lost the hour figure over the month's degradation", lines[1])
 	}
 }
@@ -181,7 +181,7 @@ func TestRenderSpendBand_OneChainsFailureLeavesTheOthers(t *testing.T) {
 		t.Errorf("value row %q has no %q for the failed span", lines[1], emptyCell)
 	}
 	for _, span := range []spendSpan{spanHour, spanToday, spanMonth} {
-		want := formatUSDCell(bandSummary().Spans[span].USD)
+		want := formatUSDTotal(bandSummary().Spans[span].USD)
 		if !strings.Contains(lines[1], want) {
 			t.Errorf("value row %q lost %s over another span's failure",
 				lines[1], spendSpanDefs[span].label)
@@ -205,7 +205,7 @@ func TestRenderSpendBand_AStaleSpanIsDated(t *testing.T) {
 			"from a current reading without it:\n%s", lines[0], strings.Join(lines, "\n"))
 	}
 	// The figure itself is unchanged: the answer is old, not wrong.
-	if !strings.Contains(lines[1], formatUSDCell(18.7994)) {
+	if !strings.Contains(lines[1], formatUSDTotal(18.7994)) {
 		t.Errorf("value row %q dropped a figure that was merely stale", lines[1])
 	}
 	// And a fresh band carries no timestamp at all — a permanent one is noise.
@@ -247,7 +247,7 @@ func TestRenderSpendBand_HeightIsConstantAndFiguresDropWhole(t *testing.T) {
 		// those could not fail because of their own arithmetic, where this cannot fail because the
 		// subject is currently correct. The first is a broken test; the second is an invariant.
 		for span := spendSpan(0); span < numSpendSpans; span++ {
-			whole := formatUSDCell(bandSummary().Spans[span].USD)
+			whole := formatUSDTotal(bandSummary().Spans[span].USD)
 			if clipsFigure(lines[1], whole) {
 				t.Errorf("width %d: %s's figure was clipped: %q (probe %q, want whole %q)",
 					w, spendSpanDefs[span].label, lines[1], figureProbe(whole), whole)
@@ -607,7 +607,7 @@ func TestBandFixtureProbes_DoNotCrossMatch(t *testing.T) {
 	s := bandSummary()
 	seen := map[string]spendSpan{}
 	for span := spendSpan(0); span < numSpendSpans; span++ {
-		probe := figureProbe(formatUSDCell(s.Spans[span].USD))
+		probe := figureProbe(formatUSDTotal(s.Spans[span].USD))
 		if other, dup := seen[probe]; dup {
 			t.Errorf("%s and %s both probe as %q, so either cell can satisfy the other's "+
 				"whole-figure assertion", spendSpanDefs[other].label, spendSpanDefs[span].label, probe)
@@ -617,12 +617,12 @@ func TestBandFixtureProbes_DoNotCrossMatch(t *testing.T) {
 	// And no probe is a substring of another whole figure, which is the same hazard by a longer
 	// route: "$70" would match inside "$1,708.20" if the fixtures ever grew a thousands separator.
 	for span := spendSpan(0); span < numSpendSpans; span++ {
-		probe := figureProbe(formatUSDCell(s.Spans[span].USD))
+		probe := figureProbe(formatUSDTotal(s.Spans[span].USD))
 		for other := spendSpan(0); other < numSpendSpans; other++ {
 			if other == span {
 				continue
 			}
-			if whole := formatUSDCell(s.Spans[other].USD); strings.Contains(whole, probe) {
+			if whole := formatUSDTotal(s.Spans[other].USD); strings.Contains(whole, probe) {
 				t.Errorf("%s's probe %q appears inside %s's figure %q", spendSpanDefs[span].label,
 					probe, spendSpanDefs[other].label, whole)
 			}
@@ -718,7 +718,7 @@ func TestRenderSpendBand_ACleanSpanCarriesNoMarker(t *testing.T) {
 	}
 	// And the figures really are there, or "no markers" would be satisfied by an empty band.
 	for span := spendSpan(0); span < numSpendSpans; span++ {
-		if want := formatUSDCell(bandSummary().Spans[span].USD); !strings.Contains(lines[1], want) {
+		if want := formatUSDTotal(bandSummary().Spans[span].USD); !strings.Contains(lines[1], want) {
 			t.Fatalf("the clean band is missing %s's figure %q, so this test asserted nothing:\n%s",
 				spendSpanDefs[span].label, want, joined)
 		}
@@ -798,7 +798,7 @@ func TestMoneyRounding_TheCellAndTheHeadlineAgree(t *testing.T) {
 			Requests: 1, CostMicros: micros, PricedRequests: 1, PriceableRequests: 1,
 		}}
 		headline := renderCostSummary(snap)
-		cell := formatUSDCell(float64(micros) / 1e6)
+		cell := formatUSDTotal(float64(micros) / 1e6)
 		if !strings.Contains(headline, cell) {
 			t.Errorf("%d micros: the pane headline says %q and a table cell says %q — one figure, "+
 				"two answers, and an operator comparing two screens cannot tell which is the money",

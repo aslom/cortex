@@ -221,7 +221,9 @@ func bandSpanCell(label string, r spanReading) bandCell {
 	}
 	return bandCell{
 		label: label,
-		value: moneyAmount(r.USD, r.Unpriced, r.Priceable, r.Incomplete, r.Degraded, r.Clamped,
+		// A SPAN TOTAL, so it reads in cents — every cell here answers "how much has this span
+		// cost", which is the side of main's precision rule that compares rows to each other.
+		value: markMoneyTotal(r.USD, r.Unpriced, r.Priceable, r.Incomplete, r.Degraded, r.Clamped,
 			r.DaysOutsideRetention > 0),
 	}
 }

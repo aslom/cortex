@@ -509,7 +509,7 @@ func renderCostSummary(snap *usage.Snapshot) string {
 	} else {
 		// Micros, not the float: the integer is already in hand, and the float64 entry point
 		// exists for callers that only have dollars.
-		cell = "COST " + formatUSDMicros(micros)
+		cell = "COST " + formatUSDTotalMicros(micros)
 	}
 	// Compared against PRICEABLE requests, not all of them. Requests counts every
 	// proxied response — MCP tool calls, health checks, anything else the sidecar
@@ -743,7 +743,7 @@ func humanizeCostMicros(micros int64) string {
 	// The rule: subtract half the unit the branch rounds to. Same lesson as
 	// humanizeDurationMs's 9.95ms, applied at every bound rather than one.
 	case micros < 9_995_000: // under $10: cents matter
-		return formatUSDMicros(micros)
+		return formatUSDTotalMicros(micros)
 	case micros < 999_500_000: // $10..$999
 		return fmt.Sprintf("$%d", (micros+500_000)/1_000_000)
 	case micros < 9_950_000_000: // $1.0k..$9.9k
