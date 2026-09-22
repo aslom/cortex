@@ -29,6 +29,12 @@ import (
 // simpler than the darwin test: there's no supervisor layer or bootout race to
 // reproduce, just the bare Restart=on-failure claim itself.
 
+// isExitCode reports whether err is a process exit with exactly this code.
+func isExitCode(err error, code int) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == code
+}
+
 // requireRealSystemd skips (or, with ABCTL_SYSTEMD_TESTS=required, fails) unless
 // this process can actually drive a live systemd --user session — covering the same
 // ground as TestWaitBootedOut_RealLaunchd's skip guards (cmd_service_bootout_test.go),
@@ -43,12 +49,6 @@ import (
 // the var, though, so the test has skipped in every CI run since it was written.
 // The one CI job that runs THIS test should set ABCTL_SYSTEMD_TESTS=required after
 // setting up a real systemd --user session, so it can't fall into the same trap.
-// isExitCode reports whether err is a process exit with exactly this code.
-func isExitCode(err error, code int) bool {
-	var ee *exec.ExitError
-	return errors.As(err, &ee) && ee.ExitCode() == code
-}
-
 func requireRealSystemd(t *testing.T) {
 	t.Helper()
 	skip := t.Skipf
