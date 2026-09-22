@@ -502,37 +502,6 @@ func sessionMoneyCell(micros int64, saturated bool, budget int) string {
 	return emptyCell
 }
 
-// sessionsScopeNote states the span of every figure in this table, in the pane's title.
-//
-// IT EXISTS BECAUSE THE SCOPE WAS ONLY EVER IN THIS FILE'S COMMENTS. sessionsColumns' own doc
-// explains at length that COST, SAVED and TOKENS are lifetime figures and that the strip's
-// rolling window "is not a check on the other" — and a reader has none of that. What they have is
-// a spend strip reporting one hour directly above a table whose TOKENS column sums to a different
-// number, with nothing on screen distinguishing the two. Measured on a local proxy: 84.6M on the
-// strip against 123.8M down the column, both correct.
-//
-// IN THE TITLE, and that placement is the one that survived three candidates:
-//
-//   - NOT in the column headers. TOKENS is squeezed to six runes on a narrow terminal — see
-//     sessionTokensCellMin — so a header carrying a word would be CLIPPED, which is the one thing
-//     this file refuses in both directions ("DROP WHOLE COLUMNS, NEVER CLIP A CELL"). Six runes
-//     is the budget, and "TOKENS" already spends it.
-//   - NOT in the hint line. fitHintLine drops whole hints from the FRONT, so anything added there
-//     is paid for by the hints ahead of it — and helpView's own comment records that [u] usage and
-//     [$] spend were deliberately placed to survive an 80-column cut. A note that costs the two
-//     keys which reach cost, in order to explain a cost column, is a bad trade at any width.
-//   - THE TITLE, where paneUsage already states its own scope ("abctl · … · usage · all"). One
-//     statement for the whole table is also the right GRAIN: every numeric column here is
-//     lifetime, EVENTS included, so a per-column marker would repeat one fact four times.
-//
-// "lifetime" rather than "all time", because the figures do not span all time: the store resets
-// when the proxy restarts, as sessionsColumns says. A session's lifetime is exactly what they sum.
-//
-// DROPPED WHEN IT DOES NOT FIT, by the caller. The title is not width-fitted, so an unconditional
-// suffix would wrap on a narrow terminal — and a wrapped title costs a row of the table, which is
-// the failure the spend strip's whole fitting ladder exists to avoid.
-const sessionsScopeNote = " · lifetime totals"
-
 // sessionsColumnWidth is the fitted width of one named column, or 0 when it is not present.
 //
 // By headerTitle rather than by the raw Title, so it finds a column whose heading carries

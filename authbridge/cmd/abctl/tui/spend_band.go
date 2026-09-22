@@ -117,28 +117,40 @@ func renderSpendBand(s spendSummary, width int) []string {
 	// put-back pass cannot repair that: it can only un-drop cells, never surrender the wide one
 	// that is inflating the shared width, so it never reaches the three-cell set.
 	//
-	// TIES GO TO THE MORE VALUED SET, which is what keeps bandDropOrder meaningful: among sets of
-	// the same size, the weight below prefers the one keeping cells later in that order — the
-	// month over the week, the hour over nothing — so "more cells" never quietly overrides "the
-	// right cells".
+	// CHOSEN BY VALUE, NOT BY COUNT, which is the whole point of having a drop order. The weight
+	// below gives each surviving cell a bit, most valued highest, so maximising it prefers the set
+	// that keeps MONTH over any set that does not — and only then more cells. A weight determines
+	// its set uniquely, so nothing else is needed to break a tie.
+	//
+	// RANKING BY COUNT FIRST INVERTED THE ORDER, and every cell sharing one width is why: three
+	// narrow cells are cheaper than two that include a wide one. Measured, with a month just over
+	// $999.99 ($4.04 / $18.80 / $216.44 / $1234.56):
+	//
+	//	width 24 -> TODAY  MONTH
+	//	width 25 -> LAST 1H  TODAY  7 DAYS      the month gone, the week back
+	//	width 28 -> LAST 1H  TODAY  MONTH       the month returns
+	//
+	// So at 25 to 27 the band hid the budget figure and showed the week instead — the exact
+	// inversion bandDropOrder exists to prevent, and month-to-date is structurally the largest
+	// figure here, so it is the likely case rather than the exotic one. Enumeration had made the
+	// COUNT monotone in width and left the SET free to change shape.
 	var dropped [numSpendSpans]bool
-	bestCount, bestWeight := -1, -1
+	bestWeight := -1
 	for mask := 0; mask < 1<<int(numSpendSpans); mask++ {
 		var try [numSpendSpans]bool
-		count, weight := 0, 0
+		weight := 0
 		for i := 0; i < int(numSpendSpans); i++ {
 			if mask&(1<<i) != 0 {
 				try[bandDropOrder[i]] = true
 				continue
 			}
-			count++
 			weight |= 1 << i
 		}
 		if bandWidth(cells, try) > width {
 			continue
 		}
-		if count > bestCount || (count == bestCount && weight > bestWeight) {
-			bestCount, bestWeight, dropped = count, weight, try
+		if weight > bestWeight {
+			bestWeight, dropped = weight, try
 		}
 	}
 

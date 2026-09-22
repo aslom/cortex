@@ -38,6 +38,24 @@ func TestSpendLabels_NeutraliseAServerSuppliedControlCharacter(t *testing.T) {
 		{"DEL", "1h" + string(rune(0x7f))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// THE AXIS TOO, which is the same exposure through the other field: snap.Group reaches
+			// drawerHeaders, which renders "BY " + ToUpper(axis) and clips it — and clipping
+			// shortens a row without neutralising anything in it. Measured before the fix: a Group
+			// of "model\x1b[2J\x1b[H" came out as "   BY MODEL\x1b[2J\x1b[H" with the
+			// clear-screen intact, and a newline returned two rows against a one-row reservation.
+			ax := &model{width: 120}
+			ax.spend.drawer.snap = drawerSnap()
+			ax.spend.drawer.snap.Group = usage.Group("model" + tc.window)
+			axAxis, axWindow := ax.drawerLabels()
+			assertNoControlChars(t, "drawer axis", string(axAxis))
+			for _, line := range renderSpendDrawer(ax.spend.drawer.snap, nil, axAxis, axWindow, 120) {
+				assertNoControlChars(t, "drawer line (axis)", line)
+			}
+			if n := len(renderSpendDrawer(ax.spend.drawer.snap, nil, axAxis, axWindow, 120)); n != spendDrawerLines {
+				t.Errorf("a tampered axis returned %d rows, want %d — the reservation is the height",
+					n, spendDrawerLines)
+			}
+
 			// The drawer's caption prints the window the SERVER said it served.
 			m := &model{width: 120}
 			m.spend.drawer.snap = drawerSnap()

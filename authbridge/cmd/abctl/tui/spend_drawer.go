@@ -380,8 +380,17 @@ func (m *model) drawerLabels() (usage.Group, string) {
 	if snap == nil {
 		return axis, window
 	}
-	if snap.Group != "" {
-		axis = snap.Group
+	// SANITISED FOR THE SAME REASON snap.Window IS, twelve lines down, and it was not: Group is
+	// server-supplied JSON that reaches the terminal verbatim through drawerHeaders, which renders
+	// "BY " + ToUpper(axis) and clips it to width — and clipRow shortens a row without neutralising
+	// anything in it. Measured: a Group of "model\x1b[2J\x1b[H" produced "   BY MODEL\x1b[2J\x1b[H"
+	// with the clear-screen and cursor-home intact, and a newline in it returned two rows where the
+	// drawer's reservation allows one.
+	//
+	// Pre-existing rather than introduced here, but this function is rewritten on this branch and
+	// the sanitize suite beside it made the field look covered, which is worse than an obvious gap.
+	if l := sanitizeLabel(string(snap.Group)); l != "" {
+		axis = usage.Group(l)
 	}
 	// FROM THE DRAWER'S OWN SNAPSHOT, not from spendSummary. It used to read
 	// spendSummary().WindowLabel, which was right while the drawer and the band shared one

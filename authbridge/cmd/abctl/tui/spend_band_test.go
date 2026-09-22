@@ -322,47 +322,56 @@ func TestRenderSpendBand_UnpricedZeroAndSubCentAreThreeDifferentCells(t *testing
 // these spans exist. Dropping left-to-right would give up the live hour. So the middle yields:
 // the week first, then the hour.
 func TestRenderSpendBand_TodayAndMonthSurviveLongest(t *testing.T) {
-	// Narrow until only two cells remain, then check which two.
-	var twoLeft []string
-	for w := 60; w >= 1; w-- {
-		lines := renderSpendBand(bandSummary(), w)
-		n := 0
-		for span := spendSpan(0); span < numSpendSpans; span++ {
-			if strings.Contains(lines[0], spendSpanDefs[span].label) {
-				n++
-			}
-		}
-		if n == 2 {
-			twoLeft = lines
-			break
-		}
-	}
-	if twoLeft == nil {
-		t.Fatal("no width leaves exactly two cells, so the drop order asserted nothing")
-	}
-	for _, want := range []spendSpan{spanToday, spanMonth} {
-		if !strings.Contains(twoLeft[0], spendSpanDefs[want].label) {
-			t.Errorf("the last two cells are %q, and %q is not among them", twoLeft[0],
-				spendSpanDefs[want].label)
-		}
-	}
-	for _, gone := range []spendSpan{spanHour, span7d} {
-		if strings.Contains(twoLeft[0], spendSpanDefs[gone].label) {
-			t.Errorf("the last two cells are %q, which still includes %q", twoLeft[0],
-				spendSpanDefs[gone].label)
-		}
-	}
-	// The week goes FIRST of all, which is the other half of the order.
-	for w := 200; w >= 1; w-- {
-		lines := renderSpendBand(bandSummary(), w)
-		if !strings.Contains(lines[0], spendSpanDefs[span7d].label) {
-			for _, still := range []spendSpan{spanHour, spanToday, spanMonth} {
-				if !strings.Contains(lines[0], spendSpanDefs[still].label) {
-					t.Errorf("at width %d, %q went before or with the week: %q", w,
-						spendSpanDefs[still].label, lines[0])
+	// EVERY RUNG OF THE LADDER, not just the bottom one. This used to narrow from 60, stop at the
+	// first width leaving exactly two cells, and assert on those — so the whole of counts four and
+	// three went unexamined, and the inversion that put the week on screen while hiding the month
+	// lived entirely at three. A test that looks at one rung of a four-rung ladder reports the
+	// ladder as sound.
+	//
+	// The order is the one bandDropOrder states: the week goes first, then the hour, leaving TODAY
+	// and MONTH, and MONTH alone last of all.
+	for _, rung := range []struct {
+		cells int
+		want  []spendSpan
+	}{
+		{4, []spendSpan{spanHour, spanToday, span7d, spanMonth}},
+		{3, []spendSpan{spanHour, spanToday, spanMonth}},
+		{2, []spendSpan{spanToday, spanMonth}},
+		{1, []spendSpan{spanMonth}},
+	} {
+		// The WIDEST width that yields this many cells, so each rung is judged where it is the
+		// band's own choice rather than an artefact of the next rung's boundary.
+		found := ""
+		for w := 60; w >= 1; w-- {
+			line := renderSpendBand(bandSummary(), w)[0]
+			n := 0
+			for span := spendSpan(0); span < numSpendSpans; span++ {
+				if strings.Contains(line, spendSpanDefs[span].label) {
+					n++
 				}
 			}
-			break
+			if n == rung.cells {
+				found = line
+				break
+			}
+		}
+		if found == "" {
+			t.Errorf("no width leaves exactly %d cells, so that rung asserted nothing", rung.cells)
+			continue
+		}
+		keep := map[spendSpan]bool{}
+		for _, span := range rung.want {
+			keep[span] = true
+		}
+		for span := spendSpan(0); span < numSpendSpans; span++ {
+			label := spendSpanDefs[span].label
+			if got := strings.Contains(found, label); got != keep[span] {
+				verb := "is missing"
+				if got {
+					verb = "still carries"
+				}
+				t.Errorf("at %d cells the band %s %q: %q", rung.cells, verb, label, found)
+			}
 		}
 	}
 }
@@ -807,27 +816,35 @@ func TestMoneyRounding_TheCellAndTheHeadlineAgree(t *testing.T) {
 	}
 }
 
-// THE SURVIVING SET NEVER SHRINKS AS THE TERMINAL GROWS, which greedy dropping did not guarantee.
+// THE SET ONLY EVER GAINS VALUE AS THE TERMINAL GROWS, and MONTH is never hidden while it fits.
 //
-// Every cell shares one width, so one wide cell inflates the budget for all of them — and a loop
-// that stops the moment the set fits keeps whichever wide cell it has not reached yet. Measured
-// before the fix, with a five-figure TODAY carrying all three markers:
+// Those are the two guarantees, and "no cell ever disappears" is NOT one of them — the three pull
+// against each other and this is where the line is drawn. Every surviving cell shares one width, so
+// a wide high-priority cell can cost two narrow low-priority ones:
 //
-//	width 25 -> LAST 1H  7 DAYS  MONTH    three cells
-//	width 26 -> TODAY  MONTH              two, and still two at width 39
+//	with a month just over $999.99, ranking by CELL COUNT put the week on screen and hid the
+//	month at widths 25-27 — the inversion bandDropOrder exists to prevent, on the figure the
+//	whole band is read for
 //
-// Widening the terminal by one column lost a reading. A put-back pass cannot repair it, because it
-// can only un-drop cells and never surrender the wide one doing the inflating.
+//	ranking by VALUE fixes that, and costs one width on a fixture with a five-figure damaged
+//	TODAY where three cells become two as the terminal widens by one column
 //
-// ASSERTED AS MONOTONICITY OVER EVERY WIDTH rather than at the two that happened to show it: the
-// pair above is one instance of a property, and a fixture chosen to reproduce a known case cannot
-// tell you the case is gone everywhere.
-func TestRenderSpendBand_WideningNeverLosesACell(t *testing.T) {
+// The second is the lesser harm: a cell traded for a more valued one still answers the question the
+// band is for, where hiding month-to-date does not. Both directions were measured across four
+// fixtures before choosing — the earlier version of this test asserted the count instead, which is
+// the guarantee that had to go.
+//
+// VALUE IS RANKED BY bandDropOrder, most valued highest, so "the set gained value" means it kept
+// everything more important than whatever it gave up.
+func TestRenderSpendBand_WideningOnlyEverGainsValue(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		build func() spendSummary
 	}{
 		{"the healthy fixture", bandSummary},
+		{"a month just over $999.99, wider than every other cell", func() spendSummary {
+			return withSpan(bandSummary(), spanMonth, func(r *spanReading) { r.USD = 1234.56 })
+		}},
 		{"a five-figure TODAY wearing all three markers", func() spendSummary {
 			return withSpan(bandSummary(), spanToday, func(r *spanReading) {
 				r.USD = 17265.97
@@ -835,29 +852,43 @@ func TestRenderSpendBand_WideningNeverLosesACell(t *testing.T) {
 				r.Degraded = &usage.Degraded{UnreadableDays: 1}
 			})
 		}},
-		{"a wide MONTH, the last cell to be dropped", func() spendSummary {
-			return withSpan(bandSummary(), spanMonth, func(r *spanReading) {
-				r.USD = 998877.66
-				r.Clamped = true
+		{"a stale TODAY, whose label carries an age", func() spendSummary {
+			return withSpan(bandSummary(), spanToday, func(r *spanReading) {
+				r.Age, r.Stale = 12*time.Minute, true
 			})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := tc.build()
-			count := func(w int) int {
+
+			// The month's own cell width: below it the month cannot be shown at all, and showing
+			// something narrower beats showing nothing.
+			var cells [numSpendSpans]bandCell
+			for span := spendSpan(0); span < numSpendSpans; span++ {
+				cells[span] = bandSpanCell(spendSpanDefs[span].label, s.Spans[span])
+			}
+			monthAlone := cells[spanMonth].width()
+
+			value := func(w int) int {
 				line := renderSpendBand(s, w)[0]
-				n := 0
-				for span := spendSpan(0); span < numSpendSpans; span++ {
-					if strings.Contains(line, spendSpanDefs[span].label) {
-						n++
+				v := 0
+				for i := 0; i < int(numSpendSpans); i++ {
+					if strings.Contains(line, spendSpanDefs[bandDropOrder[i]].label) {
+						v |= 1 << i
 					}
 				}
-				return n
+				return v
 			}
+
 			for w := 1; w < 200; w++ {
-				if got, next := count(w), count(w+1); next < got {
-					t.Errorf("width %d draws %d cells and width %d draws %d — widening the "+
-						"terminal lost a reading:\n%s\n%s", w, got, w+1, next,
+				line := renderSpendBand(s, w)[0]
+				if w >= monthAlone && !strings.Contains(line, spendSpanDefs[spanMonth].label) {
+					t.Errorf("width %d holds the month's own cell (%d columns) and the band hides "+
+						"it anyway: %q", w, monthAlone, line)
+				}
+				if got, next := value(w), value(w+1); next < got {
+					t.Errorf("width %d keeps a more valued set than width %d — widening gave up a "+
+						"reading for a less important one:\n%s\n%s", w, w+1,
 						strings.Join(renderSpendBand(s, w), "\n"),
 						strings.Join(renderSpendBand(s, w+1), "\n"))
 				}
