@@ -177,7 +177,30 @@ jobs:
             echo "::endgroup::"
           done
 
+      # Gives the abctl leg a real systemd --user session for
+      # cmd_service_systemd_integration_test.go. The runner has no interactive login, so
+      # nothing has started one yet; enable-linger asks logind to start and keep one
+      # running. Either way a real problem here is loud, not silent: a hard failure (e.g.
+      # enable-linger itself failing) fails this step outright under bash -e, so Test
+      # never runs; a soft one (session unreachable after enable-linger) only warns here,
+      # and ABCTL_SYSTEMD_TESTS=required (below) is what turns THAT case into a failed
+      # test instead of a silent skip.
+      - name: Enable a systemd --user session (abctl leg only)
+        if: matrix.binary == 'abctl'
+        run: |
+          sudo loginctl enable-linger "$(whoami)"
+          rt="/run/user/$(id -u)"
+          for i in $(seq 1 30); do
+            [ -S "${rt}/bus" ] && break
+            sleep 1
+          done
+          echo "XDG_RUNTIME_DIR=${rt}" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="${rt}" systemctl --user show-environment || \
+            echo "::warning::systemd --user session not reachable after enable-linger; the real-systemd tests will report why"
+
       - name: Test
+        env:
+          ABCTL_SYSTEMD_TESTS: ${{ matrix.binary == 'abctl' && 'required' || '' }}
         run: go test -v -race -cover ./...
 
   proxy-init-iptables:
