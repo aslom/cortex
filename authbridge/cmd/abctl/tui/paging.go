@@ -240,6 +240,11 @@ func (m *model) applyOlderPage(msg olderPageLoadedMsg) {
 		st.droppedNewer = true
 	}
 	m.events[msg.id] = merged
+	// Older events land BEFORE the ones already folded, and the page cap above can drop
+	// newer ones off the end, so the running answer cannot simply be extended. It is
+	// re-folded over the merged slice rather than dropped: these pages are projected, and
+	// so is anything the cap just discarded — see rebaseSessionContext.
+	m.rebaseSessionContext(msg.id, merged)
 	st.fetched++
 
 	// The count is decremented rather than recomputed from the server's total, because

@@ -23,8 +23,8 @@ type bandCell struct{ label, value string }
 
 // width is what the pair needs: the wider of its halves, since they share a column.
 //
-// lipgloss.Width, never len() and never a rune count — the rule this package states at
-// renderSpendStrip and the one footer.go records the cost of breaking. It is not merely style
+// lipgloss.Width, never len() and never a rune count — the rule fitStripFigures states for
+// this package and the one footer.go records the cost of breaking. It is not merely style
 // here: the values carry markers and an em dash, and the PADDING below measures with the same
 // function, so measurement and padding cannot disagree about a cell.
 //

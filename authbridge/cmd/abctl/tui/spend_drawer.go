@@ -720,7 +720,7 @@ func drawerFigures(r drawerRow) []stripFigure {
 	// longer marks its money (see renderTierRows for why), so a bare "$0.18" beside a cost of
 	// "$1.06" would read as a second spend figure with no way to tell which is which. The word is
 	// this figure's identity rather than an explanation of it, so it is not the part that yields;
-	// savedFigure's own doc makes the same argument for the strip.
+	// the strip's own saved figure made the same argument before it was replaced.
 	if r.counts.AvoidedMicros > 0 {
 		figs = append(figs, stripFigure{
 			full:    "saved " + formatUSDTotalMicros(r.counts.AvoidedMicros),

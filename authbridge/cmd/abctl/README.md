@@ -230,18 +230,52 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   event count, tokens, cost, saved, context. Numerics are right-aligned so the
   digits line up between rows.
 
-  `CONTEXT(1M)` is a gauge, not a figure: how full the session's context was on
-  its **latest** request, against a fixed one-million-token window. The
+  `CONTEXT(1M)` is a gauge, not a figure: how full the **conversation's**
+  context was on its latest turn, against a fixed one-million-token window. The
   brackets are the scale, drawn on every row, so a nearly-empty session reads
   as empty-out-of-something rather than as a blank cell — and an em dash, which
   means *no context known*, stays distinguishable from the sliver a barely-used
   session gets.
 
-  Two things worth knowing about it. The denominator is fixed at 1M, the
-  largest window on any path the proxy sees, so a model with a smaller window
-  reads lower than it really is. And the figure comes from abctl's own event
-  cache: a session idle since before abctl attached shows the dash until you
-  drill into it, because the session summary carries no per-request field.
+  **A session is not one conversation.** Claude Code interleaves one-shot
+  completions — title generation, quota and summary calls — with your
+  conversation, under the same session id. Measured across 115 responses in
+  three live sessions, those carry *no tool manifest* and 2–3 messages, while
+  every conversation turn carried 27–31 tools and 63–1572 messages, with no
+  overlap at all. So the gauge considers only requests that carried tools, and
+  among those the one with the most messages: a one-shot can be large — one
+  measured at 295k — and would otherwise hijack the column, while a subagent's
+  own conversation can never out-message a long one.
+
+  There is deliberately no recency window. Your conversation goes silent while
+  a subagent runs, and that silence is structural, so any last-N-requests
+  window can fill with the subagent's traffic and hand the gauge to it.
+
+  Three things worth knowing. The denominator is fixed at 1M, the largest
+  window on any path the proxy sees, so a model with a smaller window reads
+  lower than it really is.
+
+  The figure comes from abctl's own event cache, filled by the live stream or
+  by drilling into a session. The timeline fetch asks for `view=summary`, and
+  that projection drops the two fields this rule reads — the tool manifest and
+  the message count — so it now records their **lengths** before dropping them
+  (`messageCount` / `toolCount`) and the gauge reads either shape. Without that
+  a delivered row could not be read at all, and an idle session showed a dash
+  however long you looked at it.
+
+  Against a proxy older than those fields, an idle row still shows the dash
+  until traffic arrives or you open one of its events — the one request that
+  returns an event in full. Once a figure is established it is kept, so a
+  projection that says nothing cannot erase it.
+
+  And after a compaction the gauge can stay on the pre-compaction context for a
+  while, because the older, longer request still holds the most messages; a
+  stale figure was preferred to one that flips to a one-shot's. Since the figure
+  outlives the events it was read from, the way to clear one you do not believe
+  is `Esc` back to the Pods pane and re-enter: a different pod is the one thing
+  that discards it, and re-attaching starts the column from whatever streams
+  next. That reset only exists in picker mode — under `--endpoint` there is no
+  Pods pane to back out to, so restarting abctl is the equivalent.
 
   It replaced an `ACTIVE` column whose `●` nobody acted on — `UPDATED` already
   answers "is this live", in seconds rather than as a dot. The `cached` marker
@@ -249,9 +283,9 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   still holds events for, moved into `UPDATED`.
 
   **Every figure in this table is a per-session total**, summed over that
-  session's whole history rather than over a clock window — which is why the
-  TOKENS column does not sum to the token count in the band above it: that one
-  covers the rolling window its `LAST 1H` label names. Both are right; neither
+  session's whole history rather than over a clock window — which is why its
+  TOKENS column does not match the token counts on the `$` breakdown or the
+  Usage pane, each of which covers the window it names. Both are right; neither
   is a check on the other.
 
   The table is also **not** a longer span than the band, which is the reading
@@ -261,24 +295,31 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   the durable cost ledger and survives restarts. `[?]` states both facts; the
   title deliberately does not, since no single span is true of every row.
 
+  Rendered at 100 columns, which is the narrowest terminal that carries every
+  column at once:
+
   ```
   abctl · http://localhost:9094 · [Sessions] Pipeline
   LAST 1H    TODAY   7 DAYS    MONTH
     $4.04   $18.80  $216.44  $703.18
-  ──────────────────────────────────────────────────────────────────────────────────────
-   SESSION        UPDATED           EVENTS      TOKENS        COST      SAVED~  CONTEXT(1M)
-   ctx-abc-1234…  3s ago                42       48.2k       $0.12      <$0.01  ▕███████▌ ▏
-   ctx-def-5678…  18m ago               15        1.2k      <$0.01           —  ▕▎        ▏
-   ctx-ghi-9012…  cached                 7        2.9k           —           —  ▕████▍    ▏
-   default        1h ago                 8           —           —           —            —
+  ────────────────────────────────────────────────────────────────────────────────────────────────────
+   SESSION       TITLE        UPDATED         EVENTS      TOKENS        COST      SAVED~  CONTEXT(1M)
+   ctx-abc-123…  …pend-spans  3s ago              42       48.2k       $0.12       $0.01  ▕███████▎ ▏
+   ctx-def-567…  weather-ag…  18m ago             15        1.2k      <$0.01           —  ▕▏        ▏
+   ctx-ghi-901…               42m ago              7        2.9k           —           —  ▕███▊     ▏
+   default                    1h ago               8           —           —           —            —
 
-  ● connected   2.1 events/sec
+  ● connected  2.1 events/sec   feedback: https://github.com/rossoctl/cortex/issues/new/choose
   [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
   ```
 
   The two money columns are dropped entirely on a terminal too narrow to show a
-  sub-cent charge honestly — below 73 columns — rather than rounded to `$0.00`
-  or blanked. A charge under a cent reads `<$0.01`.
+  sub-cent charge honestly — below 97 columns — rather than rounded to `$0.00`
+  or blanked. A charge under a cent reads `<$0.01`. That floor was 73 until the
+  `TITLE` column arrived and moved it to 97: `TITLE` is fitted first and the money
+  columns yield to it, so from 73 to 96 the table carries `TITLE` and no money, and
+  at 97 the whole set holds every minimum at once. `sessionsShowMoney` states the
+  arithmetic.
 
   `SAVED~` carries the tilde in its **heading** rather than on every row: a
   saving is always an estimate, so the caveat belongs to the column rather than

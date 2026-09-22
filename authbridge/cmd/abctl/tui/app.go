@@ -324,11 +324,46 @@ type model struct {
 
 	// Data caches.
 	sessions []session.SessionSummary
-	events   map[string][]pipeline.SessionEvent // sessionID → ring buffer
-	eventCt  uint64                             // monotonic counter
-	lastTick time.Time
-	lastCt   uint64
-	rate     float64
+	// events was labelled a ring buffer and has never been one. Nothing trims an entry in
+	// place; every write is one of six, and the CONTEXT(1M) gauge folds forward off this map,
+	// so each one owes contextRun an action. The full inventory, because the gauge reads an
+	// unchanged LENGTH as "nothing new to fold" and two of these change content without
+	// changing length:
+	//
+	//	app.go   streamed append      grows           fold the delta (the design case)
+	//	app.go   snapshot load        replaces        rebaseSessionContext — PROJECTED events
+	//	paging   older-page merge     replaces        rebaseSessionContext — projected, and
+	//	                                             the page cap can drop newer events too
+	//	detail   replaceHeldEvent     same length!    rebaseSessionContext — swaps in the one
+	//	                                             UNPROJECTED copy abctl ever gets
+	//	app.go   backToPodsPane       whole map       m.contextRun = nil: a different pod is a
+	//	                                             different workload behind the same id
+	//	keys.go  picker release       deletes one     nothing: the figure outlives the events,
+	//	                                             which were released to save memory
+	//
+	// A seventh path that trimmed the front of an entry would be invisible to the length check
+	// if it also appended, so it would have to rebase.
+	events map[string][]pipeline.SessionEvent // sessionID → every event held for it
+	// contextRun is the CONTEXT(1M) gauge's answer per session, folded forward as events
+	// arrive rather than recomputed from the whole slice — see sessionContextFor. The row
+	// loop asks for every session on every rebuild, and a rebuild happens on every streamed
+	// event, so a full scan there is O(events) per session per event. It is a remembered
+	// maximum rather than a cache of the slice: the events can stop carrying the evidence
+	// (view=summary strips it) while the answer stays true.
+	contextRun map[string]contextRun
+	// sessionsData is what an agent knows about its own sessions that the proxy does
+	// not — a title, mostly. Read once at startup from ~/.cortex/session-metadata.json,
+	// which `abctl experimental read-claude-sessions` writes; empty when that has never
+	// run, which renders as an empty TITLE column rather than as a failure.
+	//
+	// Keyed by the same session id the proxy buckets on, so a lookup is direct. Nil-safe
+	// by construction: a read on a nil map yields the zero SessionMetadata, so an
+	// unharvested session, an unknown id and an absent file all render the same.
+	sessionsData map[string]SessionMetadata
+	eventCt      uint64 // monotonic counter
+	lastTick     time.Time
+	lastCt       uint64
+	rate         float64
 
 	// Connection status.
 	connState connStateInfo
@@ -609,6 +644,10 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 	// re-entering the pane must not reset a choice made during the session.
 	usageMetric, usageWindowIdx, usageGroup := Settings.usageSelection()
 
+	// Read once here, not per refresh: the file changes only when someone runs the
+	// harvester, and the sessions list refreshes every two seconds.
+	sessionMeta := loadSessionMetadataForModel()
+
 	return &model{
 		endpoint:     c.Endpoint(),
 		client:       c,
@@ -621,6 +660,7 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 		sortDesc:     sortDesc,
 		usage:        usageState{metric: usageMetric, windowIdx: usageWindowIdx, group: usageGroup},
 		filter:       Settings.Filter,
+		sessionsData: sessionMeta,
 		sessionsTbl:  newSessionsTable(),
 		eventsTbl:    newEventsTable(),
 		pipelineTbl:  newPipelineTable(),
@@ -685,6 +725,12 @@ func (m *model) backToPodsPane() {
 	// In lockstep with m.events: a Seq recorded as fetched must not survive the rows
 	// it described, or the next session to reuse that Seq would be assumed complete.
 	m.fullFetched = nil
+	// In lockstep with m.events, and the one case where the gauge's remembered figure is
+	// genuinely void rather than merely unsupported by what is held: a different pod is a
+	// different workload, so the same session id now means someone else's conversation. Left
+	// behind, an id present on both pods with a matching event count takes the length-check
+	// hit and reports the previous pod's context. sessionContextFor reallocates lazily.
+	m.contextRun = nil
 	// In lockstep with m.events. A count describing a session whose events are gone is
 	// the bug that made this map per-session in the first place, just with a narrower
 	// window: re-entering the events pane on a matching id before its snapshot lands.
@@ -1028,6 +1074,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.serverProjects = msg.projected
 		// Only update if we're still focused on this session.
 		m.events[msg.id] = msg.events
+		// A wholesale replacement the length check cannot see, so the gauge is re-folded
+		// over what just landed. NOT dropped: msg.events is projected (view=summary
+		// strips the manifest and the message count), so dropping the figure here blanked
+		// the column the moment an operator opened a session — see rebaseSessionContext.
+		m.rebaseSessionContext(msg.id, msg.events)
 		if m.olderNotFetched == nil {
 			m.olderNotFetched = map[string]int{}
 		}
@@ -1629,13 +1680,17 @@ func (m *model) paneView() string {
 		title = fmt.Sprintf("abctl · %s · %s", m.endpoint, viewTabs(paneSessions))
 		body = m.sessionsTbl.View()
 	case paneEvents:
-		title = fmt.Sprintf("abctl · %s", trunc(m.selectedSess, 36))
+		// Fitted to the terminal rather than to a fixed 36: a bare UUID is 36 characters, so
+		// the old constant truncated a titled session ALWAYS and an untitled one never —
+		// and it clipped "0e61b82d-8578-4d16-a18e…" on a 200-column terminal with room to
+		// spare. sessionHeader measures the room actually available.
+		title = m.sessionHeader(m.selectedSess, "")
 		body = m.eventsTbl.View()
 		if banner := identityBanner(m.events[m.selectedSess], m.width); banner != "" {
 			body = banner + "\n" + body
 		}
 	case paneDetail:
-		title = fmt.Sprintf("abctl · %s · event", trunc(m.selectedSess, 24))
+		title = m.sessionHeader(m.selectedSess, "event")
 		body = m.detailVp.View()
 	case panePipeline:
 		title = fmt.Sprintf("abctl · %s · %s", m.endpoint, viewTabs(panePipeline))
@@ -1737,6 +1792,42 @@ func (m *model) paneView() string {
 	rows = append(rows, styleMuted.Render(renderDivider(m.width)))
 	rows = append(rows, body, m.footerView())
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+}
+
+// sessionHeader renders a session-scoped title bar: "abctl · <label>" plus an optional
+// suffix ("event"), clipped only if the terminal genuinely cannot hold it.
+//
+// Clipping against m.width rather than a per-pane constant. The constants it replaced were 36
+// and 24 — 36 being exactly the length of a UUID, so the events header truncated every titled
+// session and no untitled one, while the detail header clipped the id itself at 24 on a
+// terminal of any size. Neither number was a fact about the screen.
+//
+// The label is clipped from the LEFT, so what survives a narrow terminal is the id and the end
+// of the title, not the "abctl · " that is on every screen anyway. Same reasoning as
+// sessionTitleCell: the distinguishing end of both a path and a UUID-suffixed label is the
+// right one.
+func (m *model) sessionHeader(id, suffix string) string {
+	label := m.sessionLabel(id)
+	head := "abctl · "
+	tail := ""
+	if suffix != "" {
+		tail = " · " + suffix
+	}
+	// A floor of 12, so a very narrow terminal shows a stub of the label rather than dropping
+	// it: the header is the only thing on screen naming which session these events belong to.
+	//
+	// The floor can exceed what is left, and deliberately does: a 12-column stub on a
+	// 20-column terminal is worth one wrapped line, where a label cut to 3 columns is worth
+	// nothing. What is NOT deliberate is skipping the truncation entirely — the guard was
+	// `room > 0`, and "abctl · " is 8 columns, so a width of 8 or less emitted the label at
+	// full length rather than as a stub. Not reachable on a real terminal; the point is that
+	// the narrow case now goes through one rule instead of two.
+	room := m.width - lipgloss.Width(head) - lipgloss.Width(tail)
+	if room < 12 {
+		room = 12
+	}
+	label = truncLeft(label, room)
+	return head + label + tail
 }
 
 // viewTabs renders the top-level tab strip "[Sessions] Pipeline" with the

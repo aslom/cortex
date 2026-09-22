@@ -639,7 +639,7 @@ func TestBandFixtureProbes_DoNotCrossMatch(t *testing.T) {
 	}
 }
 
-// THE BAND MEASURES AND PADS IN DISPLAY COLUMNS, not in runes — the rule renderSpendStrip states
+// THE BAND MEASURES AND PADS IN DISPLAY COLUMNS, not in runes — the rule fitStripFigures states
 // for this package and footer.go records the cost of breaking.
 //
 // NO PRODUCTION PATH REACHES THESE VALUES TODAY, and that is why the cells are built by hand: a

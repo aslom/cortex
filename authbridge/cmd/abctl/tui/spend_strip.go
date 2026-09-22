@@ -206,18 +206,13 @@ const saturatedNote = "clamped, figures are floors"
 // formatUSDTotal true. This function used to format as well as mark, so every surface reaching
 // it got one precision whether or not the rule said it should.
 //
-// WHAT IS LEFT ON THIS FOUR-DECIMAL PATH IS ONLY THE DEAD STRIP. moneyAmount's single production
+// NOTHING ON THIS FOUR-DECIMAL PATH IS REACHABLE FROM A SCREEN. moneyAmount's single production
 // caller was moneyFigure, and the drawer — moneyFigure's only live caller — now goes through
-// moneyFigureTotal instead, because its per-model column is scanned and compared. So the callers
-// of moneyAmount today are renderSpendStrip's two figures and the tests, and renderSpendStrip has
-// no production caller: app.go mentions it only in comments, and renderSpendBand is the live
-// renderer. Said here because this comment is where a reviver of the strip would look for the
-// rule — reviving it means routing those two through moneyTotal, since they are span totals.
-// PRODUCTION-DEAD, AND SO IS THE CHAIN UNDER IT. An earlier version of this comment said moneyFigure
-// keeps it alive; moneyFigure has no non-test caller either, so both are reachable only from tests —
-// and damagedNote with them, because moneyFigureTotal's one live call site (renderTierRows) passes
-// nil for degraded, so the branch that spells out a damaged read cannot be reached from production
-// at all.
+// moneyFigureTotal instead, because its per-model column is scanned and compared. The strip that
+// held the other two callers is gone, replaced by renderSpendBand, so moneyAmount and moneyFigure
+// are both reachable only from tests — and damagedNote with them, because moneyFigureTotal's one
+// live call site (renderTierRows) passes nil for degraded, so the branch that spells out a damaged
+// read cannot be reached from production at all.
 //
 // TESTS COUNT AS USES, which is why `golangci-lint -E unused` says nothing and the suite reports
 // coverage over code no screen can render. That is the write-only-surface defect this branch exists
@@ -303,9 +298,10 @@ func markMoneyTotal(usd float64, unpriced, priceable, incomplete int64,
 // damaged read is ledger-only. See figureIsShort and damagedMarker.
 // THE PRECISION IS THE CALLER'S here too, split the same way moneyAmount and moneyTotal are:
 // moneyFigure formats four decimals and moneyFigureTotal formats cents, over one shared body.
-// The two live side by side because this function's callers are on opposite sides of the
-// precision rule — the drawer's per-model rows read in cents, while renderSpendStrip's two
-// callers are four-decimal (and dead; see moneyAmount's doc).
+// The two live side by side because they sit on opposite sides of the precision rule — the
+// drawer's per-model rows read in cents through moneyFigureTotal, and the four-decimal half is
+// kept for the per-request side of main's rule rather than for a live caller of its own (see
+// moneyAmount's doc).
 func moneyFigure(usd float64, label string, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) stripFigure {
 	return moneyFigureFrom(moneyAmount(usd, unpriced, priceable, incomplete, degraded, saturated),
@@ -332,9 +328,10 @@ func moneyFigureFrom(amount, label string, unpriced, priceable, incomplete int64
 	// AN EMPTY LABEL ADDS NO SEPARATOR. Unconditional concatenation left a trailing space on
 	// every unlabelled figure, which the joiner then compounded into a four-space gap — visible
 	// in the drawer, whose rows have always passed "" here ("claude-opus-5   $35.5797    234
-	// req"), and one column of a width budget this file measures to the cell. Now that the window
-	// reading passes "" too — its span is on the group, see labelSpan — the stray column would be
-	// on the strip's own money figure.
+	// req"), and one column of a width budget this file measures to the cell. Every remaining
+	// caller passes "" — the drawer's rows carry their span on the group heading, and the band
+	// labels its cells itself — so the guard is the only thing standing between those callers and
+	// a stray column.
 	//
 	// THE PARTIAL MARKER IS NOT APPLIED HERE. It was, on this change's own base; moneyAmount
 	// owns all three markers now, so re-applying it rendered the figure twice-marked ("$1.12++").

@@ -1254,7 +1254,7 @@ func TestCacheHitPct_ReportedKindsWithZeroCountersIsNotNaN(t *testing.T) {
 // The DATA half of "a failed window poll must not blank the day figure".
 //
 // spendSummary is where the today figure is carried through the failure, and a renderer test
-// cannot see it: renderSpendStrip takes a hand-built spendSummary, so a summary that dropped
+// could not see it: the strip renderer took a hand-built spendSummary, so a summary that dropped
 // HasToday on failure still renders correctly when a test hands it one that did not. Verified by
 // mutation — restoring `return spendSummary{Failed: true}` leaves the renderer test green.
 //

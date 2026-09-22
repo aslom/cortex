@@ -127,14 +127,18 @@ func TestSessionsHeaders_CarryNoANSIUnderAForcedColourProfile(t *testing.T) {
 			// contextColumnTitle is declared at exactly its eleven columns so the heading "cannot"
 			// be clipped — but a declared width is not a fitted one, and fitTableColumns shrinks
 			// the widest column against ONE global floor of four. Measured on this tree: clipped
-			// at 24 widths, 45-58 and 73-82, which includes 78 — the width this package's own
-			// README sample is rendered at.
+			// at 14 widths, 45-58.
 			//
-			// Not fixed here because the column belongs to work in flight (#1078 added it, #1082
-			// is fixing its data source and its highlight), and a heading is one line of that PR's
-			// business rather than this one's. The fix is to abbreviate the title to something that
-			// fits a fitted column — "CTX(1M)" at seven survives every width the table claims to
-			// work at. Delete this exemption when that lands.
+			// THAT SET USED TO BE 24 WIDTHS — 45-58 and 73-82, including the 78 an earlier README
+			// sample was rendered at — and #1056's TITLE column changed the fit under it, which is
+			// the point: the clip is a property of the whole column set, so any column added
+			// anywhere moves it. #1082 has since landed and left the title at its eleven columns,
+			// so the exemption is still needed and no longer waits on anything.
+			//
+			// Still not fixed here, because the column is #1078's and a heading is one line of its
+			// business rather than this PR's. The fix is a title that fits a fitted column —
+			// "CTX(1M)" at seven survives every width the table claims to work at. Delete this
+			// exemption with that change.
 			if headerTitle(c) == contextColumnTitle {
 				continue
 			}

@@ -593,6 +593,13 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				for cached := range m.events {
 					if cached != id && live[cached] {
 						delete(m.events, cached)
+						// contextRun is deliberately NOT deleted, unlike the two
+						// below. This releases a still-listed session's events for
+						// memory — a storage decision, not news about the session —
+						// and the gauge's figure is one int. Dropping it would turn a
+						// live session's context into a dash; sessionContextFor
+						// re-folds whatever is left on top of the figure it kept.
+						//
 						// Same reason as the wholesale reset in backToPodsPane: the
 						// count belongs to the events it describes.
 						delete(m.olderNotFetched, cached)
@@ -1146,9 +1153,10 @@ func (m *model) layout() {
 	// definitions each time rather than to the live columns, so widening the terminal back up
 	// restores what a narrower one took away.
 	// The sessions table is NOT fitted here. Its header and its rows have to change together —
-	// the money columns come and go with the width — and setting columns with the old rows still
-	// loaded panics inside bubbles' SetColumns. rebuildSessionsTable owns both; see its doc. It
-	// is called below, after the heights are set.
+	// the money columns come and go with the width, and TITLE grows into a wide terminal's
+	// slack — and setting columns with the old rows still loaded panics inside bubbles'
+	// SetColumns. rebuildSessionsTable owns both; see its doc. It is called below, after the
+	// heights are set.
 	m.pipelineTbl.SetColumns(fitTableColumns(pipelineColumns(), m.width))
 	m.catalogTbl.SetColumns(fitTableColumns(catalogColumns(), m.width))
 
@@ -1158,7 +1166,12 @@ func (m *model) layout() {
 	setTableHeight(&m.sessionsTbl, bodyH)
 	m.bodyHeight = bodyH
 	// AFTER the height, so the cursor-visibility maths inside it uses the new window. This is
-	// what fits the sessions header to the new width, rows included.
+	// what fits the sessions header to the new width, rows included — which is also what
+	// re-truncates the TITLE cells, since rebuildSessionsTable computes the new TITLE width and
+	// passes it to sessionTitleCell. It does NOT read the live table — doing that was the
+	// stale-width bug, where a narrowing resize truncated against the previous width. An
+	// earlier revision added a second rebuild above for that, claiming nothing else
+	// reconciled them; this call already did, and only the height changes in between.
 	m.rebuildSessionsTable()
 	// Picker tables share the same body area as the session tables so the
 	// terminal real estate stays constant as the user navigates panes.
