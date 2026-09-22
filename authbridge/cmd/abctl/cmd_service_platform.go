@@ -129,9 +129,12 @@ func renderUnitFor(goos string, p servicePaths) string {
 	// every listener here is loopback, so ordering against the network would be a
 	// dependency that never arrives.
 	//
-	// TimeoutStopSec=20: exceeds the proxy's own 15s graceful-shutdown deadline
-	// (cmd/authbridge-proxy/main.go), matching the macOS supervisor's 20s wait for
-	// the same shutdown (supervise.go).
+	// TimeoutStopSec=20: narrows systemd's own default (90s) down toward the proxy's
+	// 15s shutdown deadline (cmd/authbridge-proxy/main.go), rather than adding headroom
+	// to nothing — matches the macOS supervisor's 20s wait for the same shutdown
+	// (supervise.go). 15s bounds the HTTP servers and pipelines specifically; a couple
+	// of unbounded flushes run after that deadline, which is what the 5s of slack over
+	// 15 is actually for.
 	return `[Unit]
 Description=Cortex local proxy (authbridge-proxy)
 Documentation=https://github.com/rossoctl/cortex
