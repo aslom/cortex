@@ -459,18 +459,6 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.cancel()
 		return tea.Quit
 
-	case "tab":
-		// Toggle between top-level peers only. Sub-panes (events, detail,
-		// plugin-detail) are addressed by their parent — Esc out first.
-		switch m.pane {
-		case paneSessions:
-			m.pane = panePipeline
-			m.rebuildPipelineTable()
-		case panePipeline:
-			m.pane = paneSessions
-		}
-		return nil
-
 	case "/":
 		m.filtering = true
 		// The filter input takes a body line, so the height budget changes with this
@@ -500,11 +488,12 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 
 	case "esc", "left", "h":
-		// Back-out: plugin-detail → pipeline (or catalog if we came from
-		// there); detail → events; events → sessions; catalog → previous.
-		// In picker mode, the top-level session tabs (paneSessions and
-		// panePipeline are siblings) back out further to the Pods picker,
-		// tearing down PF + SSE.
+		// Back-out: plugin-detail → pipeline (or catalog if we came from there);
+		// detail → events; events → sessions; pipeline, catalog and usage → the
+		// pane that opened them. Sessions is the only top-level pane now, and in
+		// picker mode it backs out further to the Pods picker, tearing down PF +
+		// SSE. It is the ONLY pane that does that — a key-opened surface returning
+		// to its caller must never cost the connection.
 		switch m.pane {
 		case panePluginDetail:
 			// Return to whichever pane invoked the detail (Pipeline or Catalog).
@@ -515,12 +504,22 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				m.pane = panePipeline
 			}
 		case paneCatalog:
-			// Return to whichever pane the user pressed P from.
+			// Return to whichever pane the user pressed `C` from.
+			//
+			// The fallback is SESSIONS, not the pipeline. It was the pipeline while the
+			// pipeline was a top-level pane; now that it is a key-opened surface, being
+			// dropped into it is being dropped somewhere the operator never asked to be,
+			// with a return pane of paneNone underneath. Sessions is the only pane that
+			// is always a defensible place to land.
+			//
+			// The branch is reachable, not just defensive: drilling catalog → plugin
+			// detail overwrites previousPane with paneCatalog and the detail's esc
+			// clears it, so the catalog backs out with no caller recorded.
 			if m.previousPane != paneNone {
 				m.pane = m.previousPane
 				m.previousPane = paneNone
 			} else {
-				m.pane = panePipeline
+				m.pane = paneSessions
 			}
 			// Returning INTO Usage has to restart its polling chain. The tick
 			// that was in flight when the catalog opened was dropped by the
@@ -543,11 +542,28 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 			// End the polling chain on the way out.
 			m.usage.tickGen++
+		case panePipeline:
+			// Back to the pane `P` was pressed on, from the pipeline's OWN field —
+			// model.previousPane is the catalog's and gets clobbered when the catalog
+			// is opened from here, exactly as it did for Usage.
+			//
+			// IT USED TO BE GROUPED WITH paneSessions BELOW, which meant esc here tore
+			// down the port-forward and the SSE stream and dropped the operator at the
+			// pods picker. That was defensible while `tab` made the pipeline a top-level
+			// peer with nowhere above it; now that it is opened by a key from somewhere,
+			// esc has a caller to return to, and "show me the config" must not cost a
+			// connection.
+			if m.pipelineReturnPane != paneNone {
+				m.pane = m.pipelineReturnPane
+				m.pipelineReturnPane = paneNone
+			} else {
+				m.pane = paneSessions
+			}
 		case paneDetail:
 			m.pane = paneEvents
 		case paneEvents:
 			m.pane = paneSessions
-		case paneSessions, panePipeline:
+		case paneSessions:
 			// Picker mode: back to Pods pane, tearing down the current
 			// port-forward + SSE stream. Bypass mode: no-op (parentCtx
 			// is nil; nowhere to go back to).
@@ -743,10 +759,65 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.pageActivePane(msg)
 
 	case "P":
+		// Open the pipeline. `P` REPLACED `tab` HERE, and took the letter off the
+		// plugin catalog (now `C`) to do it.
+		//
+		// `P` because the house rule is the first letter of the thing, and the only
+		// other spelling of it — lowercase `p` — pauses the stream, is printed in
+		// two footers, and has no replacement worth the trade: `space` and `d` are
+		// bubbles' page-down and half-page-down, and every free letter is a worse
+		// pause mnemonic than `p` is a pipeline one. The catalog's claim on `P` was
+		// the weaker of the two (it only fit by borrowing the "Plugin" in "plugin
+		// catalog") and `C` for Catalog is a better key than it gave up.
+		//
+		// The allowlist is the same three panes `u` opens Usage from, deliberately:
+		// two top-level surfaces reached from the same places is a rule an operator
+		// can hold, whereas two overlapping sets is a lookup. It also keeps the
+		// pipeline out of the nested-overlay cases (opened from Usage or from the
+		// catalog) where the pane to return to is ambiguous.
+		//
+		// The panes match; the CONDITIONS do not, and the difference is deliberate.
+		// `u` additionally requires a selected session on Events/Detail, because its
+		// charts are scoped to that session and there is nothing to chart without
+		// one. The pipeline is the proxy's plugin chain — the same on every session —
+		// so it needs no session and asks for none.
+		//
+		// DO NOT MOVE THIS UP BESIDE `u` ON THE STRENGTH OF THAT SYMMETRY. `u`, `$`,
+		// `c` and `?` sit ABOVE the modal blocks and each carries explicit
+		// `!m.filtering && !m.colPicker && m.editState.phase == editPhaseDone` guards
+		// to compensate. `P` and `C` carry none, and do not need to, because they sit
+		// BELOW all three: the column picker ends in `default: return nil`, the filter
+		// block returns unconditionally after feeding the input, and an in-flight edit
+		// returns via handleEditKey. The safety here is POSITIONAL. Hoisting either
+		// key above those blocks without adopting the guards would make `P` change
+		// panes under a modal popup and swallow a `P` someone was typing into the
+		// filter — silently, since nothing in the type system notices.
+		if m.client == nil {
+			return nil
+		}
+		switch m.pane {
+		case paneSessions, paneEvents, paneDetail:
+		default:
+			return nil
+		}
+		m.pipelineReturnPane = m.pane
+		m.pane = panePipeline
+		// The composition is fetched eagerly in Init, so this normally has rows to
+		// build from already; rebuild rather than refetch. A nil pipeline renders
+		// "(loading pipeline…)" and rebuildPipelineTable is a no-op on it.
+		m.rebuildPipelineTable()
+		return nil
+
+	case "C":
 		// Open the registered-plugin catalog. Available from any
 		// session-view pane; in --endpoint mode the picker fields
 		// don't matter — the catalog comes via the same /v1/* endpoint
 		// abctl is already pointed at.
+		//
+		// `C` for Catalog, moved off `P` when the pipeline took that letter. See
+		// the `P` case above for why this side of the swap is the cheap one — and
+		// note this key's own doc in globalKeys, which records that `P` was never
+		// advertised in any footer, so the muscle memory being broken is thin.
 		if m.client == nil {
 			return nil
 		}
@@ -984,10 +1055,23 @@ func (m *model) helpView() string {
 		// from the line those two describe — so the drawer existed only for a reader who went
 		// looking for it. Placed after [u] so fitHintLine, which drops from the front, gives up
 		// the navigation keys before either of the two that reach cost.
+		// [P] pipeline sits at the TAIL, not where [tab] pipeline used to sit third
+		// from the left. The tab strip in the title bar survived every width; a footer
+		// hint does not, and fitHintLine drops from the front — so the key that
+		// replaced the strip is placed behind the hints it is willing to outlive.
+		//
+		// MEASURED, because the intuition here is off by more than it looks: the
+		// un-drilled line is 98 columns, and [P] survives down to 34 columns at the
+		// tail versus 79 third from the left. So the two placements are equivalent at
+		// the classic 80-column floor — 79 still fits — and the tail only starts
+		// paying below that, in a tmux split or a half-screen terminal. It is bought
+		// cheaply (the hints it outlives are the two most guessable on the line) so it
+		// is worth having, but it is not the difference between visible and invisible
+		// at 80 that the first draft of this comment claimed.
 		if m.parentCtx != nil {
-			return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [esc] pods  [p] pause  [?] keys  [q] quit"
+			return "[↑↓] nav  [↵] drill  [u] usage  [$] spend  [/] filter  [esc] pods  [p] pause  [P] pipeline  [?] keys  [q] quit"
 		}
-		return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit"
+		return "[↑↓] nav  [↵] drill  [u] usage  [$] spend  [/] filter  [p] pause  [P] pipeline  [?] keys  [q] quit"
 	case paneEvents:
 		skipHint := "[s] hide passthru/skip"
 		if m.hideInactive {
@@ -1042,12 +1126,12 @@ func (m *model) helpView() string {
 	case paneDetail:
 		return "[↑↓] scroll  [y] yank  [u] usage  [esc] back  [?] keys  [q] quit"
 	case panePipeline:
-		var base string
-		if m.parentCtx != nil {
-			base = "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [esc] pods"
-		} else {
-			base = "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions"
-		}
+		// ONE SPELLING NOW, where there used to be two. The picker/bypass split
+		// existed only because esc meant different things in the two modes — "back
+		// to pods" with a parent context, nothing without one. esc now returns to
+		// whichever pane opened this one in both modes, so there is nothing left for
+		// the branch to say differently.
+		base := "[↑↓] nav  [↵] plugin detail  [e] edit  [esc] back"
 		// Surface a count of plugins with unmet dependencies so a single "✗" in the
 		// DEPS column doesn't get lost in a long list. Before the essential hints,
 		// for the reason given in the paneEvents case: fitHintLine drops from the

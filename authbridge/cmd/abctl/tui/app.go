@@ -538,6 +538,15 @@ type model struct {
 	// pane the user came from instead of always defaulting to one.
 	previousPane paneID
 
+	// pipelineReturnPane is where `Esc` from the pipeline pane goes back to.
+	// A FIELD OF ITS OWN, not previousPane, for the reason usageState grew
+	// returnPane: previousPane belongs to the catalog, and the catalog can be
+	// opened from the pipeline — that write sets it to panePipeline and the
+	// catalog's own esc then clears it, so esc from the pipeline would land on
+	// the default instead of the pane the operator opened it from. Three
+	// surfaces sharing one field cannot work; each keeps its own.
+	pipelineReturnPane paneID
+
 	// streamCh is the single SSE channel from the apiclient. Opened once
 	// in Init; re-pumped on every streamMsg until it closes.
 	streamCh <-chan apiclient.StreamEvent
@@ -668,10 +677,13 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 		pipelineTbl:  newPipelineTable(),
 		catalogTbl:   newCatalogTable(),
 		previousPane: paneNone,
-		detailVp:     viewport.New(0, 0),
-		filterInput:  ti,
-		lastTick:     time.Now(),
-		connState:    connStateInfo{phase: connConnecting},
+		// paneNone, not the zero value: paneNamespaces is 0, and a return pane
+		// of "namespaces" would send esc from the pipeline into the picker.
+		pipelineReturnPane: paneNone,
+		detailVp:           viewport.New(0, 0),
+		filterInput:        ti,
+		lastTick:           time.Now(),
+		connState:          connStateInfo{phase: connConnecting},
 	}
 }
 
@@ -762,6 +774,9 @@ func (m *model) backToPodsPane() {
 	m.catalog = nil
 	m.catalogTbl.SetRows(nil)
 	m.previousPane = paneNone
+	// Same reason: a return pane recorded against the pod being left would send
+	// the next `P`-then-esc back into a pane belonging to the previous connection.
+	m.pipelineReturnPane = paneNone
 	// Close the column picker with the pane it belongs to. The paneEvents gates
 	// on the key block and in View() make it inert and invisible once we leave,
 	// but the flag itself outlives the pane: entering a session on the next pod
@@ -1707,7 +1722,7 @@ func (m *model) paneView() string {
 		// The contrast carries it instead: every band cell names its own span, and the table is
 		// the only thing on screen with a SESSION column. The [?] overlay still states it in full
 		// for a reader who wants it spelled out.
-		title = fmt.Sprintf("abctl · %s · %s", m.endpoint, viewTabs(paneSessions))
+		title = fmt.Sprintf("abctl · %s", m.endpoint)
 		body = m.sessionsTbl.View()
 	case paneEvents:
 		// Fitted to the terminal rather than to a fixed 36: a bare UUID is 36 characters, so
@@ -1723,7 +1738,11 @@ func (m *model) paneView() string {
 		title = m.sessionHeader(m.selectedSess, "event")
 		body = m.detailVp.View()
 	case panePipeline:
-		title = fmt.Sprintf("abctl · %s · %s", m.endpoint, viewTabs(panePipeline))
+		// Names itself, because nothing else does any more. While the tab strip
+		// was in the title it said which of the two top-level views was showing;
+		// with the strip gone, a pane whose title read only "abctl · <endpoint>"
+		// would be indistinguishable from Sessions in a screenshot.
+		title = fmt.Sprintf("abctl · %s · pipeline", m.endpoint)
 		if m.pipeline == nil {
 			body = styleHint.Render("(loading pipeline…)")
 		} else {
@@ -1875,20 +1894,19 @@ func (m *model) sessionHeader(id, suffix string) string {
 	return head + label + tail
 }
 
-// viewTabs renders the top-level tab strip "[Sessions] Pipeline" with the
-// active pane bracketed. Rendered in the title bar of top-level views.
-func viewTabs(active paneID) string {
-	sess := "Sessions"
-	pipe := "Pipeline"
-	if active == paneSessions {
-		sess = styleTitle.Render("[" + sess + "]")
-		pipe = styleHint.Render(pipe)
-	} else {
-		sess = styleHint.Render(sess)
-		pipe = styleTitle.Render("[" + pipe + "]")
-	}
-	return sess + " " + pipe
-}
+// The "[Sessions] Pipeline" tab strip used to be rendered here, by viewTabs.
+//
+// It is gone because it implied a peerage that was never true. Sessions is the
+// surface abctl exists for; the pipeline is config, read occasionally. And the
+// strip was a map with two of four destinations on it — Usage (`u`) and the
+// plugin catalog (`C`) are top-level panes too, and neither was ever a tab. One
+// rule now covers all three: Sessions is the app, and every other top-level
+// surface is opened by a key and returns to the pane that opened it.
+//
+// The keys are advertised in each pane's footer and in the [?] overlay, which is
+// the surface that cannot run out of room. `P` sits near the TAIL of the sessions
+// footer for that reason — fitHintLine drops hints from the front, so a key at the
+// tail outlives the ones ahead of it. See helpView for the measured widths.
 
 // trunc clips a string to n DISPLAY COLUMNS with a trailing ellipsis.
 //

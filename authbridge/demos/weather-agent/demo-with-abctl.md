@@ -66,12 +66,12 @@ weather-service pod — `abctl` spawns a `kubectl port-forward`
 automatically and drops you into the **Sessions** pane:
 
 ```text
-╭─ abctl · http://127.0.0.1:<port> · [Sessions] Pipeline ──────────────────────╮
+╭─ abctl · http://127.0.0.1:<port> ────────────────────────────────────────────╮
 │  ID                                       UPDATED    EVENTS  TOKENS   ACTIVE  │
 │  (no sessions yet)                                                             │
 │                                                                                │
 │  ● connected   0.0 events/sec                                                  │
-│  [↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [p] pause  [?] help  [q]    │
+│  [↑↓] nav  [↵] drill  [/] filter  [p] pause  [P] pipeline  [?] help  [q]      │
 ╰────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -203,10 +203,11 @@ Press `Esc` to go back to the events pane.
 
 ## 6. View the plugin pipeline composition
 
-From any top-level pane, press `Tab` to switch between **Sessions** and **Pipeline**:
+From Sessions, Events or Detail, press `P` to open the **Pipeline**. `Esc` returns
+you to whichever of those you pressed it on:
 
 ```
-╭─ abctl · http://localhost:9094 · Sessions [Pipeline] ─────────────────────────╮
+╭─ abctl · http://localhost:9094 · pipeline ────────────────────────────────────╮
 │  #  DIRECTION  PLUGIN            WRITES          BODY  EVENTS                 │
 │  1  inbound    jwt-validation                    no                            │
 │  2  inbound    a2a-parser        a2a             yes   2                       │
@@ -215,7 +216,7 @@ From any top-level pane, press `Tab` to switch between **Sessions** and **Pipeli
 │  2  outbound   mcp-parser        mcp             yes   10                      │
 │  3  outbound   inference-parser  inference       yes   4                       │
 │                                                                                │
-│  [↑↓] nav  [↵] plugin detail  [tab] sessions  [q] quit                         │
+│  [↑↓] nav  [↵] plugin detail  [e] edit  [esc] back  [q] quit                   │
 ╰────────────────────────────────────────────────────────────────────────────────╯
 ```
 
