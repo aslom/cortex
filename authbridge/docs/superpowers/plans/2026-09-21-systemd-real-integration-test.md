@@ -37,11 +37,17 @@ the bare `Restart=on-failure` claim itself. Wired into the `abctl` leg of
       CI run, both tests failing identically.
 - [x] Fix: cleanup's `t.Logf` on `stop`/`reset-failed` failure printed on every
       normal passing run — `systemd-run` transient units are garbage-collected once
-      inactive, so both calls routinely exit nonzero (5, 1) by teardown time.
-      Filtered those two specific, confirmed-benign exit codes.
+      inactive, so both calls routinely exit nonzero by teardown time. `stop`'s
+      exit 5 is a narrow, confirmed-benign code, filtered by exit code.
+      `reset-failed`'s exit 1 is systemd's *generic* failure code, so filtering it
+      by code would suppress nearly everything that call can produce — filtered by
+      output text (`"not loaded"`/`"not found"`) instead, catching only the
+      confirmed "unit doesn't exist" case.
 - [x] Confirmed against real CI (not just local skip behavior): both tests pass with
-      realistic timing (~3s crash-restart, ~7s stay-stopped), and the cleanup fix
-      verified to produce zero spurious log lines on a clean run.
+      realistic timing (~3s crash-restart, ~7s stay-stopped), and the exit-code
+      version of the cleanup fix verified to produce zero spurious log lines on a
+      clean run. The later switch to message-matching for `reset-failed` has not
+      yet had its own real-CI confirmation.
 
 ## Result
 
