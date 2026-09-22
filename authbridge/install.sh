@@ -593,6 +593,62 @@ demo_ports_busy() {
 	return 1
 }
 
+# port_holder prints "<pid> <command-path>" for whatever listens on the given
+# loopback port, or nothing when it cannot tell. lsof only — ss and nc can say
+# that a port is taken but not by which binary, and the binary path is the whole
+# point here: it distinguishes our own proxy from a foreign one.
+port_holder() {
+	command -v lsof >/dev/null 2>&1 || return 1
+	# -F pcn gives one field per line (p<pid>, c<name>), stable across lsof
+	# versions in a way the columnar output is not. The command NAME is
+	# truncated to 9 chars, so resolve the full path from the pid separately.
+	_ph_pid=$(lsof -nP -iTCP@127.0.0.1:"$1" -sTCP:LISTEN -Fp 2>/dev/null \
+		| sed -n 's/^p//p' | head -1)
+	[ -n "${_ph_pid}" ] || return 1
+	# ps is POSIX and present everywhere this script runs; `comm=` prints the
+	# executable path without the argv noise.
+	_ph_cmd=$(ps -p "${_ph_pid}" -o comm= 2>/dev/null | head -1)
+	printf '%s %s\n' "${_ph_pid}" "${_ph_cmd:-unknown}"
+}
+
+# foreign_proxy_holder prints "<pid> <path>" when the forward port is held by a
+# process that is NOT the proxy this script manages, and nothing otherwise.
+#
+# Why this exists: a busy forward port was classified unconditionally as the
+# benign upgrade race, on the assumption that the holder is our own proxy still
+# draining. That assumption fails whenever the holder belongs to a DIFFERENT
+# install — a copy run from a checkout, a second clone, an earlier install whose
+# binary moved. Such a process never drains, so "wait and re-run" never comes
+# true, and the supervised service retries its bind forever. Worse, the squatter
+# keeps serving with its OWN TLS-bridge CA while clients are configured to trust
+# the CA of the install that cannot start, so every intercepted request fails
+# certificate verification. That surfaces to users as a self-signed-certificate
+# error from their agent, which points at the certificate rather than at the two
+# proxies fighting over one port.
+#
+# "Ours" is decided by the pidfile and by the binary path we install to, not by
+# process name: every candidate is named authbridge-proxy, so the name cannot
+# discriminate. When lsof is unavailable the holder cannot be identified at all;
+# returning nothing then preserves the previous ports-busy behavior rather than
+# accusing a process we cannot see.
+foreign_proxy_holder() {
+	_fp_holder=$(port_holder "${DEMO_FORWARD_PORT}") || return 1
+	[ -n "${_fp_holder}" ] || return 1
+	_fp_pid=${_fp_holder%% *}
+	_fp_cmd=${_fp_holder#* }
+
+	# Our own unsupervised proxy, recorded at start: not foreign.
+	if [ -f "${PROXY_PIDFILE}" ]; then
+		_fp_recorded=$(cat "${PROXY_PIDFILE}" 2>/dev/null)
+		[ "${_fp_pid}" = "${_fp_recorded}" ] && return 1
+	fi
+	# The binary this install manages: a supervised restart of it is the
+	# genuine upgrade race, so leave that to the existing ports-busy path.
+	[ "${_fp_cmd}" = "${BIN_DIR}/authbridge-proxy" ] && return 1
+
+	printf '%s %s\n' "${_fp_pid}" "${_fp_cmd}"
+}
+
 # service_install_action classifies the outcome of `abctl service install` into one
 # word, so the decision is one testable place instead of a chain of greps inline.
 #   $1 = abctl's exit status   $2 = abctl's combined stdout+stderr
@@ -601,6 +657,10 @@ demo_ports_busy() {
 #   refused    — abctl declined ON PURPOSE (a `refus`* message, e.g. a config that
 #                would expose a listener). This is the one failure we must NOT paper
 #                over: running the same proxy unsupervised would defeat that check.
+#   foreign-proxy — the forward port is held by a proxy from a DIFFERENT install.
+#                That never drains, so it is not the upgrade race; reported with the
+#                pid and path so the user can stop the right process. Checked before
+#                ports-busy, which would otherwise absorb it.
 #   ports-busy — non-zero, but our listener ports are held: the benign upgrade race
 #                (the old proxy is still draining). Falling back would crash a second
 #                proxy on the bound ports, so tell the user to wait and re-run.
@@ -615,6 +675,12 @@ demo_ports_busy() {
 service_install_action() { # status output
 	[ "$1" = "0" ] && { printf 'supervised\n'; return 0; }
 	if printf '%s' "$2" | grep -qi 'refus'; then printf 'refused\n'; return 0; fi
+	# Before ports-busy: a foreign holder looks identical at the port level but
+	# needs the opposite advice (stop that process, not wait for it).
+	_sia_foreign=$(foreign_proxy_holder) && [ -n "${_sia_foreign}" ] && {
+		printf 'foreign-proxy %s\n' "${_sia_foreign}"
+		return 0
+	}
 	if demo_ports_busy; then printf 'ports-busy\n'; return 0; fi
 	printf 'fallback\n'
 }
@@ -1177,7 +1243,11 @@ else
 	svc_out=$(cat "${svc_out_file}" 2>/dev/null || true)
 	rm -f "${svc_out_file}" "${svc_st_file}"
 	set -e
-	case "$(service_install_action "${svc_status}" "${svc_out}")" in
+	# Captured once: the foreign-proxy verdict carries the holder's pid and path in
+	# the same string, and re-running the classifier to re-read them could observe a
+	# different holder than the one that was classified.
+	svc_action=$(service_install_action "${svc_status}" "${svc_out}")
+	case "${svc_action}" in
 		supervised)
 			SUPERVISED=1
 			;;
@@ -1187,6 +1257,23 @@ else
 			die "abctl refused to set up the service — a safety decision, not an
   environment limit, so Cortex was NOT started. Its message was:
     ${svc_out}"
+			;;
+		"foreign-proxy "*)
+			# A proxy from a different install holds the forward port. It will not
+			# drain, so "wait and re-run" would be wrong advice — name the process
+			# and stop, rather than leaving the service to retry its bind forever
+			# while that proxy serves traffic signed by a CA nobody is configured
+			# to trust (which reaches users as a self-signed-certificate error).
+			svc_foreign=${svc_action#foreign-proxy }
+			die "port ${DEMO_FORWARD_PORT} is held by a proxy this install does not manage:
+    pid ${svc_foreign%% *}  ${svc_foreign#* }
+  That process will not shut down on its own, so re-running will not help. It is
+  most likely an authbridge-proxy started by hand or from another checkout. Stop it
+  and re-run this installer:
+    kill ${svc_foreign%% *}
+  Leaving it running is not a benign duplicate: clients are configured to trust the
+  TLS-bridge CA of THIS install, while that proxy presents its own, so intercepted
+  requests fail certificate verification."
 			;;
 		ports-busy)
 			die "the previous Cortex is still shutting down (its ports are still in use).
