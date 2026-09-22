@@ -755,24 +755,51 @@ abctl is for, and the other three are surfaces you visit and leave.
 
 Layered on top of all of them:
 
-- **Key help**: a modal overlay listing every keybinding, opened by `?`
-  from anywhere (picker included). The current pane's bindings come
-  first and are highlighted; the global keys and a one-line summary of
-  every other pane follow. While it's up it owns the keyboard — `?`,
-  `Esc`, or `q` closes it (`q` closes the overlay rather than quitting
-  abctl). This is the discoverable home for keys the single-line footer
-  has no room for, `P` among them. Two exceptions: while a pipeline edit
-  is in flight that overlay is already modal and owns `y`/`N`, and while
-  the filter input is focused `?` is a character you're typing (session
-  IDs and hosts can contain one). In both cases `?` is inert until the
-  keyboard is released.
+- **Key help**: a modal overlay opened by `?` from anywhere (picker
+  included). It is a map of the panes as much as a key list, ordered by
+  what a lost reader asks first:
+
+  1. the current pane, highlighted — what it shows, then its own keys;
+  2. **GO TO ANOTHER PANE** — the keys that leave, each naming the pane
+     it opens and what is on it. Rendered per pane and only where the
+     key actually works: all four (`u`, `P`, `C`, `$`) from the session
+     views, `C` alone on Usage, and on the two pickers a line saying
+     they open once you're connected rather than four dead keys;
+  3. **THE DRILL PATH** — `namespaces → pods → sessions → events → event
+     detail` on one line, with where you are in brackets, since that
+     spine is also what `Esc` walks back;
+  4. **ANYWHERE**, then **INSIDE THE SPEND DRAWER** (`a`/`w` are live
+     only while it is open, so they are not mixed in with the keys that
+     always work — and the section is omitted on the panes where `$`
+     is refused);
+  5. **EVERY PANE** — the other eight in full, purpose and every
+     binding's description. Not compacted to bare keys: `USAGE  m w b s
+     esc` said the pane has five keys and nothing about what any of them
+     do.
+
+  While it's up it owns the keyboard — `?`, `Esc`, or `q` closes it
+  (`q` closes the overlay rather than quitting abctl). This is the
+  discoverable home for keys the single-line footer has no room for,
+  `P` among them. Two exceptions: while a pipeline edit is in flight
+  that overlay is already modal and owns `y`/`N`, and while the filter
+  input is focused `?` is a character you're typing (session IDs and
+  hosts can contain one). In both cases `?` is inert until the keyboard
+  is released.
 
   The body scrolls, so the full reference is reachable on a short
   terminal: `↑↓`/`jk` by line, `b`/`f` or PgUp/PgDn by page, `u`/`d` by
   half page, `g`/`G` to the ends. A `[↑↓] scroll  <n>%` affordance
   appears in the overlay's footer only when the content overflows; the
   close hint stays pinned there at every scroll position. Resizing the
-  terminal re-ranges the body without losing your place.
+  terminal re-ranges AND re-wraps the body without losing your place —
+  prose wraps to the panel width rather than being clipped at the right
+  edge, so the descriptions and the scope note survive a narrow
+  terminal.
+
+  Spelling out all nine panes costs roughly three screens at 24 rows,
+  which `g`/`G` and the pinned close hint are what make affordable. The
+  overlay is the one surface with no width or height budget to defend,
+  so it is where completeness belongs.
 
 ## Keybindings
 

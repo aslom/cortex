@@ -16,57 +16,212 @@ type keyBinding struct {
 }
 
 // keyGroup is a titled block of bindings in the help overlay.
+//
+// purpose says what the group IS — for a pane, what it shows. It is the field
+// the pane-focused rewrite added, and it exists because the overlay used to name
+// nine panes and describe none of them: "what can I look at, and why" was
+// unanswerable from the one surface that exists to answer it.
+//
+// notes carry prose that belongs to the group rather than to any single key.
+// They exist so a caveat stops being smuggled into the key column as a binding
+// with an empty `keys` field, which is how the spend-scope note used to ship — a
+// sentence wearing a keybinding's clothes.
 type keyGroup struct {
 	title    string
+	purpose  string
 	bindings []keyBinding
+	notes    []string
 }
 
-// globalKeys are the bindings that work in (nearly) every pane. `C` lives
-// here because it's the discoverability problem this overlay exists to
-// solve: it works from every session-view pane but was never shown in any
-// footer. The picker panes are the documented exception — noted in the
-// group title rather than duplicated per-pane.
+// Section titles. Named constants because the jump section is conditional and
+// two others are asserted on, so a literal would drift.
+const (
+	jumpSectionTitle  = "GO TO ANOTHER PANE"
+	drillSectionTitle = "THE DRILL PATH"
+	anywhereTitle     = "ANYWHERE"
+	spendDrawerTitle  = "INSIDE THE SPEND DRAWER"
+	everyPaneTitle    = "EVERY PANE"
+
+	// thisPaneSuffix marks the active pane's group. Carried in the stored title
+	// rather than added at render time so paneName can strip it and the two forms
+	// can never disagree.
+	thisPaneSuffix = " (this pane)"
+)
+
+// anywhereKeys are the bindings that work on every pane regardless of what is on
+// screen.
 //
-// `C` WAS `P` UNTIL THE PIPELINE TOOK THAT LETTER. The sentence above is why
-// that swap was cheap: a binding no footer ever advertised has close to no
-// muscle memory behind it, and "C for Catalog" needs less explaining than a `P`
-// borrowed from the word "Plugin".
-var globalKeys = keyGroup{
-	title: "GLOBAL",
+// WHAT IS NO LONGER HERE IS THE POINT. This was `globalKeys`, and it had become a
+// bin: the overlay's own scroll keys, the keys that OPEN other panes (`P`, `C`),
+// the spend drawer's `a`/`w` — inert unless the drawer is already up — and a
+// caveat with an empty key column, all in one flat list under one heading that
+// claimed they worked everywhere. Three of those groups did not.
+//
+// The pane-opening keys moved to jumpTargets, which renders them per pane and
+// only where they work. The drawer's keys moved to spendDrawerKeys, with the
+// caveat as a note.
+var anywhereKeys = keyGroup{
+	title: anywhereTitle,
 	bindings: []keyBinding{
 		{"?", "this help"},
 		{"↑↓ / jk", "scroll this help"},
-		{"P", "pipeline (session views)"},
-		{"C", "plugin catalog (session views)"},
-		{"p", "pause/resume stream"},
+		{"p", "pause / resume the stream"},
 		{"g / G", "jump to top / bottom"},
 		{"b / f", "page up / down"},
-		// The strip is global, so its expansion is too — and this overlay advertises itself as
-		// listing every binding, which is the only reason a reader would find `$` at all. The
-		// drawer's own hint line only helps someone who already pressed it.
-		{"$", "expand the spend band into tiers and a breakdown (not on usage)"},
-		// The scope, stated where there is always room for it — and THIS IS NOW THE ONLY PLACE
-		// IT IS SPELLED OUT. The sessions footer used to carry it as a notice, and the pane
-		// title after that as " · lifetime totals"; both are gone, because a note that has to
-		// fit in a title could only name a span, and the table has no single span to name (see
-		// paneView's sessions case). Here there is room for the two facts that actually matter.
-		//
-		// "resets on proxy restart" rather than "lifetime", which is the correction that
-		// motivated dropping the title note: the store is in memory, so a session's figures
-		// cover only as far back as the current proxy process. A reader comparing the table
-		// against the band's day figure and finding it smaller is seeing that, not a bug.
-		{"", "every band cell names its own span; the table is per session, and resets on proxy restart"},
-		{"a · w", "while it is open: cycle the axis · the span (the band's four)"},
 		{"q · ctrl+c", "quit"},
 	},
 }
 
-// paneKeys maps each pane to its own bindings, rendered first (and
-// emphasized) when the overlay opens over that pane. Panes absent from
-// this map fall back to the global group alone.
+// spendDrawerKeys are live only while the spend drawer is open. Their own
+// section, because listing `a` and `w` beside the keys that work everywhere
+// taught two bindings that do nothing most of the time.
+var spendDrawerKeys = keyGroup{
+	title:   spendDrawerTitle,
+	purpose: "opened with $ over the spend band; a and w are live only while it is up",
+	bindings: []keyBinding{
+		{"a", "cycle the axis"},
+		{"w", "cycle the span (the band's four)"},
+		{"$ · esc", "close"},
+	},
+	// The scope, stated where there is always room for it — and THIS IS STILL THE ONLY PLACE
+	// IT IS SPELLED OUT. The sessions footer used to carry it as a notice, and the pane title
+	// after that as " · lifetime totals"; both are gone, because a note that has to fit in a
+	// title could only name a span, and the table has no single span to name (see paneView's
+	// sessions case).
+	//
+	// "resets on proxy restart" rather than "lifetime", which is the correction that motivated
+	// dropping the title note: the store is in memory, so a session's figures cover only as far
+	// back as the current proxy process. A reader comparing the table against the band's day
+	// figure and finding it smaller is seeing that, not a bug.
+	//
+	// A NOTE NOW, not a binding with keys:"". The same sentence, no longer pretending to be a key.
+	notes: []string{
+		"Every band cell names its own span. The sessions table is per session and resets " +
+			"on proxy restart, so its figures can read smaller than the band's.",
+	},
+}
+
+// helpGlobalGroups returns the groups that are not panes and that apply on pane,
+// in render order.
+//
+// A FUNCTION, AND THE ONE helpBodyLines RENDERS FROM. As a plain slice it was a
+// registry only the tests read, so a group added to the body and not to the slice
+// would have escaped every invariant check — the exact drift those checks exist to
+// catch. The drawer's group is conditional for the reason the jump section drops
+// `$`: on the pickers and on usage the key is refused, and a titled block
+// explaining what `a` and `w` do inside a surface that cannot be opened is three
+// keys of pure noise.
+func helpGlobalGroups(pane paneID) []keyGroup {
+	groups := []keyGroup{anywhereKeys}
+	if ok, _ := spendDrawerHostPane(pane); ok {
+		groups = append(groups, spendDrawerKeys)
+	}
+	return groups
+}
+
+// drillPath is the spine: the panes you reach by drilling in, in order, each a
+// step deeper than the last. Rendered as a single line because the SHAPE is the
+// information — the old overlay listed all nine panes flat, so nothing said that
+// events sits under sessions, or that esc walks back up rather than out.
+var drillPath = []paneID{paneNamespaces, panePods, paneSessions, paneEvents, paneDetail}
+
+// jumpTarget is a key that opens a surface from somewhere else, as opposed to one
+// that acts within a pane.
+//
+// pane is paneNone for `$`: it opens a drawer over the current pane rather than a
+// pane, so its availability comes from spendDrawerHostPane instead of from a
+// handler changing m.pane, and label names it. For real panes the label is
+// derived from paneName, so it cannot drift from the group title.
+type jumpTarget struct {
+	key   string
+	pane  paneID
+	label string
+	desc  string
+}
+
+// name is how the jump row labels the target.
+func (jt jumpTarget) name() string {
+	if jt.pane == paneNone {
+		return jt.label
+	}
+	return strings.ToLower(paneName(jt.pane))
+}
+
+// jumpTargets are the four keys that leave the pane you are on.
+//
+// `C` WAS `P` UNTIL THE PIPELINE TOOK THAT LETTER, and this section is the reason
+// that swap was cheap: `P`-for-catalog was never shown in any footer, so there
+// was close to no muscle memory behind it — and the discoverability problem the
+// overlay existed to solve for it is now a titled section rather than one line in
+// a group of ten.
+var jumpTargets = []jumpTarget{
+	{key: "u", pane: paneUsage,
+		desc: "charts over the events the proxy has seen — every session from the " +
+			"sessions table, the selected one from events"},
+	{key: "P", pane: panePipeline,
+		desc: "the plugin chain this proxy runs, editable in $EDITOR"},
+	{key: "C", pane: paneCatalog,
+		desc: "every plugin the proxy offers, from /v1/plugins"},
+	{key: "$", pane: paneNone, label: "spend",
+		desc: "a drawer over the spend band: tiers and a breakdown"},
+}
+
+// jumpsFrom returns the jump targets that actually work from p.
+//
+// THE KEYS DO NOT SHARE ONE ALLOWLIST, which is why this is a switch and not a
+// single membership test: `u` and `P` open only from the session views, `C` opens
+// from anything past the pickers, and `$` follows the drawer's own host rule. The
+// old overlay papered over that by writing "(session views)" beside two keys and
+// "(not on usage)" beside a third, in a group that rendered identically on every
+// pane — so on the namespaces picker it advertised three keys that do nothing and
+// on usage it advertised a fourth.
+//
+// Kept honest by TestHelpBody_JumpSectionMatchesTheKeysThatActuallyWork, which
+// drives the real handlers for every pane rather than re-stating these sets.
+func jumpsFrom(p paneID) []jumpTarget {
+	var out []jumpTarget
+	for _, jt := range jumpTargets {
+		// Never offer a jump to the pane the reader is already standing on.
+		if jt.pane == p {
+			continue
+		}
+		switch jt.key {
+		case "u", "P":
+			switch p {
+			case paneSessions, paneEvents, paneDetail:
+			default:
+				continue
+			}
+		case "C":
+			switch p {
+			case paneNamespaces, panePods:
+				continue
+			}
+		case "$":
+			if ok, _ := spendDrawerHostPane(p); !ok {
+				continue
+			}
+		}
+		out = append(out, jt)
+	}
+	return out
+}
+
+// paneKeys maps each pane to its purpose and its own bindings, rendered first
+// (and emphasized) when the overlay opens over that pane, and again in full under
+// everyPaneTitle for the panes the reader is not on.
+//
+// EVERY GROUP CARRIES A PURPOSE, enforced by TestHelpPurpose_EveryPaneHasOne. A
+// pane the overlay names but does not describe is a pane the reader has to visit
+// to find out whether it was the one they wanted.
+//
+// NO GROUP REPEATS A JUMP KEY. `P` and `u` used to appear here and in globalKeys
+// both; they now live only in jumpTargets, which renders directly beneath this
+// block and knows which of them work from where.
 var paneKeys = map[paneID]keyGroup{
 	paneNamespaces: {
-		title: "NAMESPACES (this pane)",
+		title:   "NAMESPACES (this pane)",
+		purpose: "agents grouped by namespace; where abctl starts",
 		bindings: []keyBinding{
 			{"↑↓ / jk", "navigate"},
 			{"↵", "open namespace"},
@@ -76,7 +231,8 @@ var paneKeys = map[paneID]keyGroup{
 		},
 	},
 	panePods: {
-		title: "PODS (this pane)",
+		title:   "PODS (this pane)",
+		purpose: "the agent pods in that namespace, each with a proxy to connect to",
 		bindings: []keyBinding{
 			{"↑↓ / jk", "navigate"},
 			{"↵", "port-forward + connect"},
@@ -86,17 +242,18 @@ var paneKeys = map[paneID]keyGroup{
 	},
 	paneSessions: {
 		title: "SESSIONS (this pane)",
+		purpose: "one row per agent session, with its tokens, cost and context. " +
+			"Figures are per session and reset when the proxy restarts.",
 		bindings: []keyBinding{
 			{"↑↓ / jk", "navigate"},
 			{"↵ / → / l", "drill into session"},
-			{"P", "pipeline"},
-			{"u", "usage charts (all sessions)"},
 			{"/", "filter"},
 			{"esc", "back to pods picker"},
 		},
 	},
 	paneEvents: {
-		title: "EVENTS (this pane)",
+		title:   "EVENTS (this pane)",
+		purpose: "the live request stream for one session, newest last",
 		bindings: []keyBinding{
 			{"↑↓ / jk", "navigate"},
 			{"↵ / → / l", "event detail"},
@@ -106,21 +263,21 @@ var paneKeys = map[paneID]keyGroup{
 			{"c then s", "sort by a column: desc → asc → chronological"},
 			{"o", "load the page before the oldest event shown"},
 			{"t", "back to the live tail (resumes updates)"},
-			{"u", "usage charts (this session)"},
 			{"esc / ← / h", "back to sessions"},
 		},
 	},
 	paneDetail: {
-		title: "EVENT DETAIL (this pane)",
+		title:   "EVENT DETAIL (this pane)",
+		purpose: "one event in full, as the proxy recorded it",
 		bindings: []keyBinding{
 			{"↑↓", "scroll"},
 			{"y", "yank event JSON to ~/.cortex/abctl-events"},
-			{"u", "usage charts (this session)"},
 			{"esc / ← / h", "back to events"},
 		},
 	},
 	panePipeline: {
-		title: "PIPELINE (this pane)",
+		title:   "PIPELINE (this pane)",
+		purpose: "the plugin chain this proxy runs, in the order it runs them",
 		bindings: []keyBinding{
 			{"↑↓ / jk", "navigate"},
 			{"↵ / → / l", "plugin detail"},
@@ -129,14 +286,16 @@ var paneKeys = map[paneID]keyGroup{
 		},
 	},
 	panePluginDetail: {
-		title: "PLUGIN DETAIL (this pane)",
+		title:   "PLUGIN DETAIL (this pane)",
+		purpose: "one plugin's resolved config, as the proxy loaded it",
 		bindings: []keyBinding{
 			{"↑↓", "scroll"},
 			{"esc / ← / h", "back"},
 		},
 	},
 	paneUsage: {
-		title: "USAGE (this pane)",
+		title:   "USAGE (this pane)",
+		purpose: "stacked-bar charts over the events the proxy has seen",
 		bindings: []keyBinding{
 			{"m", "cycle metric (tokens/requests/errors/latency/cost)"},
 			{"w", "cycle window (10m/1h/6h)"},
@@ -146,7 +305,8 @@ var paneKeys = map[paneID]keyGroup{
 		},
 	},
 	paneCatalog: {
-		title: "PLUGIN CATALOG (this pane)",
+		title:   "PLUGIN CATALOG (this pane)",
+		purpose: "every plugin the proxy offers, whether or not the pipeline runs it",
 		bindings: []keyBinding{
 			{"↑↓ / jk", "navigate"},
 			{"↵ / → / l", "plugin detail"},
@@ -167,45 +327,228 @@ var otherPaneOrder = []paneID{
 // align into a readable second column across every group.
 const helpKeyColWidth = 12
 
-// renderKeyGroup renders one titled group. emphasize bolds the title and
-// the key column — used for the pane the overlay was opened over.
-func renderKeyGroup(g keyGroup, emphasize bool) string {
+// helpMinProseWidth is the narrowest budget helpBodyLines will wrap to. Below it
+// wrapping produces a column of single words, which is less readable than letting
+// the viewport clip — and a terminal that narrow has already lost the key columns.
+const helpMinProseWidth = 40
+
+// paneName is a pane's display name without the active-pane marker: "EVENT
+// DETAIL", never "EVENT DETAIL (this pane)". One derivation, so the drill path,
+// the jump rows and the everyPaneTitle section can never disagree with the title
+// the pane's own group renders.
+func paneName(p paneID) string {
+	return strings.TrimSuffix(paneKeys[p].title, thisPaneSuffix)
+}
+
+// wrapWords breaks s into lines of at most width display columns, splitting on
+// spaces only. Words longer than width are left over-long rather than broken: the
+// only such words here are paths and URLs, and a broken path is unusable while a
+// clipped one is still recognizable.
+func wrapWords(s string, width int) []string {
+	if width < 1 {
+		return []string{s}
+	}
+	var (
+		lines []string
+		cur   string
+	)
+	for _, word := range strings.Fields(s) {
+		switch {
+		case cur == "":
+			cur = word
+		case lipgloss.Width(cur)+1+lipgloss.Width(word) <= width:
+			cur += " " + word
+		default:
+			lines = append(lines, cur)
+			cur = word
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+// proseBlock renders prefix followed by text, wrapped to width with a hanging
+// indent under the prefix, so a pane's purpose reads as one paragraph attached to
+// its name rather than as a loose sentence between the keys.
+//
+// A LONG PREFIX BREAKS INSTEAD OF HANGING. Past a third of the width the hanging
+// indent costs more columns than the paragraph has left — "INSIDE THE SPEND
+// DRAWER · " is 26 of 76 — so the text drops to its own indented lines. Pane
+// titles are all under the threshold and stay inline, which is the common case.
+func proseBlock(prefix, text string, width int, prefixStyle lipgloss.Style) string {
+	indent := lipgloss.Width(prefix)
+	if indent > width/3 {
+		lines := wrapWords(text, width-4)
+		var b strings.Builder
+		b.WriteString(prefixStyle.Render(strings.TrimSuffix(prefix, " · ")))
+		for _, ln := range lines {
+			b.WriteString("\n    " + styleHint.Render(ln))
+		}
+		return b.String()
+	}
+
+	body := width - indent
+	if body < 1 {
+		body = 1
+	}
+	lines := wrapWords(text, body)
+
 	var b strings.Builder
+	b.WriteString(prefixStyle.Render(prefix) + styleHint.Render(lines[0]))
+	for _, ln := range lines[1:] {
+		b.WriteString("\n" + strings.Repeat(" ", indent) + styleHint.Render(ln))
+	}
+	return b.String()
+}
+
+// renderKeyGroup renders one titled group: its title and purpose as a paragraph,
+// then its bindings, then any notes. emphasize bolds the title and the key column
+// — used for the pane the overlay was opened over. indent shifts the whole block
+// right, which is how the everyPaneTitle section nests nine of them.
+//
+// Descriptions wrap to the remaining width rather than running off the edge. They
+// did run off it: the body was built width-blind and the viewport clipped
+// whatever did not fit, so the one long line the old overlay had (the spend-scope
+// caveat, ~100 columns) was simply cut in half on an 80-column terminal.
+func renderKeyGroup(g keyGroup, emphasize bool, width, indent int) string {
 	titleStyle := styleHint
 	keyStyle := styleMuted
 	if emphasize {
 		titleStyle = styleTitle
 		keyStyle = styleOK
 	}
-	b.WriteString(titleStyle.Render(g.title))
+	pad := strings.Repeat(" ", indent)
+
+	var b strings.Builder
+	if g.purpose == "" {
+		b.WriteString(pad + titleStyle.Render(g.title))
+	} else {
+		b.WriteString(proseBlock(pad+g.title+" · ", g.purpose, width, titleStyle))
+	}
+
+	// The key column widens to fit the group rather than clipping at
+	// helpKeyColWidth, because the jump section puts "C  plugin catalog" in it —
+	// the key AND the pane it opens, so the target names line up in a column of
+	// their own instead of running into the descriptions behind an em dash.
+	keyCol := helpKeyColWidth
 	for _, kb := range g.bindings {
-		keys := kb.keys
-		if w := lipgloss.Width(keys); w < helpKeyColWidth {
-			keys += strings.Repeat(" ", helpKeyColWidth-w)
+		if w := lipgloss.Width(kb.keys); w > keyCol {
+			keyCol = w
 		}
-		b.WriteString("\n  " + keyStyle.Render(keys) + " " + styleHint.Render(kb.desc))
+	}
+
+	// A TWO-COLUMN GUTTER, not one. With a single space the group's widest key —
+	// the one that sets keyCol and so gets no padding — ran straight into its
+	// description: "C  plugin catalog every plugin the proxy offers".
+	keyIndent := indent + 2
+	descCol := keyIndent + keyCol + 2
+	for _, kb := range g.bindings {
+		keys := padRight(kb.keys, keyCol)
+		b.WriteString("\n" + strings.Repeat(" ", keyIndent) + keyStyle.Render(keys) + "  ")
+		for i, ln := range wrapWords(kb.desc, width-descCol) {
+			if i > 0 {
+				b.WriteString("\n" + strings.Repeat(" ", descCol))
+			}
+			b.WriteString(styleHint.Render(ln))
+		}
+	}
+	for _, note := range g.notes {
+		b.WriteString("\n")
+		for i, ln := range wrapWords(note, width-keyIndent) {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(strings.Repeat(" ", keyIndent) + styleHint.Render(ln))
+		}
 	}
 	return b.String()
 }
 
-// helpBodyLines builds the scrollable body of the key-help overlay: the
-// active pane's group (emphasized) first, then the global keys, then a
-// one-line summary of every other pane. Returned as a single string so a
-// viewport can page through it.
+// renderJumpSection renders the keys that leave the pane the reader is on, or —
+// when none of them work there — one line saying why.
 //
-// The close hint is deliberately NOT included — it lives in the overlay's
-// fixed footer so it can't be scrolled out of reach.
-func helpBodyLines(pane paneID) string {
+// THE "WHY" LINE IS NOT DECORATION. On the two picker panes every jump key is
+// inert, and an overlay that simply omitted the section would read as "there is
+// nothing else to look at" on the very pane a new reader opens first.
+func renderJumpSection(pane paneID, width int) string {
+	jumps := jumpsFrom(pane)
+	if len(jumps) == 0 {
+		return proseBlock("  ", "usage, pipeline and the plugin catalog open once you are "+
+			"connected to an agent.", width, styleHint)
+	}
+
+	// The pane each key opens goes in the KEY column, beside the key, so the four
+	// target names align. Putting it at the head of the description instead left
+	// "usage", "pipeline", "plugin catalog" and "spend" starting at four different
+	// columns, which is the opposite of what a section listing places should do.
+	g := keyGroup{title: jumpSectionTitle, bindings: make([]keyBinding, 0, len(jumps))}
+	for _, jt := range jumps {
+		g.bindings = append(g.bindings, keyBinding{
+			keys: jt.key + "  " + jt.name(),
+			desc: jt.desc,
+		})
+	}
+	return renderKeyGroup(g, false, width, 0)
+}
+
+// renderDrillPath renders the spine as one line, with the pane the reader is on
+// marked. The marker is what makes it a map rather than a list: "you are here"
+// plus "esc goes left" answers the two questions a lost reader has.
+func renderDrillPath(pane paneID, width int) string {
+	names := make([]string, 0, len(drillPath))
+	for _, p := range drillPath {
+		name := strings.ToLower(paneName(p))
+		if p == pane {
+			name = "[" + name + "]"
+		}
+		names = append(names, name)
+	}
+	return styleHint.Render(drillSectionTitle) + "\n" +
+		proseBlock("  ", strings.Join(names, " → "), width, styleHint)
+}
+
+// helpBodyLines builds the scrollable body of the key-help overlay, wrapped to
+// width: the active pane in full (emphasized), then where it can go, then the
+// spine, then the keys that work anywhere, then the spend drawer's own, then every
+// other pane in full. Returned as a single string so a viewport can page it.
+//
+// ORDERED BY WHAT A LOST READER ASKS FIRST: where am I, where can I go, how do I
+// get back, and only then the complete reference. The old body ran active pane →
+// GLOBAL → a glyph wall, which answered the last question badly and the first
+// three not at all.
+//
+// The other panes are rendered IN FULL, descriptions and all, rather than
+// compacted to their bare keys. `USAGE  m  w  b  s  esc` told a reader that the
+// pane has five keys and nothing about what any of them do, which is the defect
+// this rewrite exists to fix. It costs roughly forty lines of scroll; the close
+// hint and g/G are the reason that is affordable.
+//
+// The close hint is deliberately NOT included — it lives in the overlay's fixed
+// footer so it can't be scrolled out of reach.
+func helpBodyLines(pane paneID, width int) string {
+	if width < helpMinProseWidth {
+		width = helpMinProseWidth
+	}
 	var sections []string
 
 	if g, ok := paneKeys[pane]; ok {
-		sections = append(sections, renderKeyGroup(g, true))
+		sections = append(sections, renderKeyGroup(g, true, width, 0))
 	}
-	sections = append(sections, renderKeyGroup(globalKeys, false))
+	sections = append(sections,
+		renderJumpSection(pane, width),
+		renderDrillPath(pane, width),
+	)
+	for _, g := range helpGlobalGroups(pane) {
+		sections = append(sections, renderKeyGroup(g, false, width, 0))
+	}
 
-	// Remaining panes, compacted to one line each so the overlay stays
-	// scannable. The active pane is already rendered in full above.
-	var others []string
+	// Every other pane, in full. The active pane is already rendered above.
+	others := []string{styleHint.Render(everyPaneTitle)}
 	for _, p := range otherPaneOrder {
 		if p == pane {
 			continue
@@ -214,18 +557,11 @@ func helpBodyLines(pane paneID) string {
 		if !ok {
 			continue
 		}
-		keys := make([]string, 0, len(g.bindings))
-		for _, kb := range g.bindings {
-			keys = append(keys, kb.keys)
-		}
-		// Strip the "(this pane)" suffix the active-pane title carries.
-		name := strings.TrimSuffix(g.title, " (this pane)")
-		others = append(others, "  "+styleMuted.Render(padRight(name, 16))+" "+
-			styleHint.Render(strings.Join(keys, "  ")))
+		g.title = paneName(p)
+		others = append(others, renderKeyGroup(g, false, width, 2))
 	}
-	if len(others) > 0 {
-		sections = append(sections,
-			styleHint.Render("OTHER PANES")+"\n"+strings.Join(others, "\n"))
+	if len(others) > 1 {
+		sections = append(sections, strings.Join(others, "\n\n"))
 	}
 
 	return strings.Join(sections, "\n\n")

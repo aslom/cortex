@@ -95,13 +95,27 @@ func TestHelpOverlayRendersAndEmphasizesCurrentPane(t *testing.T) {
 	if !strings.Contains(view, "NAMESPACES (this pane)") {
 		t.Fatalf("overlay should emphasize the active pane's group:\n%s", view)
 	}
-	// P is the binding this overlay exists to make discoverable.
-	if !strings.Contains(view, "plugin catalog") {
-		t.Fatalf("overlay should document the P / plugin catalog binding:\n%s", view)
+	// The pane's PURPOSE, not just its keys. The overlay named nine panes and
+	// described none of them before the pane-focused rewrite.
+	if !strings.Contains(view, paneKeys[paneNamespaces].purpose) {
+		t.Fatalf("overlay should say what the active pane shows:\n%s", view)
 	}
-	// Other panes are summarized, not omitted.
-	if !strings.Contains(view, "OTHER PANES") {
-		t.Fatalf("overlay should list other panes:\n%s", view)
+	// `C` is the binding this overlay exists to make discoverable. On the picker
+	// it does not work yet, so the overlay names the catalog and says when it opens
+	// rather than advertising a dead key.
+	if !strings.Contains(view, "plugin catalog") {
+		t.Fatalf("overlay should name the plugin catalog:\n%s", view)
+	}
+	if strings.Contains(view, jumpSectionTitle) {
+		t.Fatalf("no jump key works on the picker; overlay should not offer them:\n%s", view)
+	}
+	// Other panes are documented, not omitted. That they are documented IN FULL is
+	// asserted on the body instead (see
+	// TestHelpBody_EveryPaneSectionSpellsOutEveryDescription): the section runs
+	// past the fold on any ordinary terminal, so View() legitimately shows only its
+	// first rows.
+	if !strings.Contains(view, everyPaneTitle) {
+		t.Fatalf("overlay should list every other pane:\n%s", view)
 	}
 	if !strings.Contains(view, "close") {
 		t.Fatalf("overlay should say how to close itself:\n%s", view)

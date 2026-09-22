@@ -821,8 +821,15 @@ func (m *model) backToPodsPane() {
 // every resize while it's open, so the body re-wraps and the scroll range
 // stays correct. resetScroll is true only on open — a resize should keep
 // the reader where they were.
+//
+// THE BODY ACTUALLY RE-WRAPS NOW. This comment claimed it did while
+// helpBodyLines took no width at all — it built one width-blind string and the
+// viewport clipped whatever overran, so the overlay's longest line lost its
+// second half on an 80-column terminal and said nothing about it. The wrap
+// budget is the terminal minus the frame the panel draws around the viewport.
 func (m *model) syncHelpViewport(resetScroll bool) {
-	body := helpBodyLines(m.pane)
+	frameW := styleBorder.GetHorizontalBorderSize() + helpPadX*2
+	body := helpBodyLines(m.pane, m.width-frameW)
 	w, h := helpViewportSize(m.width, m.height, helpBodyWidth(body))
 	m.helpVp.Width = w
 	m.helpVp.Height = h

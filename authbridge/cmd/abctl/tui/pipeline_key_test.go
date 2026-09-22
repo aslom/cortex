@@ -299,18 +299,29 @@ func TestPipelineFooter_DropsTabAndNamesWhereEscGoes(t *testing.T) {
 // both remapped keys must be correct. A stale entry here is worse than no
 // entry: it sends the reader to the wrong pane.
 func TestHelpOverlay_DocumentsTheRemappedKeys(t *testing.T) {
+	// `P` and `C` moved out of the flat global group into jumpTargets, which is
+	// the section that renders them per pane. Their MEANING is asserted against
+	// the pane each one names rather than against a description string: the row's
+	// label is derived from that pane, so naming the pane is naming the key.
+	target := map[string]paneID{}
+	for _, jt := range jumpTargets {
+		target[jt.key] = jt.pane
+	}
+	if got := target["P"]; got != panePipeline {
+		t.Errorf("jumpTargets does not point `P` at the pipeline (got pane %v)", got)
+	}
+	if got := target["C"]; got != paneCatalog {
+		t.Errorf("jumpTargets does not point `C` at the plugin catalog (got pane %v)", got)
+	}
+
 	desc := map[string]string{}
-	for _, kb := range globalKeys.bindings {
-		desc[kb.keys] = strings.ToLower(kb.desc)
-	}
-	if d, ok := desc["P"]; !ok || !strings.Contains(d, "pipeline") {
-		t.Errorf("globalKeys does not name `P` as the pipeline key (got %q)", d)
-	}
-	if d, ok := desc["C"]; !ok || !strings.Contains(d, "catalog") {
-		t.Errorf("globalKeys does not name `C` as the catalog key (got %q)", d)
+	for _, g := range nonPaneGroups() {
+		for _, kb := range g.bindings {
+			desc[kb.keys] = strings.ToLower(kb.desc)
+		}
 	}
 	if d := desc["p"]; !strings.Contains(d, "pause") {
-		t.Errorf("globalKeys lost `p` as pause (got %q)", d)
+		t.Errorf("the global groups lost `p` as pause (got %q)", d)
 	}
 
 	for _, pane := range []paneID{paneSessions, panePipeline} {
@@ -325,18 +336,27 @@ func TestHelpOverlay_DocumentsTheRemappedKeys(t *testing.T) {
 // Two bindings claiming one key is the defect this whole change corrects: `P`
 // was the catalog's and "pipeline" had no key at all. The overlay is where such
 // a collision is visible, so assert it cannot come back silently.
+// Now spans every non-pane group AND the jump targets, because the single
+// globalKeys list this checked has been split into three surfaces — and a key
+// claimed by two of THEM is the same defect one step out. The keys:"" exemption
+// is gone with the prose that needed it; see
+// TestHelpBindings_NeverHaveAnEmptyKeyColumn.
 func TestGlobalKeys_AdvertiseNoKeyTwice(t *testing.T) {
 	seen := map[string]string{}
-	for _, kb := range globalKeys.bindings {
-		// The scope notes carry no key; they are prose in the key column's place.
-		if kb.keys == "" {
-			continue
+	claim := func(key, what string) {
+		if prev, dup := seen[key]; dup {
+			t.Errorf("the overlay advertises %q for two different things: %q and %q",
+				key, prev, what)
 		}
-		if prev, dup := seen[kb.keys]; dup {
-			t.Errorf("globalKeys advertises %q for two different things: %q and %q",
-				kb.keys, prev, kb.desc)
+		seen[key] = what
+	}
+	for _, g := range nonPaneGroups() {
+		for _, kb := range g.bindings {
+			claim(kb.keys, kb.desc)
 		}
-		seen[kb.keys] = kb.desc
+	}
+	for _, jt := range jumpTargets {
+		claim(jt.key, jt.name())
 	}
 }
 
@@ -356,27 +376,42 @@ func TestGlobalKeys_AdvertiseNoKeyTwice(t *testing.T) {
 func TestRemappedKeys_MeanTheSameThingInEveryGroup(t *testing.T) {
 	want := map[string]string{"P": "pipeline", "C": "catalog"}
 
+	// jumpTargets is now the single definition, so the check that used to compare
+	// copies becomes a check that there is exactly one. A pane group is no longer
+	// free to repeat these keys at all — see TestHelpPaneKeys_DoNotRepeatTheJumpKeys
+	// — so any occurrence here is a REDEFINITION, which is what sent readers to the
+	// wrong surface.
 	for _, pane := range otherPaneOrder {
 		for _, kb := range paneKeys[pane].bindings {
-			substr, watched := want[kb.keys]
-			if !watched {
-				continue
-			}
-			if !strings.Contains(strings.ToLower(kb.desc), substr) {
-				t.Errorf("paneKeys[%v] binds %q to %q, which is not the %s — "+
-					"the key means one thing and every group must say so",
-					pane, kb.keys, kb.desc, substr)
+			if substr, watched := want[kb.keys]; watched {
+				t.Errorf("paneKeys[%v] binds %q to %q; %q belongs to jumpTargets "+
+					"(the %s) and must not be redefined per pane",
+					pane, kb.keys, kb.desc, kb.keys, substr)
 			}
 		}
 	}
 
-	// And the global group itself, which is the definition the pane groups defer to.
-	for _, kb := range globalKeys.bindings {
-		if substr, watched := want[kb.keys]; watched {
-			if !strings.Contains(strings.ToLower(kb.desc), substr) {
-				t.Errorf("globalKeys binds %q to %q, want it to name the %s",
-					kb.keys, kb.desc, substr)
+	// And the definition itself, which the jump rows render from.
+	for _, jt := range jumpTargets {
+		if substr, watched := want[jt.key]; watched {
+			if !strings.Contains(strings.ToLower(jt.name()), substr) {
+				t.Errorf("jumpTargets labels %q %q, want it to name the %s",
+					jt.key, jt.name(), substr)
 			}
+		}
+	}
+
+	// The labels are derived from paneName, and the jump rows are the only place a
+	// reader learns which pane a key opens. Assert the derivation rather than
+	// trusting it: a label that drifts from the pane's own title would have the
+	// overlay calling one surface two names.
+	for _, jt := range jumpTargets {
+		if jt.pane == paneNone {
+			continue
+		}
+		if wantName := strings.ToLower(paneName(jt.pane)); jt.name() != wantName {
+			t.Errorf("jumpTargets labels %q %q but its pane is titled %q",
+				jt.key, jt.name(), wantName)
 		}
 	}
 }

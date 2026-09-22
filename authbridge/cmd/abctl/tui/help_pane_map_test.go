@@ -1,0 +1,257 @@
+package tui
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+)
+
+// helpWide is a wrap budget wider than any line the overlay builds, so tests
+// that assert on content are not reading a truncated body.
+const helpWide = 200
+
+// allHelpGroups is every group the overlay can render anywhere: the non-pane
+// groups unioned over every pane (they are pane-conditional, so asking one pane
+// would miss any group that applies only elsewhere) plus each pane's own.
+func allHelpGroups() []keyGroup {
+	var groups []keyGroup
+	seen := map[string]bool{}
+	for p := paneNamespaces; p <= lastPaneID; p++ {
+		for _, g := range helpGlobalGroups(p) {
+			if !seen[g.title] {
+				seen[g.title] = true
+				groups = append(groups, g)
+			}
+		}
+		groups = append(groups, paneKeys[p])
+	}
+	return groups
+}
+
+// nonPaneGroups is allHelpGroups without the panes — the surfaces that used to be
+// the single `globalKeys` list.
+func nonPaneGroups() []keyGroup {
+	var groups []keyGroup
+	seen := map[string]bool{}
+	for p := paneNamespaces; p <= lastPaneID; p++ {
+		for _, g := range helpGlobalGroups(p) {
+			if !seen[g.title] {
+				seen[g.title] = true
+				groups = append(groups, g)
+			}
+		}
+	}
+	return groups
+}
+
+// Every pane must say what it IS, not just which keys it takes. The overlay
+// used to name nine panes and describe none of them, which made "what can I
+// look at" unanswerable from the one surface that exists to answer it.
+func TestHelpPurpose_EveryPaneHasOne(t *testing.T) {
+	for p := paneNamespaces; p <= lastPaneID; p++ {
+		g, ok := paneKeys[p]
+		if !ok {
+			t.Errorf("pane %v has no paneKeys entry", p)
+			continue
+		}
+		if strings.TrimSpace(g.purpose) == "" {
+			t.Errorf("pane %v (%q) has no purpose line — the overlay would name it "+
+				"without saying what it shows", p, g.title)
+		}
+	}
+}
+
+// THE GLYPH WALL IS THE BUG THIS LOCKS OUT. The old "OTHER PANES" section
+// compacted each pane to its bare keys — `USAGE  m  w  b  s  esc` — so the
+// overlay told a reader that usage has four keys and nothing about what any of
+// them do. Every binding's description must survive into the body.
+func TestHelpBody_EveryPaneSectionSpellsOutEveryDescription(t *testing.T) {
+	body := helpBodyLines(paneSessions, helpWide)
+
+	if !strings.Contains(body, "EVERY PANE") {
+		t.Fatalf("body has no EVERY PANE section:\n%s", body)
+	}
+	for p := paneNamespaces; p <= lastPaneID; p++ {
+		g := paneKeys[p]
+		name := paneName(p)
+		if !strings.Contains(body, name) {
+			t.Errorf("pane %v (%q) is not named anywhere in the body", p, name)
+		}
+		if !strings.Contains(body, g.purpose) {
+			t.Errorf("pane %v purpose %q missing from the body", p, g.purpose)
+		}
+		for _, kb := range g.bindings {
+			if !strings.Contains(body, kb.desc) {
+				t.Errorf("pane %v binds %q to %q, and the description is not in the "+
+					"body — that is the glyph wall coming back", p, kb.keys, kb.desc)
+			}
+		}
+	}
+}
+
+// The jump section must list exactly the keys that actually change panes from
+// where the reader is standing. Driven against the real handlers rather than a
+// second copy of their allowlists: `u`, `P` and `C` do NOT share one (P is
+// sessions/events/detail, C is anything past the pickers), so a hardcoded list
+// here would encode today's accident and go stale silently.
+func TestHelpBody_JumpSectionMatchesTheKeysThatActuallyWork(t *testing.T) {
+	for p := paneNamespaces; p <= lastPaneID; p++ {
+		listed := map[string]bool{}
+		for _, jt := range jumpsFrom(p) {
+			listed[jt.key] = true
+		}
+
+		for _, jt := range jumpTargets {
+			var works bool
+			switch jt.pane {
+			case paneNone:
+				// `$` opens no pane — the drawer's own host check is the authority.
+				works, _ = (&model{pane: p}).spendDrawerHost()
+			case p:
+				// Never advertise a jump to the pane the reader is already on.
+				works = false
+			default:
+				m := &model{
+					pane:               p,
+					client:             deadClient(),
+					selectedSess:       "s1", // `u` needs one on events/detail.
+					previousPane:       paneNone,
+					pipelineReturnPane: paneNone,
+				}
+				m.handleKey(keyRune(rune(jt.key[0])))
+				works = m.pane == jt.pane
+			}
+
+			if works && !listed[jt.key] {
+				t.Errorf("%q works from pane %v but the jump section does not list it",
+					jt.key, p)
+			}
+			if !works && listed[jt.key] {
+				t.Errorf("the jump section offers %q from pane %v, where it does nothing",
+					jt.key, p)
+			}
+		}
+	}
+}
+
+// The pickers run before a connection exists, so none of the jump keys work
+// there. Saying nothing would read as "this pane has no way out"; the overlay
+// says why instead.
+func TestHelpBody_PickerPanesExplainWhyThereIsNoJumpSection(t *testing.T) {
+	for _, p := range []paneID{paneNamespaces, panePods} {
+		body := helpBodyLines(p, helpWide)
+		if strings.Contains(body, jumpSectionTitle) {
+			t.Errorf("pane %v renders %q, but no jump key works there",
+				p, jumpSectionTitle)
+		}
+		if !strings.Contains(body, "connected") {
+			t.Errorf("pane %v neither offers the jump keys nor explains why:\n%s", p, body)
+		}
+	}
+}
+
+// The spine, in order, on one line. This is the structure the old overlay never
+// showed: a reader could not tell that events sits under sessions, or that esc
+// walks back up rather than quitting.
+func TestHelpBody_DrillPathIsInOrder(t *testing.T) {
+	body := helpBodyLines(paneSessions, helpWide)
+	if !strings.Contains(body, "THE DRILL PATH") {
+		t.Fatalf("body has no drill path section:\n%s", body)
+	}
+
+	// The spine is the line under the section title, so read that line rather than
+	// the whole body — an ordering assertion over the body would also be satisfied
+	// by the EVERY PANE section further down. Found by the title and not by the
+	// arrow: `↵ / → / l` is a binding on most panes and comes first.
+	var line string
+	lines := strings.Split(body, "\n")
+	for i, ln := range lines {
+		if strings.Contains(ln, drillSectionTitle) && i+1 < len(lines) {
+			line = lines[i+1]
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("no drill path line under %q:\n%s", drillSectionTitle, body)
+	}
+
+	at := -1
+	for _, p := range drillPath {
+		name := strings.ToLower(paneName(p))
+		i := strings.Index(line, name)
+		if i < 0 {
+			t.Fatalf("drill path does not name %q: %q", name, line)
+		}
+		if i <= at {
+			t.Errorf("drill path lists %q out of order: %q", name, line)
+		}
+		at = i
+	}
+
+	// "You are here" is what makes the line a map rather than a list.
+	if want := "[" + strings.ToLower(paneName(paneSessions)) + "]"; !strings.Contains(line, want) {
+		t.Errorf("drill path does not mark the active pane with %q: %q", want, line)
+	}
+}
+
+// `P`, `C`, `u` and `$` are advertised once, in the jump section. They used to
+// appear in globalKeys AND be repeated inside the pane groups, so the overlay
+// carried two copies of each that could disagree.
+func TestHelpPaneKeys_DoNotRepeatTheJumpKeys(t *testing.T) {
+	jump := map[string]bool{}
+	for _, jt := range jumpTargets {
+		jump[jt.key] = true
+	}
+	for p := paneNamespaces; p <= lastPaneID; p++ {
+		for _, kb := range paneKeys[p].bindings {
+			if jump[kb.keys] {
+				t.Errorf("paneKeys[%v] repeats the jump key %q (%q); the jump "+
+					"section is where it belongs", p, kb.keys, kb.desc)
+			}
+		}
+	}
+}
+
+// `a` and `w` are live only while the drawer is open, so listing them beside
+// the keys that work everywhere taught a binding that mostly does nothing.
+func TestHelpBody_SpendDrawerKeysAreTheirOwnSection(t *testing.T) {
+	body := helpBodyLines(paneSessions, helpWide)
+	if !strings.Contains(body, "INSIDE THE SPEND DRAWER") {
+		t.Fatalf("drawer-only keys have no section of their own:\n%s", body)
+	}
+	for _, k := range []string{"a", "w"} {
+		for _, kb := range anywhereKeys.bindings {
+			if kb.keys == k {
+				t.Errorf("anywhereKeys claims %q (%q), which only works while the "+
+					"spend drawer is open", k, kb.desc)
+			}
+		}
+	}
+}
+
+// Prose in the key column was how the old overlay smuggled a caveat into a key
+// table: a binding with keys:"" and a sentence for a description. Notes now
+// belong to a group, so no binding needs an empty key.
+func TestHelpBindings_NeverHaveAnEmptyKeyColumn(t *testing.T) {
+	for _, g := range allHelpGroups() {
+		for _, kb := range g.bindings {
+			if strings.TrimSpace(kb.keys) == "" {
+				t.Errorf("group %q carries a binding with no key: %q", g.title, kb.desc)
+			}
+		}
+	}
+}
+
+// Long prose must wrap to the terminal, not run off it. syncHelpViewport's own
+// doc comment claimed the body "re-wraps" on resize while helpBodyLines took no
+// width at all, so every purpose line was simply clipped at narrow widths.
+func TestHelpBody_WrapsProseToTheGivenWidth(t *testing.T) {
+	const width = 56
+	body := helpBodyLines(paneSessions, width)
+	for _, ln := range strings.Split(body, "\n") {
+		if w := lipgloss.Width(ln); w > width {
+			t.Errorf("line is %d columns, over the %d budget: %q", w, width, ln)
+		}
+	}
+}
