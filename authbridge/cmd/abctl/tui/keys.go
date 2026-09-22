@@ -770,11 +770,28 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		// the weaker of the two (it only fit by borrowing the "Plugin" in "plugin
 		// catalog") and `C` for Catalog is a better key than it gave up.
 		//
-		// The allowlist is EXACTLY the panes `u` opens Usage from, deliberately:
-		// two top-level surfaces reached from the same three places is a rule an
-		// operator can hold, whereas two overlapping sets is a lookup. It also
-		// keeps the pipeline out of the nested-overlay cases (opened from Usage or
-		// from the catalog) where the pane to return to is ambiguous.
+		// The allowlist is the same three panes `u` opens Usage from, deliberately:
+		// two top-level surfaces reached from the same places is a rule an operator
+		// can hold, whereas two overlapping sets is a lookup. It also keeps the
+		// pipeline out of the nested-overlay cases (opened from Usage or from the
+		// catalog) where the pane to return to is ambiguous.
+		//
+		// The panes match; the CONDITIONS do not, and the difference is deliberate.
+		// `u` additionally requires a selected session on Events/Detail, because its
+		// charts are scoped to that session and there is nothing to chart without
+		// one. The pipeline is the proxy's plugin chain — the same on every session —
+		// so it needs no session and asks for none.
+		//
+		// DO NOT MOVE THIS UP BESIDE `u` ON THE STRENGTH OF THAT SYMMETRY. `u`, `$`,
+		// `c` and `?` sit ABOVE the modal blocks and each carries explicit
+		// `!m.filtering && !m.colPicker && m.editState.phase == editPhaseDone` guards
+		// to compensate. `P` and `C` carry none, and do not need to, because they sit
+		// BELOW all three: the column picker ends in `default: return nil`, the filter
+		// block returns unconditionally after feeding the input, and an in-flight edit
+		// returns via handleEditKey. The safety here is POSITIONAL. Hoisting either
+		// key above those blocks without adopting the guards would make `P` change
+		// panes under a modal popup and swallow a `P` someone was typing into the
+		// filter — silently, since nothing in the type system notices.
 		if m.client == nil {
 			return nil
 		}

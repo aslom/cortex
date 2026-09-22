@@ -15,26 +15,75 @@ import (
 // the Cmd they return is never run here, so no request is ever made.
 func deadClient() *apiclient.Client { return apiclient.New("http://127.0.0.1:1") }
 
-// `P` opens the pipeline from exactly the panes `u` opens Usage from. Matching
-// that allowlist is the point: both are top-level surfaces reached from wherever
-// the operator happens to be standing in the session views, and picking a
-// different set for each would make "which keys work here" unanswerable.
+// `P` opens the pipeline from the same panes `u` opens Usage from. Matching that
+// allowlist is the point: both are top-level surfaces reached from wherever the
+// operator happens to be standing in the session views, and picking a different
+// set for each would make "which keys work here" unanswerable.
+//
+// SO THE TEST DRIVES `u` TOO, on the same panes and in the same loop. Asserting
+// only `P` against a hardcoded list would leave the parity claim — in this test's
+// own name — unenforced: `u`'s allowlist could move and this would stay green.
+//
+// Note the conditions are NOT identical, only the panes: `u` needs a selected
+// session on Events/Detail (its charts are session-scoped), which is why
+// selectedSess is set below. The pipeline is the same on every session and asks
+// for no session at all. See the `P` handler for why that asymmetry is correct.
 func TestPipelineKey_OpensFromTheSamePanesAsUsage(t *testing.T) {
-	for _, from := range []paneID{paneSessions, paneEvents, paneDetail} {
-		m := &model{
-			pane:               from,
-			client:             deadClient(),
-			previousPane:       paneNone,
-			pipelineReturnPane: paneNone,
-		}
-		m.handleKey(keyRune('P'))
+	panes := []paneID{paneSessions, paneEvents, paneDetail}
 
+	for _, from := range panes {
+		newModel := func() *model {
+			return &model{
+				pane:               from,
+				client:             deadClient(),
+				selectedSess:       "s1", // `u` requires one on Events/Detail.
+				previousPane:       paneNone,
+				pipelineReturnPane: paneNone,
+			}
+		}
+
+		m := newModel()
+		m.handleKey(keyRune('P'))
 		if m.pane != panePipeline {
 			t.Errorf("`P` from pane %v opened pane %v, want panePipeline", from, m.pane)
 		}
 		if m.pipelineReturnPane != from {
 			t.Errorf("`P` from pane %v recorded return pane %v, want %v",
 				from, m.pipelineReturnPane, from)
+		}
+
+		// The other half of the parity claim: if `u` stops working here, the two
+		// allowlists have diverged and the comment on the `P` handler is stale.
+		u := newModel()
+		u.handleKey(keyRune('u'))
+		if u.pane != paneUsage {
+			t.Errorf("`u` from pane %v opened pane %v, want paneUsage — `P` and `u` "+
+				"no longer share an allowlist, so the claim on the P handler is stale",
+				from, u.pane)
+		}
+	}
+
+	// And the exclusions, which the handler's comment claims deliberately: the
+	// panes that are themselves key-opened surfaces. `P` from any of them would
+	// have to pick a pane to return to, and there is no good answer — so it does
+	// nothing, and that must stay true rather than becoming an accident.
+	for _, from := range []paneID{paneUsage, paneCatalog, panePluginDetail, panePipeline} {
+		m := &model{
+			pane:               from,
+			client:             deadClient(),
+			selectedSess:       "s1",
+			previousPane:       paneNone,
+			pipelineReturnPane: paneNone,
+		}
+		m.handleKey(keyRune('P'))
+
+		if m.pane != from {
+			t.Errorf("`P` on pane %v changed the pane to %v; it is outside the "+
+				"allowlist and must be a no-op", from, m.pane)
+		}
+		if m.pipelineReturnPane != paneNone {
+			t.Errorf("`P` on pane %v recorded a return pane (%v) without opening "+
+				"anything", from, m.pipelineReturnPane)
 		}
 	}
 }
@@ -288,5 +337,46 @@ func TestGlobalKeys_AdvertiseNoKeyTwice(t *testing.T) {
 				kb.keys, prev, kb.desc)
 		}
 		seen[kb.keys] = kb.desc
+	}
+}
+
+// The two REMAPPED keys must mean the same thing wherever they are documented. A
+// pane group is free to repeat a global key (the sessions group repeats `P`,
+// which is useful on the pane that wants it most), but not to redefine it — a
+// `{"C", "clear filter"}` added to some pane group would send a reader of that
+// group to the wrong surface, and the overlay renders both groups together.
+//
+// SCOPED TO `P` AND `C` ON PURPOSE. A blanket globalKeys x paneKeys uniqueness
+// check is not viable: measured, it flags seven overlaps today and six are the
+// legitimate modal case — `↑↓ / jk` navigates a pane but scrolls the help
+// overlay while that is up, so the same key genuinely means two things. Such a
+// test would ship needing a six-entry exemption list, which encodes exemptions
+// rather than catching bugs. These two keys have exactly one meaning each, so
+// the narrow check needs no exemptions and covers the realistic regression.
+func TestRemappedKeys_MeanTheSameThingInEveryGroup(t *testing.T) {
+	want := map[string]string{"P": "pipeline", "C": "catalog"}
+
+	for _, pane := range otherPaneOrder {
+		for _, kb := range paneKeys[pane].bindings {
+			substr, watched := want[kb.keys]
+			if !watched {
+				continue
+			}
+			if !strings.Contains(strings.ToLower(kb.desc), substr) {
+				t.Errorf("paneKeys[%v] binds %q to %q, which is not the %s — "+
+					"the key means one thing and every group must say so",
+					pane, kb.keys, kb.desc, substr)
+			}
+		}
+	}
+
+	// And the global group itself, which is the definition the pane groups defer to.
+	for _, kb := range globalKeys.bindings {
+		if substr, watched := want[kb.keys]; watched {
+			if !strings.Contains(strings.ToLower(kb.desc), substr) {
+				t.Errorf("globalKeys binds %q to %q, want it to name the %s",
+					kb.keys, kb.desc, substr)
+			}
+		}
 	}
 }
