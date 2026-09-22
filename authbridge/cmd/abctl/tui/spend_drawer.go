@@ -591,9 +591,18 @@ func hasSeries(ranked []seriesKey, label string) bool {
 //
 // THE TIER COLUMN IS THE ONE THAT YIELDS, so the panel degrades to exactly the per-model
 // drawer that shipped before this feature: an addition gives way to the existing contract,
-// never the reverse. Measured from the parts — tierColumnWidth plus its gutter plus enough
-// for a model label and two figures — rather than chosen, so it moves with them.
-const spendDrawerTwoColumnMin = tierColumnWidth + 2 + 36
+// never the reverse. Measured from the parts rather than chosen, so it moves with them.
+//
+// EVERY PART NAMED, which it was not: this read `tierColumnWidth + 2 + 36` while its own doc
+// claimed "plus its gutter", and drawerColumnGutter was not in the sum — so at the threshold the
+// series column got 33 columns rather than the 36 intended. The literal 36 also predates the series
+// table: "enough for a model label and two figures" was a soft estimate when the figures had no
+// fixed widths, and now that they do the arithmetic can simply be stated. A label, the money column
+// and the request column, with their gutters, is 40.
+//
+// The leading 2 is paneView's indent, not a gutter; both are charged because the row carries both.
+const spendDrawerTwoColumnMin = tierColumnWidth + drawerColumnGutter + 2 +
+	drawerLabelWidth + len(stripGap) + drawerMoneyWidth + len(stripGap) + drawerReqWidth
 
 // tierColumnWidth is the left column's share. Fixed rather than proportional so the model
 // labels to its right do not reflow every time a tier figure changes width.
@@ -873,27 +882,34 @@ func drawerFigures(r drawerRow) []stripFigure {
 		saved = plainFigure("saved " + formatUSDTotalMicros(r.counts.AvoidedMicros))
 	}
 
-	// THE SLOTS, IN ORDER, each at its own column width. A slot with nothing in it still occupies
-	// its column when a later slot is filled — that is what keeps a tokens figure out of the
-	// request column on an MCP-only row — and trailing empties are trimmed so a short row does not
-	// pay width for columns nobody filled.
-	//
-	// The note is LAST and takes no column: it is prose of whatever length the caveats come to, so
-	// nothing is aligned against it and it is the first thing fitStripFigures gives up.
-	slots := []stripFigure{
+	// THE COLUMNAR SLOTS, IN ORDER, each at its own width. A slot with nothing in it still occupies
+	// its column when a later COLUMN is filled — that is what keeps a tokens figure out of the
+	// request column on an MCP-only row.
+	cols := []stripFigure{
 		money.inColumn(drawerMoneyWidth, false),
 		req.inColumn(drawerReqWidth, false),
 		tokens.inColumn(drawerTokensWidth, false),
 		saved.inColumn(drawerSavedWidth, false),
-		note,
 	}
+	// TRIMMED AGAINST THE LAST FILLED COLUMN, NOT THE LAST FILLED SLOT, and the note is the reason
+	// the distinction matters. Nothing is aligned against the note — it is prose of whatever length
+	// the caveats come to — so an empty column held open in FRONT of it buys no alignment and costs
+	// its width plus a gap. Measured with the note counted as a slot: a row with caveats and no
+	// saving held drawerSavedWidth open for nothing, so the note first fitted at 91 columns where 77
+	// would do, and was dropped on every terminal between.
 	last := -1
-	for i, f := range slots {
+	for i, f := range cols {
 		if f.full != "" {
 			last = i
 		}
 	}
-	return append(figs, slots[:last+1]...)
+	figs = append(figs, cols[:last+1]...)
+	// The note goes on the end and takes no column, so it is the first thing fitStripFigures gives
+	// up — which is right, since it is the explanation and every figure before it is the fact.
+	if note.full != "" {
+		figs = append(figs, note)
+	}
+	return figs
 }
 
 // gapOf is a row's unpriced count: priceable minus priced, floored at zero.

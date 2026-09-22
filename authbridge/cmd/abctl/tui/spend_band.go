@@ -218,16 +218,27 @@ func renderSpendBand(s spendSummary, width int) []string {
 	return []string{joinBandCells(spendBandCells(s, width), nil)}
 }
 
-// renderSpendBandStyled is renderSpendBand with each label muted and each figure left bright.
+// renderSpendBandStyled is renderSpendBand with each label muted and each figure left bright, plus
+// whether anything survived the fit.
 //
 // WIDTH-IDENTICAL TO THE PLAIN FORM, which is the property that lets the fit be computed on one and
 // drawn from the other: lipgloss.Width ignores escape sequences, and the mute wraps the label
 // without changing its text. TestRenderSpendBand_StylingCostsNoColumns holds the line.
-func renderSpendBandStyled(s spendSummary, width int) []string {
+//
+// IT RETURNS `drew` RATHER THAN LEAVING THE CALLER TO TEST THE STRING, and that is the whole reason
+// for the second return value. paneView needs to know whether a figure reached the screen — the
+// drawer must not open under an empty band — and it cannot ask the styled line, because an escape
+// sequence is not whitespace and a band with nothing in it is still a non-empty string. Reading it
+// off the cell list is exact: bandSpanCell always sets a label and a value, so a surviving cell is a
+// visible reading. The alternative, which this replaced, was rendering the band a SECOND time in
+// plain form and calling spendSummary() again for it — twice per frame on bubbletea's per-event
+// render path, with spendSummary walking all four poll chains each time.
+func renderSpendBandStyled(s spendSummary, width int) (lines []string, drew bool) {
+	cells := spendBandCells(s, width)
 	// Wrapped rather than passed directly: lipgloss's Render is variadic, and a variadic mute would
 	// let a caller pass several strings and get them joined by a rule this file does not own.
-	return []string{joinBandCells(spendBandCells(s, width),
-		func(s string) string { return styleMuted.Render(s) })}
+	return []string{joinBandCells(cells, func(s string) string { return styleMuted.Render(s) })},
+		len(cells) > 0
 }
 
 // joinBandCells lays surviving cells out on one line, separated by bandSeparator.

@@ -147,6 +147,55 @@ func sharePercent(line string) (int, bool) {
 	return n, true
 }
 
+// A TIER UNDER HALF A PERCENT SAYS "<1%", NEVER "0%".
+//
+// "0%" beside a non-zero figure is the one claim this panel refuses, arriving through the share
+// column instead of the money one. renderTierRows' own doc spells out the rule for the figure —
+// never $0.00, because that asserts the tier was FREE — and a share rounded down to nothing asserts
+// exactly the same thing about the same tier, one column to the left. Measured before the fix:
+// $0.20 of a $99.20 window rendered "input  0%  $0.20", which is self-contradicting on one row.
+//
+// "<1%" rather than a decimal place: a decimal would claim a precision the modelled mix does not
+// have, and humanizeDurationMs already established this spelling for the same situation ("<1ms" for
+// a duration too small to state at the panel's precision but too real to call zero).
+//
+// IT DOES NOT COUNT TOWARD THE 100, which is why this is a rendering rule and not an arithmetic one:
+// tierShares still floors to 0 and gives the remainder to the largest tier, so the stated shares
+// still sum to 100 — see TestRenderTierRows_SharesSumTo100. A "<1%" row is the disclosure that the
+// sum is carrying it.
+func TestRenderTierRows_ASubPercentTierIsNotZero(t *testing.T) {
+	c := usage.Counts{
+		Requests: 100, CostMicros: 99_200_000,
+		InputCostMicros: 200, CacheWriteCostMicros: 25_000,
+		CacheReadCostMicros: 56_000, OutputCostMicros: 18_000,
+	}
+	lines := renderTierRows(c, tierColumnWidth)
+	var input string
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "input") {
+			input = line
+		}
+	}
+	if input == "" {
+		t.Fatalf("no input row:\n%s", strings.Join(lines, "\n"))
+	}
+	// The premise: the tier really does hold money.
+	if !strings.Contains(input, "$0.20") {
+		t.Fatalf("the fixture no longer apportions $0.20 to input, so this asserts nothing: %q", input)
+	}
+	if strings.Contains(input, "0%") && !strings.Contains(input, "<1%") {
+		t.Errorf("input renders a 0%% share beside $0.20, which says the tier was free: %q", input)
+	}
+	if !strings.Contains(input, "<1%") {
+		t.Errorf("input = %q, want a \"<1%%\" share", input)
+	}
+	// And a tier that really is over 1% still states its number.
+	if !strings.Contains(strings.Join(lines, "\n"), "57%") {
+		t.Errorf("no row states a plain percentage, so the rule swallowed them all:\n%s",
+			strings.Join(lines, "\n"))
+	}
+}
+
 // A TIER THE MIX NEVER MENTIONED STATES NO SHARE, for the same reason it states no money.
 //
 // "0%" is a claim — this tier was free — where the absent row means "not known here". The zero case

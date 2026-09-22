@@ -140,13 +140,13 @@ func renderTierRows(c usage.Counts, width int) []string {
 			row = fmt.Sprintf("%-*s %s", tierLabelWidth, label, emptyCell)
 		case budget > 0:
 			row = fmt.Sprintf("%-*s %s %-*s %s", tierLabelWidth, label,
-				tierShareCell(shares[tier]),
+				tierShareCell(shares[tier], tiers[tier]),
 				budget, tierBar(tiers[tier], peak, budget),
 				tierMoneyCell(tiers[tier]))
 		default:
 			// The bar is gone and the two figures remain — see tierBarBudget.
 			row = fmt.Sprintf("%-*s %s %s", tierLabelWidth, label,
-				tierShareCell(shares[tier]), tierMoneyCell(tiers[tier]))
+				tierShareCell(shares[tier], tiers[tier]), tierMoneyCell(tiers[tier]))
 		}
 		out[i] = clipRow(row, width)
 	}
@@ -155,10 +155,27 @@ func renderTierRows(c usage.Counts, width int) []string {
 
 // tierShareCell is one tier's share of the window, right-aligned.
 //
+// "<1%" FOR A TIER THAT ROUNDS TO NOTHING BUT HOLDS SOMETHING. A 0% beside a non-zero figure is the
+// one claim this panel refuses — renderTierRows spells out the rule for the money column ("never
+// $0.00 ... which asserts the tier was FREE") and a share floored to zero asserts the same thing
+// about the same tier, one column to the left. Measured: $0.20 of a $99.20 window rendered
+// "input  0%  $0.20", which contradicts itself on one row.
+//
+// Callers pass a floored percentage, so this cannot tell "rounds to zero" from "is zero" on its own
+// — hence `micros`, which is the figure the row is about to print beside it. A tier absent from the
+// mix never reaches here at all: its row is the not-known cell, see renderTierRows.
+//
+// NOT A DECIMAL PLACE, which was the alternative. "0.2%" claims a precision the modelled mix does
+// not have and costs two more columns; humanizeDurationMs already settled this spelling for the same
+// situation, where "<1ms" says a duration is too small to state and too real to call zero.
+//
 // padLeft, not Fprintf("%*s"): fmt pads to a RUNE count and this package measures in display
 // columns — the rule footer.go records the cost of breaking. ASCII either way today, and the point
 // is that the whole panel obeys one vocabulary.
-func tierShareCell(pct int) string {
+func tierShareCell(pct int, micros int64) string {
+	if pct == 0 && micros > 0 {
+		return padLeft("<1%", tierPctWidth)
+	}
 	return padLeft(strconv.Itoa(pct)+"%", tierPctWidth)
 }
 

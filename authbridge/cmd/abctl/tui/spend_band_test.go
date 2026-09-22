@@ -818,7 +818,7 @@ func TestRenderSpendBand_StylingCostsNoColumns(t *testing.T) {
 
 	for w := 1; w <= 120; w++ {
 		plain := renderSpendBand(bandSummary(), w)
-		dressed := renderSpendBandStyled(bandSummary(), w)
+		dressed, drew := renderSpendBandStyled(bandSummary(), w)
 		if len(plain) != spendBandLines || len(dressed) != spendBandLines {
 			t.Fatalf("width %d: %d plain rows and %d styled, want %d of each",
 				w, len(plain), len(dressed), spendBandLines)
@@ -827,10 +827,19 @@ func TestRenderSpendBand_StylingCostsNoColumns(t *testing.T) {
 			t.Errorf("width %d: styled band is %d columns against the plain band's %d:\n%q",
 				w, got, want, dressed[0])
 		}
+		// AND `drew` AGREES WITH THE PLAIN LINE AT EVERY WIDTH. paneView gates the drawer on it, so
+		// a `drew` that disagreed would open the breakdown under an empty band — the state the
+		// styled string cannot be asked about, since an escape sequence is not whitespace.
+		if want := strings.TrimSpace(plain[0]) != ""; drew != want {
+			t.Errorf("width %d: drew = %v but the plain band is %q", w, drew, plain[0])
+		}
 	}
 	// Not vacuous: at a width that draws something, the styled form really does carry escapes.
-	if dressed := renderSpendBandStyled(bandSummary(), 200)[0]; dressed ==
-		renderSpendBand(bandSummary(), 200)[0] {
+	dressed, drew := renderSpendBandStyled(bandSummary(), 200)
+	if !drew {
+		t.Error("drew is false at width 200, so the agreement above was asserted on empty bands")
+	}
+	if dressed[0] == renderSpendBand(bandSummary(), 200)[0] {
 		t.Error("the styled band is byte-identical to the plain one, so nothing was styled")
 	}
 }

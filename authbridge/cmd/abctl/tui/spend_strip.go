@@ -157,6 +157,21 @@ type stripFigure struct {
 func plainFigure(s string) stripFigure { return stripFigure{full: s, compact: s} }
 
 // inColumn fixes f to a display width: left-aligned for a label, right-aligned for a figure.
+//
+// IT MAKES THE COMPACT FORM INERT FOR THIS FIGURE, and that is intended rather than overlooked.
+// Both forms pad to the same column, so whenever the full form already fits its column the compact
+// one saves nothing and fitStripFigures' compact pass cannot help: degradation for a columnar
+// figure is DROP-ONLY. Measured on a drawer row — six distinct renderings across widths 1 to 200,
+// none of them containing "568r" or a bare "137M".
+//
+// PADDING THE COMPACT FORM IS LOAD-BEARING, which is why the answer is not "skip the pad in compact
+// mode". The fitter runs per ROW against one shared width, and rows do not all reach the same
+// decision: a money slot holding "cost unavailable" is 16 columns in a 9-column column while "$9.43"
+// fits, so at some widths one row degrades and its neighbour does not. If compact forms rendered
+// unpadded, those two rows would then disagree about their column stride — silently misaligning the
+// table, which is the defect the columns exist to fix. A narrower compact column per figure would
+// preserve both, at the cost of a second width on every slot; it is not worth it for the band of
+// terminal widths it would serve, and the trade is recorded here rather than left to be rediscovered.
 func (f stripFigure) inColumn(width int, leftAlign bool) stripFigure {
 	f.col, f.leftAlign = width, leftAlign
 	return f
@@ -171,6 +186,19 @@ func (f stripFigure) inColumn(width int, leftAlign bool) stripFigure {
 func (f stripFigure) pad(s string) string {
 	if f.col <= 0 {
 		return s
+	}
+	// AN EMPTY FIGURE STILL OCCUPIES ITS COLUMN, and this case has to be spelled out because
+	// padLeft and padRight both return "" unchanged — `if s == "" || w >= width` — so neither will
+	// hold a column open. That guard suits the table cells they were written for and is exactly
+	// wrong here: an empty MIDDLE slot is the whole reason drawerFigures is positional, and
+	// collapsing it moves every column to its right.
+	//
+	// Measured before this: a row with a saving and no tokens rendered
+	// "model-b  $1.00  100 req      saved $0.50" against its neighbour's
+	// "model-a  $1.00  100 req  900k tokens  saved $0.50" — the saving eleven columns out of line,
+	// which is the defect the columns exist to prevent, surviving inside the fix for it.
+	if s == "" {
+		return strings.Repeat(" ", f.col)
 	}
 	if f.leftAlign {
 		return padRight(s, f.col)

@@ -1771,11 +1771,11 @@ func (m *model) paneView() string {
 			// mute the figures with the labels and flatten the contrast into uniform grey, so the
 			// mute moved to where a cell knows which half is which. See bandCell.renderMuting.
 			//
-			// `drew` is still read off the PLAIN form: it tests emptiness, and an escape sequence
-			// is not whitespace — a styled empty band is a non-empty string, so gating on it would
-			// open the drawer under a band with no figure in it.
-			band = renderSpendBandStyled(m.spendSummary(), m.width)
-			drew = strings.TrimSpace(strings.Join(renderSpendBand(m.spendSummary(), m.width), "")) != ""
+			// ONE CALL, because this is bubbletea's per-event render path and spendSummary walks
+			// all four poll chains. `drew` comes back from the renderer rather than being tested
+			// on the string it returns — see renderSpendBandStyled for why the styled form cannot
+			// answer that question.
+			band, drew = renderSpendBandStyled(m.spendSummary(), m.width)
 		}
 		for len(band) < spendBandLines {
 			band = append(band, "")

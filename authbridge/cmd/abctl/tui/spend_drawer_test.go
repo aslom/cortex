@@ -1630,6 +1630,48 @@ func TestDrawerFigures_RowsShareTheirColumns(t *testing.T) {
 	}
 }
 
+// AN EMPTY MIDDLE COLUMN HOLDS ITS PLACE, which is the whole reason drawerFigures is positional.
+//
+// A row can be missing a middle figure and carry a later one: tool-prune removes prompt tokens from
+// a request whose response could not be parsed, so a saving with no token count is a real row rather
+// than a constructed one. If its empty slot collapses, the saving moves left into the tokens column
+// and no longer lines up with the savings above it.
+//
+// FOUND AFTER THE COLUMNS SHIPPED, by measuring what a review comment about the note's width
+// actually recovered — 3 columns where 14 were expected. The cause was that padLeft and padRight
+// both return "" unchanged, so stripFigure.pad was holding no column open at all for an empty
+// figure; every earlier test filled every slot, so nothing saw it.
+func TestDrawerFigures_AnEmptyMiddleColumnHoldsItsPlace(t *testing.T) {
+	row := func(label string, tokens int64) string {
+		return fitStripFigures(" ", drawerFigures(drawerRow{
+			label: label,
+			counts: usage.Counts{
+				Requests: 100, Tokens: tokens, CostMicros: 1_000_000,
+				PricedRequests: 100, PriceableRequests: 100, AvoidedMicros: 500_000,
+			},
+		}), 140)
+	}
+	withTokens, without := row("model-a", 900_000), row("model-b", 0)
+
+	saved := "saved " + formatUSDTotalMicros(500_000)
+	at := func(t *testing.T, line string) int {
+		t.Helper()
+		i := strings.Index(line, saved)
+		if i < 0 {
+			t.Fatalf("row %q does not carry %q", line, saved)
+		}
+		return lipgloss.Width(line[:i])
+	}
+	if a, b := at(t, withTokens), at(t, without); a != b {
+		t.Errorf("the saving starts at column %d with a token count and %d without it — the empty "+
+			"tokens column collapsed instead of holding its place:\n%s\n%s", a, b, withTokens, without)
+	}
+	// Not vacuous: the two rows really do differ in whether the tokens column is filled.
+	if !strings.Contains(withTokens, "tokens") || strings.Contains(without, "tokens") {
+		t.Fatalf("the fixture no longer varies the tokens column:\n%s\n%s", withTokens, without)
+	}
+}
+
 // THE CAVEAT PROSE LEAVES THE MONEY COLUMN AND BECOMES THE ROW'S LAST FIGURE.
 //
 // "~$89.95 (3 inexact)" put a parenthesised sentence of variable length INSIDE a column every other
