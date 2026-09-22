@@ -763,11 +763,14 @@ Layered on top of all of them:
   2. **GO TO ANOTHER PANE** — the keys that leave, each naming the pane
      it opens and what is on it. Rendered per pane and only where the
      key actually works: all four (`u`, `P`, `C`, `$`) from the session
-     views, `C` alone on Usage, and on the two pickers a line saying
-     they open once you're connected rather than four dead keys;
+     views, `C` alone on Usage, and on the two pickers the heading kept
+     with a line saying they open once you're connected, rather than four
+     dead keys;
   3. **THE DRILL PATH** — `namespaces → pods → sessions → events → event
-     detail` on one line, with where you are in brackets, since that
-     spine is also what `Esc` walks back;
+     detail` on one line, since that spine is also what `Esc` walks back.
+     If you're on one of its five panes it's in brackets; the four
+     key-opened panes are not steps on it, so they get a line naming that
+     and naming where `Esc` returns them;
   4. **ANYWHERE**, then **INSIDE THE SPEND DRAWER** (`a`/`w` are live
      only while it is open, so they are not mixed in with the keys that
      always work — and the section is omitted on the panes where `$`

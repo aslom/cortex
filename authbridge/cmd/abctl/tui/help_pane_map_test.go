@@ -137,16 +137,29 @@ func TestHelpBody_JumpSectionMatchesTheKeysThatActuallyWork(t *testing.T) {
 
 // The pickers run before a connection exists, so none of the jump keys work
 // there. Saying nothing would read as "this pane has no way out"; the overlay
-// says why instead.
+// keeps the section and explains instead.
+//
+// THE TITLE MUST STAY AND THE KEYS MUST GO — asserted as two separate things,
+// because the section went through both failure modes. Omitting the title left the
+// explanation reading as a trailing row of the pane block above it; listing the
+// keys advertised four that do nothing.
 func TestHelpBody_PickerPanesExplainWhyThereIsNoJumpSection(t *testing.T) {
 	for _, p := range []paneID{paneNamespaces, panePods} {
 		body := helpBodyLines(p, helpWide)
-		if strings.Contains(body, jumpSectionTitle) {
-			t.Errorf("pane %v renders %q, but no jump key works there",
+		if !strings.Contains(body, jumpSectionTitle) {
+			t.Errorf("pane %v drops the %q heading, so its explanation has no owner",
 				p, jumpSectionTitle)
 		}
 		if !strings.Contains(body, "connected") {
 			t.Errorf("pane %v neither offers the jump keys nor explains why:\n%s", p, body)
+		}
+		// No key rows under it: the section names the panes in prose only.
+		head := body[strings.Index(body, jumpSectionTitle):]
+		for _, jt := range jumpTargets {
+			row := jt.key + "  " + jt.name()
+			if strings.Contains(head, row) {
+				t.Errorf("pane %v lists the jump row %q, where the key does nothing", p, row)
+			}
 		}
 	}
 }
@@ -192,6 +205,42 @@ func TestHelpBody_DrillPathIsInOrder(t *testing.T) {
 	// "You are here" is what makes the line a map rather than a list.
 	if want := "[" + strings.ToLower(paneName(paneSessions)) + "]"; !strings.Contains(line, want) {
 		t.Errorf("drill path does not mark the active pane with %q: %q", want, line)
+	}
+}
+
+// EVERY pane must be located, not just the five on the spine. Asserting the marker
+// on paneSessions alone left four panes — usage, pipeline, plugin detail and the
+// catalog — rendering a bare list with nothing saying the reader was off the path
+// or where esc would return them.
+func TestHelpBody_DrillPathLocatesEveryPane(t *testing.T) {
+	spine := map[paneID]bool{}
+	for _, p := range drillPath {
+		spine[p] = true
+	}
+
+	for p := paneNamespaces; p <= lastPaneID; p++ {
+		body := helpBodyLines(p, helpWide)
+		section := body[strings.Index(body, drillSectionTitle):]
+		if end := strings.Index(section, "\n\n"); end > 0 {
+			section = section[:end]
+		}
+
+		if spine[p] {
+			if want := "[" + strings.ToLower(paneName(p)) + "]"; !strings.Contains(section, want) {
+				t.Errorf("pane %v is on the spine but unmarked (want %q):\n%s", p, want, section)
+			}
+			continue
+		}
+		// Off the spine: no position to bracket, so it must be named in prose
+		// along with where esc goes.
+		if !strings.Contains(section, strings.ToLower(paneName(p))) {
+			t.Errorf("pane %v is off the spine and the drill path never names it:\n%s",
+				p, section)
+		}
+		if !strings.Contains(section, "esc") {
+			t.Errorf("pane %v is off the spine and nothing says where esc returns it:\n%s",
+				p, section)
+		}
 	}
 }
 
@@ -246,12 +295,21 @@ func TestHelpBindings_NeverHaveAnEmptyKeyColumn(t *testing.T) {
 // Long prose must wrap to the terminal, not run off it. syncHelpViewport's own
 // doc comment claimed the body "re-wraps" on resize while helpBodyLines took no
 // width at all, so every purpose line was simply clipped at narrow widths.
+// EVERY PANE AT EVERY INTERESTING WIDTH, because one pane at one width is the
+// combination where this happened to hold: the first version checked only
+// paneSessions at 56 and passed while the usage pane's enum-list bindings overran
+// by up to 15 columns on anything below 61. The widths bracket the wrap floor
+// (helpMinProseWidth), the point where the longest enum stops fitting, and a
+// roomy terminal.
 func TestHelpBody_WrapsProseToTheGivenWidth(t *testing.T) {
-	const width = 56
-	body := helpBodyLines(paneSessions, width)
-	for _, ln := range strings.Split(body, "\n") {
-		if w := lipgloss.Width(ln); w > width {
-			t.Errorf("line is %d columns, over the %d budget: %q", w, width, ln)
+	for _, width := range []int{40, 41, 48, 50, 56, 61, 80, 120} {
+		for p := paneNamespaces; p <= lastPaneID; p++ {
+			for _, ln := range strings.Split(helpBodyLines(p, width), "\n") {
+				if w := lipgloss.Width(ln); w > width {
+					t.Errorf("pane %v at width %d: line is %d columns, over budget: %q",
+						p, width, w, ln)
+				}
+			}
 		}
 	}
 }

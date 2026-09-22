@@ -340,10 +340,23 @@ func paneName(p paneID) string {
 	return strings.TrimSuffix(paneKeys[p].title, thisPaneSuffix)
 }
 
-// wrapWords breaks s into lines of at most width display columns, splitting on
-// spaces only. Words longer than width are left over-long rather than broken: the
-// only such words here are paths and URLs, and a broken path is unusable while a
-// clipped one is still recognizable.
+// wrapWords breaks s into lines of at most width display columns, on spaces
+// first and then — for a single word still too wide — on `/`.
+//
+// THE SLASH PASS IS NOT FOR PATHS. An earlier version split on spaces only and
+// justified it by claiming the only over-long words here were paths and URLs,
+// which was wrong: the words that actually overran are the enum lists in the usage
+// pane's own bindings — "(tokens/requests/errors/latency/cost)" at 37 columns and
+// "(none/status/method/plugin/host;" at 31. Under everyPaneTitle the description
+// column starts at 18, so both overran on any terminal below 61 columns and the
+// viewport clipped them: 53 lines across the nine panes at widths 40/41/48, and a
+// 50-column reader saw "(tokens/requests/erro". That is the exact defect this
+// rewrite exists to remove, reintroduced one layer down.
+//
+// An enum list reads perfectly well broken after a slash, which is why the original
+// objection does not apply to the real offenders. A path broken the same way reads
+// worse, but only ever when it genuinely does not fit — and a wrapped path still
+// shows every character, where a clipped one does not.
 func wrapWords(s string, width int) []string {
 	if width < 1 {
 		return []string{s}
@@ -352,24 +365,63 @@ func wrapWords(s string, width int) []string {
 		lines []string
 		cur   string
 	)
+	flush := func() {
+		if cur != "" {
+			lines = append(lines, cur)
+			cur = ""
+		}
+	}
 	for _, word := range strings.Fields(s) {
+		if lipgloss.Width(word) > width {
+			flush()
+			lines = append(lines, splitOnSlashes(word, width)...)
+			continue
+		}
 		switch {
 		case cur == "":
 			cur = word
 		case lipgloss.Width(cur)+1+lipgloss.Width(word) <= width:
 			cur += " " + word
 		default:
-			lines = append(lines, cur)
+			flush()
 			cur = word
 		}
 	}
-	if cur != "" {
-		lines = append(lines, cur)
-	}
+	flush()
 	if len(lines) == 0 {
 		return []string{""}
 	}
 	return lines
+}
+
+// splitOnSlashes packs word into lines of at most width columns, breaking only
+// after `/` and joining the pieces with NO separator — the fragments are parts of
+// one token, so the space wrapWords puts between words would invent one the reader
+// would take for real ("(tokens/ requests/").
+//
+// A piece with no slash left to break on comes back over-long rather than cut
+// mid-character. Nothing in the overlay hits that today; if something does the line
+// is too wide instead of silently truncated, which the wrap test catches.
+func splitOnSlashes(word string, width int) []string {
+	var (
+		out []string
+		cur string
+	)
+	for _, piece := range strings.SplitAfter(word, "/") {
+		switch {
+		case cur == "":
+			cur = piece
+		case lipgloss.Width(cur)+lipgloss.Width(piece) <= width:
+			cur += piece
+		default:
+			out = append(out, cur)
+			cur = piece
+		}
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
 }
 
 // proseBlock renders prefix followed by text, wrapped to width with a hanging
@@ -470,16 +522,25 @@ func renderKeyGroup(g keyGroup, emphasize bool, width, indent int) string {
 }
 
 // renderJumpSection renders the keys that leave the pane the reader is on, or —
-// when none of them work there — one line saying why.
+// when none of them work there — the section's title over one line saying why.
 //
 // THE "WHY" LINE IS NOT DECORATION. On the two picker panes every jump key is
 // inert, and an overlay that simply omitted the section would read as "there is
 // nothing else to look at" on the very pane a new reader opens first.
+//
+// IT KEEPS THE TITLE, though, which it did not at first: the bare sentence sat at
+// the same 2-column indent and muted style as everything else and read as a
+// trailing row of the pane block above it rather than as the answer to "where can I
+// go". Carried as the group's purpose, so the section holds its place in the
+// overlay's shape on every pane while listing no key that does nothing.
 func renderJumpSection(pane paneID, width int) string {
 	jumps := jumpsFrom(pane)
 	if len(jumps) == 0 {
-		return proseBlock("  ", "usage, pipeline and the plugin catalog open once you are "+
-			"connected to an agent.", width, styleHint)
+		return renderKeyGroup(keyGroup{
+			title: jumpSectionTitle,
+			purpose: "usage, pipeline and the plugin catalog open once you are connected " +
+				"to an agent.",
+		}, false, width, 0)
 	}
 
 	// The pane each key opens goes in the KEY column, beside the key, so the four
@@ -499,17 +560,33 @@ func renderJumpSection(pane paneID, width int) string {
 // renderDrillPath renders the spine as one line, with the pane the reader is on
 // marked. The marker is what makes it a map rather than a list: "you are here"
 // plus "esc goes left" answers the two questions a lost reader has.
+//
+// FOUR PANES ARE NOT ON THE SPINE — usage, pipeline, plugin detail and the catalog
+// — and they used to get the bare line with no marker at all, which is the one case
+// where a reader most needs telling where they are. They are key-opened surfaces
+// rather than steps, so there is no position to bracket; they get a sentence naming
+// that and naming where esc returns them, which is the fact the missing marker was
+// standing in for.
 func renderDrillPath(pane paneID, width int) string {
 	names := make([]string, 0, len(drillPath))
+	onSpine := false
 	for _, p := range drillPath {
 		name := strings.ToLower(paneName(p))
 		if p == pane {
 			name = "[" + name + "]"
+			onSpine = true
 		}
 		names = append(names, name)
 	}
-	return styleHint.Render(drillSectionTitle) + "\n" +
+
+	out := styleHint.Render(drillSectionTitle) + "\n" +
 		proseBlock("  ", strings.Join(names, " → "), width, styleHint)
+	if !onSpine {
+		out += "\n" + proseBlock("  ", "you are on "+strings.ToLower(paneName(pane))+
+			", which sits off this path — esc returns you to the pane that opened it.",
+			width, styleHint)
+	}
+	return out
 }
 
 // helpBodyLines builds the scrollable body of the key-help overlay, wrapped to

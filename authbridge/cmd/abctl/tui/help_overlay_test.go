@@ -100,14 +100,16 @@ func TestHelpOverlayRendersAndEmphasizesCurrentPane(t *testing.T) {
 	if !strings.Contains(view, paneKeys[paneNamespaces].purpose) {
 		t.Fatalf("overlay should say what the active pane shows:\n%s", view)
 	}
-	// `C` is the binding this overlay exists to make discoverable. On the picker
-	// it does not work yet, so the overlay names the catalog and says when it opens
-	// rather than advertising a dead key.
+	// `C` is the binding this overlay exists to make discoverable. On the picker it
+	// does not work yet, so the section keeps its heading and names the catalog in
+	// prose rather than advertising a dead key — see
+	// TestHelpBody_PickerPanesExplainWhyThereIsNoJumpSection for both halves.
 	if !strings.Contains(view, "plugin catalog") {
 		t.Fatalf("overlay should name the plugin catalog:\n%s", view)
 	}
-	if strings.Contains(view, jumpSectionTitle) {
-		t.Fatalf("no jump key works on the picker; overlay should not offer them:\n%s", view)
+	if !strings.Contains(view, jumpSectionTitle) {
+		t.Fatalf("overlay should keep the %q heading on the picker:\n%s",
+			jumpSectionTitle, view)
 	}
 	// Other panes are documented, not omitted. That they are documented IN FULL is
 	// asserted on the body instead (see
