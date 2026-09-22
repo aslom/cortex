@@ -1,14 +1,19 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"strings"
-	"testing"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
 )
 
 // drawerSnap is four series whose cost ORDER differs from their request order, which is the
@@ -99,7 +104,7 @@ func TestSpendDrawerRows_TheOtherBandStaysLastEvenWhenItOutweighsANamedRow(t *te
 // moneyFigure exists to prevent — and here the window is fully priced except for that one
 // series, so the two answers differ.
 func TestRenderSpendDrawer_EachRowCarriesItsOwnCoverage(t *testing.T) {
-	lines := renderSpendDrawer(drawerSnap(), usage.GroupModel, "1h", 200)
+	lines := renderSpendDrawer(drawerSnap(), nil, usage.GroupModel, "1h", 200)
 	joined := strings.Join(lines, "\n")
 
 	// gpt-4o's gap folds into the band, which is where the caveat must appear.
@@ -116,7 +121,7 @@ func TestRenderSpendDrawer_EachRowCarriesItsOwnCoverage(t *testing.T) {
 
 // The saving rides on the row that earned it, wearing its marker, and never joins the cost.
 func TestRenderSpendDrawer_ShowsAPerSeriesSavingWithoutAddingItToCost(t *testing.T) {
-	lines := renderSpendDrawer(drawerSnap(), usage.GroupModel, "1h", 200)
+	lines := renderSpendDrawer(drawerSnap(), nil, usage.GroupModel, "1h", 200)
 	var opus string
 	for _, l := range lines {
 		if strings.Contains(l, "claude-opus-5") {
@@ -135,9 +140,7 @@ func TestRenderSpendDrawer_ShowsAPerSeriesSavingWithoutAddingItToCost(t *testing
 		t.Errorf("row %q is missing the saving or the word that identifies it", opus)
 	}
 	// NO MARKER *ON THIS FIXTURE*, which has IncompleteRequests == 0 — not "no marker ever on this
-	// panel". The cost figure's marker is conditional and is still emitted; see the sibling test
-	// below, which exists because the sentence this assertion invites is the one that was wrong in
-	// inexactMarker's own doc.
+	// panel". The cost figure's marker is conditional and is still emitted.
 	if strings.Contains(opus, inexactMarker) {
 		t.Errorf("row %q carries %q with nothing inexact behind it", opus, inexactMarker)
 	}
@@ -153,50 +156,11 @@ func TestRenderSpendDrawer_ShowsAPerSeriesSavingWithoutAddingItToCost(t *testing
 	}
 }
 
-// A per-model COST figure KEEPS its inexact marker, because that marker is conditional.
-//
-// THE SIBLING OF THE ASSERTION ABOVE, and the reason both exist. Dropping the tier rows' marker
-// and the saved figure's is easy to over-remember as "the drawer no longer marks anything" — which
-// is exactly what inexactMarker's doc claimed until this test was written, while the code had gone
-// on emitting it here the whole time. The rule is that an unconditional caveat moves to a heading
-// and a conditional one rides the figure; IncompleteRequests is per-row, so it rides.
-//
-// Asserted through drawerFigures rather than the rendered panel, because the caveat clause is what
-// distinguishes this from a coverage note and fitStripFigures may drop it at a narrow width.
-func TestDrawerFigures_APerModelCostKeepsItsConditionalMarker(t *testing.T) {
-	figures := func(incomplete int64) string {
-		figs := drawerFigures(drawerRow{
-			label: "claude-opus-5",
-			counts: usage.Counts{CostMicros: 1_060_100, PricedRequests: 11,
-				PriceableRequests: 11, IncompleteRequests: incomplete},
-		})
-		var joined string
-		for _, f := range figs {
-			joined += f.full + " "
-		}
-		return joined
-	}
-
-	marked := figures(3)
-	if !strings.Contains(marked, inexactMarker+"$1.06") {
-		t.Errorf("3 inexact requests behind the figure and it rendered %q — the conditional "+
-			"marker was dropped with the unconditional ones", marked)
-	}
-	// And the prose caveat that says how many, so the glyph is not the only disclosure.
-	if !strings.Contains(marked, "3 inexact") {
-		t.Errorf("the count behind the marker is missing: %q", marked)
-	}
-	// The control, so this cannot pass by marking everything.
-	if clean := figures(0); strings.Contains(clean, inexactMarker) {
-		t.Errorf("nothing inexact behind the figure and it still rendered %q", clean)
-	}
-}
-
 // The hint line names both keys and says which axis is current, because it is the only place
 // either is written down. A drawer whose controls are undiscoverable is a drawer nobody
 // changes the axis of.
 func TestRenderSpendDrawer_HintLineNamesTheKeysAndTheCurrentAxis(t *testing.T) {
-	lines := renderSpendDrawer(drawerSnap(), usage.GroupEndpoint, "6h", 200)
+	lines := renderSpendDrawer(drawerSnap(), nil, usage.GroupEndpoint, "6h", 200)
 	hint := lines[len(lines)-1]
 	// "[a]", not "[g]": g is globally "go to top" and the drawer stays open alongside the table,
 	// so it must not shadow that motion. See cycleSpendAxis.
@@ -215,19 +179,53 @@ func TestRenderSpendDrawer_HintLineNamesTheKeysAndTheCurrentAxis(t *testing.T) {
 	}
 }
 
-// The zero value of the state must be what the strip requested before the drawer existed.
+// The zero value of the state must be the live hour and the model axis — the first entry of
+// each cycle, and the span a reader opening the drawer is most likely to want.
 //
-// windowStep is an offset rather than an index precisely because of this: spendWindow sits in
-// the MIDDLE of an ascending span slice, so a bare index of zero would have moved the
-// strip's own poll to 15m — which is what the first version did, under a comment claiming it
-// could not.
-func TestSpendState_ZeroValueRequestsThePreDrawerDefaults(t *testing.T) {
+// THE OFFSET IS GONE, and this test is why it existed. windowStep used to be an offset from a
+// default index purely because the old slice had 1h in the MIDDLE: a bare index of zero
+// pointed at 15m, so a freshly constructed state would have polled a span nobody asked for —
+// which is what the first version did, under a comment claiming it could not. With the band's
+// four spans in ascending order the hour is first, so zero is already right and the offset has
+// nothing left to correct.
+func TestSpendState_ZeroValueRequestsTheLiveHour(t *testing.T) {
 	var s spendState
-	if got := s.window(); got != spendWindow {
-		t.Errorf("window() = %v on a zero-value state, want %v", got, spendWindow)
+	if got, want := s.window(), spendSpanDefs[spanHour].window; got != want {
+		t.Errorf("window() = %q on a zero-value state, want %q", got, want)
 	}
 	if got := s.axis(); got != usage.GroupModel {
 		t.Errorf("axis() = %q on a zero-value state, want %q", got, usage.GroupModel)
+	}
+	// A ring span asks for a single bucket; a symbolic one omits the resolution entirely.
+	if got := s.windowResolution(); got != spendResolution {
+		t.Errorf("windowResolution() = %v for the hour, want %v", got, spendResolution)
+	}
+}
+
+// `w` REACHES EXACTLY THE BAND'S FOUR SPANS, in the band's order.
+//
+// The cycle used to be {15m, 1h, 6h} — ring diagnostics, none of them a span a budget is read
+// against, and it could not reach the day at all. Asserted against spendSpanDefs rather than
+// against four literals, so the two cannot drift: a span added to the band is a span `w` must
+// be able to point the breakdown at.
+func TestSpendDrawerWindows_AreExactlyTheBandsSpans(t *testing.T) {
+	if len(spendDrawerWindows) != int(numSpendSpans) {
+		t.Fatalf("w cycles %d windows but the band has %d spans", len(spendDrawerWindows), numSpendSpans)
+	}
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if got, want := spendDrawerWindows[span], spendSpanDefs[span].window; got != want {
+			t.Errorf("cycle position %d is %q, want %q — `w` must reach the band's spans in the "+
+				"band's order", span, got, want)
+		}
+	}
+	// And the two spans the old cycle offered are gone: they are ring diagnostics, reachable
+	// through `abctl cost --window`, and six stops to reach four useful ones is a worse surface.
+	for _, gone := range []string{"15m", "6h"} {
+		for _, w := range spendDrawerWindows {
+			if w == gone {
+				t.Errorf("%q is still in the cycle", gone)
+			}
+		}
 	}
 }
 
@@ -246,9 +244,9 @@ func TestSpendDrawer_CyclesWrapThroughEveryDistinctStop(t *testing.T) {
 	// (see wrapIndex), and two laps is what proves it.
 	// The expected sequence WRITTEN OUT, not derived from wrapIndex — deriving it from the
 	// helper under test would make the assertion agree with whatever that helper does. It starts
-	// at the DEFAULT rather than at the slice's first entry, which is the point of windowStep
-	// being an offset: a fresh model requests the span the strip has always requested.
-	wantSpans := []time.Duration{spendWindow, 6 * time.Hour, 15 * time.Minute}
+	// at the FIRST entry now, which is the live hour: windowStep is a plain index since the
+	// cycle became the band's four ascending spans.
+	wantSpans := []string{"1h", usage.WindowToday, usage.Window7d, usage.WindowMonth}
 	m := &model{}
 	for lap := 0; lap < 2; lap++ {
 		for i, want := range wantSpans {
@@ -258,8 +256,8 @@ func TestSpendDrawer_CyclesWrapThroughEveryDistinctStop(t *testing.T) {
 			_ = m.cycleSpendWindow()
 		}
 	}
-	if got := m.spend.window(); got != spendWindow {
-		t.Errorf("after two full laps window() = %v, want back at %v", got, spendWindow)
+	if got, want := m.spend.window(), "1h"; got != want {
+		t.Errorf("after two full laps window() = %q, want back at %q", got, want)
 	}
 
 	for lap := 0; lap < 2; lap++ {
@@ -309,6 +307,45 @@ func TestToggleSpendDrawer_RefusesOnAShortTerminalAndExplains(t *testing.T) {
 	}
 }
 
+// AND `$` ON A PANE THAT CANNOT HOST THE DRAWER LEAVES IT ALONE, which is the mirror of the gate
+// esc already has.
+//
+// m.spend.expanded survives a move to the Usage pane, and the close branch tested that flag alone —
+// before the host check, so it never ran there. Pressing `$` on Usage therefore closed a drawer the
+// operator could not see, said nothing, and the breakdown was missing on the way back to Sessions.
+// The flag is left ALONE rather than closed-and-restored: it is a strip expansion and the strip is
+// global, so a pane that can host it should find it as the operator left it.
+//
+// DRIVEN THROUGH handleKey, not toggleSpendDrawer, because half of the defect is the routing:
+// paneUsage's own switch handles m/w/b/s and has no default return, so `$` falls past it into the
+// global drawer keys. A test calling the toggle directly cannot see that at all.
+func TestHandleKey_DollarOnTheUsagePaneKeepsAnOffScreenDrawer(t *testing.T) {
+	m := &model{width: 100, height: 40}
+	m.pane = paneSessions
+	m.handleKey(keyRune('$'))
+	if !m.spendDrawerVisible() {
+		t.Fatalf("the drawer did not open on the sessions pane (expanded=%v), so this test cannot "+
+			"say anything about what $ does to an open one", m.spend.expanded)
+	}
+
+	m.pane = paneUsage
+	m.flash = ""
+	m.handleKey(keyRune('$'))
+	if !m.spend.expanded {
+		t.Error("$ on the usage pane closed the drawer: it is off screen there, so the keypress " +
+			"took away something the operator could neither see nor have meant")
+	}
+	if m.flash == "" {
+		t.Error("$ on the usage pane did nothing and said nothing, which is the broken-key " +
+			"reading toggleSpendDrawer's own doc refuses")
+	}
+
+	m.pane = paneSessions
+	if !m.spendDrawerVisible() {
+		t.Error("the drawer did not come back on returning to a pane that hosts it")
+	}
+}
+
 // The drawer never draws without the strip above it. A breakdown under a bare title, with no
 // summary it is breaking down, is a pane — which is the one thing this is not.
 func TestSpendDrawerVisible_RequiresTheStrip(t *testing.T) {
@@ -331,7 +368,10 @@ func TestPaneView_DrawsTheDrawerUnderTheStripAndKeepsTheBody(t *testing.T) {
 	m := &model{width: 160, height: 40, endpoint: "http://x"}
 	m.pane = paneSessions
 	m.sessionsTbl = newSessionsTable()
-	m.spend.snap = drawerSnap()
+	// BOTH CHAINS, because they are separate now: the band renders from its own spans and
+	// the drawer from its own fold. Seeding only one was enough while they shared a poll.
+	m.spend.chains[spanHour].snap = drawerSnap()
+	m.spend.drawer.snap = drawerSnap()
 	m.spend.expanded = true
 	m.layout()
 
@@ -371,7 +411,7 @@ func TestPaneView_FitsTheTerminalWithTheDrawerOpen(t *testing.T) {
 	// THE SNAPSHOT VARIES TOO, and its absence is the case the first version could not see: it
 	// only ever set drawerSnap(), so "the renderer pads a nil snapshot" was covered while "the
 	// VIEW fills its reservation for one" was not — which reads as coverage. Before the first poll
-	// answers renderSpendStrip returns "" on purpose, and the reservations are height-gated, so
+	// answers renderSpendBand returns blank lines on purpose, and the reservations are height-gated, so
 	// nothing filled them and the footer sat six rows up.
 	for _, snap := range []*usage.Snapshot{drawerSnap(), nil} {
 		for _, h := range []int{spendDrawerMinHeight - 1, spendDrawerMinHeight, 40, 60} {
@@ -379,7 +419,7 @@ func TestPaneView_FitsTheTerminalWithTheDrawerOpen(t *testing.T) {
 				m := &model{width: 160, height: h, endpoint: "http://x"}
 				m.pane = paneSessions
 				m.sessionsTbl = newSessionsTable()
-				m.spend.snap = snap
+				m.spend.drawer.snap = snap
 				m.spend.expanded = open
 				m.layout()
 
@@ -409,9 +449,9 @@ func TestDrawerLabels_DescribeTheSnapshotNotTheNextRequest(t *testing.T) {
 	m := &model{width: 200, height: 60}
 	m.pane = paneSessions
 	// The snapshot in hand was grouped by model over an hour.
-	m.spend.snap = drawerSnap()
-	m.spend.snap.Window = "1h0m0s"
-	m.spend.snap.Group = usage.GroupModel
+	m.spend.drawer.snap = drawerSnap()
+	m.spend.drawer.snap.Window = "1h0m0s"
+	m.spend.drawer.snap.Group = usage.GroupModel
 
 	// The operator presses `a` and `w`: the NEXT poll will ask for endpoint over 6h.
 	m.spend.groupIdx, m.spend.windowStep = 1, 1
@@ -424,14 +464,19 @@ func TestDrawerLabels_DescribeTheSnapshotNotTheNextRequest(t *testing.T) {
 		t.Errorf("axis label = %q while the rows on screen are grouped by %q: the label leads the "+
 			"data by one poll", axis, usage.GroupModel)
 	}
-	if window != "1h" {
-		t.Errorf("window label = %q, want 1h — the span the answer covers, not the one queued",
-			window)
+	// THE BAND'S OWN LABEL, not "1h": the served window is "1h0m0s" and the band cell directly
+	// above this caption says LAST 1H, so anything else here is two spellings of one period in
+	// one region. This expectation used to be "1h", which is what spanLabelFor returned when it
+	// compared the served string to the requested one with == : the hour is the only span written
+	// as a duration, so it was the only one that missed its own label.
+	if window != spendSpanDefs[spanHour].label {
+		t.Errorf("window label = %q, want %q — the span the answer covers, spelled the way the "+
+			"band spells it", window, spendSpanDefs[spanHour].label)
 	}
 
 	// With no snapshot there is nothing to describe, so the requested values are the honest
 	// fallback: a blank axis would read as a rendering fault.
-	m.spend.snap = nil
+	m.spend.drawer.snap = nil
 	if axis, window := m.drawerLabels(); axis == "" || window == "" {
 		t.Errorf("labels = %q/%q with no snapshot; want the requested values rather than blanks",
 			axis, window)
@@ -446,9 +491,13 @@ func TestPaneView_TheHintLineLabelsTheSnapshotNotTheNextRequest(t *testing.T) {
 	m := &model{width: 200, height: 60, endpoint: "http://x"}
 	m.pane = paneSessions
 	m.sessionsTbl = newSessionsTable()
-	m.spend.snap = drawerSnap()
-	m.spend.snap.Window = "1h0m0s"
-	m.spend.snap.Group = usage.GroupModel
+	// The BAND's chain as well as the drawer's: renderSpendDrawer is gated on the band having
+	// drawn, because a headless breakdown would be a pane. They are separate polls now, so a
+	// fixture seeding one gets a screen with no drawer on it at all.
+	m.spend.chains[spanHour].snap = drawerSnap()
+	m.spend.drawer.snap = drawerSnap()
+	m.spend.drawer.snap.Window = "1h0m0s"
+	m.spend.drawer.snap.Group = usage.GroupModel
 	m.spend.expanded = true
 	// `a` and `w` pressed: the next poll will ask for endpoint over 6h, the rows on screen are
 	// still model over an hour.
@@ -460,8 +509,9 @@ func TestPaneView_TheHintLineLabelsTheSnapshotNotTheNextRequest(t *testing.T) {
 		t.Errorf("the hint line does not bracket %q, the axis the rows on screen are grouped by:\n%s",
 			usage.GroupModel, out)
 	}
-	if !strings.Contains(out, "[w] 1h") {
-		t.Errorf("the hint line does not report 1h, the span the answer covers:\n%s", out)
+	if !strings.Contains(out, "[w] "+spendSpanDefs[spanHour].label) {
+		t.Errorf("the hint line does not report %q, the span the answer covers as the band spells "+
+			"it:\n%s", spendSpanDefs[spanHour].label, out)
 	}
 	// The queued values must not be on screen as though they described the data.
 	if strings.Contains(out, "["+string(usage.GroupEndpoint)+"]") || strings.Contains(out, "[w] 6h") {
@@ -491,7 +541,7 @@ func TestSpendDrawerLines_MatchesWhatTheRendererEmits(t *testing.T) {
 		{name: "no snapshot", snap: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := len(renderSpendDrawer(tc.snap, usage.GroupModel, "1h", 200)); got != spendDrawerLines {
+			if got := len(renderSpendDrawer(tc.snap, nil, usage.GroupModel, "1h", 200)); got != spendDrawerLines {
 				t.Errorf("renderSpendDrawer emits %d lines but layout() reserves %d: the difference "+
 					"is either a footer off the bottom or a footer floating above it",
 					got, spendDrawerLines)
@@ -629,7 +679,7 @@ func TestRenderSpendDrawer_AFullyUnpricedSeriesSaysItsCostIsUnknown(t *testing.T
 		}}},
 	}
 	var row string
-	for _, l := range renderSpendDrawer(snap, usage.GroupModel, "1h", 200) {
+	for _, l := range renderSpendDrawer(snap, nil, usage.GroupModel, "1h", 200) {
 		if strings.Contains(l, "mystery-model") {
 			row = l
 		}
@@ -645,11 +695,11 @@ func TestRenderSpendDrawer_AFullyUnpricedSeriesSaysItsCostIsUnknown(t *testing.T
 	}
 	// Never a zero: a zero cost and an unknown cost are different answers, and this row is the
 	// second kind.
-	if strings.Contains(row, "$0.0000") {
-		t.Errorf("row %q renders $0.0000 for a cost nobody produced", row)
+	if strings.Contains(row, "$0.00") {
+		t.Errorf("row %q renders $0.00 for a cost nobody produced", row)
 	}
 	// And a priced row in the same drawer is NOT annotated, or the caveat means nothing.
-	for _, l := range renderSpendDrawer(snap, usage.GroupModel, "1h", 200) {
+	for _, l := range renderSpendDrawer(snap, nil, usage.GroupModel, "1h", 200) {
 		if strings.Contains(l, "claude-opus-5") && strings.Contains(l, "unavailable") {
 			t.Errorf("a fully priced row carries the unknown-cost caveat: %q", l)
 		}
@@ -676,7 +726,7 @@ func TestRenderSpendDrawer_ANegativeSeriesTotalIsUnpricedNotARefund(t *testing.T
 				PricedRequests: 17, PriceableRequests: 17},
 		}}},
 	}
-	lines := renderSpendDrawer(snap, usage.GroupModel, "1h", 200)
+	lines := renderSpendDrawer(snap, nil, usage.GroupModel, "1h", 200)
 	joined := strings.Join(lines, "\n")
 
 	if strings.Contains(joined, "$-5") || strings.Contains(joined, "-$5") {
@@ -717,7 +767,7 @@ func TestHandleKey_TheDrawersBindings(t *testing.T) {
 		m := &model{width: 200, height: 60}
 		m.pane = pane
 		m.sessionsTbl = newSessionsTable()
-		m.spend.snap = drawerSnap()
+		m.spend.drawer.snap = drawerSnap()
 		return m
 	}
 
@@ -749,7 +799,7 @@ func TestHandleKey_TheDrawersBindings(t *testing.T) {
 			t.Errorf("axis = %q after one `a`, want %q", m.spend.axis(), spendDrawerAxes[1])
 		}
 		m.handleKey(runeKey('w'))
-		if m.spend.window() == spendWindow {
+		if m.spend.window() == spendSpanDefs[spanHour].window {
 			t.Errorf("window = %v after one `w`, want it moved off the default", m.spend.window())
 		}
 	})
@@ -976,7 +1026,7 @@ func TestDrawerFigures_NamesTrafficThatCannotBePriced(t *testing.T) {
 		}}},
 	}
 	var row string
-	for _, line := range renderSpendDrawer(snap, usage.GroupEndpoint, "1h", 200) {
+	for _, line := range renderSpendDrawer(snap, nil, usage.GroupEndpoint, "1h", 200) {
 		if strings.Contains(line, "mcp-tools.svc") {
 			row = line
 		}
@@ -993,7 +1043,7 @@ func TestDrawerFigures_NamesTrafficThatCannotBePriced(t *testing.T) {
 	}
 	// The priced row beside it is untouched: this branch is reached only when nothing priced
 	// AND nothing could have.
-	for _, line := range renderSpendDrawer(snap, usage.GroupEndpoint, "1h", 200) {
+	for _, line := range renderSpendDrawer(snap, nil, usage.GroupEndpoint, "1h", 200) {
 		if strings.Contains(line, "inference.svc") && strings.Contains(line, "not priceable") {
 			t.Errorf("priced row %q picked up the unpriceable caveat", line)
 		}
@@ -1013,7 +1063,7 @@ func tierSnap() *usage.Snapshot {
 
 // Two columns, headed, tiers left and series right.
 func TestRenderSpendDrawer_ShowsBothColumnsWithHeaders(t *testing.T) {
-	lines := renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", 100)
+	lines := renderSpendDrawer(tierSnap(), nil, usage.GroupModel, "1h", 100)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{"WHERE IT WENT", "BY MODEL", "cache-read", "claude-opus-5"} {
 		if !strings.Contains(joined, want) {
@@ -1022,30 +1072,204 @@ func TestRenderSpendDrawer_ShowsBothColumnsWithHeaders(t *testing.T) {
 	}
 	// The header names the CURRENT axis, which is what the dropped tree glyphs were
 	// gesturing at and what the hint line otherwise says only in brackets.
-	endpoint := strings.Join(renderSpendDrawer(tierSnap(), usage.GroupEndpoint, "1h", 100), "\n")
+	endpoint := strings.Join(renderSpendDrawer(tierSnap(), nil, usage.GroupEndpoint, "1h", 100), "\n")
 	if !strings.Contains(endpoint, "BY ENDPOINT") {
 		t.Errorf("the header does not follow the axis:\n%s", endpoint)
 	}
 }
 
-// The right column's header sits in the right column.
+// A CLAMPED SERIES SAYS SO ON THE ROW, in words at a width that has room for them and in the
+// marker at every width.
 //
-// Measured, not eyeballed: fitStripFigures prepends its own `label + "  "` indent, so the
-// series text sat three columns right of the header naming it — "BY MODEL" at column 36
-// against "claude-opus-5" at 39. A header over the wrong column is worse than none.
-func TestRenderSpendDrawer_TheSeriesHeaderSitsOverItsColumn(t *testing.T) {
-	for _, width := range []int{80, 100, 160, 200} {
-		lines := renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", width)
-		hdr, row := lines[0], lines[1]
-		hi, ri := strings.Index(hdr, "BY MODEL"), strings.Index(row, "claude-opus-5")
-		if hi < 0 || ri < 0 {
-			t.Fatalf("width %d: header or first row missing:\n%s", width, strings.Join(lines, "\n"))
+// THIS IS THE LIVE HALF of the two notes moneyFigureFrom can emit, and it had no test through a
+// screen: drawerFigures passes r.counts.Saturated straight through, so saturatedNote's wording is
+// what an operator actually reads when a series total hits the int64 ceiling. The wording was
+// asserted only through moneyFigure, which has no production caller at all — so the vocabulary was
+// pinned on a path nothing renders while the rendered path was pinned by nothing.
+//
+// damagedNote is the other half and stays unreachable from here by construction: this call site
+// passes nil for degraded, since a per-series damage figure is not something the aggregate carries.
+// Its wording keeps its unit test and its comment says which side of the line it is on.
+func TestRenderSpendDrawer_AClampedSeriesRowSaysItIsAFloor(t *testing.T) {
+	snap := drawerSnap()
+	for k, c := range snap.Buckets[0].Series {
+		if k == "claude-opus-5" {
+			c.Saturated = true
+			snap.Buckets[0].Series[k] = c
 		}
-		hcol := len([]rune(hdr[:hi]))
-		rcol := len([]rune(row[:ri]))
-		if hcol != rcol {
-			t.Errorf("width %d: header starts at column %d, its column starts at %d:\n%s",
-				width, hcol, rcol, strings.Join(lines, "\n"))
+	}
+
+	// THE MARKER AT EVERY WIDTH the drawer renders at, because it is one column and the fitter's
+	// compact form keeps it — that is what makes it the disclosure of last resort.
+	for _, width := range []int{90, 120, 200} {
+		joined := strings.Join(renderSpendDrawer(snap, nil, usage.GroupModel, "TODAY", width), "\n")
+		if !strings.Contains(joined, damagedMarker+"$11.12") {
+			t.Errorf("width %d: the clamped row carries no %q on its figure:\n%s",
+				width, damagedMarker, joined)
+		}
+	}
+
+	// AND THE WORDS where there is room: 200 columns is the measured width at which the fitter
+	// keeps the full form. Below that the marker carries it alone, which is the documented
+	// degradation rather than a loss.
+	joined := strings.Join(renderSpendDrawer(snap, nil, usage.GroupModel, "TODAY", 200), "\n")
+	if !strings.Contains(joined, saturatedNote) {
+		t.Errorf("a clamped series row does not say %q anywhere:\n%s", saturatedNote, joined)
+	}
+}
+
+// CYCLING DROPS THE PREVIOUS SPAN'S ERROR, so no failure is ever captioned with a span that was
+// not asked for.
+//
+// The error and the snapshot are stored together by applySpendLoaded, so a failed poll leaves err
+// set and snap nil — and the diagnostic prints the CURRENT label, which `w` has already moved.
+// Measured before the fix: a failed month poll followed by `w` printed "breakdown unavailable for
+// LAST 1H: <the month's error>" for the whole round trip.
+func TestCycleSpendDrawer_DropsThePreviousSpansError(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cycle func(m *model) tea.Cmd
+	}{
+		{"w", (*model).cycleSpendWindow},
+		{"a", (*model).cycleSpendAxis},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{width: 200, height: 60, pane: paneSessions}
+			m.sessionsTbl = newSessionsTable()
+			m.spend.expanded = true
+			m.spend.chains[spanHour].snap = drawerSnap()
+			// The month's poll failed: snap nil and err set, which is what applySpendLoaded stores.
+			m.spend.drawer.snap, m.spend.drawer.err = nil, errors.New("month poll exploded")
+			m.layout()
+			if !strings.Contains(m.paneView(), "month poll exploded") {
+				t.Fatalf("setup: the failure is not on screen to begin with:\n%s", m.paneView())
+			}
+
+			tc.cycle(m)
+
+			if m.spend.drawer.err != nil {
+				t.Errorf("drawer.err survived the cycle: %v", m.spend.drawer.err)
+			}
+			if out := m.paneView(); strings.Contains(out, "month poll exploded") {
+				t.Errorf("the previous span's failure is still captioned with the new span:\n%s", out)
+			}
+		})
+	}
+}
+
+// THE DRAWER'S CADENCE IS ITS SPAN'S, and the two lists that make that possible stay in step.
+//
+// The breakdown sits directly under the band cell it breaks down, so a slower cadence means the two
+// disagree about the same span for the difference between them. On one fixed five-minute interval
+// the hour's breakdown could lag the hour's total — twenty seconds — by five minutes, which is the
+// failure bandSpanCell's doc argues against, with nothing on screen saying so.
+func TestSpendDrawer_PollsAtTheCadenceOfTheSpanItShows(t *testing.T) {
+	// The two parallel lists first: windowSpan indexes into one and the request carries the other,
+	// so a span inserted into either alone would point the cadence at a different window than the
+	// one being fetched.
+	if len(spendDrawerSpans) != len(spendDrawerWindows) {
+		t.Fatalf("%d spans against %d windows", len(spendDrawerSpans), len(spendDrawerWindows))
+	}
+	for i, span := range spendDrawerSpans {
+		if got := spendSpanDefs[span].window; got != spendDrawerWindows[i] {
+			t.Errorf("index %d: span %d's window is %q, the window list says %q",
+				i, span, got, spendDrawerWindows[i])
+		}
+	}
+
+	// AND EVERY SELECTION REPORTS ITS OWN SPAN'S INTERVAL. Stepped through with the same keypress
+	// an operator uses, so the wrap and the index resolution are covered too.
+	m := &model{}
+	for i := range spendDrawerWindows {
+		want := spendSpanDefs[spendDrawerSpans[i]].pollInterval()
+		if got := m.spend.pollInterval(); got != want {
+			t.Errorf("step %d (%s): cadence %v, want its span's %v",
+				i, m.spend.window(), got, want)
+		}
+		m.cycleSpendWindow()
+	}
+
+	// The hour and the month must not be the same number, or the assertion above would hold for one
+	// constant applied to all four — which is the state this replaced.
+	if spendSpanDefs[spanHour].pollInterval() == spendSpanDefs[spanMonth].pollInterval() {
+		t.Error("the hour and the month poll at the same rate, so this test cannot see the defect")
+	}
+}
+
+// A LATE DRAWER SAYS SO, on its own label, at its own span's threshold.
+func TestDrawerLabels_ALateBreakdownCarriesItsAge(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		since   time.Duration
+		wantAge bool
+	}{
+		{"just answered", time.Second, false},
+		{"inside the threshold", 2*spendSpanDefs[spanHour].pollInterval() - time.Second, false},
+		{"past it", 6 * time.Minute, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{width: 200, height: 60, pane: paneSessions}
+			m.spend.drawer.snap = drawerSnap()
+			m.spend.drawer.snap.Window = spendSpanDefs[spanHour].window
+			m.spend.drawer.lastFetch = time.Now().Add(-tc.since)
+
+			_, window := m.drawerLabels()
+			base := spendSpanDefs[spanHour].label
+			if got := window != base; got != tc.wantAge {
+				t.Errorf("label = %q (base %q): carries an age = %v, want %v",
+					window, base, got, tc.wantAge)
+			}
+		})
+	}
+
+	// AND NEVER BEFORE THE FIRST ANSWER: a zero lastFetch is "nothing has answered", which the
+	// empty drawer already says. Rendered as an age it would read as a wedged chain on a drawer
+	// that has simply just been opened.
+	m := &model{width: 200, height: 60, pane: paneSessions}
+	m.spend.drawer.snap = drawerSnap()
+	m.spend.drawer.snap.Window = spendSpanDefs[spanHour].window
+	if _, window := m.drawerLabels(); window != spendSpanDefs[spanHour].label {
+		t.Errorf("label = %q before any poll answered, want the bare %q",
+			window, spendSpanDefs[spanHour].label)
+	}
+}
+
+// indentOf counts the leading spaces of a rendered line, in display columns.
+func indentOf(line string) int {
+	return len([]rune(line)) - len([]rune(strings.TrimLeft(line, " ")))
+}
+
+// BOTH headers sit over their own column.
+//
+// Measured, not eyeballed. The right one: fitStripFigures prepends its own `label + "  "`
+// indent, so the series text sat three columns right of the header naming it — "BY MODEL" at
+// column 36 against "claude-opus-5" at 39. The left one had the mirror defect and no test, so it
+// outlived the fix — "WHERE IT WENT" at column 2 over tier rows starting at 0. A header over the
+// wrong column is worse than none, on either side.
+func TestRenderSpendDrawer_BothHeadersSitOverTheirColumns(t *testing.T) {
+	for _, width := range []int{80, 100, 160, 200} {
+		lines := renderSpendDrawer(tierSnap(), nil, usage.GroupModel, "1h", width)
+		hdr, row := lines[0], lines[1]
+		// THE LEFT COLUMN BY ITS INDENT, not by a tier name: the tier rows are ranked by cost,
+		// so which label lands on the first row depends on the fixture's figures.
+		if hi, ri := indentOf(hdr), indentOf(row); hi != ri {
+			t.Errorf("width %d: the header is indented %d columns, the tier rows %d:\n%s",
+				width, hi, ri, strings.Join(lines, "\n"))
+		}
+		for _, c := range []struct{ heading, value string }{
+			{"BY MODEL", "claude-opus-5"},
+		} {
+			hi, ri := strings.Index(hdr, c.heading), strings.Index(row, c.value)
+			if hi < 0 || ri < 0 {
+				t.Fatalf("width %d: %q or %q missing:\n%s",
+					width, c.heading, c.value, strings.Join(lines, "\n"))
+			}
+			hcol := len([]rune(hdr[:hi]))
+			rcol := len([]rune(row[:ri]))
+			if hcol != rcol {
+				t.Errorf("width %d: %q starts at column %d, %q at %d:\n%s",
+					width, c.heading, hcol, c.value, rcol, strings.Join(lines, "\n"))
+			}
 		}
 	}
 }
@@ -1066,17 +1290,17 @@ func TestRenderSpendDrawer_DoesNotRestateTheBandsFigures(t *testing.T) {
 				PricedRequests: 35, PriceableRequests: 35},
 		}}},
 	}
-	joined := strings.Join(renderSpendDrawer(snap, usage.GroupModel, "1h", 100), "\n")
+	joined := strings.Join(renderSpendDrawer(snap, nil, usage.GroupModel, "1h", 100), "\n")
 	// The window total appears once — on the model row that earned it — and the tier column
 	// carries shares of it rather than the figure again.
-	if n := strings.Count(joined, "$4.5462"); n > 1 {
+	if n := strings.Count(joined, "$4.55"); n > 1 {
 		t.Errorf("the window total appears %d times in the panel:\n%s", n, joined)
 	}
 }
 
 // The tree glyphs are gone: they implied a parent row that does not exist.
 func TestRenderSpendDrawer_HasNoOrphanTreeGlyph(t *testing.T) {
-	joined := strings.Join(renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", 100), "\n")
+	joined := strings.Join(renderSpendDrawer(tierSnap(), nil, usage.GroupModel, "1h", 100), "\n")
 	for _, glyph := range []string{"└", "├"} {
 		if strings.Contains(joined, glyph) {
 			t.Errorf("the panel still draws %q, which implies a parent row:\n%s", glyph, joined)
@@ -1089,11 +1313,284 @@ func TestRenderSpendDrawer_HasNoOrphanTreeGlyph(t *testing.T) {
 // existing contract, never the reverse.
 func TestRenderSpendDrawer_NarrowDropsTheTierColumnNotTheModels(t *testing.T) {
 	joined := strings.Join(
-		renderSpendDrawer(tierSnap(), usage.GroupModel, "1h", spendDrawerTwoColumnMin-1), "\n")
+		renderSpendDrawer(tierSnap(), nil, usage.GroupModel, "1h", spendDrawerTwoColumnMin-1), "\n")
 	if !strings.Contains(joined, "claude-opus-5") {
 		t.Errorf("the model column dropped below the two-column width:\n%s", joined)
 	}
 	if strings.Contains(joined, "cache-read") {
 		t.Errorf("both columns drawn below the two-column width:\n%s", joined)
+	}
+}
+
+// THE DRAWER'S CHAIN MUST OUTLIVE GOING OFF SCREEN, because m.spend.expanded does.
+//
+// The tick handler used to stop on !spendDrawerVisible(), conflating "closed" with "not on
+// screen right now". They are different questions: expanded deliberately survives a move to a
+// pane that cannot host the drawer and a resize below spendDrawerMinHeight — see the esc
+// handler, which leaves the flag alone so returning finds the drawer as the operator left it.
+//
+// So: open on Sessions, press `u`, and the next tick returned without rescheduling. Nothing
+// re-arms the chain but `$` itself, so coming back rendered the pre-switch snapshot forever —
+// and the drawer has no age indicator, so it was silent.
+func TestSpendDrawerTick_SurvivesGoingOffScreen(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		break_ func(*model)
+	}{
+		{"moved to a pane that cannot host it", func(m *model) { m.pane = paneUsage }},
+		{"resized below the drawer's height floor", func(m *model) { m.height = spendDrawerMinHeight - 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{width: 200, height: 60, pane: paneSessions}
+			m.spend.expanded = true
+			gen := m.spend.drawer.tickGen
+			tc.break_(m)
+
+			if m.spendDrawerVisible() {
+				t.Fatal("the drawer is still visible, so this fixture asserts nothing")
+			}
+			if !m.spend.expanded {
+				t.Fatal("expanded was cleared, so the chain SHOULD stop; fixture is wrong")
+			}
+			// The tick must still be accepted and rescheduled: it is the flag that says the
+			// drawer is open, not whether it happens to be drawable this frame.
+			_, cmd := m.Update(spendDrawerTickMsg{gen: gen})
+			if cmd == nil {
+				t.Error("the drawer's poll chain stopped and nothing re-arms it but `$`, so " +
+					"returning to a hosting pane renders the pre-switch snapshot forever")
+			}
+		})
+	}
+	// And it DOES stop once the drawer is actually closed, or the off-screen case would keep a
+	// ledger walk alive for the session.
+	m := &model{width: 200, height: 60, pane: paneSessions}
+	m.spend.expanded = false
+	if _, cmd := m.Update(spendDrawerTickMsg{gen: m.spend.drawer.tickGen}); cmd != nil {
+		t.Error("a closed drawer kept polling; its span can be a month of day files")
+	}
+}
+
+// A POD SWITCH MUST NOT LEAVE AN EXPANDED DRAWER WITH NOTHING TO SHOW AND NOTHING COMING.
+//
+// startSpendPolling calls invalidate(), which walks every chain INCLUDING the drawer's — a
+// different pod is a different breakdown just as much as a different total — and then restarted
+// only the band's. So: open the drawer, esc to the pods picker, pick another pod, and the drawer
+// came back expanded with snap == nil and nothing scheduled to fill it. Headers over blank rows,
+// revivable only by closing and reopening.
+func TestStartSpendPolling_ReArmsAnOpenDrawer(t *testing.T) {
+	// THROUGH THE RETURNED BATCH, not by fabricating a tick. A hand-made spendDrawerTickMsg is
+	// accepted and rescheduled by the handler whether or not anything ever scheduled one — so
+	// asserting on it passed with the re-arm removed, which is the mutation this test exists to
+	// catch. What has to be true is that startSpendPolling ITSELF issues the drawer's fetch.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"window":"1h","group":"model","buckets":[],"totals":{}}`))
+	}))
+	defer ts.Close()
+
+	drawerFetched := func(m *model) bool {
+		t.Helper()
+		cmd := m.startSpendPolling()
+		if cmd == nil {
+			t.Fatal("startSpendPolling returned no command at all")
+		}
+		batch, ok := cmd().(tea.BatchMsg)
+		if !ok {
+			t.Fatalf("startSpendPolling produced %T, want a tea.BatchMsg", cmd())
+		}
+		// Every command at once, then ONE deadline. The batch holds fetches and tea.Tick
+		// closures; the fetches answer against a loopback server in milliseconds while the
+		// ticks block for their whole interval, so anything that has not answered by the
+		// deadline is a tick and not the fetch under test. Fired concurrently rather than in
+		// sequence because waiting out each tick in turn took sixteen seconds.
+		msgs := make(chan tea.Msg, len(batch))
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			go func(c tea.Cmd) {
+				defer func() { _ = recover() }()
+				msgs <- c()
+			}(c)
+		}
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case msg := <-msgs:
+				if _, isDrawer := msg.(spendDrawerLoadedMsg); isDrawer {
+					return true
+				}
+			case <-deadline:
+				return false
+			}
+		}
+	}
+
+	open := &model{width: 200, height: 60, pane: paneSessions, client: apiclient.New(ts.URL)}
+	open.spend.expanded = true
+	open.spend.drawer.snap = drawerSnap()
+	if !drawerFetched(open) {
+		t.Error("startSpendPolling issued no drawer fetch for an OPEN drawer: invalidate() has " +
+			"already cleared drawer.snap, so the drawer renders headers over blank rows " +
+			"indefinitely and only `$` twice revives it")
+	}
+	// invalidate cleared the previous pod's breakdown, which is correct — it belonged to the
+	// pod we just left.
+	if open.spend.drawer.snap != nil {
+		t.Error("the previous pod's breakdown survived the switch")
+	}
+
+	// A CLOSED drawer is not armed, or every session would pay for a chain nobody opened.
+	closed := &model{width: 200, height: 60, pane: paneSessions, client: apiclient.New(ts.URL)}
+	if drawerFetched(closed) {
+		t.Error("startSpendPolling fetched a breakdown for a drawer nobody opened")
+	}
+}
+
+// A FAILED DRAWER FETCH MUST NOT RENDER AS SILENCE, which is the rule the band already follows.
+//
+// applySpendDrawerLoaded clears snap on failure — deliberately, since a stale breakdown drawn as
+// a current one is the worse error — so without an error path the drawer showed headers over
+// blank rows and said nothing about why. drawer.err was written and had no reader at all.
+func TestRenderSpendDrawer_AFailedFetchSaysSo(t *testing.T) {
+	lines := renderSpendDrawer(nil, context.DeadlineExceeded, usage.GroupModel, "MONTH", 100)
+	if len(lines) != spendDrawerLines {
+		t.Fatalf("%d lines, want %d: the reservation has to be filled either way",
+			len(lines), spendDrawerLines)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "unavailable") {
+		t.Errorf("a failed drawer fetch renders no diagnostic:\n%s", joined)
+	}
+	if !strings.Contains(joined, "MONTH") {
+		t.Errorf("the diagnostic does not name the span that failed:\n%s", joined)
+	}
+	// The keys still work, so they are still advertised: a failed span is when an operator most
+	// wants to try another.
+	if !strings.Contains(joined, "[w]") || !strings.Contains(joined, "esc") {
+		t.Errorf("the hint line is gone, so the keys that recover from this are undiscoverable:\n%s",
+			joined)
+	}
+	// And an empty drawer before the first poll is NOT the same state: no diagnostic there.
+	fresh := strings.Join(renderSpendDrawer(nil, nil, usage.GroupModel, "MONTH", 100), "\n")
+	if strings.Contains(fresh, "unavailable") {
+		t.Errorf("a drawer awaiting its first answer reports a failure:\n%s", fresh)
+	}
+}
+
+// CLOSING THE DRAWER DISOWNS ITS POLL CHAIN, BY EITHER KEY — and the two keys are asserted
+// together because the bug was that they had drifted apart.
+//
+// `$` invalidated and esc did not. That was harmless only because the OPEN path also invalidates,
+// for snapshot freshness, which is not about closing at all: a reply already in the air outlives
+// the keypress by up to spendFetchTimeout, and without reqSeq moving it passes
+// applySpendDrawerLoaded's guard and is stored against a closed drawer, so the next open renders a
+// stale breakdown before its own first poll lands.
+//
+// reqSeq IS THE ASSERTION, not just snap. Clearing the snapshot without bumping the sequence leaves
+// exactly that in-flight reply admissible, which is the half a "did it clear?" test would miss —
+// and removing the esc-path call left the entire package green before this existed.
+func TestClosingTheDrawer_DisownsItsPollChainByEitherKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{"dollar", keyRune('$')},
+		{"esc", tea.KeyMsg{Type: tea.KeyEsc}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{width: 100, height: 40}
+			m.pane = paneSessions
+			m.handleKey(keyRune('$'))
+			if !m.spendDrawerVisible() {
+				t.Fatalf("the drawer did not open, so this says nothing about closing it")
+			}
+			// A breakdown on screen and a request in flight.
+			m.spend.drawer.snap = &usage.Snapshot{Window: "month", Priced: true}
+			m.spend.drawer.lastFetch = time.Now()
+			seq := m.spend.drawer.reqSeq
+
+			m.handleKey(tc.key)
+
+			if m.spend.expanded {
+				t.Fatalf("%q did not close the drawer", tc.name)
+			}
+			if m.spend.drawer.snap != nil {
+				t.Errorf("%q left the breakdown behind, so the next open draws a stale one before "+
+					"its own poll lands", tc.name)
+			}
+			if m.spend.drawer.reqSeq == seq {
+				t.Errorf("%q closed the drawer without bumping reqSeq (%d): a reply already in "+
+					"flight is still admissible and will be stored against a closed drawer",
+					tc.name, seq)
+			}
+		})
+	}
+}
+
+// THE ROW SAYS HOW MANY FIGURES ARE INEXACT, not just that some are.
+//
+// The glyph and the count are different claims: markMoney's "~" says "this total is a lower bound",
+// the caveat says how much of the row is behind it — "3 inexact" on a series of forty requests is a
+// blip, on a series of three it is the whole row. The drawer is the only surface with room for both,
+// and it passes r.counts.IncompleteRequests for exactly that.
+//
+// UNASSERTED UNTIL NOW: the base covered it through two strip tests that went with the strip, and
+// the band's tests see only the marker. Verified — dropping the `if incomplete > 0` block left the
+// whole package green.
+func TestSpendDrawerRows_StateHowManyFiguresAreInexact(t *testing.T) {
+	figs := drawerFigures(drawerRow{
+		label: "claude-opus-5",
+		counts: usage.Counts{
+			Requests: 40, CostMicros: 11_121_400,
+			PricedRequests: 40, PriceableRequests: 40, IncompleteRequests: 3,
+		},
+	})
+	var joined string
+	for _, f := range figs {
+		joined += f.full + " "
+	}
+	if !strings.Contains(joined, "3 inexact") {
+		t.Errorf("row %q does not say how many of its figures are lower bounds", joined)
+	}
+	// And the marker is there too — they are not alternatives.
+	if !strings.Contains(joined, inexactMarker) {
+		t.Errorf("row %q carries the count without the marker on the figure", joined)
+	}
+	// A clean row says neither, so the count is a signal rather than furniture.
+	clean := drawerFigures(drawerRow{
+		label:  "claude-opus-5",
+		counts: usage.Counts{Requests: 40, CostMicros: 11_121_400, PricedRequests: 40, PriceableRequests: 40},
+	})
+	var cleanJoined string
+	for _, f := range clean {
+		cleanJoined += f.full + " "
+	}
+	if strings.Contains(cleanJoined, "inexact") {
+		t.Errorf("a row with nothing inexact still says so: %q", cleanJoined)
+	}
+}
+
+// AND paneView READS drawer.err, which is the half no test reached.
+//
+// Every other test here passes an error straight to renderSpendDrawer, so they pin the RENDERER and
+// say nothing about whether anything hands it the stored error. Verified: changing the call site to
+// pass nil left the package green — the same data-half/renderer-half split that let a failed poll
+// render as silence in the first place.
+func TestPaneView_DrawsTheDrawersStoredError(t *testing.T) {
+	m := &model{width: 120, height: 40}
+	m.pane = paneSessions
+	m.sessionsTbl = newSessionsTable()
+	m.handleKey(keyRune('$'))
+	if !m.spendDrawerVisible() {
+		t.Fatalf("the drawer did not open, so this cannot say what paneView does with its error")
+	}
+	m.spend.drawer.snap = nil
+	m.spend.drawer.err = errors.New("dial tcp: connection refused")
+	m.layout()
+
+	out := m.paneView()
+	if !strings.Contains(out, "unavailable") {
+		t.Errorf("paneView drew no diagnostic for a drawer whose poll failed — a stored error with "+
+			"no reader is the defect renderSpendDrawer's error path exists to end:\n%s", out)
 	}
 }

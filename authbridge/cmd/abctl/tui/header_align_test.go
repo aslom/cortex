@@ -293,3 +293,57 @@ func lastInk(s string) int {
 	}
 	return lipgloss.Width(trimmed)
 }
+
+// TestSessionsRightAligned_EveryNameResolvesToAColumn keeps the set honest, so that a renamed
+// column cannot quietly lose its RENDER-LEVEL coverage.
+//
+// The two alignment tests here fail differently on a stale entry, and the difference is the
+// whole reason this exists:
+//
+//   - assertHeadersMatchCells derives the expected alignment from the CELLS and consults no
+//     name list, so it catches a renamed column loudly. Verified by mutation: renaming the
+//     SAVED entry fails TestSessionsHeader_SitsOverItsOwnValues at every width.
+//   - TestHeaderAlignment_SurvivesRendering skips columns absent from sessionsRightAligned, so
+//     the same rename SILENTLY drops that column out of it — and that is the test which slices
+//     the rendered View() rather than inspecting Title, precisely because "every assertion on
+//     Title would keep passing if bubbles clipped or re-flowed the padding on the way to the
+//     screen". Losing it costs the one check that looks at what reaches the terminal.
+//
+// So the exposure is a loss of coverage rather than a green suite over a broken heading. Worth
+// closing anyway, because it is invisible: the suite stays green, the column count checked
+// quietly drops by one, and nothing says so.
+//
+// NOT HYPOTHETICAL. This branch renames SAVED to carry headerMarker, which is exactly that
+// shape — it stays covered only because headerTitle strips the marker before the lookup. This
+// test makes that a checked property rather than a coincidence.
+func TestSessionsRightAligned_EveryNameResolvesToAColumn(t *testing.T) {
+	cols := sessionsColumns()
+	for name := range sessionsRightAligned {
+		found := false
+		for _, c := range cols {
+			if headerTitle(c) == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("sessionsRightAligned names %q, which is not a column in sessionsColumns(). "+
+				"A name that resolves to nothing exempts that column from "+
+				"assertHeadersMatchCells — which skips columns absent from this set — so its "+
+				"heading can stop sitting over its values with the whole suite still green.",
+				name)
+		}
+	}
+	// And the reverse direction for the money columns specifically, because they are the ones a
+	// marker can rename: every column whose CELLS are right-aligned has to be in the set.
+	for _, c := range cols {
+		switch headerTitle(c) {
+		case "EVENTS", "TOKENS", "COST", "SAVED":
+			if !sessionsRightAligned[headerTitle(c)] {
+				t.Errorf("column %q has right-aligned cells but is not in sessionsRightAligned, "+
+					"so its heading is left-flushed and assertHeadersMatchCells skips it",
+					headerTitle(c))
+			}
+		}
+	}
+}

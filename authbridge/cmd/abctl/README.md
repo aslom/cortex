@@ -282,16 +282,44 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   that column also carried, for sessions the server has forgotten but abctl
   still holds events for, moved into `UPDATED`.
 
-  **Every figure in this table is a lifetime total for its session** — which is
-  what the title says, and why the TOKENS column does not sum to the token count
-  in the band above it: that one covers the rolling window its `LAST 1H` label
-  names. Both are right; neither is a check on the other. The same goes for a
-  session's lifetime cost sitting under a smaller `TODAY` — that is the older
-  scope, not a fault.
+  **Every figure in this table is a per-session total**, summed over that
+  session's whole history rather than over a clock window — which is why its
+  TOKENS column does not match the token counts on the `$` breakdown or the
+  Usage pane, each of which covers the window it names. Both are right; neither
+  is a check on the other.
+
+  The table is also **not** a longer span than the band, which is the reading
+  worth heading off. The session store is in memory, so a session's figures only
+  reach back as far as the current proxy process — on a freshly restarted proxy
+  the whole COST column can sum to less than `TODAY`, because `TODAY` comes from
+  the durable cost ledger and survives restarts. `[?]` states both facts; the
+  title deliberately does not, since no single span is true of every row.
+
+  Rendered at 100 columns, which is the narrowest terminal that carries every
+  column at once:
+
+  ```
+  abctl · http://localhost:9094 · [Sessions] Pipeline
+  LAST 1H    TODAY   7 DAYS    MONTH
+    $4.04   $18.80  $216.44  $703.18
+  ────────────────────────────────────────────────────────────────────────────────────────────────────
+   SESSION       TITLE        UPDATED         EVENTS      TOKENS        COST      SAVED~  CONTEXT(1M)
+   ctx-abc-123…  …pend-spans  3s ago              42       48.2k       $0.12       $0.01  ▕███████▎ ▏
+   ctx-def-567…  weather-ag…  18m ago             15        1.2k      <$0.01           —  ▕▏        ▏
+   ctx-ghi-901…               42m ago              7        2.9k           —           —  ▕███▊     ▏
+   default                    1h ago               8           —           —           —            —
+
+  ● connected  2.1 events/sec   feedback: https://github.com/rossoctl/cortex/issues/new/choose
+  [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
+  ```
 
   The two money columns are dropped entirely on a terminal too narrow to show a
-  sub-cent charge honestly — below 73 columns — rather than rounded to `$0.00`
-  or blanked. A charge under a cent reads `<$0.01`.
+  sub-cent charge honestly — below 97 columns — rather than rounded to `$0.00`
+  or blanked. A charge under a cent reads `<$0.01`. That floor was 73 until the
+  `TITLE` column arrived and moved it to 97: `TITLE` is fitted first and the money
+  columns yield to it, so from 73 to 96 the table carries `TITLE` and no money, and
+  at 97 the whole set holds every minimum at once. `sessionsShowMoney` states the
+  arithmetic.
 
   `SAVED~` carries the tilde in its **heading** rather than on every row: a
   saving is always an estimate, so the caveat belongs to the column rather than
@@ -301,35 +329,68 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   whose requests could not all be settled exactly, appears on the band's `TODAY`
   and `LAST 1H` and on the `$` drawer's per-model cost.
 
-  ```
-  abctl · http://localhost:9094 · [Sessions] Pipeline · lifetime totals
-  TODAY   SAVED~  LAST 1H  TOKENS 1H  CACHE HIT 1H
-  $30.94  $0.18   $2.91    9.9M       81%
-  ───────────────────────────────────────────────────────────────────────────
-   SESSION         UPDATED    EVENTS   TOKENS    COST  SAVED~  CONTEXT(1M)
-   ctx-abc-1234…   3s ago         42    48.2k   $0.12  <$0.01  ▕███████▌ ▏
-   ctx-def-5678…   18m ago        15     1.2k  <$0.01       —  ▕▎        ▏
-   ctx-ghi-9012…   cached          7     2.9k       —       —  ▕████▍    ▏
-   default         1h ago          8        —       —       —            —
-
-  ● connected   2.1 events/sec
-  cost/saved: lifetime   [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
-  ```
+  The screen above shows all of this; the markers are absent there because that fixture
+  has nothing to disclose, which is itself the rule — a clean figure wears none.
 
   Labels sit above their values rather than beside them: `$30.94 today`
   reads as a list, `TODAY` over `$30.94` reads as a figure.
 
-  The cells are grouped by the span they cover — the day's figures, then the
-  rolling window's — and every window cell names its window, because `TOKENS`
-  covering an hour beside a `TODAY` covering a day is the one thing this line
-  cannot afford to leave to inference. A rule closes the block off from the
-  table below it.
+  **One cell per span a budget is read against**, ascending left to right, and
+  every cell's label names the period its figure covers. That last part is the
+  rule the band is built on: an earlier version carried `CACHE HIT` and `TOKENS`
+  read off the rolling hour while sitting in a row that opened with `TODAY`, so
+  an hour's token count read as a day's with nothing on screen to say otherwise.
+  Volume readings live where there is room to scope them — the `$` breakdown, the
+  sessions table, and the Usage pane.
+
+  All four figures share one column width and are right-aligned, so their decimal
+  points line up and the four periods can be compared by eye.
+
+  As the terminal narrows, whole cells drop — never a clipped figure — and the
+  middle yields first: `7 DAYS`, then `LAST 1H`, leaving `TODAY` and `MONTH` as
+  the last two readings. Four fit in 34 columns, three in 25, two in 16, one in 7.
+
+  A span this deployment cannot answer reads `—`, not a number. Without a cost
+  ledger (Kubernetes by default) the proxy answers `today`, `7d` and `month` from
+  its six-hour in-memory ring and reports the window it actually served; a
+  six-hour figure under a `MONTH` label would understate the month by about 120x
+  while looking perfectly well-formed.
+
+  <a id="spans-and-the-cost-ledger"></a>
+  **Spans and the cost ledger.** Three of the four spans are ledger-backed, so what
+  abctl can really distinguish depends on whether the proxy keeps one:
+
+  | | `LAST 1H` | `TODAY` | `7 DAYS` | `MONTH` |
+  |---|---|---|---|---|
+  | local install (ledger on) | ring | ledger | ledger | ledger |
+  | Kubernetes (no ledger) | ring | `—` | `—` | `—` |
+
+  The **band** detects this and draws `—`, so it never labels six hours of spend as a
+  month. The **`$` breakdown does not**: `w` still offers all four spans there, and
+  without a ledger three of them return the same clamped six-hour fold under three
+  different captions. That is a known limitation rather than a design: the target is
+  a local install, where the ledger is on by default and all four spans are real.
+  `w` used to offer 15m/1h/6h, which is what a ledger-less deployment could actually
+  tell apart, and those remain reachable through `abctl cost --window` and the Usage
+  pane.
+
+  A poll chain that stops answering is dated on its own label — `TODAY 7m` — so a
+  wedged chain cannot pass for a current reading. Each span polls on its own
+  cadence (20s for the ring-served hour, a minute for today, five minutes for the
+  two that walk many day files), so the age is per cell rather than per band.
+
+  The `~` on `SAVED` sits in the **heading**, not on every value. A saving is
+  estimated in every row, so a per-row marker distinguished nothing while
+  diluting the same glyph where it *is* conditional — on a cost figure whose
+  pricing was incomplete. `+` (the real figure is larger) and `!` (spend is
+  missing from the sum) stay on the values, because those are per-row claims.
 
   **How precise a money figure is depends on whether you scan it.** Anything read
-  down a column or compared against its neighbours reads in **cents**: `TODAY`,
-  `LAST 1H`, `SAVED`, the Usage pane's `COST`, the sessions table's `COST` and
-  `SAVED`, and both columns of the `$` drawer. Two digits of extra precision are
-  noise on a surface whose job is comparing rows to each other.
+  down a column or compared against its neighbours reads in **cents**: all four
+  band cells (`LAST 1H`, `TODAY`, `7 DAYS`, `MONTH`), the sessions table's `COST`
+  and `SAVED`, the Usage pane's `COST`, and both columns of the `$` drawer. Two
+  digits of extra precision are noise on a surface whose job is comparing rows to
+  each other.
 
   **One request** is the exception, and keeps four decimals: the events table's
   `COST`. A single cache-read request is $0.000038, so cents there would render
@@ -368,24 +429,23 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   The selected row is reverse-video rather than marked with a glyph, so it is
   the one thing these listings cannot show.
 
-  **Reading the SPEND line: figures are grouped by the span they cover, and each
-  group names its span once.** Everything before `1h:` is the day — `$30.9350
-  today` is spend since local midnight from the durable cost ledger, and
-  `saved ~$0.1804` beside it is the same day's avoided spend, so the pair is
-  "what it cost" and "what it would have cost" over one span. Everything from
-  `1h:` onward is the rolling window the `[w]` key cycles: its cost, then the
-  cache hit rate and token count that window covers. A span's label rides on the
-  first figure of its group, so it survives every width at which that figure
-  does. Two trailing readings belong to neither group and appear last: `[u] usage`
-  and a `polled 3m ago` staleness note, which is built from whichever of the two
-  poll chains is further behind.
+  **What the markers on a figure mean.** Each rides on the figure it qualifies,
+  and a clean figure carries none — a marker present on every row would
+  distinguish nothing:
 
-  On a deployment with no durable cost ledger — Kubernetes, by design — there is
-  no day figure, so the line opens with the window group instead
-  (`SPEND  1h: $2.9100   saved ~$0.1804   …`) and the saving shown is that
-  window's. `~` on a money figure means it is a lower bound, never an exact
-  total; the saving always wears one, because it is estimated from a
-  bytes-to-tokens ratio rather than measured by a tokenizer.
+  | | |
+  |---|---|
+  | `~` | estimated, so the figure is a lower bound rather than an exact total |
+  | `+` | a floor: some traffic in the span is unpriced, or the span reaches back past what the ledger retains |
+  | `!` | short by an amount nothing can state — a damaged ledger read, or a counter that hit its ceiling |
+
+  This paragraph used to describe a single `SPEND` line whose figures were grouped
+  by span — `SPEND  $30.93 today   1h: $2.91   cache 81% …` — with the day's cost
+  and saving before `1h:` and the rolling window's readings after it, and a `~` on
+  the saving on every row. That line is gone: it mixed spans on one row, which is
+  the defect the band replaced, and the saving's unconditional `~` was noise on
+  100% of rows. Avoided spend now lives per session in the sessions table and per
+  series in the `$` breakdown; volume readings live in the Usage pane.
 - **Events**: per-session event table. `c` opens a column picker — a popup with
   a checkbox and a one-line description per column, since twelve abbreviated
   headers are not self-describing.
@@ -640,9 +700,9 @@ Layered on top of all of them:
 | `y` | detail | yank event JSON to `~/.cortex/abctl-events` (path stays until the next keypress) |
 | `g` / `G` | lists | jump to top / bottom. In the events timeline this also sets where the *next* session opens — see [Where a session opens](#where-a-session-opens) |
 | `u` | sessions, events, detail | open the usage charts (sessions: all sessions; events/detail: the selected session) |
-| `$` | every pane except the two pickers and usage | expand the spend strip into a per-model breakdown, in place — the table stays on screen. Needs 26 rows; refuses on the two pickers (nothing is connected yet) and on the usage pane, which is already a breakdown with its own cycles |
+| `$` | every pane except the two pickers and usage | expand the band into a breakdown — where the money went by rate tier, and who spent it by model, endpoint or agent — in place, so the table stays on screen. Needs 27 rows; refuses on the two pickers (nothing is connected yet) and on the usage pane, which is already a breakdown with its own cycles |
 | `a` | while the breakdown is open | cycle the axis: model / endpoint / agent. Not `g`, which is the global "jump to top" |
-| `w` | while the breakdown is open | cycle the span: 15m / 1h / 6h |
+| `w` | while the breakdown is open | cycle the span: the band's four — last 1h / today / 7 days / month. Without a cost ledger only the hour is distinct; see [Spans and the cost ledger](#spans-and-the-cost-ledger) |
 | `m` | usage | cycle metric: tokens / requests / errors / latency / cost |
 | `w` | usage | cycle window: 10m / 1h / 6h |
 | `b` | usage | cycle breakdown: none / status / method / plugin (not offered for latency — there is no per-label latency) |

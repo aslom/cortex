@@ -147,18 +147,19 @@ does survive a restart; see below.
 **A local install keeps a cost ledger on disk, on by default.** Sessions themselves —
 prompts, completions, tool arguments — stay in memory and die with the process. Per-minute
 cost totals do not: they are appended to `~/.cortex/cost/YYYY-MM-DD.jsonl`, one file per
-local day, **kept for 30 days**.
+local day, **kept for 31 days** — the length of the longest month, so `window=month` can be
+answered in full on the 31st.
 
 **Sizing, because "roughly 10 MB" was a laptop figure and is not general.** A row is about 418
 bytes, and there is one per minute *per distinct (endpoint, model, agent, provenance)*. A laptop
 writes rows only for minutes with traffic, which is where 10 MB comes from. Continuous traffic
 populates all 1,440 minutes of a day:
 
-| Distinct combinations per minute | Per day | Per 30 days |
+| Distinct combinations per minute | Per day | Per 31 days (the default retention) |
 |---|---|---|
-| 2 | 1.2 MB | 36 MB |
-| 8 | 4.8 MB | 144 MB |
-| 64 (the per-minute cap) | 38.5 MB | 1.16 GB |
+| 2 | 1.2 MB | 37 MB |
+| 8 | 4.8 MB | 149 MB |
+| 64 (the per-minute cap) | 38.5 MB | 1.19 GB |
 
 Size a mounted volume from that table, not from the laptop number, and lower
 `retention_days` if the top row is closer to your traffic.
@@ -180,10 +181,12 @@ no longer depends on the file. `grep -A1 cost_ledger ~/.cortex/config.yaml` show
 have.
 
 It exists because the in-memory counters are a 6-hour ring, and the proxy restarts several
-times a day. Without the ledger, both `today` and `7d` are still answered — from the ring's
-maximum window, with the response's own `window` field naming the span that was actually
-covered rather than the one you asked for. So the figures stay honest and get much smaller:
-six hours of a day, and six hours of a week.
+times a day. Without the ledger, `today`, `7d` and `month` are all still answered — from the
+ring's maximum window, with the response's own `window` field naming the span that was actually
+covered rather than the one you asked for. So the figures stay honest and get much smaller: six
+hours of a day, six hours of a week, and six hours of a month, which is the one that reads most
+wrongly if you take the label at face value. abctl draws such a span as `—` rather than as a
+number for that reason.
 
 **What is in the files.** One JSON line per minute per (endpoint, model, agent,
 provenance): the host, the model name, the calling agent's User-Agent, token counts,
@@ -194,10 +197,11 @@ that is a promise a test asserts against the serialized bytes, not a convention.
 reach the session API, which is **unauthenticated** (the proxy logs `UNAUTHENTICATED; contains
 raw user content; never expose via ingress` when it starts). On a laptop it binds to localhost.
 
-`abctl` is not yet one of those readers, and the distinction is worth being exact about:
-`GET /v1/usage` reaches these files only for the symbolic windows `today` and `7d`, and
-`apiclient.GetUsage` takes a duration, so every view abctl draws today is served from the
-6-hour ring instead. Reading the ledger from abctl is the next step, not this one.
+`abctl` is one of those readers now, and the distinction is worth being exact about:
+`GET /v1/usage` reaches these files only for the symbolic windows `today`, `7d` and `month`,
+which a duration cannot express — so the spend band asks for them by name through
+`apiclient.GetUsageWindow`, and three of its four cells are ledger-backed. Only `LAST 1H` comes
+from the 6-hour ring, and it is the one cell that survives a deployment with no ledger at all.
 Nothing about the ledger makes that worse, but "my spend is on disk and readable" is worth
 knowing rather than discovering.
 
@@ -239,7 +243,7 @@ Two other knobs, same restart rule:
 | Setting | Default | Notes |
 |---|---|---|
 | `cost_ledger.dir` | `~/.cortex/cost` | Must be an absolute path. A relative one is refused, because it would resolve against whatever directory the proxy started from |
-| `cost_ledger.retention_days` | 30 | Minimum **9** when set. `window=7d` is a rolling 7×24h, not seven calendar days, so it can open **nine** local day files: one extra because a rolling span starts part-way through a date, and one more because a spring-forward week is 167 hours, so the span reaches an hour further back. A shorter retention answers `window:"7d"` over a partial week with nothing saying so |
+| `cost_ledger.retention_days` | 31 | The longest month, so `window=month` is answerable in full on the 31st; a shorter value makes that total a partial one and it is marked as such. Minimum **9** when set. `window=7d` is a rolling 7×24h, not seven calendar days, so it can open **nine** local day files: one extra because a rolling span starts part-way through a date, and one more because a spring-forward week is 167 hours, so the span reaches an hour further back. A retention shorter than the window is disclosed rather than silent — `DaysOutsideRetention` counts the days asked for beyond the setting, the band marks the total as a floor and `abctl cost` prints a coverage line. The floor of 9 is exactly `window=7d`'s worst case, so a legal setting can never answer *that* window short; a `month` asked of a 9-day ledger can |
 
 ## `abctl: command not found`
 

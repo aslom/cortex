@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
 // dayLayout names a day file. Sortable, and the same layout Query parses back, so
@@ -20,9 +22,28 @@ const dayLayout = "2006-01-02"
 // defaultRetentionDays is how many day files are kept.
 //
 // An active 8h day writes roughly 480 minutes x a few label combinations, about
-// 350 KB, so 30 days is on the order of 10 MB — small enough that nobody has to
-// think about it, long enough to answer "what did last month cost".
-const defaultRetentionDays = 30
+// 350 KB, so a month of them is on the order of 10 MB — small enough that nobody has to
+// think about it, long enough to answer "what did this month cost".
+//
+// THIRTY-ONE, AND IT HAS TO BE. This was 30, under a doc claiming it was "long enough to
+// answer what did last month cost" — and it was one day short of doing so. prune keeps the
+// window [ref-(retainDays-1), ref], so N retention days is exactly N distinct dates, and
+// answering window=month on the 31st of a 31-day month needs day files for the 1st through
+// the 31st. At 30 the first of the month was pruned on the morning of the 31st and a
+// month-to-date total silently lost its first day: no error, no caveat, a figure too small,
+// and a budget that looked further from its limit than it was.
+//
+// usage.WindowMonthLocalDays ITSELF, not a literal agreeing with it. An earlier version was
+// written out as 31 "because this package does not import usage" — which was never true here:
+// query.go has imported it since this package learned to answer a symbolic window, so the only
+// thing the literal bought was a test to keep two numbers equal.
+//
+// NOT THE SAME CASE AS config.minCostLedgerRetentionDays, whose literal stays: that package is
+// the leaf every binary loads to parse its config and must not import the aggregator at all.
+// Here the import already exists, so the agreement can be structural instead of asserted. What
+// the number means is in usage: the most distinct local dates a month-to-date window can touch,
+// which TestWindowMonthLocalDays_IsTheLongestMonthsDateCount walks a calendar to confirm.
+const defaultRetentionDays = usage.WindowMonthLocalDays
 
 // expiredSuffix marks a day file that prune has CONDEMNED but not yet deleted.
 //
@@ -558,6 +579,26 @@ type dayIssues struct {
 	// after that offset is missing from the answer and nothing says how much, which is
 	// why it is tracked separately from a skip rather than added to it.
 	truncated bool
+}
+
+// retentionCutoff is the oldest day this ledger's CONFIGURATION reaches back to: the
+// [ref-(retainDays-1), ref] span prune keeps, measured from the clock's day.
+//
+// A STATEMENT ABOUT CONFIGURATION, NOT ABOUT WHAT WAS DELETED, and the difference is why an
+// earlier version of this was wrong. It claimed to be "derived from the same expression prune
+// uses" and it is not: prune floors its own ref at the NEWEST day file, so on a ledger that has
+// been idle it reaches further back than this does, and files can outlive this cutoff between
+// prune runs in any case.
+//
+// So this cannot answer "was anything deleted". Nothing in this package can: no inception date
+// is persisted and prune records nothing about what it removed, so an absent old day is
+// indistinguishable from a day that was never written. A three-day-old install with
+// retention_days=10 has twenty-two absent days before this cutoff and lost nothing.
+//
+// What it CAN answer is "how far back can a request expect coverage", which is a coverage
+// question and is all its one caller asks. See sessionapi's daysOutsideRetention.
+func (s *store) retentionCutoff(now time.Time) time.Time {
+	return s.dayOf(now).AddDate(0, 0, -(s.retainDays - 1))
 }
 
 // prune condemns day files outside the retention window, in both directions.

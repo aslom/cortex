@@ -47,7 +47,7 @@ func runCost(args []string, stdout, stderr io.Writer) int {
 			"figure is inexact and any incomplete-read disclosure as JSON, with "+
 			"usage.Counts' own field names")
 	window := fs.String("window", usage.WindowToday,
-		"window to report: today, 7d, or a duration such as 1h or 6h")
+		"window to report: today, month, 7d, or a duration such as 1h or 6h")
 	endpoint := fs.String("endpoint", "",
 		"session API URL of the proxy (default: the Cortex installed on this machine)")
 	fs.Usage = func() {
@@ -55,18 +55,26 @@ func runCost(args []string, stdout, stderr io.Writer) int {
 
 Usage:
   abctl cost                     today's spend, from local midnight
+  abctl cost --window month      this month's spend, from the 1st — where a budget resets
   abctl cost --window 7d         the last seven days
   abctl cost --window 1h         a rolling hour, from the in-memory ring
   abctl cost --json              the totals as JSON, for a script
   abctl cost --endpoint URL      ask a specific proxy rather than the local one
 
-"today" and "7d" are served from Cortex's durable cost ledger, which is on for a
-local install and off in Kubernetes. Where it is off, the proxy answers with the
+"today", "month" and "7d" are served from Cortex's durable cost ledger, which is on
+for a local install and off in Kubernetes. Where it is off, the proxy answers with the
 longest window it does hold and this command prints THAT window, never the one you
-asked for — a six-hour figure labelled "today" would be a wrong number wearing a
-right label.
+asked for — a six-hour figure labelled "today" would be a wrong number wearing a right
+label. That gap is widest for "month", where the ring holds six hours against a window
+of up to thirty-one days.
 
-A duration window (1h, 6h) comes from a different place than "today" and "7d", and
+"today" and "month" are BOUNDARIES rather than lengths: they run from the start of the
+local day and the start of the local month to now, so each is narrow at the beginning
+of its period and widens through it. "7d" is a rolling seven times twenty-four hours,
+which makes it the one window here not aligned to a calendar edge — worth knowing
+before comparing it against "month".
+
+A duration window (1h, 6h) comes from a different place than the ledger windows, and
 the two can disagree slightly about the same traffic: the in-memory ring prices a
 request nothing else priced, from the rate table, while the ledger reports it as
 unpriced instead. Where a request arrives with a settled cost — which is every
@@ -134,7 +142,7 @@ Flags:
 			// that has nothing wrong with it. An older proxy predating window=today, or a
 			// --window this one does not accept, are the two real causes.
 			fmt.Fprintf(stderr, "  this proxy does not accept --window %q\n", *window)
-			fmt.Fprintln(stderr, "  it may predate the today/7d windows; try --window 1h, or a duration it does hold")
+			fmt.Fprintln(stderr, "  it may predate the today/month/7d windows; try --window 1h, or a duration it does hold")
 		default:
 			// A user whose proxy is down needs the next command, not a bare dial error.
 			fmt.Fprintln(stderr, "  is Cortex running? `abctl service status`")
@@ -227,7 +235,7 @@ type costJSON struct {
 	// here has to be the reason string on the wire and in pricing.ReasonOutputUncounted.
 	//
 	// ABSENT IS NOT A CLAIM OF EXACTNESS, and a consumer must not read it as one. It is
-	// never present on a ledger-backed window — "today" and "7d", this command's default
+	// never present on a ledger-backed window — "today", "7d" and "month", this command's default
 	// and its only durable windows — because the reason is no part of a persisted row's
 	// key, so a per-minute row cannot say which way its inexact figures were inexact.
 	// Totals.IncompleteRequests is the field that answers exactness on both window kinds.
@@ -262,6 +270,18 @@ type costJSON struct {
 	// this printed before — absence keeps meaning "the read was clean" rather than becoming
 	// zeros a consumer has to interpret.
 	Degraded *usage.Degraded `json:"degraded,omitempty"`
+	// DaysOutsideRetention is how many days of the requested window fall before the ledger's
+	// horizon, carried verbatim from usage.Snapshot.
+	//
+	// HERE BECAUSE THE HUMAN SUMMARY HAS IT AND A SCRIPT HAD NOT, which is the disagreement this
+	// command's own comment calls worse than either answer: `--window month` against a shorter
+	// retention_days printed the "!" coverage line for a reader and returned a total short by
+	// weeks, with no trace of it, to the consumer with nobody watching. A figure a human is
+	// warned about and a script is not is the shape of a silent wrong number.
+	//
+	// NOT a Degraded counter, for the reason that type documents: this says the configuration
+	// cannot reach part of the window, not that rows are missing from the sum.
+	DaysOutsideRetention int64 `json:"daysOutsideRetention,omitempty"`
 	// SeriesOvershootMicros says the answer CONTRADICTS ITSELF: the breakdown summed to more
 	// than the total, by this much. It is a defect report rather than a figure — see
 	// usage.Snapshot.SeriesOvershootMicros, which states that a reconcilable group's series can
@@ -344,14 +364,15 @@ func writeCostJSON(snap *usage.Snapshot, stdout, stderr io.Writer) int {
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	out := costJSON{
-		Window:       snap.Window,
-		Priced:       snap.Priced,
-		Totals:       snap.Totals,
-		Tiers:        tiersJSONOf(snap.Totals),
-		PricedBy:     snap.PricedBy,
-		UnpricedBy:   snap.UnpricedBy,
-		IncompleteBy: snap.IncompleteBy,
-		Degraded:     snap.Degraded,
+		Window:               snap.Window,
+		Priced:               snap.Priced,
+		Totals:               snap.Totals,
+		Tiers:                tiersJSONOf(snap.Totals),
+		PricedBy:             snap.PricedBy,
+		UnpricedBy:           snap.UnpricedBy,
+		IncompleteBy:         snap.IncompleteBy,
+		Degraded:             snap.Degraded,
+		DaysOutsideRetention: snap.DaysOutsideRetention,
 		// usage.Counts.Saturated and usage.Counts.RefusedTokenRequests need no line here: Totals
 		// is usage.Counts embedded verbatim, so both travel with their own field names and their
 		// own omitempty. That is the whole point of not re-keying the struct — a disclosure added
@@ -435,7 +456,7 @@ func writeCostSummary(snap *usage.Snapshot, stdout io.Writer) {
 	// aggregate.
 	//
 	// Silent at zero, on this function's standing rule: a deployment not running tool-prune has
-	// nothing to act on, and a permanent "~$0.0000 saved" is the line that teaches an operator
+	// nothing to act on, and a permanent "~$0.00 saved" is the line that teaches an operator
 	// to stop reading these.
 	if t.AvoidedMicros > 0 {
 		fmt.Fprintf(stdout, "  ~%-13s saved   estimate, gross of cache re-warm; not deducted above\n",
@@ -514,6 +535,35 @@ func writeCostSummary(snap *usage.Snapshot, stdout io.Writer) {
 		fmt.Fprintf(stdout, "  ! %s of %s priceable requests unpriced — the total covers only the priced ones\n",
 			plainCount(gap), plainCount(t.PriceableRequests))
 	}
+	// AND HOW MUCH OF THE WINDOW THE LEDGER CANNOT REACH, next to the unpriced gap because it is
+	// the same kind of statement: how much of the traffic the figure covers, rather than whether
+	// the figure is exact. Never a Degraded clause — see
+	// TestUsageDegraded_CarriesNoRetentionCoverageField for that boundary.
+	//
+	// "CANNOT REACH", never "was pruned": nothing records the ledger's inception or what prune
+	// removed, so a window reaching past the horizon may have lost nothing at all. The provable
+	// claim is about configuration, and this is the CLI's only disclosure of it — --window month
+	// against a shorter retention_days printed a clean-looking total, while the TUI band marked
+	// the same figure partial. Two surfaces disagreeing about the same number is worse than
+	// either answer.
+	//
+	// "MAY BE MISSING", NOT "IS OUTSIDE THE TOTAL", and the difference is a state that
+	// reproduces. prune floors its own reference day at the newest day file, so an idle ledger
+	// keeps its last retainDays files however old they are — while this figure is measured from
+	// the clock. Both then hold: days are reported outside retention AND their spend is in the
+	// sum. Measured in sessionapi's TestLedgerSnapshot_ADayReportedOutsideRetentionCanStillBeIn
+	// TheTotal: 21 days reported, ten of them present, every one of those in the total. So this
+	// line is a CEILING on what is absent, and saying "is outside" overstated it in the
+	// direction that makes an operator distrust a figure that was right.
+	//
+	// "MAY NOT COVER" rather than "may be missing", because "missing" is one of the three
+	// words this line is already forbidden — see the test below: it asserts spend EXISTED on
+	// those days, which nothing here knows. The hedge has to come without that claim.
+	if snap.DaysOutsideRetention > 0 {
+		fmt.Fprintf(stdout, "  ! the window reaches %s day%s past this ledger's retention — "+
+			"the total may not cover them\n",
+			plainCount(snap.DaysOutsideRetention), plainPlural(snap.DaysOutsideRetention))
+	}
 	if !snap.Priced && t.PriceableRequests == 0 {
 		// Not a gap and not a failure: there was no inference traffic to price. Said out
 		// loud so an empty answer reads as a finding rather than as a broken command.
@@ -558,6 +608,13 @@ func costDegradedText(d *usage.Degraded) string {
 	// A CLAUSE LIST, not a switch over combinations: four counters make fifteen non-empty
 	// combinations, and a switch over a subset of them is how two came to be missing. A counter
 	// added to the struct needs one clause here and any mixture composes.
+	//
+	// FOUR COUNTERS, FOUR CLAUSES, and that equality is asserted by
+	// TestCostDegradedText_HasAClauseForEveryCounter rather than maintained by hand. A fifth
+	// counter reaching Degraded without a clause here falls through to "did not say how much it
+	// lost" — which is wrong on every word when the amount IS statable, and worse, is erased
+	// entirely the moment any other counter is also set. Retention coverage is deliberately NOT
+	// one of these: it is not a loss, so it is reported with the unpriced gap above.
 	//
 	// Ordered by how much each kind loses, worst first: a whole day, the rest of a day, the named
 	// lines, then the writer's own drops.
@@ -671,7 +728,7 @@ var costIncompleteReasons = []struct {
 // when there are no reasons.
 //
 // Nothing, not a line saying so. Absence is the normal case on this command's own default
-// window — "today" and "7d" are ledger-backed and a persisted row has no reason column — and
+// window — "today", "month" and "7d" are ledger-backed and a persisted row has no reason column — and
 // usage.Snapshot.IncompleteBy's doc is explicit that absence is NOT a claim of exactness.
 // The count line above states the inexactness on both window kinds; this only ever adds
 // which way, and where that is unknown it adds nothing rather than guessing a direction.
@@ -717,7 +774,7 @@ func costIncompleteReasonLines(by map[string]int64) []string {
 // through untouched.
 //
 // time.Duration.String() emits every unit, so the aggregator's own Window field
-// reads "6h0m0s" where "6h" would do. A symbolic window ("today", "7d") is not a
+// reads "6h0m0s" where "6h" would do. A symbolic window ("today", "7d", "month") is not a
 // duration at all and must survive verbatim — it is the server's own word for what
 // it served, and rewriting it is how a label stops matching its data.
 func costWindowLabel(window string) string {

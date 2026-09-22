@@ -107,7 +107,7 @@ type Snapshot struct {
 	// Window is the span this snapshot ACTUALLY covers, e.g. "10m", "6h0m0s" or
 	// "today". Not necessarily the span requested.
 	//
-	// The difference matters: the symbolic windows ("today", "7d") are served from the
+	// The difference matters: the symbolic windows ("today", "7d", "month") are served from the
 	// durable cost ledger, and a proxy with no ledger — Kubernetes by design — answers
 	// them from the ring's maximum window instead and reports THAT here. A client must
 	// read this field rather than echo its own request, or it will label six hours of
@@ -162,6 +162,46 @@ type Snapshot struct {
 	// a deduction from it — the coverage question and the exactness question are
 	// separate, and this field answers neither on its own.
 	Priced bool `json:"priced"`
+	// DaysOutsideRetention is how many days of the REQUESTED window fall before the durable
+	// ledger's retention horizon. A COVERAGE statement, and a CEILING: the configuration does
+	// not promise those days, so spend on them may be missing from the total.
+	//
+	// NOT A LOSS, AND DELIBERATELY NOT IN Degraded, whose downstream meaning is "rows are
+	// missing from the sum". Nothing in the ledger records its own inception or what prune
+	// deleted, so an absent old day is indistinguishable from a day that was never written — a
+	// three-day-old install with retention_days=10 has twenty-two absent days before its cutoff
+	// and lost nothing. Reporting that as damage would make the disclosure fire when nothing
+	// was pruned, and noise on a disclosure is how a real one gets ignored.
+	//
+	// What it states instead is the part a client can act on and the server can prove: this
+	// window asked for N days the configuration does not reach. Whether spend happened on them
+	// is unknowable here, and so is whether the total includes it.
+	//
+	// AN EARLIER VERSION OF THIS SAID "that the total cannot include it is certain". It is not,
+	// and the state that breaks it is ordinary rather than exotic: costledger's prune floors its
+	// reference day at the NEWEST day file, so a ledger nothing has written to keeps its last
+	// retainDays files however long ago they were written — while this figure is measured from
+	// the clock. A query then sums day files this field has already called outside. Reproduced
+	// in sessionapi's TestLedgerSnapshot_ADayReportedOutsideRetentionCanStillBeInTheTotal:
+	// retention_days 10, files for 21 consecutive days, read ten days after the last write —
+	// 21 days reported outside, and ten days of spend in the total.
+	//
+	// A CLIENT MUST THEREFORE RENDER THIS AS "may be missing", never as a deduction from the
+	// figure beside it. Both shipped consumers do: the band marks the total a floor, and
+	// `abctl cost` prints a coverage line.
+	//
+	// SAME SHAPE AS THE UNPRICED COVERAGE GAP beside it — Unpriced over Priceable — which is
+	// why it sits here rather than with the damage counters: both say "this figure covers less
+	// than the question implied", and neither says anything was destroyed.
+	//
+	// ZERO DOES NOT MEAN THE TOTAL IS COMPLETE, and a client must not read it that way. It is
+	// measured against retention_days AS CONFIGURED NOW, so a day pruned while the setting was
+	// SHORTER is inside today's horizon and reported by nothing: set retention_days to 9, run
+	// for a week, set it back to 31, and the month's total is short with this field at 0. The
+	// same is true of a day prune deleted for any other reason. Closing that needs a persisted
+	// inception date or a prune record and the ledger keeps neither — and inferring one from the
+	// files present is the false-positive design this field replaced.
+	DaysOutsideRetention int64 `json:"daysOutsideRetention,omitempty"`
 	// UnpricedBy counts the requests that could NOT be priced, keyed
 	// "<endpoint> <model>". Present only when something was unpriced — and never
 	// present at all on a ledger-backed window, where a per-minute row carries only
@@ -571,7 +611,7 @@ func seriesCost(series map[string]Counts) CostSum {
 
 // ParseWindow validates a window parameter against the storage resolution.
 //
-// Durations ONLY. It rejects the symbolic windows "today" and "7d", because a
+// Durations ONLY. It rejects the symbolic windows "today", "7d" and "month", because a
 // time.Duration genuinely cannot express a boundary and silently substituting a
 // length would report a number for a span nobody asked for. Callers that accept
 // those use ParseWindowSpec, which delegates here for every fixed length so the
@@ -585,7 +625,11 @@ func ParseWindow(s string) (time.Duration, error) {
 		// Not wrapped with the caller's string, for the reason in ParseGroup.
 		// time.ParseDuration's own error quotes the input, so it is not
 		// forwarded either.
-		return 0, errors.New("bad window (want a duration such as 10m, 1h or 6h)")
+		// NAMES THE SYMBOLIC WINDOWS TOO. This is the only guidance a mistyped window gets, and
+		// ?window=mtd was told to pick a duration — advice that cannot lead to "month". The
+		// duration examples stay first because a duration is the default shape.
+		return 0, errors.New("bad window (want a duration such as 10m, 1h or 6h, " +
+			"or one of today, 7d, month)")
 	}
 	if d < BucketWidth {
 		return 0, fmt.Errorf("window %s is shorter than the %s bucket width", d, BucketWidth)
@@ -712,21 +756,78 @@ func StartOfLocalDay(t time.Time) time.Time {
 	return first
 }
 
-// WindowToday and Window7d are the symbolic windows the API accepts.
+// StartOfLocalMonth is the earliest instant that EXISTS in t's local calendar month, in t's
+// own zone. It is the lower bound of "month to date".
 //
-// Symbolic because neither is a LENGTH: "today" is a boundary, and while "7d" has a
-// fixed span it is longer than the ring retains, so both can only be answered from
-// the durable cost ledger. time.ParseDuration reads neither string, which is why
+// IT IS StartOfLocalDay ASKED ABOUT THE FIRST, not a second sweep, and that is deliberate:
+// the earliest instant in a month is the earliest instant on its first date, so there is one
+// definition of "where a local period begins" in this package rather than two that agree
+// until a zone makes them disagree. StartOfLocalDay's own doc records what a duplicated
+// boundary cost the layer above it.
+//
+// THE FIRST IS ANCHORED AT NOON before being handed over, for the reason dayAnchorHour
+// exists: no DST transition can move midday onto a different date, so the anchor identifies
+// the month's first date without depending on midnight existing on it.
+//
+// AND IT HAS TO, because a month bound can be wrong in a way a day bound cannot. Paraguay
+// moved its clocks forward AT 00:00 ON 1 OCTOBER in 2017 and 2023, so midnight on that date
+// does not exist and time.Date(y, 10, 1, 0, 0, 0, 0, loc) resolves BACKWARDS to 23:00 on 30
+// September — an hour before the previous month ended. A month-to-date total on that bound
+// folds September's last hour into October and reports a budget closer to its limit than it
+// is. See TestStartOfLocalMonth_TheNaiveFirstOfMonthExpressionIsStillWrong, which is the
+// negative control, and note that the day-level cases StartOfLocalDay documents are all
+// mid-month: this shape needed its own fixture to be found at all.
+//
+// A ZONE THAT SKIPS THE FIRST resolves correctly by construction. Pacific/Apia dropped
+// 2011-12-30 entirely when it crossed the date line; were a zone ever to drop a first of the
+// month, the noon anchor normalises onto the next date and the sweep returns the start of
+// THAT date — which is then genuinely the earliest instant in the month.
+func StartOfLocalMonth(t time.Time) time.Time {
+	y, m, _ := t.Date()
+	return StartOfLocalDay(time.Date(y, m, 1, dayAnchorHour, 0, 0, 0, t.Location()))
+}
+
+// WindowToday, Window7d and WindowMonth are the symbolic windows the API accepts.
+//
+// Symbolic because none is a LENGTH: "today" and "month" are boundaries, and while "7d" has
+// a fixed span it is longer than the ring retains, so all three can only be answered from
+// the durable cost ledger. time.ParseDuration reads none of these strings, which is why
 // ParseWindow already rejects them and why they need their own parse.
+//
+// "month" RATHER THAN "mtd", because "today" is already a boundary word rather than a length
+// and this joins that family. "mtd" is less ambiguous read cold, at the cost of a second
+// naming convention on the same small enum; the label is echoed back on the wire either way,
+// so a client always learns which window it got. It means month-TO-DATE — since the first of
+// the local month, not a rolling thirty days — which is what a budget that resets on the
+// first is measured against.
 const (
 	WindowToday = "today"
 	Window7d    = "7d"
+	WindowMonth = "month"
 )
 
 // Window7dSpan is what "7d" MEANS: a rolling seven times twenty-four hours back from
 // now. Stated once, and read by ParseWindowSpec, so nothing that has to reason about
 // the span can spell it differently.
 const Window7dSpan = 7 * 24 * time.Hour
+
+// WindowMonthLocalDays is the MOST distinct LOCAL DATES a month-to-date window can touch:
+// THIRTY-ONE, the length of the longest calendar month.
+//
+// NO +1, unlike Window7dLocalDays, and the asymmetry is the whole difference between a
+// boundary window and a rolling one. 7d needs two increments because it starts part-way
+// through a date and because a spring-forward week is 167 hours, so it reaches an hour
+// further back than a calendar week does. This window's From IS a date boundary —
+// StartOfLocalMonth returns the first instant of the first — so it begins exactly where a day
+// file begins and cannot spill onto an earlier date. A DST transition inside the month moves
+// which instants the window covers but not the set of DATES, and a date is what a day file is
+// named by.
+//
+// It is therefore the number of day files a durable ledger must hold to answer this window on
+// the 31st of a 31-day month, which is why costledger's default retention is derived from this
+// rather than written as its own number — the lesson Window7dLocalDays records about two
+// constants that had to agree and did not.
+const WindowMonthLocalDays = 31
 
 // Window7dLocalDays is the MOST distinct LOCAL DATES a 7d window can touch: NINE.
 //
@@ -829,6 +930,19 @@ func ParseWindowSpec(s string, now time.Time) (Spec, error) {
 		// floor is derived from the same constant, and a span defined twice is how the two
 		// came to disagree. See Window7dLocalDays.
 		return Spec{Label: Window7d, From: now.Add(-Window7dSpan), To: now}, nil
+	case WindowMonth:
+		// THE START OF THE LOCAL MONTH to now, so this is month-TO-DATE and grows through the
+		// month rather than being a fixed span. On the first it is minutes wide, which is the
+		// point of a boundary: a budget that resets on the first has spent nothing yet.
+		//
+		// StartOfLocalMonth for the same reason "today" uses StartOfLocalDay rather than
+		// midnight — see there, and note that this window reaches a shape the day window
+		// cannot, a zone shifting at 00:00 on a first of the month.
+		return Spec{
+			Label: WindowMonth,
+			From:  StartOfLocalMonth(now),
+			To:    now,
+		}, nil
 	}
 	d, err := ParseWindow(s)
 	if err != nil {
@@ -1247,7 +1361,7 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 	// The COUNTER, never CostMicros > 0. A window whose every request was DECLARED FREE
 	// by the gateway — a settled zero — has priced requests and no dollars, and reading
 	// the total would report it "cost unavailable". Those are different truths: false
-	// must render "cost unavailable", a declared-free window must render $0.0000. See
+	// must render "cost unavailable", a declared-free window must render $0.00. See
 	// costevent.Event.Settled, and TestPricing_SettledZeroIsNotRePriced, which pins it.
 	out.Priced = out.Totals.PricedRequests > 0
 	// A CLAMPED BREAKDOWN IS DISCLOSED ON THE SAME FLAG Counts.Add RAISES for a saturated Requests,

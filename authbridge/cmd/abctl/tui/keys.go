@@ -165,8 +165,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if !m.filtering && !m.colPicker && m.editState.phase == editPhaseDone {
 		switch msg.String() {
 		case "$":
-			m.toggleSpendDrawer()
-			return nil
+			return m.toggleSpendDrawer()
 		case "a":
 			if m.spendDrawerVisible() {
 				return m.cycleSpendAxis()
@@ -194,6 +193,16 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// should find it as the operator left it.
 			if m.spendDrawerVisible() {
 				m.spend.expanded = false
+				// AND THE SAME INVALIDATION `$` DOES, for the same reason: the drawer owns a poll
+				// chain, a reply already in the air outlives the keypress by up to
+				// spendFetchTimeout, and storing it would leave a snapshot the next open renders
+				// before its own first poll lands. Closing by esc and closing by `$` are the same
+				// event and must leave the same state.
+				//
+				// It is currently harmless to omit only because the OPEN path invalidates too —
+				// and that call is there for snapshot freshness, so an esc close relying on it is
+				// relying on something that is not about closing at all. See toggleSpendDrawer.
+				m.spend.drawer.invalidate()
 				// Same reason toggleSpendDrawer re-lays out: the reserved rows have to go back.
 				m.layout()
 				return nil
@@ -960,11 +969,16 @@ func (m *model) helpView() string {
 	case panePods:
 		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [r] reload  [?] keys  [q] quit"
 	case paneSessions:
-		// THE LIFETIME SCOPE IS NOT SAID HERE. It was, as a leading notice — and the pane's
-		// TITLE now carries it instead (see sessionsScopeNote), which is the better place for
-		// the same words: adjacent to the table they describe, and width-fitted so it drops
-		// rather than wraps. A notice here would have been the third copy on one screen, after
-		// the title and the [?] overlay, which is the redundancy "name the span once" forbids.
+		// THE PER-SESSION SCOPE IS NOT SAID HERE. It was, as a leading notice; then the pane's
+		// title carried it as " · lifetime totals"; now neither does. See paneView's sessions
+		// case for why the note was dropped rather than reworded — "lifetime" named a span this
+		// table does not have, and named the shortest one on screen when it named any.
+		//
+		// A notice here would have been the wrong place for it regardless: fitHintLine drops
+		// whole hints from the FRONT, so anything added here is paid for by the hints ahead of
+		// it — and the two keys that reach cost, [u] and [$], were deliberately placed to
+		// survive an 80-column cut. Spending them to explain a cost column is a bad trade at
+		// any width. The [?] overlay is the surface that cannot run out of room.
 		// [$] spend BESIDE [u] usage, because the footer is where a key gets discovered. It was
 		// documented in the [?] overlay and in the README's own footer sample and was missing
 		// from the line those two describe — so the drawer existed only for a reader who went

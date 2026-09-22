@@ -20,11 +20,13 @@ import (
 // Query parameters:
 //
 //	window      10m (default), or any multiple of the bucket width up to the ring's
-//	            maximum, or the SYMBOLIC windows "today" (LOCAL midnight to now, so a
-//	            laptop crossing a timezone does not reset its day mid-afternoon) and
-//	            "7d" (a rolling 7x24h). Symbolic windows are served from the durable
-//	            cost ledger; where it is off, the ring's maximum is served instead and
-//	            the response's own "window" field names what was served.
+//	            maximum, or one of the three SYMBOLIC windows: "today" (LOCAL midnight to
+//	            now, so a laptop crossing a timezone does not reset its day
+//	            mid-afternoon), "7d" (a rolling 7x24h) and "month" (the start of the
+//	            LOCAL month to now, which is month-to-date and grows through the month
+//	            rather than being a fixed span). Symbolic windows are served from the
+//	            durable cost ledger; where it is off, the ring's maximum is served
+//	            instead and the response's own "window" field names what was served.
 //	resolution  bucket width to return; defaults to the 1m storage resolution. Folded
 //	            here rather than in the client so every consumer gets the same
 //	            arithmetic — see usage.fold for why latency cannot be folded naively.
@@ -247,10 +249,15 @@ func (e usageError) Error() string { return e.msg }
 
 var errSessionIDTooLong = usageError{"session id too long"}
 
-// errSessionWithSymbolicWindow refuses session= alongside window=today|7d. A fixed
+// errSessionWithSymbolicWindow refuses session= alongside window=today|7d|month. A fixed
 // string, like every other message this endpoint returns — see writeUsageError.
+//
+// EVERY SYMBOLIC WINDOW IS NAMED, because a caller who asked for the one the message omits
+// reads it as being about a different request than the one they made. "month" joined the
+// symbolic set without joining this list, so window=month&session= was refused for
+// "(today, 7d)". TestUsageErrorNamesEverySymbolicWindow keeps the two in step.
 var errSessionWithSymbolicWindow = usageError{
-	"session= cannot be combined with a symbolic window (today, 7d); " +
+	"session= cannot be combined with a symbolic window (today, 7d, month); " +
 		"the durable cost ledger holds no session ids — ask for a duration window such as 1h or 6h"}
 
 // ledgerSnapshot builds a Snapshot from persisted rows.
@@ -289,6 +296,19 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 	if err != nil {
 		return usage.Snapshot{}, err
 	}
+	// HOW MUCH OF THE WINDOW THE CONFIGURATION CANNOT REACH, computed here rather than in the
+	// ledger because it is a fact about the REQUEST measured against the ledger's horizon, and
+	// the ledger does not know what was asked for. See usage.Snapshot.DaysOutsideRetention for
+	// why this is coverage rather than damage.
+	//
+	// MEASURED AGAINST THE WINDOW'S OWN INSTANT, not a second reading of the clock.
+	// RetentionCutoff() would call time.Now() again, and the two sides of this comparison are only
+	// sound if no day boundary fell between the two reads — a margin that is exactly zero in the
+	// default configuration, so a month-to-date request crossing local midnight reported a
+	// complete total as one day short. spec.To is the instant ParseWindowSpec built this window
+	// from, and this path is symbolic-only, so it is always set: the Window call above already
+	// depends on it.
+	outside := daysOutsideRetention(spec.From, s.ledger.RetentionCutoffAt(spec.To))
 	// THE GROUPING THIS SOURCE CAN APPLY, which is not always the one that was asked for,
 	// and the response says which it was.
 	//
@@ -388,7 +408,8 @@ func (s *Server) ledgerSnapshot(ctx context.Context, spec usage.Spec, group usag
 		// window whose every request was a truncated stream reports priced:true over a
 		// real total and discloses the caveat in Totals.IncompleteRequests. Withholding
 		// the figure would render "cost unavailable" over dollars that are known.
-		Priced: totals.PricedRequests > 0,
+		Priced:               totals.PricedRequests > 0,
+		DaysOutsideRetention: outside,
 	}
 	// The dollars the breakdown above does not account for — a gateway-priced response the
 	// inference parser could not read is stored with no model, so it counts toward Totals
@@ -418,6 +439,49 @@ func writeUsageError(w http.ResponseWriter, err error) {
 	}{Error: err.Error()}); encErr != nil {
 		slog.Debug("sessionapi: usage error encode failed", "error", encErr)
 	}
+}
+
+// daysOutsideRetention is how many whole days of a window start before a retention cutoff.
+//
+// Zero when the window fits, which is the normal case and says nothing. Counted in DAYS because
+// that is the unit the ledger stores and prunes in: a window reaching back part of a day past the
+// cutoff has one date it cannot cover, not a fraction of one.
+//
+// BOTH ARGUMENTS IDENTIFY A DATE AND NEITHER IS A BOUND, which is where two defects lived.
+// cutoff comes from costledger's retentionCutoff, and a ledger day is carried at NOON —
+// costledger.dayOf's doc forbids reading it as the day's first instant — while from is a local
+// MIDNIGHT, from usage.StartOfLocalDay or StartOfLocalMonth. Comparing them as instants made a
+// month-to-date request report one day short of ITSELF: from sits twelve hours before the cutoff
+// of the very date it starts on, so "from is earlier" was true and a floor turned it into 1. With
+// retention_days defaulting to 31, deliberately equal to the longest month, that stamped the
+// partial marker on a complete and correct total every 31-day month, and on the 9th of any month
+// at the 9-day minimum.
+//
+// So both sides are reduced to DATES and differenced as dates. NEVER Truncate(24*time.Hour),
+// which truncates on the absolute UTC-epoch axis rather than to a local date: east of Greenwich a
+// local midnight and a local noon belong to different UTC dates, so the difference gained a day
+// in Berlin and Tokyo while UTC, New_York and Auckland answered correctly. Neither a
+// fixed-offset test zone nor a single-zone one can see that.
+func daysOutsideRetention(from, cutoff time.Time) int64 {
+	// The LEDGER's zone decides the grid: retention is counted in the ledger's own day files, so
+	// the question is which of its dates the window reaches past, not which of the caller's.
+	d := utcNoonOfDate(cutoff).Sub(utcNoonOfDate(from.In(cutoff.Location())))
+	if n := int64(d / (24 * time.Hour)); n > 0 {
+		return n
+	}
+	return 0
+}
+
+// utcNoonOfDate re-anchors a timestamp's calendar date at noon UTC, so two dates can be
+// differenced as dates.
+//
+// NOON, and in UTC, for the same reason costledger carries its days at noon: UTC has no
+// transitions, so the gap between two of these is always an exact multiple of 24 hours and the
+// division below cannot be off by one — where a local date's length is 22, 23, 24 or 25 hours and
+// subtracting local midnights drifts by the offset change.
+func utcNoonOfDate(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 12, 0, 0, 0, time.UTC)
 }
 
 // degradedFrom is the whole of the Caveats-to-wire conversion, in one place so a field cannot be

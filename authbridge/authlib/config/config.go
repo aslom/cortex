@@ -97,9 +97,24 @@ type CostLedgerConfig struct {
 	// machines.
 	Dir string `yaml:"dir,omitempty" json:"dir,omitempty"`
 	// RetentionDays is how many day files survive. Zero means the package default of
-	// 30, which is roughly 10 MB.
+	// 31, which is roughly 10 MB.
 	//
-	// A non-zero value must be at least minCostLedgerRetentionDays; see there.
+	// THIRTY-ONE because that is what window=month needs: a month-to-date total on the 31st
+	// of a 31-day month opens 31 day files, and costledger's prune keeps exactly
+	// retention_days distinct dates. See costledger.defaultRetentionDays, which is pinned to
+	// usage.WindowMonthLocalDays.
+	//
+	// A non-zero value must be at least minCostLedgerRetentionDays; see there. Note that the
+	// FLOOR is lower than the default: a deployment may legitimately keep less history than
+	// window=month needs, and one that does will answer that window short.
+	//
+	// THE SHORTFALL IS DISCLOSED, which an earlier version of this comment denied: a pruned day
+	// file is absent rather than unreadable, so it produces no Caveats entry — but
+	// usage.Snapshot.DaysOutsideRetention counts the days a REQUEST asks for beyond this setting,
+	// and the band marks such a total as a floor while `abctl cost` prints a coverage line. What
+	// is still silent is a day pruned INSIDE the current horizon, from a setting that used to be
+	// shorter; see that field. The default covers the longest shipped window so that the ordinary
+	// case needs no disclosure at all.
 	RetentionDays int `yaml:"retention_days,omitempty" json:"retention_days,omitempty"`
 }
 

@@ -1124,25 +1124,45 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spendTickMsg:
-		// ONE guard, not two, and unlike the usage chain: this tick carries no pane or
-		// session scope, so generation is the only thing that can make it stale. See
-		// spendTickIsCurrent.
-		if !m.spendTickIsCurrent(msg.gen) {
+		// ONE CASE FOR EVERY SPAN, because the tick carries the span it belongs to. The
+		// four chains poll on four cadences — a ring read every 20s, up to thirty-one day
+		// files every 5 minutes — and each reschedules only itself.
+		//
+		// TWO guards in one, and unlike the usage chain this tick carries no pane or
+		// session scope: the span has to be a real one and the generation has to be live.
+		// See spendTickIsCurrent.
+		if !m.spendTickIsCurrent(msg.span, msg.gen) {
 			return m, nil
 		}
-		return m, tea.Batch(m.fetchSpend(), spendTick(msg.gen))
+		return m, tea.Batch(m.fetchSpendSpan(msg.span), spendTick(msg.span, msg.gen))
 
-	case spendTodayLoadedMsg:
-		m.applySpendTodayLoaded(msg)
+	case spendDrawerLoadedMsg:
+		m.applySpendDrawerLoaded(msg)
 		return m, nil
 
-	case spendTodayTickMsg:
-		// The day figure polls on its own, much slower clock — it reads day files off
-		// disk where the window figure reads a ring out of memory.
-		if !m.spendTodayTickIsCurrent(msg.gen) {
+	case spendDrawerTickMsg:
+		// The drawer's own chain, and it stops when the drawer is CLOSED rather than running
+		// for the session: its span can be a ledger window, so refreshing forever would walk
+		// day files to redraw rows nobody is looking at.
+		//
+		// GATED ON expanded, NOT ON spendDrawerVisible(). Those are different questions and
+		// conflating them killed the chain for good. m.spend.expanded deliberately survives a
+		// move to a pane that cannot host the drawer and a resize below spendDrawerMinHeight —
+		// see the esc handler, which leaves the flag alone precisely so returning finds the
+		// drawer as the operator left it — while spendDrawerVisible() reports whether it is on
+		// screen RIGHT NOW. Stopping on "not visible" meant: open it on Sessions, press `u`, and
+		// the next tick returned without rescheduling. Nothing re-arms the chain but `$` itself,
+		// so coming back to Sessions rendered the pre-switch snapshot forever — a stale money
+		// figure with no age indicator and no disclosure anywhere, which is the failure
+		// applySpendLoaded's own doc forbids for the band.
+		//
+		// The tick still FETCHES nothing it does not need: an off-screen drawer keeps its chain
+		// alive on a five-minute cadence, which is one request per five minutes to have the rows
+		// current the moment the operator comes back.
+		if !m.spendDrawerTickIsCurrent(msg.gen) || !m.spend.expanded {
 			return m, nil
 		}
-		return m, tea.Batch(m.fetchSpendToday(), spendTodayTick(msg.gen))
+		return m, tea.Batch(m.fetchSpendDrawer(), spendDrawerTick(msg.gen, m.spend.pollInterval()))
 
 	case streamClosedMsg:
 		// In picker mode, ignore the close from the previous session —
@@ -1639,14 +1659,25 @@ func (m *model) paneView() string {
 	var body string
 	switch m.pane {
 	case paneSessions:
+		// NO SCOPE NOTE. The title used to carry " · lifetime totals", to say that the table's
+		// figures are per-session sums rather than slices of a clock window. It is gone, because
+		// it misread in the one direction that matters:
+		//
+		//   - "lifetime" NAMES A SPAN, and this table has no single span. Each row covers its own
+		//     session, first event to last, and no two rows need cover the same duration. There
+		//     was no one duration for the word to be true about.
+		//   - WHERE IT DID IMPLY A SPAN, it implied the wrong one. The session store is in memory
+		//     and resets when the proxy restarts, so a session's lifetime cannot exceed proxy
+		//     uptime — measured on a freshly restarted local proxy, the COST column summed to
+		//     $4.04, matching the band's rolling hour, while the band's day read $18.80. The word
+		//     that sounds like "everything ever" was labelling the SHORTEST span on screen.
+		//   - It sat at the end of the title, one line above a band whose nearest cells are
+		//     explicitly clock-windowed, so it read as covering those too.
+		//
+		// The contrast carries it instead: every band cell names its own span, and the table is
+		// the only thing on screen with a SESSION column. The [?] overlay still states it in full
+		// for a reader who wants it spelled out.
 		title = fmt.Sprintf("abctl · %s · %s", m.endpoint, viewTabs(paneSessions))
-		// The span of every figure in the table below — see sessionsScopeNote, which argues why
-		// this belongs in the title rather than in the headers or the hint line. Added only when
-		// it fits, because the title is not otherwise fitted and a wrapped one costs a row of the
-		// table it describes.
-		if scoped := title + sessionsScopeNote; lipgloss.Width(scoped) <= m.width {
-			title = scoped
-		}
 		body = m.sessionsTbl.View()
 	case paneEvents:
 		// Fitted to the terminal rather than to a fixed 36: a bare UUID is 36 characters, so
@@ -1701,9 +1732,10 @@ func (m *model) paneView() string {
 	// without needing a second call site. It sits directly under the title because that
 	// is the whole requirement: spend read BEFORE the data rather than navigated to.
 	//
-	// Styled AFTER fitting. renderSpendStrip measures with lipgloss.Width, and styleMuted
-	// only adds a colour escape so the column count is unchanged — but fitting an
-	// already-styled string would measure the escape bytes and silently over-truncate.
+	// Styled AFTER fitting. renderSpendBand measures DISPLAY COLUMNS (lipgloss.Width, see
+	// bandCell.width), and styleMuted only adds a colour escape so the column count is
+	// unchanged — but fitting an already-styled string would measure the escape bytes and
+	// silently over-truncate.
 	//
 	// Nothing here touches eventsTbl: the strip holds no cursor, filter or scroll state,
 	// so it cannot perturb the pane it sits above.
@@ -1714,17 +1746,23 @@ func (m *model) paneView() string {
 	// direction that overflows. So the render fills them rather than the reservation tracking the
 	// render.
 	//
-	// The case that made this necessary: renderSpendStrip returns "" before the first poll answers
-	// (deliberately — "we have not looked" is honest), which left the strip's row and the drawer's
-	// five unfilled and the footer six rows above the bottom of the terminal. The same arithmetic
-	// covers a drawer left open on a pane that cannot host it.
+	// The case that made this necessary: the renderer can return FEWER lines than the reservation,
+	// which left the strip's row and the drawer's five unfilled and the footer six rows above the
+	// bottom of the terminal. The same arithmetic covers a drawer left open on a pane that cannot
+	// host it.
+	//
+	// NOT "blank before the first poll answers", which an earlier version of this said: an
+	// unanswered band draws its four labels over four em dashes — that IS the honest "we have not
+	// looked". Measured, the band comes back blank in one case only: a width so narrow that not
+	// even one cell fits, which is 4 columns or less. So `drew` below tracks "the strip is visible
+	// AND at least one cell fit", and it is not vacuous — it is the gate that keeps the breakdown
+	// off a screen with no figure above it.
 	if m.spendStripReservesRow() {
 		band := make([]string, spendBandLines)
 		drew := false
 		if m.spendStripVisible() {
-			// Styled AFTER fitting. renderSpendBand measures runes, and styleMuted only adds a
-			// colour escape so the column count is unchanged — but fitting an already-styled
-			// string would measure the escape bytes and silently over-truncate.
+			// Styled AFTER fitting, for the reason stated above the row slice: the renderer
+			// measures display columns and an escape sequence is not one.
 			band = renderSpendBand(m.spendSummary(), m.width)
 			drew = strings.TrimSpace(strings.Join(band, "")) != ""
 		}
@@ -1745,7 +1783,7 @@ func (m *model) paneView() string {
 				// The axis and span come off the SNAPSHOT, not off what was last requested: see
 				// drawerLabels.
 				axis, window := m.drawerLabels()
-				lines = renderSpendDrawer(m.spend.snap, axis, window, m.width)
+				lines = renderSpendDrawer(m.spend.drawer.snap, m.spend.drawer.err, axis, window, m.width)
 			}
 			for len(lines) < spendDrawerLines {
 				lines = append(lines, "")

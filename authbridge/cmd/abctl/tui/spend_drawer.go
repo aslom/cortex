@@ -78,43 +78,107 @@ const (
 // one of them is wrong.
 var spendDrawerAxes = []usage.Group{usage.GroupModel, usage.GroupEndpoint, usage.GroupAgent}
 
-// spendDrawerWindows are the spans `w` cycles through.
+// spendDrawerWindows are the spans `w` cycles through: EXACTLY THE BAND'S FOUR.
 //
-// RING SPANS ONLY, and the absence of "today" and "7d" is a decision rather than an
-// omission. The strip's headline figure is already the day's spend, on its own
-// ledger-backed poll, so a "today" option here would render the same number twice and the
-// drawer would need a SECOND ledger query to break it down — day files off disk, on a
-// keypress, where every other option is a fold of a ring already in memory. The drawer
-// answers "what is my spend made of right now"; `abctl cost --window 7d` answers the other
-// question, from a shell, where waiting for a disk read is expected.
+// THE RING-ONLY RESTRICTION IS GONE, and both of the reasons for it have expired. It was
+// {15m, 1h, 6h}, on the grounds that a "today" option "would render the same number twice"
+// and that a ledger query on a keypress was too expensive.
 //
-// spendWindow (1h) is the middle entry, so the default index leaves the strip requesting
-// exactly what it requested before the drawer existed.
-var spendDrawerWindows = []time.Duration{15 * time.Minute, spendWindow, 6 * time.Hour}
+// The first was true while the band showed a single day headline and the drawer had no span
+// of its own to name. It is not true now: the band shows four TOTALS and the drawer shows a
+// BREAKDOWN, so pointing it at the month answers "what is this month's spend made of", which
+// no cell on the band can say at any width.
+//
+// The second was really a worry about the twenty-second POLL LOOP, not about user demand. The
+// drawer has its own chain now, polled only while it is open and at the slow cadence, and
+// `abctl cost --window 7d` has always done exactly this read on demand from a shell. A
+// keypress that costs a disk walk is a keypress someone asked for.
+//
+// 15m and 6h are dropped. They are ring diagnostics rather than budget spans, and six entries
+// to cycle through to reach four useful ones is a worse surface than four. Both remain
+// reachable through `abctl cost --window` and the Usage pane.
+//
+// KNOWN LIMITATION, ON A DEPLOYMENT WITH NO COST LEDGER. Three of these four spans are
+// ledger-backed, and without a ledger — Kubernetes by default — the server answers all three
+// from the six-hour ring instead, clamped to the window asked for. So `w` has ONE span the
+// store can really distinguish there (the hour), and the other three stops return the same
+// clamped answer under three different captions. The band already detects and discloses that
+// per cell, via servedAsRequested; THIS surface does not, so the drawer shows the clamped
+// breakdown without saying it is one.
+//
+// Left as it is deliberately, and scoped: the target is a local install, where the ledger is on
+// by default and all four spans are real. Dropping the ring spans is what a ledger-less
+// deployment lost, and re-adding them for that case would put back the clutter this set exists
+// to remove. The two ways out, if the Kubernetes case ever matters: disclose here the way the
+// band does, or make the cycle's contents depend on whether a ledger answered.
+//
+// STRINGS, not durations, because three of the four are symbolic boundaries that
+// time.ParseDuration cannot express — the same reason spendSpanDefs.window is a string.
+var spendDrawerWindows = []string{
+	spendSpanDefs[spanHour].window,
+	spendSpanDefs[spanToday].window,
+	spendSpanDefs[span7d].window,
+	spendSpanDefs[spanMonth].window,
+}
 
-// spendDrawerWindowDefault indexes spendWindow in spendDrawerWindows.
-const spendDrawerWindowDefault = 1
+// spendDrawerSpans is the same list as spendDrawerWindows, as SPANS, and it is the list
+// windowSpan resolves against.
+//
+// Two slices rather than one derivation because the strings above are what the request carries
+// and the spans here are what the cadence and the label come from; they are checked against
+// each other by TestSpendDrawerWindows_AreTheBandsSpans rather than trusted to stay in step.
+var spendDrawerSpans = []spendSpan{spanHour, spanToday, span7d, spanMonth}
 
-// window is the span the strip and drawer currently request.
+// window is the span the drawer currently requests.
 //
-// windowStep is an OFFSET FROM THE DEFAULT, not an index, and that is the whole reason this
-// function exists. The strip polls long before anyone opens the drawer, so a freshly
-// constructed model must request spendWindow — but zero is also the natural zero value of a
-// counter, and an index of zero points at the FIRST entry of the slice, which is 15m. The
-// first version of this guarded only out-of-range indices and therefore made exactly that
-// mistake while carrying a comment claiming it did not; the wire assertion in
-// TestFetchSpend_AsksForTheDrawersAxis is what caught it.
+// A PLAIN INDEX NOW, and that is a footgun retired rather than a simplification. windowStep
+// used to be an OFFSET from spendDrawerWindowDefault, purely because the old slice had 1h in
+// the MIDDLE: zero is the natural zero value of a counter, an index of zero pointed at the
+// first entry, and the first entry was 15m — so a freshly constructed model would silently
+// have polled a span nobody asked for. The offset existed to make zero mean "the middle".
 //
-// Adding the default and taking the modulus makes the zero value mean "the span the strip
-// always asked for" while keeping the slice in ascending order, so the hint line reads
-// 15m · 1h · 6h and `w` still walks it in that direction.
-func (s *spendState) window() time.Duration {
-	return spendDrawerWindows[s.windowStepIndex()]
+// With the band's four spans in ascending order the hour IS first, so the zero value is
+// already the right answer and the offset has nothing left to correct. The wrap survives as
+// defence in depth; see wrapIndex.
+func (s *spendState) window() string {
+	return spendSpanDefs[s.windowSpan()].window
+}
+
+// windowSpan is which of the band's four spans the drawer is currently pointed at.
+//
+// THE DRAWER'S WINDOWS ARE THE BAND'S SPANS, one for one — spendDrawerWindows is built from
+// spendSpanDefs — so the span is the honest identity of the current selection and the window
+// string is one of its fields. Named because a second reader needs it: the drawer's poll
+// cadence comes from the span it is showing, not from one constant for all four.
+func (s *spendState) windowSpan() spendSpan {
+	return spendDrawerSpans[s.windowStepIndex()]
+}
+
+// pollInterval is how often THIS drawer selection refreshes: the cadence of the span it is
+// showing.
+//
+// ONE CONSTANT FOR ALL FOUR WAS WRONG IN BOTH DIRECTIONS, and the hour is the case that shows
+// it: the band's hour cell refreshes every twenty seconds and the breakdown underneath it every
+// five minutes, so the two disagreed for up to five minutes about the same span — a breakdown
+// that does not add up to the figure above it is the failure bandSpanCell's own doc argues
+// against. The month keeps its slow cadence, which is what the single constant was chosen for:
+// re-folding thirty-one day files every twenty seconds to redraw four rows.
+func (s *spendState) pollInterval() time.Duration {
+	return spendSpanDefs[s.windowSpan()].pollInterval()
+}
+
+// windowResolution asks the ring for a single bucket, and omits the parameter for a symbolic
+// window — the ledger serves those as one bucket and ignores the resolution entirely.
+func (s *spendState) windowResolution() time.Duration {
+	if _, ok := parseWindowSpan(s.window()); ok {
+		return spendResolution
+	}
+	return 0
 }
 
 // windowStepIndex resolves windowStep to a slice index, through the same wrap axis() uses.
 func (s *spendState) windowStepIndex() int {
-	return wrapIndex(spendDrawerWindowDefault+s.windowStep, len(spendDrawerWindows))
+	return wrapIndex(s.windowStep, len(spendDrawerWindows))
 }
 
 // axis is the breakdown the strip asks the server to fold for.
@@ -207,33 +271,52 @@ func (m *model) spendDrawerVisible() bool {
 //
 // The refusal does not set expanded, so growing the terminal later does not surprise the
 // user with a drawer they asked for minutes ago and were told they could not have.
-func (m *model) toggleSpendDrawer() {
-	if m.spend.expanded {
+// IT RETURNS A COMMAND NOW, because the drawer owns a poll chain. Opening starts it and
+// closing stops it: the breakdown is the only thing that reads it, and its span can be a
+// ledger window, so a chain left running behind a closed drawer would walk day files for
+// nobody. Closing invalidates rather than merely ceasing to reschedule — a reply already in
+// the air outlives the keypress by up to spendFetchTimeout, and storing it would leave a
+// snapshot the next open would render before its own first poll lands.
+// THE CLOSE BRANCH IS GATED ON WHAT IS ON SCREEN, not on the flag, for the reason esc is: the
+// flag survives a move to a pane that cannot host the drawer and a resize below the height floor,
+// so `$` on the Usage pane closed a drawer the user could not see and gave no sign it had. Open it
+// on Sessions, press `u`, press `$` — and the breakdown was gone on the way back, with no flash to
+// say why, which is precisely the "a key that silently does nothing reads as a broken key" failure
+// this function's own doc argues against, arriving through the other door. Off screen, `$` now
+// falls through to the refusals below and says which one applies.
+func (m *model) toggleSpendDrawer() tea.Cmd {
+	if m.spendDrawerVisible() {
 		m.spend.expanded = false
+		m.spend.drawer.invalidate()
 		// Give the rows back, for the reason the open path takes them.
 		m.layout()
-		return
+		return nil
 	}
 	// The PANE first, because its refusal has nothing to do with height and a height message
 	// there sends the reader to resize a terminal that was never the problem.
 	if ok, why := m.spendDrawerHost(); !ok {
 		m.setFlash(why)
-		return
+		return nil
 	}
 	if !m.spendStripVisible() {
-		m.setFlash("spend: no room for the strip on a terminal this short")
-		return
+		m.setFlash("spend: no room for the band on a terminal this short")
+		return nil
 	}
 	if m.height < spendDrawerMinHeight {
 		m.setFlash(fmt.Sprintf("spend: the breakdown needs %d rows, this terminal has %d",
 			spendDrawerMinHeight, m.height))
-		return
+		return nil
 	}
 	m.spend.expanded = true
 	// The reservation is made by layout(), which otherwise only runs on a resize — so without
 	// this the drawer draws into a body sized for a closed one and the footer goes off the
 	// bottom until the terminal happens to change size.
 	m.layout()
+	// Fetch immediately AND schedule: the drawer is opened to be read now, so waiting out its
+	// span's cadence would show an empty breakdown for twenty seconds on the hour and five
+	// minutes on the month.
+	m.spend.drawer.invalidate()
+	return tea.Batch(m.fetchSpendDrawer(), spendDrawerTick(m.spend.drawer.tickGen, m.spend.pollInterval()))
 }
 
 // cycleSpendAxis handles `a` while the drawer is open, and refetches.
@@ -253,18 +336,36 @@ func (m *model) toggleSpendDrawer() {
 // does not blink through an empty frame — it is a breakdown of the same traffic either way.
 func (m *model) cycleSpendAxis() tea.Cmd {
 	m.spend.groupIdx = (m.spend.groupIdx + 1) % len(spendDrawerAxes)
-	return m.fetchSpend()
+	// THE PREVIOUS SPAN'S ERROR IS DROPPED HERE, and it has to be dropped rather than left to
+	// the reply that will overwrite it. applySpendLoaded stores both fields together, so a
+	// failed poll leaves err set and snap nil — and the diagnostic is captioned with the
+	// label, which now names the span just asked for. Measured: a failed month poll then `w`
+	// printed "breakdown unavailable for LAST 1H: <the month's error>", attributing a failure
+	// to a request nobody has made yet, for the whole round trip.
+	//
+	// The SNAPSHOT deliberately survives (see above) because it is a breakdown of the same
+	// traffic either way. An error is not: it describes one request.
+	m.spend.drawer.err = nil
+	return m.fetchSpendDrawer()
 }
 
 // cycleSpendWindow handles `w` while the drawer is open, and refetches.
 //
-// Changes the STRIP's figure too, which is intended: the strip's window reading and the
-// drawer's rows are one snapshot, and a breakdown of six hours sitting under a total for
-// one would be two spans presented as one answer. The label moves with it, because the
-// label is derived from what the server served — see spendSummary.
+// IT NO LONGER MOVES THE BAND, and that separation is the point of the drawer having its own
+// chain. The two used to share one poll, so `w` silently changed what the band's window cell
+// reported — press it once and "LAST 1H" became "LAST 15M" with nobody having asked for a
+// different band. The band now holds four fixed spans and this changes exactly the breakdown
+// it is pointed at.
+//
+// Refetches rather than regrouping client-side: the server folds, and doing it here would be
+// a second implementation of the aggregator's arithmetic that could disagree with the figures
+// above it. The old snapshot stays on screen until the new one lands, so the drawer does not
+// blink through an empty frame.
 func (m *model) cycleSpendWindow() tea.Cmd {
 	m.spend.windowStep = (m.spend.windowStep + 1) % len(spendDrawerWindows)
-	return m.fetchSpend()
+	// Same reason as cycleSpendAxis: see there.
+	m.spend.drawer.err = nil
+	return m.fetchSpendDrawer()
 }
 
 // plainFigures lifts a run of fixed strings into the fitter's type. None of them can be partial,
@@ -297,19 +398,92 @@ func plainFigures(ss ...string) []stripFigure {
 // FALLING BACK to the requested values when the snapshot cannot say: no snapshot yet, or a server
 // that echoed no group. The alternative is a hint line with a blank axis, which reads as a
 // rendering fault rather than as an answer in flight.
+// spanLabelFor renders a REQUESTED window the way the hint line wants it.
+//
+// A span the band already names gets the band's own label, so "month" reads as MONTH in both
+// places rather than as two spellings of the same period. A duration the band does NOT name is
+// compacted through formatWindowLabel ("6h0m0s" -> "6h"), and anything else is carried
+// through as given.
+//
+// THE MATCH IS servedAsRequested's, NOT ==, and that distinction is the whole invariant. The
+// hour's window is the one span written as a DURATION, and a server answers a duration window by
+// stringifying it: "1h0m0s" against a requested "1h". An exact comparison missed that, fell
+// through to formatWindowLabel, and returned "1h" — so the caption flipped from LAST 1H to 1h
+// the moment the first poll landed, while the band cell directly above it still said LAST 1H.
+// Two spellings of one period in one region, which is exactly what this function is for.
+//
+// Used for the fallback AND for the served label — drawerLabels prefers what the server
+// actually served, for the reason its own doc gives, and routes it through here.
+func spanLabelFor(window string) string {
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if servedAsRequested(spendSpanDefs[span].window, window) {
+			return spendSpanDefs[span].label
+		}
+	}
+	if d, ok := parseWindowSpan(window); ok {
+		return formatWindowLabel(d)
+	}
+	return window
+}
+
+// drawerAge is how long ago the breakdown on screen answered, and whether that is longer than
+// its own span's cadence allows.
+//
+// THE SAME RULE THE BAND USES — twice the interval; see spanReadings — so one wedged chain
+// reads the same way wherever it is. Without this, drawer.lastFetch was recorded and never
+// rendered: a drawer whose poll had been failing for an hour showed an hour-old breakdown
+// under a caption that named the span and nothing about when it was true. The band spent the
+// whole of its own review round on exactly that, one row up.
+//
+// A ZERO lastFetch IS NOT STALE. Nothing has answered yet, which is a different state from a
+// wedged chain and is already visible: the drawer draws no rows.
+func (s *spendState) drawerAge(now time.Time) (time.Duration, bool) {
+	if s.drawer.lastFetch.IsZero() {
+		return 0, false
+	}
+	age := now.Sub(s.drawer.lastFetch)
+	return age, age > 2*s.pollInterval()
+}
+
 func (m *model) drawerLabels() (usage.Group, string) {
-	axis, window := m.spend.axis(), formatWindowLabel(m.spend.window())
-	snap := m.spend.snap
+	axis, window := m.spend.axis(), spanLabelFor(m.spend.window())
+	snap := m.spend.drawer.snap
 	if snap == nil {
 		return axis, window
 	}
-	if snap.Group != "" {
-		axis = snap.Group
+	// SANITISED FOR THE SAME REASON snap.Window IS, twelve lines down, and it was not: Group is
+	// server-supplied JSON that reaches the terminal verbatim through drawerHeaders, which renders
+	// "BY " + ToUpper(axis) and clips it to width — and clipRow shortens a row without neutralising
+	// anything in it. Measured: a Group of "model\x1b[2J\x1b[H" produced "   BY MODEL\x1b[2J\x1b[H"
+	// with the clear-screen and cursor-home intact, and a newline in it returned two rows where the
+	// drawer's reservation allows one.
+	//
+	// Pre-existing rather than introduced here, but this function is rewritten on this branch and
+	// the sanitize suite beside it made the field look covered, which is worse than an obvious gap.
+	if l := sanitizeLabel(string(snap.Group)); l != "" {
+		axis = usage.Group(l)
 	}
-	// The strip's own label, derived from the answer by spendSummary through the same parse; empty
-	// when the server sent a span this client cannot parse into a duration.
-	if l := m.spendSummary().WindowLabel; l != "" {
-		window = l
+	// FROM THE DRAWER'S OWN SNAPSHOT, not from spendSummary. It used to read
+	// spendSummary().WindowLabel, which was right while the drawer and the band shared one
+	// poll and is wrong now that they do not: the summary's label describes the BAND's hour,
+	// so a drawer showing a month would have been captioned "1h" — the mislabel this
+	// function exists to prevent, arriving through the function meant to prevent it.
+	//
+	// Sanitised because snap.Window is server-supplied and reaches the terminal verbatim, and
+	// compacted through the same parse-then-format the summary used: the server answers a
+	// duration window as "1h0m0s", which is literally true and three columns wider than the
+	// "1h" the caller asked for. A SYMBOLIC window ("today", "month") does not parse as a
+	// duration and is carried through as the server spelled it.
+	if l := sanitizeLabel(snap.Window); l != "" {
+		// Through spanLabelFor, so a span the band names reads the SAME here: a drawer showing
+		// the month says MONTH, not "month", and the reader is not left matching two spellings
+		// of one period across two rows of the same region.
+		window = spanLabelFor(l)
+	}
+	// THE AGE RIDES ON THE LABEL, and only when the chain is late — the same place and the same
+	// condition as the band's, so "LAST 1H 6m" means one thing on both rows.
+	if age, stale := m.spend.drawerAge(time.Now()); stale {
+		window += " " + formatSpendAge(age)
 	}
 	return axis, window
 }
@@ -461,7 +635,29 @@ func drawerHeaders(axis usage.Group, twoCol bool, width int) string {
 // windowLabel is the span in the strip's own vocabulary — "1h", not time.Duration's
 // "1h0m0s". Passed in already formatted rather than formatted here, so the drawer's hint and
 // the strip's own figure label are produced by one function and cannot drift apart.
-func renderSpendDrawer(snap *usage.Snapshot, axis usage.Group, windowLabel string, width int) []string {
+// err is the drawer chain's own failure, and it is a PARAMETER rather than something this
+// function infers from a nil snapshot, because the two are different states that must not read
+// the same. A nil snapshot before the first poll is "no answer yet"; a nil snapshot after a
+// failed one is "we asked and could not find out", and drawing the second as the first is
+// exactly the silence applySpendLoaded's doc forbids for the band — the chain clears snap on
+// failure, so without this a broken endpoint rendered as headers over blank rows forever.
+func renderSpendDrawer(snap *usage.Snapshot, err error, axis usage.Group, windowLabel string, width int) []string {
+	if err != nil {
+		// The reservation still has to be filled, so this is spendDrawerLines rows with the
+		// diagnostic on the first and the hint line last — the hints stay because `w` and `esc`
+		// still work, and a failed span is the moment an operator most wants to try another.
+		out := make([]string, 0, spendDrawerLines)
+		out = append(out, clipRow("  breakdown unavailable for "+windowLabel+": "+
+			sanitizeLabel(err.Error()), width))
+		for len(out) < spendDrawerLines-1 {
+			out = append(out, "")
+		}
+		return append(out, fitStripFigures(" ", plainFigures(
+			"[a] "+axisHint(axis),
+			"[w] "+windowLabel,
+			"esc closes",
+		), width))
+	}
 	rows := spendDrawerRows(snap, spendDrawerSeries)
 	// TWO COLUMNS: what the money was spent ON, and who spent it. They answer different
 	// questions, and with a single model in the window the series column alone restated the
@@ -493,8 +689,13 @@ func renderSpendDrawer(snap *usage.Snapshot, axis usage.Group, windowLabel strin
 		// outer column owns the placement here. Left in, the series text sat three columns
 		// right of the header naming it — measured, not guessed: "BY MODEL" at column 36
 		// against "claude-opus-5" at 39.
-		out = append(out, fmt.Sprintf("%-*s%s",
-			tierColumnWidth+2, tiers[i], strings.TrimLeft(series, " ")))
+		// THE SAME TWO-COLUMN INDENT THE HEADER USES. The rows started at column 0 while
+		// "WHERE IT WENT" started at 2, so the left column's header sat two columns right of
+		// its own values — the same off-by-two measured and fixed for the right column above,
+		// surviving on the other side of the panel because only the right one had a test.
+		// Costs no width: the two columns are 2 + tierColumnWidth + seriesWidth either way.
+		out = append(out, fmt.Sprintf("  %-*s%s",
+			tierColumnWidth, tiers[i], strings.TrimLeft(series, " ")))
 	}
 	// The hint line is LAST and always present: it is the only place the two keys and the
 	// current axis are written down, and a drawer whose controls are undiscoverable is a
@@ -600,7 +801,7 @@ func drawerFigures(r drawerRow) []stripFigure {
 	// longer marks its money (see renderTierRows for why), so a bare "$0.18" beside a cost of
 	// "$1.06" would read as a second spend figure with no way to tell which is which. The word is
 	// this figure's identity rather than an explanation of it, so it is not the part that yields;
-	// savedFigure's own doc makes the same argument for the strip.
+	// the strip's own saved figure made the same argument before it was replaced.
 	if r.counts.AvoidedMicros > 0 {
 		figs = append(figs, stripFigure{
 			full:    "saved " + formatUSDTotalMicros(r.counts.AvoidedMicros),

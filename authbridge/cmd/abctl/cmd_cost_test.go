@@ -77,6 +77,71 @@ func TestRunCost_FullyPricedCarriesNoWarning(t *testing.T) {
 	}
 }
 
+// A WINDOW REACHING PAST RETENTION SAYS SO, which is the coverage statement this CLI was silent
+// about while the TUI band marked the same figure partial.
+//
+// --window month against a ledger keeping less than a month is the ordinary case for it: the total
+// is a subtotal, and printed alone it reads as the month's spend. The line is a COVERAGE claim, so
+// it must not say anything was lost — nothing records the ledger's inception or what prune removed,
+// so a fresh install reaching past its horizon may have lost nothing at all.
+func TestRunCost_DisclosesAWindowPastRetention(t *testing.T) {
+	srv := fakeUsageServer(t, `{"window":"month","totals":{"requests":318,`+
+		`"costMicros":4170000,"pricedRequests":318,"priceableRequests":318},`+
+		`"priced":true,"daysOutsideRetention":21}`)
+	defer srv.Close()
+
+	var out, errOut strings.Builder
+	runCost([]string{"--endpoint", srv.URL, "--window", "month"}, &out, &errOut)
+	got := out.String()
+
+	if !strings.Contains(got, "21") {
+		t.Errorf("output does not disclose the 21 days the ledger cannot reach:\n%s", got)
+	}
+	if !strings.Contains(got, "retention") {
+		t.Errorf("output names no cause for the shortfall:\n%s", got)
+	}
+	// AND IT DOES NOT CLAIM A LOSS. "Pruned" or "missing" asserts spend existed on those days,
+	// which is the false disclosure this whole feature was narrowed away from.
+	for _, forbidden := range []string{"pruned", "missing", "lost"} {
+		if strings.Contains(strings.ToLower(got), forbidden) {
+			t.Errorf("output says %q about days outside retention, which claims a loss nothing "+
+				"here can know about:\n%s", forbidden, got)
+		}
+	}
+	// AND IT IS HEDGED, which is the other half of the same rule. "any spend on them is outside
+	// the total" was the wording, and it is false whenever prune has floored its window at the
+	// newest day file: those days are reported outside AND summed. See sessionapi's
+	// TestLedgerSnapshot_ADayReportedOutsideRetentionCanStillBeInTheTotal, which reproduces it.
+	for _, overclaim := range []string{"is outside the total", "are outside the total"} {
+		if strings.Contains(strings.ToLower(got), overclaim) {
+			t.Errorf("output says %q, which is certain about a total it cannot inspect:\n%s",
+				overclaim, got)
+		}
+	}
+}
+
+// AND A WINDOW INSIDE THE HORIZON IS SILENT, so the line above is a signal rather than furniture.
+func TestRunCost_AWindowInsideRetentionSaysNothingAboutIt(t *testing.T) {
+	srv := fakeUsageServer(t, `{"window":"today","totals":{"requests":318,`+
+		`"costMicros":4170000,"pricedRequests":318,"priceableRequests":318},"priced":true}`)
+	defer srv.Close()
+
+	var out, errOut strings.Builder
+	// THE EXIT CODE AND A POSITIVE ANCHOR, because absence alone is not evidence: a command
+	// that failed before printing anything satisfies "does not mention retention" too.
+	if code := runCost([]string{"--endpoint", srv.URL}, &out, &errOut); code != 0 {
+		t.Fatalf("runCost = %d, want 0\nstdout: %s\nstderr: %s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "$4.17") {
+		t.Fatalf("output does not carry the total, so it proves nothing about retention:\n%s",
+			out.String())
+	}
+
+	if strings.Contains(out.String(), "retention") {
+		t.Errorf("a window the ledger covers still mentions retention:\n%s", out.String())
+	}
+}
+
 // An inexact total must SAY it is inexact. A truncated stream's figure is a floor,
 // and printing it beside an exact-looking "$4.17" claims a precision the data does
 // not have — the claim usage.Counts.IncompleteRequests exists to withdraw.
@@ -93,8 +158,11 @@ func TestRunCost_DisclosesAnInexactTotal(t *testing.T) {
 	if !strings.Contains(got, "inexact") {
 		t.Errorf("output does not say the total is inexact:\n%s", got)
 	}
-	if !strings.Contains(got, "4") {
-		t.Errorf("output does not name how many figures are inexact:\n%s", got)
+	// THE PHRASE, not the digit "4" — which "$4.17" satisfies whatever incompleteRequests holds,
+	// so the assertion could not fail on its own fixture.
+	if !strings.Contains(got, "4 of 318 priced requests carry an inexact figure") {
+		t.Errorf("output does not name how many figures are inexact, or how many they are out "+
+			"of:\n%s", got)
 	}
 	// Disclosed, not deducted: the dollar total still stands.
 	if !strings.Contains(got, "$4.17") {
@@ -1393,5 +1461,55 @@ func TestRunCost_JSONOmitsTiersWithNoMix(t *testing.T) {
 	}
 	if strings.Contains(out.String(), `"tiers"`) {
 		t.Errorf("tiers emitted for a window with no modelled mix:\n%s", out.String())
+	}
+}
+
+// AND --json CARRIES THE SAME COVERAGE FIGURE THE HUMAN SUMMARY PRINTS.
+//
+// costJSON re-keys the snapshot field by field, so a disclosure added to the server reaches a
+// script only when someone adds a line here — and this one was missed: `--window month` against a
+// shorter retention_days printed the "!" line for a reader and returned a total short by weeks,
+// with no trace of it, to the consumer with nobody watching. That is the disagreement this
+// command's own comment calls worse than either answer, on the surface where nothing notices.
+func TestRunCost_JSONCarriesTheRetentionCoverage(t *testing.T) {
+	srv := fakeUsageServer(t, `{"window":"month","totals":{"requests":318,`+
+		`"costMicros":4170000,"pricedRequests":318,"priceableRequests":318},`+
+		`"priced":true,"daysOutsideRetention":21}`)
+	defer srv.Close()
+
+	var out, errOut strings.Builder
+	if code := runCost([]string{"--endpoint", srv.URL, "--window", "month", "--json"},
+		&out, &errOut); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr = %s", code, errOut.String())
+	}
+	var got struct {
+		DaysOutsideRetention int64 `json:"daysOutsideRetention"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &got); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out.String())
+	}
+	if got.DaysOutsideRetention != 21 {
+		t.Errorf("daysOutsideRetention = %d, want 21 — a script cannot see that the month is "+
+			"short by three weeks:\n%s", got.DaysOutsideRetention, out.String())
+	}
+}
+
+// And it is absent when the window fits, so a consumer can treat presence as the signal.
+func TestRunCost_JSONOmitsTheCoverageWhenThereIsNone(t *testing.T) {
+	srv := fakeUsageServer(t, `{"window":"today","totals":{"requests":318,`+
+		`"costMicros":4170000,"pricedRequests":318,"priceableRequests":318},"priced":true}`)
+	defer srv.Close()
+
+	var out, errOut strings.Builder
+	// Same reason as the text form above: the exit code first, then a key that MUST be there,
+	// so "the key is absent" is a statement about this JSON and not about an empty buffer.
+	if code := runCost([]string{"--endpoint", srv.URL, "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("runCost = %d, want 0\nstdout: %s\nstderr: %s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "\"costMicros\"") {
+		t.Fatalf("output is not the cost JSON, so the missing key proves nothing:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "daysOutsideRetention") {
+		t.Errorf("a window the ledger covers still carries the key:\n%s", out.String())
 	}
 }
