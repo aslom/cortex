@@ -1068,6 +1068,47 @@ func TestSpendSpanDefs_CadenceRisesWithTheCostOfTheAnswer(t *testing.T) {
 
 // Every span has to be fully described, or the band renders a cell it cannot label and a
 // chain that polls a window the server will refuse.
+// AND THE ZERO CASE IS ANSWERED THE SAME WAY BY BOTH READERS OF IT, which is the half the
+// completeness test above cannot cover: it fails the build-time mistake, and this pins what
+// happens if one ever ships anyway.
+//
+// The two disagreed. spendTick clamped a non-positive interval to spendPollInterval and polled at
+// that cadence, while spanReadings compared the age against 2*interval — 2*0 — so every age
+// exceeded it and the span reported itself stale on every frame. A span that polls correctly and
+// wears a permanently dated label is worse than either half alone, because the age on the label is
+// the signal an operator is meant to act on, and it also costs width: the age rides on the label
+// and the band is one uniform cell width.
+//
+// Both now read pollInterval, so this test is about the two CALLERS agreeing rather than about the
+// clamp's value.
+func TestSpendSpanDef_AMissingIntervalIsClampedForBothItsReaders(t *testing.T) {
+	var def spendSpanDef // no interval, the shape a fifth span added to the keyed literal would have
+
+	if got := def.pollInterval(); got != spendPollInterval {
+		t.Fatalf("pollInterval() = %v, want the default %v", got, spendPollInterval)
+	}
+
+	// THE STALENESS SIDE, with a span that actually HAS no interval — spendSpanDefs is a var, so
+	// the zero can be staged here rather than argued about. Against the raw zero this reading
+	// was stale at one nanosecond of age.
+	restore := spendSpanDefs[spanHour]
+	t.Cleanup(func() { spendSpanDefs[spanHour] = restore })
+	spendSpanDefs[spanHour] = spendSpanDef{window: restore.window, resolution: restore.resolution,
+		label: restore.label}
+
+	m := &model{}
+	m.spend.chains[spanHour].lastFetch = time.Now().Add(-spendPollInterval)
+	m.spend.chains[spanHour].snap = &usage.Snapshot{
+		Window: string(spendSpanDefs[spanHour].window),
+		Totals: usage.Counts{Requests: 1, CostMicros: 1_000_000, PricedRequests: 1, PriceableRequests: 1},
+		Priced: true,
+	}
+	if r := m.spanReadings()[spanHour]; r.Stale {
+		t.Errorf("a span fetched one cadence ago is stale (age %v) — the threshold read a zero "+
+			"interval where the scheduler read the clamp", r.Age)
+	}
+}
+
 func TestSpendSpanDefs_EverySpanIsComplete(t *testing.T) {
 	for span := spendSpan(0); span < numSpendSpans; span++ {
 		def := spendSpanDefs[span]

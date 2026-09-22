@@ -1072,24 +1072,82 @@ func TestRenderSpendDrawer_ShowsBothColumnsWithHeaders(t *testing.T) {
 	}
 }
 
-// The right column's header sits in the right column.
+// A CLAMPED SERIES SAYS SO ON THE ROW, in words at a width that has room for them and in the
+// marker at every width.
 //
-// Measured, not eyeballed: fitStripFigures prepends its own `label + "  "` indent, so the
-// series text sat three columns right of the header naming it — "BY MODEL" at column 36
-// against "claude-opus-5" at 39. A header over the wrong column is worse than none.
-func TestRenderSpendDrawer_TheSeriesHeaderSitsOverItsColumn(t *testing.T) {
+// THIS IS THE LIVE HALF of the two notes moneyFigureFrom can emit, and it had no test through a
+// screen: drawerFigures passes r.counts.Saturated straight through, so saturatedNote's wording is
+// what an operator actually reads when a series total hits the int64 ceiling. The wording was
+// asserted only through moneyFigure, which has no production caller at all — so the vocabulary was
+// pinned on a path nothing renders while the rendered path was pinned by nothing.
+//
+// damagedNote is the other half and stays unreachable from here by construction: this call site
+// passes nil for degraded, since a per-series damage figure is not something the aggregate carries.
+// Its wording keeps its unit test and its comment says which side of the line it is on.
+func TestRenderSpendDrawer_AClampedSeriesRowSaysItIsAFloor(t *testing.T) {
+	snap := drawerSnap()
+	for k, c := range snap.Buckets[0].Series {
+		if k == "claude-opus-5" {
+			c.Saturated = true
+			snap.Buckets[0].Series[k] = c
+		}
+	}
+
+	// THE MARKER AT EVERY WIDTH the drawer renders at, because it is one column and the fitter's
+	// compact form keeps it — that is what makes it the disclosure of last resort.
+	for _, width := range []int{90, 120, 200} {
+		joined := strings.Join(renderSpendDrawer(snap, nil, usage.GroupModel, "TODAY", width), "\n")
+		if !strings.Contains(joined, damagedMarker+"$11.12") {
+			t.Errorf("width %d: the clamped row carries no %q on its figure:\n%s",
+				width, damagedMarker, joined)
+		}
+	}
+
+	// AND THE WORDS where there is room: 200 columns is the measured width at which the fitter
+	// keeps the full form. Below that the marker carries it alone, which is the documented
+	// degradation rather than a loss.
+	joined := strings.Join(renderSpendDrawer(snap, nil, usage.GroupModel, "TODAY", 200), "\n")
+	if !strings.Contains(joined, saturatedNote) {
+		t.Errorf("a clamped series row does not say %q anywhere:\n%s", saturatedNote, joined)
+	}
+}
+
+// indentOf counts the leading spaces of a rendered line, in display columns.
+func indentOf(line string) int {
+	return len([]rune(line)) - len([]rune(strings.TrimLeft(line, " ")))
+}
+
+// BOTH headers sit over their own column.
+//
+// Measured, not eyeballed. The right one: fitStripFigures prepends its own `label + "  "`
+// indent, so the series text sat three columns right of the header naming it — "BY MODEL" at
+// column 36 against "claude-opus-5" at 39. The left one had the mirror defect and no test, so it
+// outlived the fix — "WHERE IT WENT" at column 2 over tier rows starting at 0. A header over the
+// wrong column is worse than none, on either side.
+func TestRenderSpendDrawer_BothHeadersSitOverTheirColumns(t *testing.T) {
 	for _, width := range []int{80, 100, 160, 200} {
 		lines := renderSpendDrawer(tierSnap(), nil, usage.GroupModel, "1h", width)
 		hdr, row := lines[0], lines[1]
-		hi, ri := strings.Index(hdr, "BY MODEL"), strings.Index(row, "claude-opus-5")
-		if hi < 0 || ri < 0 {
-			t.Fatalf("width %d: header or first row missing:\n%s", width, strings.Join(lines, "\n"))
+		// THE LEFT COLUMN BY ITS INDENT, not by a tier name: the tier rows are ranked by cost,
+		// so which label lands on the first row depends on the fixture's figures.
+		if hi, ri := indentOf(hdr), indentOf(row); hi != ri {
+			t.Errorf("width %d: the header is indented %d columns, the tier rows %d:\n%s",
+				width, hi, ri, strings.Join(lines, "\n"))
 		}
-		hcol := len([]rune(hdr[:hi]))
-		rcol := len([]rune(row[:ri]))
-		if hcol != rcol {
-			t.Errorf("width %d: header starts at column %d, its column starts at %d:\n%s",
-				width, hcol, rcol, strings.Join(lines, "\n"))
+		for _, c := range []struct{ heading, value string }{
+			{"BY MODEL", "claude-opus-5"},
+		} {
+			hi, ri := strings.Index(hdr, c.heading), strings.Index(row, c.value)
+			if hi < 0 || ri < 0 {
+				t.Fatalf("width %d: %q or %q missing:\n%s",
+					width, c.heading, c.value, strings.Join(lines, "\n"))
+			}
+			hcol := len([]rune(hdr[:hi]))
+			rcol := len([]rune(row[:ri]))
+			if hcol != rcol {
+				t.Errorf("width %d: %q starts at column %d, %q at %d:\n%s",
+					width, c.heading, hcol, c.value, rcol, strings.Join(lines, "\n"))
+			}
 		}
 	}
 }

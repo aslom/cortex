@@ -613,8 +613,13 @@ func renderSpendDrawer(snap *usage.Snapshot, err error, axis usage.Group, window
 		// outer column owns the placement here. Left in, the series text sat three columns
 		// right of the header naming it — measured, not guessed: "BY MODEL" at column 36
 		// against "claude-opus-5" at 39.
-		out = append(out, fmt.Sprintf("%-*s%s",
-			tierColumnWidth+2, tiers[i], strings.TrimLeft(series, " ")))
+		// THE SAME TWO-COLUMN INDENT THE HEADER USES. The rows started at column 0 while
+		// "WHERE IT WENT" started at 2, so the left column's header sat two columns right of
+		// its own values — the same off-by-two measured and fixed for the right column above,
+		// surviving on the other side of the panel because only the right one had a test.
+		// Costs no width: the two columns are 2 + tierColumnWidth + seriesWidth either way.
+		out = append(out, fmt.Sprintf("  %-*s%s",
+			tierColumnWidth, tiers[i], strings.TrimLeft(series, " ")))
 	}
 	// The hint line is LAST and always present: it is the only place the two keys and the
 	// current axis are written down, and a drawer whose controls are undiscoverable is a

@@ -429,6 +429,14 @@ func TestMoneyMarkers_AreThreeDistinctOneColumnClaims(t *testing.T) {
 // would deepen the strip's vocabulary to draw a distinction that changes nothing about how the
 // number must be read — where the WORDS do change what an operator goes and looks at: a day file
 // for one, whatever produced 9.2e18 micros of traffic for the other.
+//
+// THROUGH moneyFigure, WHICH NO SCREEN REACHES, and that is deliberate here rather than an
+// oversight: this test's subject is the RELATIONSHIP between one marker and two explanations, and
+// moneyFigure is the only entry point that can carry both at once. The live path —
+// moneyFigureTotal, from the drawer's per-model rows — passes nil for degraded, so it can only ever
+// produce one of the two. The half of this that an operator can actually read is asserted through
+// the rendered drawer in TestRenderSpendDrawer_AClampedSeriesRowSaysItIsAFloor; without that, this
+// file pinned the vocabulary of a path nothing renders and the rendered path was pinned by nothing.
 func TestMoneyFigure_OneMarkerForBothWaysAFigureCanBeShort(t *testing.T) {
 	fig := moneyFigure(4.17, "today", 0, 400, 0, &usage.Degraded{SkippedLines: 3}, true)
 	if n := strings.Count(fig.compact, damagedMarker); n != 1 {

@@ -243,7 +243,7 @@ Two other knobs, same restart rule:
 | Setting | Default | Notes |
 |---|---|---|
 | `cost_ledger.dir` | `~/.cortex/cost` | Must be an absolute path. A relative one is refused, because it would resolve against whatever directory the proxy started from |
-| `cost_ledger.retention_days` | 31 | The longest month, so `window=month` is answerable in full on the 31st; a shorter value makes that total a partial one and it is marked as such. Minimum **9** when set. `window=7d` is a rolling 7×24h, not seven calendar days, so it can open **nine** local day files: one extra because a rolling span starts part-way through a date, and one more because a spring-forward week is 167 hours, so the span reaches an hour further back. A shorter retention answers `window:"7d"` over a partial week with nothing saying so |
+| `cost_ledger.retention_days` | 31 | The longest month, so `window=month` is answerable in full on the 31st; a shorter value makes that total a partial one and it is marked as such. Minimum **9** when set. `window=7d` is a rolling 7×24h, not seven calendar days, so it can open **nine** local day files: one extra because a rolling span starts part-way through a date, and one more because a spring-forward week is 167 hours, so the span reaches an hour further back. A retention shorter than the window is disclosed rather than silent — `DaysOutsideRetention` counts the days asked for beyond the setting, the band marks the total as a floor and `abctl cost` prints a coverage line. The floor of 9 is exactly `window=7d`'s worst case, so a legal setting can never answer *that* window short; a `month` asked of a 9-day ledger can |
 
 ## `abctl: command not found`
 

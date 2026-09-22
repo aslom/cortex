@@ -1732,9 +1732,10 @@ func (m *model) paneView() string {
 	// without needing a second call site. It sits directly under the title because that
 	// is the whole requirement: spend read BEFORE the data rather than navigated to.
 	//
-	// Styled AFTER fitting. renderSpendBand measures runes, and styleMuted
-	// only adds a colour escape so the column count is unchanged — but fitting an
-	// already-styled string would measure the escape bytes and silently over-truncate.
+	// Styled AFTER fitting. renderSpendBand measures DISPLAY COLUMNS (lipgloss.Width, see
+	// bandCell.width), and styleMuted only adds a colour escape so the column count is
+	// unchanged — but fitting an already-styled string would measure the escape bytes and
+	// silently over-truncate.
 	//
 	// Nothing here touches eventsTbl: the strip holds no cursor, filter or scroll state,
 	// so it cannot perturb the pane it sits above.
@@ -1745,17 +1746,23 @@ func (m *model) paneView() string {
 	// direction that overflows. So the render fills them rather than the reservation tracking the
 	// render.
 	//
-	// The case that made this necessary: renderSpendBand returns blank lines before the first poll answers
-	// (deliberately — "we have not looked" is honest), which left the strip's row and the drawer's
-	// five unfilled and the footer six rows above the bottom of the terminal. The same arithmetic
-	// covers a drawer left open on a pane that cannot host it.
+	// The case that made this necessary: the renderer can return FEWER lines than the reservation,
+	// which left the strip's row and the drawer's five unfilled and the footer six rows above the
+	// bottom of the terminal. The same arithmetic covers a drawer left open on a pane that cannot
+	// host it.
+	//
+	// NOT "blank before the first poll answers", which an earlier version of this said: an
+	// unanswered band draws its four labels over four em dashes — that IS the honest "we have not
+	// looked". Measured, the band comes back blank in one case only: a width so narrow that not
+	// even one cell fits, which is 4 columns or less. So `drew` below tracks "the strip is visible
+	// AND at least one cell fit", and it is not vacuous — it is the gate that keeps the breakdown
+	// off a screen with no figure above it.
 	if m.spendStripReservesRow() {
 		band := make([]string, spendBandLines)
 		drew := false
 		if m.spendStripVisible() {
-			// Styled AFTER fitting. renderSpendBand measures runes, and styleMuted only adds a
-			// colour escape so the column count is unchanged — but fitting an already-styled
-			// string would measure the escape bytes and silently over-truncate.
+			// Styled AFTER fitting, for the reason stated above the row slice: the renderer
+			// measures display columns and an escape sequence is not one.
 			band = renderSpendBand(m.spendSummary(), m.width)
 			drew = strings.TrimSpace(strings.Join(band, "")) != ""
 		}

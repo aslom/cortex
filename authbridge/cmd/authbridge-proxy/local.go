@@ -271,9 +271,9 @@ cost_ledger:
   # dir: /absolute/path        # default ~/.cortex/cost; a RELATIVE path is refused
   # retention_days: 31         # minimum 9; 31 is the default and what window=month needs
   #                             # -- a month-to-date total on the 31st of a 31-day month
-  #                             # opens 31 day files, and a pruned one is ABSENT rather
-  #                             # than unreadable, so a short answer discloses nothing.
-  #                             # window=7d can open nine.
+  #                             # opens 31 day files. A shorter setting is disclosed: the
+  #                             # band marks such a total as a floor and abctl cost
+  #                             # prints a coverage line. window=7d can open nine.
 # Session bucketing: which request headers are used to group traffic into
 # sessions visible in abctl. Each listed header is tried in order; the first
 # non-empty value wins.

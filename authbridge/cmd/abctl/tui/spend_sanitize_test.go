@@ -79,19 +79,33 @@ func TestSpendLabels_NeutraliseAServerSuppliedControlCharacter(t *testing.T) {
 			// cannot match the requested one, so the reading is Unanswerable and the cell is an
 			// em dash. That is the assertion worth making, because the alternative — drawing the
 			// figure under the requested label — publishes a number for a window nobody served.
+			// ALL FOUR CHAINS ANSWER, and only the hour's label is tampered with. An earlier version
+			// populated the hour alone, which left the other three spans nil — already em dashes for
+			// want of a snapshot — so "the band contains an em dash" was true before the tampering
+			// and the assertion could not fail. Counted instead, so the ONE refusal has to be the
+			// tampered span and the other three have to still be figures.
+			// The hour's figure is UNIQUE so the check below names one span: with every span at the
+			// same amount, "the band does not contain $1.00" would fail on its honest neighbours.
 			b := &model{}
-			b.spend.chains[spanHour].snap = &usage.Snapshot{
-				Window: tc.window,
-				Totals: usage.Counts{Requests: 1, CostMicros: 1_000_000, PricedRequests: 1, PriceableRequests: 1},
-				Priced: true,
+			for span := spendSpan(0); span < numSpendSpans; span++ {
+				micros := int64(7_770_000)
+				if span == spanHour {
+					micros = 1_000_000
+				}
+				b.spend.chains[span].snap = &usage.Snapshot{
+					Window: string(spendSpanDefs[span].window),
+					Totals: usage.Counts{Requests: 1, CostMicros: micros, PricedRequests: 1, PriceableRequests: 1},
+					Priced: true,
+				}
 			}
+			b.spend.chains[spanHour].snap.Window = tc.window
 			lines := renderSpendBand(spendSummary{Spans: b.spanReadings()}, 200)
 			for _, line := range lines {
 				assertNoControlChars(t, "band line", line)
 			}
-			if !strings.Contains(lines[1], emptyCell) {
-				t.Errorf("a tampered served window drew a cell instead of %q:\n%s",
-					emptyCell, strings.Join(lines, "\n"))
+			if n := strings.Count(lines[1], emptyCell); n != 1 {
+				t.Errorf("%d cells are %q, want exactly 1 — the tampered span and no other:\n%s",
+					n, emptyCell, strings.Join(lines, "\n"))
 			}
 			if strings.Contains(lines[1], "$1.00") {
 				t.Errorf("the band drew the figure under the requested label for a window the "+

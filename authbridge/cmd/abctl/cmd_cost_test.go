@@ -117,7 +117,15 @@ func TestRunCost_AWindowInsideRetentionSaysNothingAboutIt(t *testing.T) {
 	defer srv.Close()
 
 	var out, errOut strings.Builder
-	runCost([]string{"--endpoint", srv.URL}, &out, &errOut)
+	// THE EXIT CODE AND A POSITIVE ANCHOR, because absence alone is not evidence: a command
+	// that failed before printing anything satisfies "does not mention retention" too.
+	if code := runCost([]string{"--endpoint", srv.URL}, &out, &errOut); code != 0 {
+		t.Fatalf("runCost = %d, want 0\nstdout: %s\nstderr: %s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "$4.17") {
+		t.Fatalf("output does not carry the total, so it proves nothing about retention:\n%s",
+			out.String())
+	}
 
 	if strings.Contains(out.String(), "retention") {
 		t.Errorf("a window the ledger covers still mentions retention:\n%s", out.String())
@@ -1483,7 +1491,14 @@ func TestRunCost_JSONOmitsTheCoverageWhenThereIsNone(t *testing.T) {
 	defer srv.Close()
 
 	var out, errOut strings.Builder
-	runCost([]string{"--endpoint", srv.URL, "--json"}, &out, &errOut)
+	// Same reason as the text form above: the exit code first, then a key that MUST be there,
+	// so "the key is absent" is a statement about this JSON and not about an empty buffer.
+	if code := runCost([]string{"--endpoint", srv.URL, "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("runCost = %d, want 0\nstdout: %s\nstderr: %s", code, out.String(), errOut.String())
+	}
+	if !strings.Contains(out.String(), "\"costMicros\"") {
+		t.Fatalf("output is not the cost JSON, so the missing key proves nothing:\n%s", out.String())
+	}
 	if strings.Contains(out.String(), "daysOutsideRetention") {
 		t.Errorf("a window the ledger covers still carries the key:\n%s", out.String())
 	}

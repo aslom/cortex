@@ -86,11 +86,20 @@ func TestSessionsRows_CarryNoANSIUnderAForcedColourProfile(t *testing.T) {
 
 		// No value was replaced by the truncation ellipsis, which is how the defect presented:
 		// a muted row rendered as "… … … …".
-		for r, row := range m.sessionsTbl.Rows() {
-			for c, cell := range row {
-				if cell == "…" {
-					t.Errorf("width %d row %d cell %d truncated to nothing but an ellipsis",
-						width, r, c)
+		//
+		// OVER View(), NOT Rows(), because the ellipsis is not ours: Rows() holds the cells this
+		// package built, and bubbles inserts "…" inside View() when it truncates one to fit. The
+		// earlier form of this check compared Rows() cells against "…" — a value nothing in this
+		// package writes — so it described a rendered symptom it never rendered.
+		//
+		// IT CAN FIRE: sweeping below this test's own floor, widths 34-38 render UPDATED as a bare
+		// ellipsis. That is the degraded regime fitTableColumns documents and no width this test
+		// walks reaches it, which is the point — the check is falsifiable and currently true.
+		for i, line := range strings.Split(stripANSI(m.sessionsTbl.View()), "\n") {
+			for _, field := range strings.Fields(line) {
+				if field == "…" {
+					t.Errorf("width %d line %d has a cell truncated to nothing but an ellipsis: %q",
+						width, i, line)
 				}
 			}
 		}
@@ -108,7 +117,8 @@ func TestSessionsHeaders_CarryNoANSIUnderAForcedColourProfile(t *testing.T) {
 	// clipped heading survived: "CONTEXT(1M)" was declared at exactly its own eleven columns so
 	// it could not be clipped, and the FITTER — which shrinks the widest column against one
 	// global floor of four — squeezed it to ten at 80 and eight at 50, two sizes this list did
-	// not name. The heading now abbreviates to seven; see contextColumnTitle.
+	// not name. The title is STILL eleven columns — shortening it is #1094, not this PR — so
+	// the sweep exempts that one column and holds every other heading to its fitted width.
 	//
 	// FROM 45 UP, because below that every column reaches that floor and headings clip starting
 	// with SESSION. That is the regime fitTableColumns documents as "the terminal is simply too
@@ -135,10 +145,16 @@ func TestSessionsHeaders_CarryNoANSIUnderAForcedColourProfile(t *testing.T) {
 			// anywhere moves it. #1082 has since landed and left the title at its eleven columns,
 			// so the exemption is still needed and no longer waits on anything.
 			//
-			// Still not fixed here, because the column is #1078's and a heading is one line of its
-			// business rather than this PR's. The fix is a title that fits a fitted column —
-			// "CTX(1M)" at seven survives every width the table claims to work at. Delete this
-			// exemption with that change.
+			// TRACKED AS #1094, which is what this exemption now waits on. It used to say "delete
+			// this when #1082 lands"; #1082 landed and left the title alone, so that condition could
+			// never fire — an exemption retiring on a PR with no reason to touch it is permanent by
+			// accident.
+			//
+			// Not fixed here because the fix is not the rename: eight comments across app.go,
+			// styles.go, detail_fetch.go and three test files name the column by its literal
+			// heading, and the README names it in prose and in a rendered sample. #1094 carries the
+			// measurement that makes it safe — "CTX(1M)" at seven columns clears all 156 widths this
+			// sweep walks, under all three data conditions.
 			if headerTitle(c) == contextColumnTitle {
 				continue
 			}

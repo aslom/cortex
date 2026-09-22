@@ -182,6 +182,23 @@ type spendSpanDef struct {
 
 // spendSpanDefs is the whole table. Ascending span order, which is also the band's
 // left-to-right order: reading outwards from "right now" to "this month".
+// pollInterval is this span's cadence with the ZERO CASE CLAMPED, and it exists so the two
+// readers of `interval` cannot disagree about it. spendSpanDefs is a keyed array literal, so a
+// fifth span added without an interval compiles with zero — and the scheduler and the staleness
+// test drew opposite conclusions from that zero: spendTick clamped it and polled at the default
+// cadence, while spanReadings compared the age against 2*0 and dated the span on every frame. A
+// span that polls fine and reports itself permanently stale is worse than either failure alone,
+// because the dated label is the signal an operator is supposed to trust.
+//
+// TestSpendSpanDefs_EverySpanIsComplete still catches the missing interval at development time.
+// This bounds what it costs if one ever reaches a terminal.
+func (d spendSpanDef) pollInterval() time.Duration {
+	if d.interval <= 0 {
+		return spendPollInterval
+	}
+	return d.interval
+}
+
 var spendSpanDefs = [numSpendSpans]spendSpanDef{
 	// The only ring-served span, and therefore the only cheap one: no disk, no day files.
 	spanHour: {window: "1h", resolution: time.Hour, label: "LAST 1H", interval: 20 * time.Second},
@@ -525,6 +542,12 @@ type spendSummary struct {
 	// removes spendHourAndDaySummary, applyTodayFigure, applyAges and cacheHitPct along with
 	// roughly thirty of this package's tests, which is a thousand-line no-behaviour-change diff
 	// on top of a feature PR. What is NOT deferred is saying so accurately.
+	//
+	// AND spendStaleAfter GOES WITH THEM, which an earlier version of this list left out.
+	// applyAges is its only reader, so the constant is dead by the same route as the fields it
+	// fills: the band derives its own threshold per span from that span's cadence — see
+	// spendSpanDef.pollInterval — because one shared threshold cannot describe four cadences
+	// that differ by fifteen times.
 	Age   time.Duration
 	Stale bool
 
@@ -843,21 +866,16 @@ func spendTick(span spendSpan, gen uint64) tea.Cmd {
 	if !span.valid() {
 		return nil
 	}
-	d := spendSpanDefs[span].interval
-	// A NON-POSITIVE CADENCE IS CLAMPED, NOT HONOURED. spendSpanDefs is a keyed array literal, so a
-	// fifth span added without an interval compiles with zero — and tea.Tick(0) fires immediately,
-	// reschedules at zero, and turns the poll chain into an unbounded stream of /v1/usage requests
-	// at the proxy. TestSpendSpanDefs_EverySpanIsComplete is the guard that catches that at
-	// development time and is where the mistake should be reported; this bounds what it costs if it
-	// ever reaches a terminal.
+	// THE CLAMP IS pollInterval's, shared with the staleness test so the two cannot disagree; see
+	// there for why a zero is clamped rather than honoured. What matters HERE is that tea.Tick(0)
+	// fires immediately, reschedules at zero, and turns the poll chain into an unbounded stream of
+	// /v1/usage requests at the proxy.
 	//
 	// CLAMPED RATHER THAN DROPPED, because returning nil here would leave the new span silently
 	// unpolled — the precise failure startSpendPolling's doc promises cannot happen. A span polled
 	// too slowly is a dated figure that says so; a span never polled is a permanent em dash with no
 	// explanation.
-	if d <= 0 {
-		d = spendPollInterval
-	}
+	d := spendSpanDefs[span].pollInterval()
 	return tea.Tick(d, func(time.Time) tea.Msg { return spendTickMsg{span: span, gen: gen} })
 }
 
@@ -1133,7 +1151,7 @@ func (m *model) spanReadings() [numSpendSpans]spanReading {
 		// slow reply is not an alarm and a wedged chain is. Derived per span rather than shared,
 		// so a retuned cadence carries its own threshold with it.
 		if !c.lastFetch.IsZero() {
-			if age := now.Sub(c.lastFetch); age > 2*def.interval {
+			if age := now.Sub(c.lastFetch); age > 2*def.pollInterval() {
 				r.Age, r.Stale = age, true
 			}
 		}
@@ -1169,8 +1187,10 @@ func (m *model) spanReadings() [numSpendSpans]spanReading {
 			// snapshot.go requires that to render as a zero figure rather than as "cost
 			// unavailable", and the two are different answers. Adding a > 0 test here would
 			// withhold a figure we have. The reading that would actually be a lie — a real
-			// charge displayed as free — is refused by formatUSDCell, whose floor renders
-			// anything positive under half a cent as "<$0.01". See
+			// charge displayed as free — is refused downstream by formatUSDTotalMicros, which
+			// is what a band cell formats through and whose floor renders anything positive
+			// under half a cent as "<$0.01". (formatUSDCell is the four-decimal path, floored
+			// at "<$0.0001"; the events table reads through it, this does not.) See
 			// TestRenderSpendBand_UnpricedZeroAndSubCentAreThreeDifferentCells, which pins all
 			// three cells.
 			if snap.Priced && !negativeCost(snap.Totals.CostMicros) {
