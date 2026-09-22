@@ -602,7 +602,13 @@ func main() {
 				if cfg.CostLedger != nil {
 					retention = cfg.CostLedger.RetentionDays
 				}
-				led, lerr := costledger.New(dir, costledger.WithRetentionDays(retention))
+				// THE SAME REGISTRY THE AGGREGATOR AND THE PLUGINS HOLD, for the reason its own
+				// construction above states: the pointer never changes and the table is swapped
+				// in place, so the ledger cannot end up reading a stale table while /v1/usage
+				// reads a fresh one. It is used only to rebuild the per-tier split on rows
+				// written before that split was persisted — no total is priced from it here.
+				led, lerr := costledger.New(dir, costledger.WithRetentionDays(retention),
+					costledger.WithPricing(pricingRegistry))
 				if lerr != nil {
 					slog.Warn("cost ledger disabled — could not open it",
 						"dir", dir, "error", lerr, "effect", "cost history will not survive a restart")
