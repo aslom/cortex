@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -60,8 +61,11 @@ func callLog(t *testing.T) (path string, appendLine string) {
 func readCallLog(t *testing.T, path string) []string {
 	t.Helper()
 	b, err := os.ReadFile(path) //nolint:gosec
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // genuinely never called
+	}
 	if err != nil {
-		return nil
+		t.Fatalf("reading the call log: %v", err)
 	}
 	var lines []string
 	for _, l := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
@@ -120,6 +124,26 @@ func TestSupervisorRunning_Linux(t *testing.T) {
 }
 
 func TestLoadService_Linux(t *testing.T) {
+	// The daemon-reload/enable-now failure subtests below only prove loadService
+	// reports the right failure when systemctl fails — they say nothing about what
+	// gets invoked, in what order, on a run that succeeds. This closes that: the two
+	// calls must happen in order, with --user and the exact unit name, not just "some
+	// two calls that happened to both exit 0".
+	t.Run("daemon-reload then enable --now, in that order, with the exact unit", func(t *testing.T) {
+		p := servicePathsFixture(t)
+		logPath, logLine := callLog(t)
+		fakeSystemctl(t, "#!/bin/sh\n"+logLine+"\nexit 0\n")
+		fakeLoginctl(t, "#!/bin/sh\necho 'Linger=yes'\nexit 0\n") // skip the linger branch; not under test here
+		if err := loadService("linux", p, io.Discard); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		calls := readCallLog(t, logPath)
+		want := []string{"--user daemon-reload", "--user enable --now cortex.service"}
+		if len(calls) != len(want) || calls[0] != want[0] || calls[1] != want[1] {
+			t.Errorf("systemctl calls = %v, want %v in that order", calls, want)
+		}
+	})
+
 	t.Run("no systemctl on PATH", func(t *testing.T) {
 		p := servicePathsFixture(t)
 		noSystemctlOnPath(t)
@@ -164,13 +188,14 @@ exit 1
 	t.Run("linger already enabled: skipped, no marker written", func(t *testing.T) {
 		p := servicePathsFixture(t)
 		fakeSystemctl(t, "#!/bin/sh\nexit 0\n")
+		logPath, logLine := callLog(t)
 		fakeLoginctl(t, `#!/bin/sh
+`+logLine+`
 case "$*" in
   *show-user*)
     echo "Linger=yes"
     exit 0 ;;
 esac
-echo "enable-linger should not have run" >&2
 exit 1
 `)
 		if err := loadService("linux", p, io.Discard); err != nil {
@@ -179,12 +204,22 @@ exit 1
 		if _, err := os.Stat(lingerMarker(p)); err == nil {
 			t.Error("marker written even though linger was already on")
 		}
+		// Asserting the marker's absence proves loadService took the skip branch, but
+		// not that it got there by actually calling show-user — a fake that always
+		// skipped enable-linger regardless of input would pass the same way. Checking
+		// the log closes that: show-user must have run, and enable-linger must not.
+		calls := readCallLog(t, logPath)
+		if len(calls) != 1 || !strings.Contains(calls[0], "show-user") {
+			t.Errorf("loginctl calls = %v, want exactly one show-user", calls)
+		}
 	})
 
 	t.Run("linger not enabled, enable-linger succeeds: marker written", func(t *testing.T) {
 		p := servicePathsFixture(t)
 		fakeSystemctl(t, "#!/bin/sh\nexit 0\n")
+		logPath, logLine := callLog(t)
 		fakeLoginctl(t, `#!/bin/sh
+`+logLine+`
 case "$*" in
   *show-user*)
     echo "Linger=no"
@@ -197,6 +232,15 @@ exit 0
 		}
 		if _, err := os.Stat(lingerMarker(p)); err != nil {
 			t.Error("no marker written after abctl enabled linger itself")
+		}
+		// The marker alone doesn't prove the right command ran — a typo'd verb, the
+		// wrong uid, or a bare `enable-linger` with no argument would each still exit 0
+		// here and still write the marker. Assert the actual second call's shape:
+		// enable-linger, with this process's own uid, and nothing else.
+		calls := readCallLog(t, logPath)
+		wantEnable := "enable-linger " + strconv.Itoa(os.Getuid())
+		if len(calls) != 2 || !strings.Contains(calls[0], "show-user") || calls[1] != wantEnable {
+			t.Errorf("loginctl calls = %v, want [show-user ..., %q]", calls, wantEnable)
 		}
 	})
 

@@ -380,7 +380,7 @@ func dialableAddr(addr string) string {
 }
 
 // controlService maps stop/start/restart onto the platform's supervisor.
-func controlService(goos string, action string, p servicePaths, progress io.Writer) error {
+func controlService(goos, action string, p servicePaths, progress io.Writer) error {
 	if goos == "darwin" {
 		target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + launchdLabel
 		switch action {

@@ -173,7 +173,7 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   `Restart=on-failure` assumption** — it's currently trusted, not proven. This is precisely
   the class of gap #945 (and its manual-reboot sibling, #964) exists to close.
 
-### 6. `abctl service status | start | stop | restart` accurate in every state — **CLOSED (Tier 2) 2026-09-17**
+### 6. `abctl service status | start | stop | restart` accurate in every state — **Closing in #1080 (this PR, unmerged)**
 - **Exists:** `serviceStatus`/`serviceControl` (`cmd_service.go:540-665`) are
   platform-agnostic; Linux `controlService` maps stop→`disable --now` (persistent),
   start→`enable --now`, restart→plain `systemctl --user restart` (transient, by design).
@@ -197,19 +197,17 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   this way — only that our own code reacts correctly to inputs we scripted. That's Tier 3
   (real systemd integration test), still not built.
 
-### 7. `stop` tolerates the proxy's ~15s drain — **CLOSED on sibling PR #1079, not part of this branch**
+### 7. `stop` tolerates the proxy's ~15s drain — **In review (#1079), not part of this branch**
 - **Exists:** the proxy's own 15s shutdown timeout (`main.go:671`) is the anchor value
   everything else has to respect. macOS handles this *explicitly* in Go
   (`serviceBootoutTimeout = 30*time.Second`, `cmd_service.go:39-42`, plus the supervisor's
   own 20s-before-SIGKILL logic in `supervise.go:88-95`, deliberately longer than 15s).
-- **Fixed:** added an explicit `TimeoutStopSec=20` to `renderUnitFor("linux", ...)`
-  (`cmd_service_platform.go`), matching the macOS supervisor's 20s headroom over the
-  proxy's 15s drain, with a rationale comment in the same style as the surrounding
-  `StartLimit*`/`network-online.target` comments. `TestRenderUnit_BothPlatforms`'s
-  `"linux restarts on failure only"` subtest now asserts the line is present, so a future
-  regression that drops it fails CI instead of silently reverting to systemd's undocumented
-  default. Previously it "worked" only by accident of systemd's 90s default exceeding 15s —
-  now it's an explicit, tested value.
+  Today it "works" only by accident of systemd's 90s default exceeding 15s.
+- **In review (#1079):** adds an explicit `TimeoutStopSec=20` to `renderUnitFor("linux",
+  ...)`, matching the macOS supervisor's 20s headroom over the proxy's 15s drain, with
+  `TestRenderUnit_BothPlatforms`'s `"linux restarts on failure only"` subtest asserting the
+  line is present. Neither the unit-file change nor the subtest exists on this branch —
+  see #1079 directly for status.
 
 ### 8. Works under user systemd, and states what happens where systemd is absent
 - **Exists (this is the best-handled bullet):** `loadService` gives a clear,
