@@ -451,6 +451,35 @@ func heldContextCell(t *testing.T, m *model, id string) string {
 	return ""
 }
 
+// assertGaugeFilled fails unless the cell is a bracketed track with something drawn IN it.
+//
+// `!= emptyCell` is too weak, which a review caught: an EMPTY track is not the em dash, so it
+// would pass, and this package calls it a fault in its own right — "an empty track beside a live
+// session reads as a rendering fault" (sessions_context_test.go), the same rule tierBar states as
+// a non-zero figure never drawing as an empty bar.
+//
+// NOT the sibling assertion's strings.Contains(cell, "█") though, which holds only for a large
+// figure. Measured at this column's width: 500,000 of 1M draws "▕████▌    ▏", but 62,000 draws
+// "▕▌        ▏" and 8,200 draws "▕▏        ▏" — no full block in either. Requiring one would fail
+// the small figures the tests below deliberately use. Ink between the brackets is the property
+// that holds for every non-zero figure.
+//
+// Sliced by byte offset rather than strings.Trim, and that is not pedantry: the one-eighth fill ▏
+// is THE SAME RUNE as the closing bracket, so Trim(cell, "▕▏") eats an 8,200-token sliver whole
+// and then reports the empty track it was written to catch.
+func assertGaugeFilled(t *testing.T, cell, when string) {
+	t.Helper()
+	const openBracket, closeBracket = "▕", "▏"
+	if !strings.HasPrefix(cell, openBracket) || !strings.HasSuffix(cell, closeBracket) {
+		t.Errorf("%s the row holds %q, which is not a gauge at all", when, cell)
+		return
+	}
+	if strings.TrimSpace(cell[len(openBracket):len(cell)-len(closeBracket)]) == "" {
+		t.Errorf("%s the row holds an EMPTY track %q — the figure reached contextRun and not "+
+			"the cell", when, cell)
+	}
+}
+
 // THE FIGURE IS NOT THE ROW, and every test above this one stops at the figure.
 //
 // Which is how the reported bug survived a suite this size. TestSessionsTable_AnIdleSessionsSnapshotFillsTheGauge
@@ -475,7 +504,15 @@ func heldContextCell(t *testing.T, m *model, id string) string {
 func TestSessionsTable_ASnapshotRepaintsTheGaugeItFilled(t *testing.T) {
 	base := time.Now()
 	const id = "idle"
-	m := &model{width: 200, pane: paneSessions, events: map[string][]pipeline.SessionEvent{}}
+	// PARKED ON THE TIMELINE, not on the sessions pane, and that is what makes this test pin the
+	// paragraph above rather than merely exercise the arm. Enter switches to paneEvents and the
+	// snapshot lands there — the ordinary case — so a `m.pane == paneSessions` guard fails here.
+	// Set the other way it passed with that guard in place, and so did the other two tests, which
+	// each cover a different arm: the forbidden one-liner was caught by nothing at all.
+	//
+	// selectedSess is left empty so the arm's OWN pane check still skips rebuildEventsTable; this
+	// model has no events table to rebuild.
+	m := &model{width: 200, pane: paneEvents, events: map[string][]pipeline.SessionEvent{}}
 	m.sessionsTbl = newSessionsTable()
 	m.sessions = []session.SessionSummary{{ID: id, UpdatedAt: base, EventCount: 9}}
 	m.rebuildSessionsTable()
@@ -485,8 +522,8 @@ func TestSessionsTable_ASnapshotRepaintsTheGaugeItFilled(t *testing.T) {
 			"session idle since before it attached", got, emptyCell)
 	}
 
-	// Enter on the row, and the snapshot lands. A current proxy states the counts, so the
-	// projected timeline can answer on its own and no detail fetch is involved.
+	// The snapshot Enter issued. A current proxy states the counts, so the projected timeline can
+	// answer on its own and no detail fetch is involved.
 	m.Update(snapshotLoadedMsg{
 		id: id, events: projected(conversation("c1", base, 600, 500_000)), projected: true})
 
@@ -494,10 +531,7 @@ func TestSessionsTable_ASnapshotRepaintsTheGaugeItFilled(t *testing.T) {
 		t.Fatalf("the figure is %d, want %d — this test is about the ROW, which cannot be "+
 			"right until the figure is", got, want)
 	}
-	if got := heldContextCell(t, m, id); got == emptyCell {
-		t.Errorf("after the snapshot the row still holds %q — the figure was filled and "+
-			"nothing repainted, so the operator waits for the next /v1/sessions poll", got)
-	}
+	assertGaugeFilled(t, heldContextCell(t, m, id), "after the snapshot")
 }
 
 // AN OLDER PAGE IS THE SAME DEFECT AT THE SECOND SITE. [o] merges a projected page, rebases, and
@@ -523,9 +557,8 @@ func TestSessionsTable_AnOlderPageRepaintsTheGauge(t *testing.T) {
 	if got, want := m.sessionContextFor("sess-1"), 62_000; got != want {
 		t.Fatalf("the figure is %d, want %d", got, want)
 	}
-	if got := heldContextCell(t, m, "sess-1"); got == emptyCell {
-		t.Errorf("after the older page the row still holds %q", got)
-	}
+	// 62,000 of 1M draws a half-block sliver and no full block — see assertGaugeFilled.
+	assertGaugeFilled(t, heldContextCell(t, m, "sess-1"), "after the older page")
 }
 
 // AND THE DETAIL FETCH IS THE THIRD, which matters most of the three: against a proxy that projects
@@ -559,7 +592,5 @@ func TestSessionsTable_ADetailFetchRepaintsTheGauge(t *testing.T) {
 	if got, want := m.sessionContextFor("s"), 500_000; got != want {
 		t.Fatalf("the figure is %d, want %d", got, want)
 	}
-	if got := heldContextCell(t, m, "s"); got == emptyCell {
-		t.Errorf("after the detail fetch the row still holds %q", got)
-	}
+	assertGaugeFilled(t, heldContextCell(t, m, "s"), "after the detail fetch")
 }
