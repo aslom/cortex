@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
@@ -17,6 +20,181 @@ func tierCounts() usage.Counts {
 		Requests: 35, CostMicros: 4_546_200,
 		InputCostMicros: 3000, CacheWriteCostMicros: 7500,
 		CacheReadCostMicros: 30000, OutputCostMicros: 45000,
+	}
+}
+
+// THE MONEY COLUMN IS RIGHT-ALIGNED, so the decimal points line up down the panel.
+//
+// It was left-flushed directly after the bar, which put "$56.51", "$25.34", "$15.42" and "$2.11"
+// in three different places — measured on a live panel. That is the exact defect renderSpendBand
+// argued about for itself ("left-flushed in cells of their own widths, '$4.04' and '$703.18' put
+// their decimal points four columns apart") and that the tables already avoid; this panel is a
+// column of four money figures read against each other and was the one surface that never got it.
+//
+// Asserted on the END column of each figure rather than the start: right-aligned means the last
+// character shares a column, and a test on the start would pass for a left-flushed panel whose
+// figures happened to be the same length.
+//
+// IN DISPLAY COLUMNS, and getting this wrong is how the test failed before the renderer did.
+// strings.Index returns a BYTE offset while the column a reader sees is a display width, and a bar
+// of eighth-blocks is three bytes per column — so the first version of this test reported the four
+// figures ending at 41, 43, 55 and 63 for a panel that was already aligned at 39. The same
+// confusion footer.go records the cost of, arriving in the assertion instead of the renderer.
+func TestRenderTierRows_MoneyIsRightAligned(t *testing.T) {
+	tiers, ok := tierCounts().ApportionTiers()
+	if !ok {
+		t.Fatal("the fixture apportions to nothing, so this test asserts nothing")
+	}
+	lines := renderTierRows(tierCounts(), tierColumnWidth)
+	type end struct {
+		fig string
+		at  int
+	}
+	var ends []end
+	for i, line := range lines {
+		// Every tier is in the fixture, so every row carries exactly one of the figures.
+		found := false
+		for _, micros := range tiers {
+			f := formatUSDTotalMicros(micros)
+			at := strings.Index(line, f)
+			if at < 0 {
+				continue
+			}
+			// Columns, not bytes: measure the text BEFORE the figure rather than trusting the
+			// byte offset to be one.
+			ends = append(ends, end{f, lipgloss.Width(line[:at]) + lipgloss.Width(f)})
+			found = true
+			break
+		}
+		if !found {
+			t.Fatalf("row %d = %q carries none of the apportioned figures", i, line)
+		}
+	}
+	if len(ends) != numTierRows {
+		t.Fatalf("matched %d rows, want %d", len(ends), numTierRows)
+	}
+	for _, e := range ends[1:] {
+		if e.at != ends[0].at {
+			t.Errorf("%q ends at column %d but %q ends at %d — the money column is not "+
+				"right-aligned, so the decimal points do not line up:\n%s",
+				e.fig, e.at, ends[0].fig, ends[0].at, strings.Join(lines, "\n"))
+		}
+	}
+	// Not vacuous: figures of differing widths are what alignment has to do work for.
+	short, long := lipgloss.Width(ends[0].fig), lipgloss.Width(ends[0].fig)
+	for _, e := range ends[1:] {
+		if w := lipgloss.Width(e.fig); w < short {
+			short = w
+		} else if w > long {
+			long = w
+		}
+	}
+	if short == long {
+		t.Logf("every figure is %d columns wide, so this fixture does not exercise padding", short)
+	}
+}
+
+// EVERY TIER STATES ITS SHARE, AND THE SHARES SUM TO 100.
+//
+// The bar says "this one is bigger" and the figure says how much, but neither answers the question
+// an operator actually brings to a cost breakdown — what FRACTION of the bill is cache? At the
+// widths this panel really renders at, tierBarBudget degrades the bar to six columns, so the bar
+// was carrying almost all of the proportion information in almost none of the space.
+//
+// SUMMING TO 100 IS THE ASSERTION, not each share individually, because four independent roundings
+// do not: this fixture floors to 3 + 8 + 35 + 52 = 98. The remainder goes to the largest share for
+// the same reason usage.Counts.ApportionTiers gives for its own micro — that is where it is
+// proportionally smallest and cannot flip a rank — so a panel that reordered its bars to make the
+// arithmetic work would be caught by TestRenderTierRows_RanksByCostNotByDeclarationOrder.
+func TestRenderTierRows_SharesSumTo100(t *testing.T) {
+	lines := renderTierRows(tierCounts(), tierColumnWidth)
+	total, found := 0, 0
+	for _, line := range lines {
+		pct, ok := sharePercent(line)
+		if !ok {
+			t.Errorf("row %q states no share; every tier with money in it must", line)
+			continue
+		}
+		found++
+		total += pct
+	}
+	if found != numTierRows {
+		t.Fatalf("%d of %d rows state a share", found, numTierRows)
+	}
+	if total != 100 {
+		t.Errorf("the shares sum to %d%%, not 100%% — four independent roundings do not add up, so "+
+			"the remainder must land on the largest:\n%s", total, strings.Join(lines, "\n"))
+	}
+}
+
+// sharePercent reads the "NN%" a row states, if it states one.
+func sharePercent(line string) (int, bool) {
+	i := strings.Index(line, "%")
+	if i < 0 {
+		return 0, false
+	}
+	j := i
+	for j > 0 && line[j-1] >= '0' && line[j-1] <= '9' {
+		j--
+	}
+	if j == i {
+		return 0, false
+	}
+	n, err := strconv.Atoi(line[j:i])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// A TIER THE MIX NEVER MENTIONED STATES NO SHARE, for the same reason it states no money.
+//
+// "0%" is a claim — this tier was free — where the absent row means "not known here". The zero case
+// and the no-mix case are one case in this renderer already (see renderTierRows), and a share
+// column must not be the door a "$0.00 for a figure that might be unknown" lie comes in through.
+func TestRenderTierRows_AnAbsentTierStatesNoShare(t *testing.T) {
+	c := tierCounts()
+	c.CacheWriteCostMicros = 0 // never wrote cache
+	lines := renderTierRows(c, tierColumnWidth)
+
+	var cacheWrite string
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "cache-write") {
+			cacheWrite = line
+		}
+	}
+	if cacheWrite == "" {
+		t.Fatalf("no cache-write row at all:\n%s", strings.Join(lines, "\n"))
+	}
+	if _, ok := sharePercent(cacheWrite); ok {
+		t.Errorf("cache-write states a share for a tier absent from the mix: %q", cacheWrite)
+	}
+	if !strings.Contains(cacheWrite, emptyCell) {
+		t.Errorf("cache-write = %q, want the not-known cell %q", cacheWrite, emptyCell)
+	}
+	// The other three still state theirs, or this passes for a renderer that dropped shares whole.
+	for _, line := range lines {
+		if line == cacheWrite {
+			continue
+		}
+		if _, ok := sharePercent(line); !ok {
+			t.Errorf("row %q lost its share because a SIBLING tier was absent", line)
+		}
+	}
+}
+
+// THE BAR YIELDS BEFORE THE FIGURES, which is the rule tierBarBudget already stated and which the
+// share column has to inherit: a bar is decoration over a number that is printed anyway, while the
+// share IS a number. So a terminal too narrow for both keeps the share and drops the bar.
+func TestRenderTierRows_TheBarYieldsBeforeTheShare(t *testing.T) {
+	narrow := renderTierRows(tierCounts(), tierLabelWidth+1+tierPctWidth+1+tierMoneyWidth)
+	for _, line := range narrow {
+		if strings.ContainsAny(line, "█▉▊▋▌▍▎▏") {
+			t.Errorf("row %q drew a bar at a width that only fits the figures", line)
+		}
+		if _, ok := sharePercent(line); !ok {
+			t.Errorf("row %q gave up its share to keep a bar", line)
+		}
 	}
 }
 

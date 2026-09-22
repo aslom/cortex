@@ -241,7 +241,7 @@ func TestSpanReadings_CarryTheLedgersDisclosuresToTheCell(t *testing.T) {
 			if !got.Priced {
 				t.Fatalf("the reading is unpriced, so the marker has no figure to ride on")
 			}
-			line := renderSpendBand(spendSummary{Spans: m.spanReadings()}, 200)[1]
+			line := renderSpendBand(spendSummary{Spans: m.spanReadings()}, 200)[0]
 			if !strings.Contains(line, tc.want) {
 				t.Errorf("the month's cell carries no %q for %s, so the total is published as "+
 					"though it were whole:\n%s", tc.want, tc.name, line)

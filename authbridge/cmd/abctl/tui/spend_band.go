@@ -6,27 +6,64 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// spendBandLines is the band's height: labels, then values.
+// spendBandLines is the band's height: ONE row, labels inline with their figures.
 //
 // Constant in every state, for the same reason numTierRows is — layout() reserves it from
 // the terminal height and paneView fills it, and a renderer whose height follows its data
 // floats the footer or overflows the terminal.
-const spendBandLines = 2
+//
+// IT WAS TWO, stacking labels over values so their figures could share a column stride. The
+// row is worth more to the sessions table than the stride was to a reader: keys.go does
+// `bodyH -= spendBandLines`, so this hands a row back to the body of every pane the band draws
+// on, drawer open or closed. What is given up and why it is affordable is recorded on
+// TestRenderSpendBand_EveryLabelSitsBesideItsOwnFigure, which replaced the stride assertion.
+const spendBandLines = 1
 
-// bandGutter separates cells. Two spaces: the columns already separate the readings, and a
-// third space costs a whole cell at the widths where cells start dropping.
-const bandGutter = 2
+// bandSeparator divides cells. A middle dot with a space either side, which is how this package
+// already separates peer readings on one line — the title bar's "abctl · <url> · [Sessions]" and
+// the drawer's "model · endpoint · agent" hint. Two spaces was enough when the cells were
+// columns; on one line a label follows a figure directly, and "…$18.80  THIS MONTH…" runs the two
+// readings together where "…$18.80 · THIS MONTH…" does not.
+const bandSeparator = " · "
 
-// bandCell is one labelled figure. Label and value travel together because the whole point
-// of the band is that they occupy the same column.
+// bandSeparatorWidth is bandSeparator in display columns, named so the width arithmetic below
+// cannot drift from the string above it.
+const bandSeparatorWidth = 3
+
+// bandCell is one labelled figure. Label and value travel together because a reader pairs them
+// by adjacency now that there is no column to pair them by position.
 type bandCell struct{ label, value string }
 
-// width is what the pair needs: the wider of its halves, since they share a column.
+// render is the cell as it appears: label, one space, figure.
+//
+// PLAIN, ALWAYS. Width arithmetic runs over this, and an escape sequence is not a display column —
+// the rule app.go's composition site states for the band and footer.go records the cost of
+// breaking. renderMuting below is the styled form, and it is width-identical by construction.
+func (c bandCell) render() string { return c.label + " " + c.value }
+
+// renderMuting is render with the LABEL dimmed and the figure left alone.
+//
+// THE HIERARCHY THE TWO-LINE BAND GOT FOR FREE. app.go used to mute the whole label ROW and leave
+// the whole value row bright — `styleMuted.Render(band[0]), band[1]` — which folding to one line
+// would have destroyed silently, muting labels and figures together into one uniform grey. The
+// contrast is the thing that makes four readings scannable, so it moves down here where a cell
+// knows which half is which.
+//
+// mute is passed in rather than reaching for styleMuted directly so this file stays free of the
+// package's styles and a test can assert the geometry with an identity function.
+func (c bandCell) renderMuting(mute func(string) string) string {
+	return mute(c.label) + " " + c.value
+}
+
+// width is what that pair occupies.
 //
 // lipgloss.Width, never len() and never a rune count — the rule fitStripFigures states for
 // this package and the one footer.go records the cost of breaking. It is not merely style
-// here: the values carry markers and an em dash, and the PADDING below measures with the same
-// function, so measurement and padding cannot disagree about a cell.
+// here: the values carry markers and an em dash, and bandWidth's arithmetic feeds the drop
+// enumeration, so a cell measured in runes would drop cells at the wrong widths.
+//
+// MEASURED OFF render() rather than summed from the halves, so the separating space is counted
+// once and in one place. Summing is how a one-column drift gets into a budget.
 //
 // It does NOT fix an East-Asian ambiguous width, and it is worth saying so rather than leaving
 // the next reader to assume it did. U+2014 is ambiguous-width, and a terminal under an EA locale
@@ -35,12 +72,7 @@ type bandCell struct{ label, value string }
 // an em-dash band under that locale under-counts no matter which of these two functions is used;
 // what changes is that the band now under-counts the same way the table, the strip and the footer
 // do, instead of in its own private way.
-func (c bandCell) width() int {
-	if n := lipgloss.Width(c.value); n > lipgloss.Width(c.label) {
-		return n
-	}
-	return lipgloss.Width(c.label)
-}
+func (c bandCell) width() int { return lipgloss.Width(c.render()) }
 
 // bandDropOrder is the order cells are given up in as the terminal narrows, FIRST DROPPED
 // FIRST. It is deliberately NOT the visual order.
@@ -56,8 +88,8 @@ func (c bandCell) width() int {
 // clipped, which is the rule a truncated money figure breaks.
 var bandDropOrder = [numSpendSpans]spendSpan{span7d, spanHour, spanToday, spanMonth}
 
-// renderSpendBand is the always-on spend band: labels ABOVE values, column-aligned, one cell
-// per budget span.
+// renderSpendBand is the always-on spend band: ONE LINE, each label inline with its own figure,
+// one cell per budget span, separated by bandSeparator.
 //
 // FOUR COST CELLS AND NOTHING ELSE, and the exclusion is the design rather than an omission.
 // The band used to carry TODAY, LAST 1H, SAVED, CACHE HIT and TOKENS, and three of those five
@@ -84,19 +116,28 @@ var bandDropOrder = [numSpendSpans]spendSpan{span7d, spanHour, spanToday, spanMo
 // and savings, and the Usage pane keeps the full metric set.
 //
 // MARKERS, NOT PROSE. Each money value comes from moneyAmount, so the three disclosure glyphs
-// ride on the figures; moneyFigure's parenthesised caveats do not fit two lines. The marker is
-// the fact and the words are the explanation, and `abctl cost` is the surface with room for
-// both.
+// ride on the figures; moneyFigure's parenthesised caveats do not fit one line beside four
+// readings. The marker is the fact and the words are the explanation, and `abctl cost` is the
+// surface with room for both.
 //
-// RIGHT-ALIGNED, AT A UNIFORM WIDTH, which is what makes four spans legible. These are four
-// readings of the SAME quantity over different periods, so a reader compares them directly —
-// and left-flushed in cells of their own widths, "$4.04" and "$703.18" put their decimal points
-// four columns apart. One width for every surviving cell with both lines right-aligned puts the
-// figures on a fixed stride with their decimal points in one place. Same rule the tables follow,
-// for the same reason.
-func renderSpendBand(s spendSummary, width int) []string {
+// PAIRED BY ADJACENCY, which is what replaced the uniform-width stride when the band folded to one
+// line. The two-line form stacked labels over values and right-aligned both in cells of ONE shared
+// width, because four readings of the SAME quantity left-flushed in cells of their own widths put
+// "$4.04" and "$703.18" four columns apart and a reader scanning down could not compare them.
+//
+// A single line has no column to scan, so that property is not weakened but inapplicable — and
+// what takes its place is stronger: "TODAY $18.80" is one unit, and no arrangement of neighbours
+// can pair a label with another span's money. What is genuinely given up is that two cells of
+// unequal width no longer put their decimal points near each other. The row buys that back in the
+// sessions table; see spendBandLines and
+// TestRenderSpendBand_EveryLabelSitsBesideItsOwnFigure.
+//
+// THE SELECTION IS SPLIT OUT FROM THE JOIN so the band can be drawn twice from one decision: plain
+// for the width arithmetic and the assertions, muted-label for the screen. See renderSpendBand and
+// renderSpendBandStyled, which differ in nothing else.
+func spendBandCells(s spendSummary, width int) []bandCell {
 	// Cells in VISUAL order, every span present. A span with nothing to say still gets a cell:
-	// an em dash under MONTH says "not known here", where a missing column says nothing at all.
+	// "THIS MONTH —" says "not known here", where a missing cell says nothing at all.
 	var cells [numSpendSpans]bandCell
 	for span := spendSpan(0); span < numSpendSpans; span++ {
 		cells[span] = bandSpanCell(spendSpanDefs[span].label, s.Spans[span])
@@ -154,61 +195,84 @@ func renderSpendBand(s spendSummary, width int) []string {
 		}
 	}
 
-	// ONE WIDTH FOR EVERY SURVIVOR, measured after the drops: a cell that is gone must not go
-	// on widening the ones that remain.
-	cw := 0
+	// NO PADDING PASS. The two-line band padded every cell to one shared width so the figures
+	// shared a stride; each cell is now exactly as wide as its own contents, which is what
+	// bandWidth above charges for and what keeps one wide span off the other three.
+	out := make([]bandCell, 0, numSpendSpans)
 	for span := spendSpan(0); span < numSpendSpans; span++ {
 		if !dropped[span] {
-			if w := cells[span].width(); w > cw {
-				cw = w
-			}
+			out = append(out, cells[span])
 		}
 	}
-
-	var labels, values strings.Builder
-	first := true
-	for span := spendSpan(0); span < numSpendSpans; span++ {
-		if dropped[span] {
-			continue
-		}
-		if !first {
-			labels.WriteString(strings.Repeat(" ", bandGutter))
-			values.WriteString(strings.Repeat(" ", bandGutter))
-		}
-		first = false
-		// padLeft, not Fprintf("%*s"): fmt pads to a RUNE count, so a cell measured in display
-		// columns and padded in runes disagree with each other the moment either half of a cell
-		// is not plain ASCII.
-		labels.WriteString(padLeft(cells[span].label, cw))
-		values.WriteString(padLeft(cells[span].value, cw))
-	}
-	// Two lines whatever happened, including when nothing survived: an empty band is two
-	// blank lines, never zero. See spendBandLines.
-	return []string{
-		strings.TrimRight(labels.String(), " "),
-		strings.TrimRight(values.String(), " "),
-	}
+	return out
 }
 
-// bandWidth is what these cells render at, at a uniform width, skipping the dropped ones.
+// renderSpendBand is the band as PLAIN TEXT: one line, no escape sequences.
 //
-// The last cell's gutter is not charged, because the rendered line trims it — otherwise a set
-// that exactly filled the terminal would lose a cell to trailing space nobody sees.
+// This is what the width arithmetic and every assertion run over, which is why it is the form the
+// renderer publishes. renderSpendBandStyled is the same line dressed for the screen.
+//
+// Returns a slice rather than a string so it keeps paneView's shape — spendBandLines rows in, the
+// same number out — and so growing the band back to two rows would not change the signature again.
+func renderSpendBand(s spendSummary, width int) []string {
+	return []string{joinBandCells(spendBandCells(s, width), nil)}
+}
+
+// renderSpendBandStyled is renderSpendBand with each label muted and each figure left bright.
+//
+// WIDTH-IDENTICAL TO THE PLAIN FORM, which is the property that lets the fit be computed on one and
+// drawn from the other: lipgloss.Width ignores escape sequences, and the mute wraps the label
+// without changing its text. TestRenderSpendBand_StylingCostsNoColumns holds the line.
+func renderSpendBandStyled(s spendSummary, width int) []string {
+	// Wrapped rather than passed directly: lipgloss's Render is variadic, and a variadic mute would
+	// let a caller pass several strings and get them joined by a rule this file does not own.
+	return []string{joinBandCells(spendBandCells(s, width),
+		func(s string) string { return styleMuted.Render(s) })}
+}
+
+// joinBandCells lays surviving cells out on one line, separated by bandSeparator.
+//
+// A nil mute means plain. One walk for both forms, so the styled band cannot come out in a different
+// order or with a different separator from the one that was measured.
+func joinBandCells(cells []bandCell, mute func(string) string) string {
+	var line strings.Builder
+	for i, c := range cells {
+		if i > 0 {
+			line.WriteString(bandSeparator)
+		}
+		if mute == nil {
+			line.WriteString(c.render())
+			continue
+		}
+		line.WriteString(c.renderMuting(mute))
+	}
+	// One line whatever happened, including when nothing survived: an empty band is one blank
+	// line, never zero. See spendBandLines.
+	return line.String()
+}
+
+// bandWidth is what these cells render at on one line, skipping the dropped ones.
+//
+// THE SUM OF THEIR OWN WIDTHS, not a count times a shared one. That is the arithmetic change the
+// fold makes, and it is why a wide cell now costs only itself — see
+// TestRenderSpendBand_AWideCellDoesNotWidenTheOthers. It also makes the drop enumeration cheaper
+// to reason about: a set's width no longer depends on which member happens to be widest.
+//
+// Only the separators BETWEEN cells are charged, for the reason the gutter was not: the rendered
+// line has none trailing, so charging one would lose a cell to space nobody sees.
 func bandWidth(cells [numSpendSpans]bandCell, dropped [numSpendSpans]bool) int {
-	cw, n := 0, 0
+	total, n := 0, 0
 	for span := spendSpan(0); span < numSpendSpans; span++ {
 		if dropped[span] {
 			continue
 		}
 		n++
-		if w := cells[span].width(); w > cw {
-			cw = w
-		}
+		total += cells[span].width()
 	}
 	if n == 0 {
 		return 0
 	}
-	return n*cw + (n-1)*bandGutter
+	return total + (n-1)*bandSeparatorWidth
 }
 
 // bandSpanCell is one span's cell: its label, and its figure or an em dash.

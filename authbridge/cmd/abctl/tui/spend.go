@@ -199,8 +199,20 @@ var spendSpanDefs = [numSpendSpans]spendSpanDef{
 	spanToday: {window: usage.WindowToday, label: "TODAY", interval: time.Minute},
 	// Up to nine day files (usage.Window7dLocalDays) and up to thirty-one
 	// (usage.WindowMonthLocalDays). Both slow-moving, both on the slow cadence.
-	span7d:    {window: usage.Window7d, label: "7 DAYS", interval: 5 * time.Minute},
-	spanMonth: {window: usage.WindowMonth, label: "MONTH", interval: 5 * time.Minute},
+	span7d: {window: usage.Window7d, label: "7 DAYS", interval: 5 * time.Minute},
+	// "THIS MONTH", not "MONTH" and emphatically not "MTD". The window runs from the FIRST of the
+	// local month, and a bare "MONTH" reads just as easily as a rolling thirty days — the one
+	// thing it is not. "THIS" costs five columns and removes that ambiguity.
+	//
+	// A WORD, NOT AN INITIALISM, which is the choice usage.WindowMonth's own doc already made for
+	// the wire token: "mtd" is "less ambiguous read cold, at the cost of a second naming
+	// convention on the same small enum". "THIS MONTH" keeps the convention TODAY established —
+	// a natural-language boundary phrase — and buys the precision in columns instead.
+	//
+	// AFFORDABLE ONLY SINCE THE BAND FOLDED. bandCell.width() used to give every surviving cell
+	// max(width), so five extra columns here would have widened all four; on one line a cell
+	// carries its own width. See TestRenderSpendBand_AWideCellDoesNotWidenTheOthers.
+	spanMonth: {window: usage.WindowMonth, label: "THIS MONTH", interval: 5 * time.Minute},
 }
 
 // spendChain is one span's poll state: the last answer, whether it failed, when it landed,

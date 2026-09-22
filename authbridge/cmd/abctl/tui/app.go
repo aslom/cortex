@@ -1763,16 +1763,24 @@ func (m *model) paneView() string {
 		if m.spendStripVisible() {
 			// Styled AFTER fitting, for the reason stated above the row slice: the renderer
 			// measures display columns and an escape sequence is not one.
-			band = renderSpendBand(m.spendSummary(), m.width)
-			drew = strings.TrimSpace(strings.Join(band, "")) != ""
+			//
+			// THE STYLED FORM COMES FROM THE RENDERER NOW, not from wrapping its output here. The
+			// band used to be two rows and this line muted the whole label row —
+			// `styleMuted.Render(band[0]), band[1]` — which is a hierarchy that exists only while
+			// labels and figures live on separate rows. Folded to one row, wrapping the line would
+			// mute the figures with the labels and flatten the contrast into uniform grey, so the
+			// mute moved to where a cell knows which half is which. See bandCell.renderMuting.
+			//
+			// `drew` is still read off the PLAIN form: it tests emptiness, and an escape sequence
+			// is not whitespace — a styled empty band is a non-empty string, so gating on it would
+			// open the drawer under a band with no figure in it.
+			band = renderSpendBandStyled(m.spendSummary(), m.width)
+			drew = strings.TrimSpace(strings.Join(renderSpendBand(m.spendSummary(), m.width), "")) != ""
 		}
 		for len(band) < spendBandLines {
 			band = append(band, "")
 		}
-		// THE LABEL LINE IS MUTED AND THE VALUE LINE IS NOT: that contrast is the hierarchy the
-		// band buys, and it is applied here rather than inside the renderer so the renderer's
-		// output stays measurable and assertable without escape sequences in the way.
-		rows = append(rows, styleMuted.Render(band[0]), band[1])
+		rows = append(rows, band...)
 
 		if m.spendDrawerReservesRows() {
 			var lines []string
