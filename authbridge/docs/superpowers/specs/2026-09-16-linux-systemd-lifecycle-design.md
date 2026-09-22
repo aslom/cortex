@@ -63,9 +63,11 @@ the macOS supervisor. That was the single biggest gap this issue needed to close
 - `authbridge/cmd/authbridge-proxy/supervise.go` — the macOS-only (and
   unsupervised-fallback) Go restart loop.
 - `authbridge/cmd/authbridge-proxy/main.go` — the proxy itself; on SIGTERM/SIGINT
-  does a graceful shutdown with a **15-second drain**
-  (`context.WithTimeout(..., 15*time.Second)`, `main.go:957`) — every "does stop
-  tolerate the drain" question traces back to this constant.
+  does a graceful shutdown with a **15-second drain** (`main()`'s `shutdownCtx :=
+  context.WithTimeout(..., 15*time.Second)`, right after the signal wait — cited
+  by site rather than line number, since `main.go` isn't part of this PR's diff
+  and keeps moving independently) — every "does stop tolerate the drain" question
+  traces back to this constant.
 - `authbridge/docs/laptop-service.md` — user-facing doc for `abctl service *`,
   `~/.cortex/` layout, restricted-environment fallback, manual-removal
   instructions.
@@ -119,9 +121,15 @@ real-launchd integration test.
 ### 7. `stop` tolerates the proxy's ~15s drain
 The proxy's own 15s shutdown timeout is the anchor value everything else has to
 respect. macOS handles this explicitly in Go (a 30s bootout timeout, plus the
-supervisor's own 20s-before-SIGKILL logic). The rendered Linux unit set no
-`TimeoutStopSec` at all — it "worked" only by accident of systemd's own
-90s default (`systemd.system.conf(5)`) exceeding 15s.
+supervisor's own 20s-before-SIGKILL logic). As of this audit (2026-09-16), the
+rendered Linux unit set no `TimeoutStopSec` at all — it "worked" only by accident
+of systemd's own 90s default (`systemd.system.conf(5)`) exceeding 15s.
+
+**Closed by #1079** — `renderUnitFor("linux", ...)` now sets `TimeoutStopSec=20`
+explicitly on `main`, matching the macOS supervisor's 20s headroom over the same
+15s drain, with a subtest in `cmd_service_test.go` asserting the line is present.
+Not yet on this branch's own tree until it merges — cited by symbol, not line,
+since #1079 landed in a sibling PR.
 
 ### 8. Works under user systemd, and states what happens where systemd is absent
 The best-handled bullet: `loadService` gives a clear, actionable message when
@@ -155,7 +163,11 @@ Linux-aware preflight — still an open decision, not yet resolved either way.
   raised above — worth coordinating rather than duplicating.
 - **#966** — plugin build-tag convention cleanup (retired `exclude_plugin_*` form →
   `include_plugin_*`; allow-legacy-plugin-tag: this reference is design history, not
-  a live usage) and a smaller desktop artifact. Touches the same
-  install/upgrade path: upgrading to a build that dropped a plugin an existing
-  config still names must be handled gracefully — flagged there as something
-  #944/#945/#964 must cover.
+  a live usage — the guard matches on the whole file via `strings.Contains`, not
+  scoped to this one mention, so a real `exclude_plugin_*` usage added anywhere
+  else in this file would also pass silently) and a smaller desktop artifact.
+  Touches the same install/upgrade path: upgrading to a build that dropped a
+  plugin an existing config still names must be handled gracefully — #966 itself
+  closed 2026-09-16 having noted this as something #944/#945/#964 would need to
+  cover; tracking it directly against one of those now that #966 is no longer
+  open would keep the concern from being lost.

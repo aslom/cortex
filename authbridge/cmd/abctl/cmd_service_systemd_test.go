@@ -60,7 +60,11 @@ func installStub(t *testing.T, name, body string) {
 }
 
 // noSystemctlOnPath points PATH at an empty directory, so exec.LookPath("systemctl")
-// fails the same way it would on a box with no systemd at all.
+// fails the same way it would on a box with no systemd at all. Call this instead
+// of, never after, fakeSystemctl/fakeLoginctl/installStub in the same subtest: it
+// replaces PATH rather than prepending to it, so it would silently shadow out any
+// stub already installed, the same invisible failure installStub's own
+// reachability check exists to catch.
 func noSystemctlOnPath(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())
@@ -175,7 +179,9 @@ func TestLoadService_Linux(t *testing.T) {
 
 	t.Run("daemon-reload failure is reported, enable is never attempted", func(t *testing.T) {
 		p := servicePathsFixture(t)
+		logPath, logLine := callLog(t)
 		fakeSystemctl(t, `#!/bin/sh
+`+logLine+`
 case "$*" in
   *daemon-reload*)
     echo "boom: unit has a syntax error" >&2
@@ -187,6 +193,14 @@ exit 1
 		err := loadService("linux", p, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "daemon-reload") || !strings.Contains(err.Error(), "boom") {
 			t.Errorf("err = %v, want it to name daemon-reload and the underlying reason", err)
+		}
+		// The error-message assertion above already implies this (an enable --now
+		// attempt would hit the fallthrough and produce a different message), but
+		// the call log makes "enable is never attempted" a literal check rather
+		// than something a reader has to re-derive from the error format.
+		calls := readCallLog(t, logPath)
+		if len(calls) != 1 || calls[0] != "--user daemon-reload" {
+			t.Errorf("systemctl calls = %v, want exactly [--user daemon-reload]", calls)
 		}
 	})
 

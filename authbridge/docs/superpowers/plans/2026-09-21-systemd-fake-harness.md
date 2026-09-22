@@ -4,7 +4,10 @@
 `unloadService`'s Linux logic be exercised and tested from any host, and prove
 their reaction to systemd's real vocabulary (`activating`/`failed`/`deactivating`,
 `daemon-reload`/`enable` failures) rather than only the generated unit text —
-closing checklist bullet 6 of #945.
+closing the unit-test half of checklist bullet 6 of #945. The spec doc's bullet 6
+also covers `serviceStatus`/`serviceControl` accuracy more broadly and a
+real-systemd integration test analogous to `TestWaitBootedOut_RealLaunchd`;
+neither is touched here.
 
 **Architecture:** All four functions took `runtime.GOOS` directly, unlike
 `renderUnitFor`, which already took `goos` as an explicit parameter for exactly

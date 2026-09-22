@@ -11,14 +11,15 @@ import (
 )
 
 // fakeLaunchctl puts a launchctl on PATH that behaves like a restricted sandbox: it
-// cannot answer, exactly as reported from a real one.
+// cannot answer, exactly as reported from a real one. Delegates to installStub
+// (cmd_service_systemd_test.go) so callers get the same exec.LookPath reachability
+// check fakeSystemctl/fakeLoginctl have: without it, a stub that's silently
+// unreachable (PATH not applied yet, or written non-executable) makes a
+// zero-calls assertion pass for the wrong reason, indistinguishable from a real
+// zero-calls outcome.
 func fakeLaunchctl(t *testing.T, body string) {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "launchctl"), []byte(body), 0o700); err != nil { //nolint:gosec
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installStub(t, "launchctl", body)
 }
 
 // TestLabelGone_UnknownIsNotGone is the defect this fixes. launchctl print exits 113
