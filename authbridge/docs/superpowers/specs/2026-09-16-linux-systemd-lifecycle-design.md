@@ -63,11 +63,11 @@ the macOS supervisor. That was the single biggest gap this issue needed to close
 - `authbridge/cmd/authbridge-proxy/supervise.go` — the macOS-only (and
   unsupervised-fallback) Go restart loop.
 - `authbridge/cmd/authbridge-proxy/main.go` — the proxy itself; on SIGTERM/SIGINT
-  does a graceful shutdown with a **15-second drain** (`main()`'s `shutdownCtx :=
-  context.WithTimeout(..., 15*time.Second)`, right after the signal wait — cited
-  by site rather than line number, since `main.go` isn't part of this PR's diff
-  and keeps moving independently) — every "does stop tolerate the drain" question
-  traces back to this constant.
+  does a graceful shutdown with a **15-second drain** (`main()`'s
+  `shutdownCtx, shutdownCancel := context.WithTimeout(..., 15*time.Second)`, right
+  after the signal wait — cited by site rather than line number, since `main.go`
+  isn't part of this PR's diff and keeps moving independently) — every "does stop
+  tolerate the drain" question traces back to this constant.
 - `authbridge/docs/laptop-service.md` — user-facing doc for `abctl service *`,
   `~/.cortex/` layout, restricted-environment fallback, manual-removal
   instructions.
