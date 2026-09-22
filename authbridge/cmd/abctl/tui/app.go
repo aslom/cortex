@@ -343,6 +343,14 @@ type model struct {
 	//
 	// A seventh path that trimmed the front of an entry would be invisible to the length check
 	// if it also appended, so it would have to rebase.
+	//
+	// AND EVERY ROW ABOVE THAT REBASES ALSO OWES rebuildSessionsTable, which is a second
+	// obligation and not a restatement of the first. Updating contextRun makes the figure right;
+	// the sessions table holds the gauge as a BAKED string, so nothing on screen changes until
+	// the rows are rebuilt. The streamed append had that call all along and the other three did
+	// not, so a session abctl streamed showed a gauge while a session it merely opened showed a
+	// dash — corrected in contextRun, and only visible when the next /v1/sessions poll happened
+	// to repaint. See TestSessionsTable_ASnapshotRepaintsTheGaugeItFilled.
 	events map[string][]pipeline.SessionEvent // sessionID → every event held for it
 	// contextRun is the CONTEXT(1M) gauge's answer per session, folded forward as events
 	// arrive rather than recomputed from the whole slice — see sessionContextFor. The row
@@ -1142,6 +1150,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pane == paneEvents && m.selectedSess == msg.id {
 			m.rebuildEventsTable()
 		}
+		// AND THE SESSIONS ROW, because the rebase above changed this session's CONTEXT(1M)
+		// figure and the table holds BAKED cells — rebuildSessionsTable renders each gauge to a
+		// string once and View() reprints whatever was baked, so a figure nothing repaints is
+		// still the dash it just disproved.
+		//
+		// UNCONDITIONAL, unlike the line above it, and that is the whole fix rather than an
+		// oversight. This snapshot was issued by Enter on the sessions pane and normally lands
+		// while the operator is still in the timeline they opened — milliseconds against a local
+		// proxy — and esc back out is a bare pane switch that rebuilds nothing (keys.go). So a
+		// `m.pane == paneSessions` guard would repaint only in the race and skip the ordinary
+		// case, which is how this reached a user: open an idle row, come straight back out, and
+		// the gauge appears about a second later when the /v1/sessions poll happens to rebuild
+		// the table. The sessions table is a RETAINED component; what matters is what its rows
+		// say when it is next painted, not which pane is focused when they are built.
+		m.rebuildSessionsTable()
 		return m, nil
 
 	case olderPageLoadedMsg:
@@ -1149,6 +1172,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pane == paneEvents && m.selectedSess == msg.id {
 			m.rebuildEventsTable()
 		}
+		// applyOlderPage rebases as well, so the gauge owes the same repaint — see the snapshot
+		// arm above for why it is not guarded on the focused pane.
+		m.rebuildSessionsTable()
 		return m, nil
 
 	case olderPageFailedMsg:

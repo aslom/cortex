@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -430,4 +431,166 @@ func TestSessionContextFor_ThePickerReleaseKeepsTheFigure(t *testing.T) {
 	if !released {
 		t.Fatal("the picker released nothing, so this test is not exercising the prune")
 	}
+}
+
+// heldContextCell is the CONTEXT(1M) cell of one session's row AS THE TABLE HOLDS IT.
+//
+// Read off Rows() rather than recomputed, because that is the whole distinction the three tests
+// below exist for: bubbles/table stores the strings rebuildSessionsTable baked and View() reprints
+// them, so this is what the operator is looking at and sessionContextFor is not.
+func heldContextCell(t *testing.T, m *model, id string) string {
+	t.Helper()
+	for i, rowID := range m.sessionRowIDs {
+		if rowID != id {
+			continue
+		}
+		row := m.sessionsTbl.Rows()[i]
+		return strings.TrimSpace(row[len(row)-1])
+	}
+	t.Fatalf("no sessions row for %q; the table holds %v", id, m.sessionRowIDs)
+	return ""
+}
+
+// assertGaugeFilled fails unless the cell is a bracketed track with something drawn IN it.
+//
+// `!= emptyCell` is too weak, which a review caught: an EMPTY track is not the em dash, so it
+// would pass, and this package calls it a fault in its own right — "an empty track beside a live
+// session reads as a rendering fault" (sessions_context_test.go), the same rule tierBar states as
+// a non-zero figure never drawing as an empty bar.
+//
+// NOT the sibling assertion's strings.Contains(cell, "█") though, which holds only for a large
+// figure. Measured at this column's width: 500,000 of 1M draws "▕████▌    ▏", but 62,000 draws
+// "▕▌        ▏" and 8,200 draws "▕▏        ▏" — no full block in either. Requiring one would fail
+// the small figures the tests below deliberately use. Ink between the brackets is the property
+// that holds for every non-zero figure.
+//
+// Sliced by byte offset rather than strings.Trim, and that is not pedantry: the one-eighth fill ▏
+// is THE SAME RUNE as the closing bracket, so Trim(cell, "▕▏") eats an 8,200-token sliver whole
+// and then reports the empty track it was written to catch.
+func assertGaugeFilled(t *testing.T, cell, when string) {
+	t.Helper()
+	const openBracket, closeBracket = "▕", "▏"
+	if !strings.HasPrefix(cell, openBracket) || !strings.HasSuffix(cell, closeBracket) {
+		t.Errorf("%s the row holds %q, which is not a gauge at all", when, cell)
+		return
+	}
+	if strings.TrimSpace(cell[len(openBracket):len(cell)-len(closeBracket)]) == "" {
+		t.Errorf("%s the row holds an EMPTY track %q — the figure reached contextRun and not "+
+			"the cell", when, cell)
+	}
+}
+
+// THE FIGURE IS NOT THE ROW, and every test above this one stops at the figure.
+//
+// Which is how the reported bug survived a suite this size. TestSessionsTable_AnIdleSessionsSnapshotFillsTheGauge
+// builds a sessions table, names the sessions table, and then asserts on sessionContextFor — so the
+// rebase was pinned and the repaint was pinned by nothing. All three handlers that reach
+// rebaseSessionContext (the inventory on model.events lists them) ended without one, while the
+// fourth writer — the streamed append — has called rebuildSessionsTable all along. That asymmetry is
+// the bug: a session abctl streamed shows a gauge, a session it did not shows a dash that opening
+// the session corrects in contextRun and nowhere the operator can see.
+//
+// What that looks like from the outside, and how it was reported: on a row idle since before abctl
+// attached, press Enter, come straight back out, and the gauge appears about a second later. The
+// wait is the /v1/sessions poll at refreshInterval, which is simply the next thing that happens to
+// rebuild the table.
+//
+// AND THE REPAINT MUST NOT BE GUARDED ON THE FOCUSED PANE, which is the tempting one-liner next to
+// each arm's existing `if m.pane == paneEvents`. The snapshot normally lands while the operator is
+// still in the timeline they just opened — milliseconds against a local proxy — and esc back to the
+// sessions pane rebuilds nothing (keys.go). So `if m.pane == paneSessions` would repaint in the race
+// and skip the ordinary case. The sessions table is a RETAINED component: what matters is what its
+// rows say when it is next painted, not which pane is on screen when they are built.
+func TestSessionsTable_ASnapshotRepaintsTheGaugeItFilled(t *testing.T) {
+	base := time.Now()
+	const id = "idle"
+	// PARKED ON THE TIMELINE, not on the sessions pane, and that is what makes this test pin the
+	// paragraph above rather than merely exercise the arm. Enter switches to paneEvents and the
+	// snapshot lands there — the ordinary case — so a `m.pane == paneSessions` guard fails here.
+	// Set the other way it passed with that guard in place, and so did the other two tests, which
+	// each cover a different arm: the forbidden one-liner was caught by nothing at all.
+	//
+	// selectedSess is left empty so the arm's OWN pane check still skips rebuildEventsTable; this
+	// model has no events table to rebuild.
+	m := &model{width: 200, pane: paneEvents, events: map[string][]pipeline.SessionEvent{}}
+	m.sessionsTbl = newSessionsTable()
+	m.sessions = []session.SessionSummary{{ID: id, UpdatedAt: base, EventCount: 9}}
+	m.rebuildSessionsTable()
+
+	if got := heldContextCell(t, m, id); got != emptyCell {
+		t.Fatalf("before the snapshot the row holds %q, want %q — abctl has no events for a "+
+			"session idle since before it attached", got, emptyCell)
+	}
+
+	// The snapshot Enter issued. A current proxy states the counts, so the projected timeline can
+	// answer on its own and no detail fetch is involved.
+	m.Update(snapshotLoadedMsg{
+		id: id, events: projected(conversation("c1", base, 600, 500_000)), projected: true})
+
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Fatalf("the figure is %d, want %d — this test is about the ROW, which cannot be "+
+			"right until the figure is", got, want)
+	}
+	assertGaugeFilled(t, heldContextCell(t, m, id), "after the snapshot")
+}
+
+// AN OLDER PAGE IS THE SAME DEFECT AT THE SECOND SITE. [o] merges a projected page, rebases, and
+// changes the gauge — for a session whose held events cannot answer, it is the first thing that can.
+func TestSessionsTable_AnOlderPageRepaintsTheGauge(t *testing.T) {
+	base := time.Now()
+	// A proxy that projects without stating the counts, so nothing held can be read and the
+	// page is the only candidate — see projectedNoCounts.
+	m := pagedModel(t, projectedNoCounts(conversation("c1", base, 600, 500_000)))
+	m.width = 200
+	m.sessions = []session.SessionSummary{{ID: "sess-1", UpdatedAt: base, EventCount: 600}}
+	m.rebuildSessionsTable()
+
+	if got := heldContextCell(t, m, "sess-1"); got != emptyCell {
+		t.Fatalf("before the page the row holds %q, want %q", got, emptyCell)
+	}
+
+	// Older in wall-clock terms, or applyOlderPage refuses it as a restarted session.
+	m.Update(olderPageLoadedMsg{id: "sess-1",
+		events:       projected(conversation("c0", base.Add(-time.Hour), 40, 62_000)),
+		serverOldest: 1})
+
+	if got, want := m.sessionContextFor("sess-1"), 62_000; got != want {
+		t.Fatalf("the figure is %d, want %d", got, want)
+	}
+	// 62,000 of 1M draws a half-block sliver and no full block — see assertGaugeFilled.
+	assertGaugeFilled(t, heldContextCell(t, m, "sess-1"), "after the older page")
+}
+
+// AND THE DETAIL FETCH IS THE THIRD, which matters most of the three: against a proxy that projects
+// without stating the counts it is the only path that ever puts a manifest back, so it is the only
+// thing that can give such a session a gauge at all (see replaceHeldEvent). Filling the figure and
+// leaving the row alone spends a round trip on nothing the operator can see.
+func TestSessionsTable_ADetailFetchRepaintsTheGauge(t *testing.T) {
+	base := time.Now()
+	full := conversation("c1", base, 600, 500_000)
+	for i := range full {
+		full[i].Seq = uint64(i + 1)
+	}
+	summaries := projectedNoCounts(full)
+
+	// detailModel keys its events under "s" and parks the pane on the response row.
+	m := detailModel(t, "s", &summaries[1])
+	m.events["s"] = summaries
+	m.width = 200
+	m.sessionsTbl = newSessionsTable()
+	m.sessions = []session.SessionSummary{{ID: "s", UpdatedAt: base, EventCount: len(summaries)}}
+	m.rebuildSessionsTable()
+
+	if got := heldContextCell(t, m, "s"); got != emptyCell {
+		t.Fatalf("before the fetch the row holds %q, want %q — a counts-less projection is "+
+			"unreadable, which is the case this path exists for", got, emptyCell)
+	}
+
+	resp := full[1] // what GetEvent returns: the manifest is back
+	m.Update(detailEventLoadedMsg{sessionID: "s", seq: resp.Seq, event: &resp})
+
+	if got, want := m.sessionContextFor("s"), 500_000; got != want {
+		t.Fatalf("the figure is %d, want %d", got, want)
+	}
+	assertGaugeFilled(t, heldContextCell(t, m, "s"), "after the detail fetch")
 }

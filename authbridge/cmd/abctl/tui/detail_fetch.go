@@ -109,6 +109,16 @@ func (m *model) applyDetailEvent(msg detailEventLoadedMsg) {
 	m.replaceHeldEvent(msg.sessionID, msg.event)
 	m.markFullFetched(msg.sessionID, msg.seq)
 
+	// AND THE SESSIONS ROW, because replaceHeldEvent rebased the CONTEXT(1M) gauge and that
+	// table holds BAKED cells — see the snapshot arm in Update for the full reason, and for why
+	// the repaint is not guarded on the focused pane.
+	//
+	// It matters most here of the three rebasing sites. Against a proxy that projects without
+	// stating the counts this fetch is the ONLY path that ever puts a manifest back, so it is the
+	// only thing that can give such a session a gauge at all; leaving the row baked as a dash
+	// spends the round trip on a figure the operator cannot see.
+	m.rebuildSessionsTable()
+
 	// Re-render through showDetail so the tunnel/TLS headers, wrapping and scroll
 	// position are all rebuilt exactly as the first render built them.
 	m.detailRow.event = msg.event
