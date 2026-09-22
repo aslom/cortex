@@ -279,6 +279,22 @@ test. No new workflow file.
 | Demo drifts from the real UI | Staleness check; abctl screens come from the real renderer. |
 | Reader arrives mid-loop | Accepted. The 3s hold on act 4's final state plus a 50s cycle means the most likely landing frame is the product. |
 
+## Implementation notes — where the build diverged from this design
+
+Recorded because each of these was discovered by building, and the reasons outlive
+the commit that found them.
+
+| Design said | Built as | Why |
+|---|---|---|
+| Acts 1 and 2 are separate | One `shell` act of 14s | `--claude-code` *runs* `abctl claude-code enable` (`install.sh:1227-1233`) rather than suggesting it, so there is no second command to type. |
+| State groups animate `visibility` | They animate `opacity` | `visibility` is inheritable but a descendant may re-declare `visible` and show through a hidden ancestor. Every row reveal does exactly that, which drew all nine states on top of each other. |
+| Fixtures set `ToolCount` / `MessageCount` | They carry real `Tools` and `Messages` arrays | `sessionapi.summarizeEvent` recomputes both counts from `len()` and nils the arrays, so counts alone arrive as zero and the `CONTEXT(1M)` fold skips every response. `AgentRole: main` is required for the same reason. |
+| Pump abandons overdue commands | It parks them and reads them later | Their goroutines hold the model's timer chain; dropping them permanently stops the 2s sessions refresh. |
+| Events may be recorded after the server starts | All of them are recorded before it | The spend band's four spans poll on independent cadences, so late arrivals produced screens where `LAST 1H` exceeded `TODAY`. Per-session caches are warmed by drilling into each session instead. |
+| Asset is byte-identical run to run | Clock-dependent strings are canonicalised first | Ages, the TIME column and ISO timestamps move every second, and their *width* shifts the padding of every cell after them. They are rewritten to fixed digits of the same length; the staleness check masks digit runs as a backstop. |
+| Verify with `--virtual-time-budget` | Verify with a global negative `animation-delay` | `--virtual-time-budget` leaves an `<img>`-embedded SVG's animation clock at zero. Every screenshot came back identical, which looks exactly like proof that animated SVG does not work — the wrong conclusion from a broken measurement. |
+| The tool manifest is reached by scrolling | Two page-downs (`f`) | The conversation is ~70 lines; arrow keys could not reach the manifest inside the beat. |
+
 ## Out of scope
 
 - Light/dark variants — one dark asset.

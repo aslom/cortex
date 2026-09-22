@@ -16,9 +16,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -447,8 +450,62 @@ func (c *Capturer) Press(keys ...string) {
 	}
 }
 
-// Screen is the current settled view, ANSI included.
-func (c *Capturer) Screen() string { return c.m.View() }
+// localSessionPort is the port a real local cortex serves its session API on.
+// The harness binds an ephemeral port, and abctl prints whatever endpoint it is
+// attached to in its header — so the raw capture would show a five-digit port
+// that changes every run. Rewriting it to the real one makes the asset both
+// deterministic and more accurate: the ephemeral port is a fact about this
+// generator, not about cortex.
+const localSessionPort = "9094"
+
+// clockPatterns match everything on a screen that moves with the wall clock: the
+// UPDATED ages, the events table's TIME column, the ISO timestamps in the detail
+// pane, and the usage chart's axis ticks.
+//
+// They are rewritten to fixed digits of the SAME LENGTH, which is what makes the
+// asset byte-identical between runs. Length matters as much as value: the TUI pads
+// to fixed column widths, so "9s ago" and "21s ago" consume different amounts of
+// the surrounding padding and shift every cell after them.
+var clockPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\d{4}-\d{2}-\d{2}T[\d:.]+(?:[+-]\d{2}:\d{2}|Z)`),
+	regexp.MustCompile(`\d{1,3}[smhd] ago`),
+	regexp.MustCompile(`\d{2}:\d{2}:\d{2}(?:\.\d+)?`),
+	regexp.MustCompile(`\b\d{2}:\d{2}\b`),
+	regexp.MustCompile(`:\d{2}\b`),
+}
+
+// canonicalDigits is the repeating filler clock digits are replaced with.
+const canonicalDigits = "42"
+
+// fixClock rewrites one match's digits, preserving its length exactly.
+func fixClock(match string) string {
+	var b strings.Builder
+	for i, r := range match {
+		if r >= '0' && r <= '9' {
+			b.WriteByte(canonicalDigits[i%len(canonicalDigits)])
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// Screen is the current settled view, ANSI included, with the harness's ephemeral
+// endpoint and every clock-dependent figure rewritten so two runs of the generator
+// produce the same bytes.
+func (c *Capturer) Screen() string {
+	view := c.m.View()
+	if c.ts != nil {
+		host := strings.TrimPrefix(c.ts.URL, "http://")
+		if _, port, err := net.SplitHostPort(host); err == nil {
+			view = strings.ReplaceAll(view, ":"+port, ":"+localSessionPort)
+		}
+	}
+	for _, re := range clockPatterns {
+		view = re.ReplaceAllStringFunc(view, fixClock)
+	}
+	return view
+}
 
 func (c *Capturer) Close() {
 	if c.cancel != nil {

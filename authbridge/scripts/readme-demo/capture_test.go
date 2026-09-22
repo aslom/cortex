@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -45,7 +44,6 @@ func newProbe(t *testing.T) *Capturer {
 func TestCapture_SessionsTableShowsMoneyAndTitles(t *testing.T) {
 	c := newProbe(t)
 	got := ansi.Strip(c.Screen())
-	fmt.Printf("\n########## SESSIONS ##########\n%s\n", got)
 
 	for _, want := range []string{
 		"SESSION", "TITLE", "TOKENS", "COST", "SAVED~", "CONTEXT(1M)",
@@ -58,24 +56,59 @@ func TestCapture_SessionsTableShowsMoneyAndTitles(t *testing.T) {
 	if strings.Count(got, "$") < 2 {
 		t.Errorf("expected COST figures in the table, got none")
 	}
+	if !strings.Contains(got, ":"+localSessionPort) {
+		t.Errorf("header should show the real local session port, not the harness's ephemeral one:\n%s", got)
+	}
+	// A gauge glyph proves CONTEXT(1M) folded: it is a dash whenever the fixture
+	// forgets the tool manifest or the main-agent role.
+	if !strings.Contains(got, "▏") {
+		t.Errorf("CONTEXT(1M) rendered no gauge:\n%s", got)
+	}
 }
 
-func TestCapture_SpendTiersAndUsageAndDrilldown(t *testing.T) {
+// TestCapture_EveryBeatShowsWhatTheStoryboardClaims walks the same keys demo.yaml
+// walks and asserts each pane still says what the animation is built to show. This
+// is the drift guard with teeth: the staleness check can only say "something
+// changed", while these name the thing that must not vanish.
+func TestCapture_EveryBeatShowsWhatTheStoryboardClaims(t *testing.T) {
 	c := newProbe(t)
 
 	c.Press("$")
 	tiers := ansi.Strip(c.Screen())
-	fmt.Printf("\n########## $ SPEND TIERS ##########\n%s\n", tiers)
+	for _, want := range []string{"WHERE IT WENT", "cache-read", "cache-write", "input", "output", "BY MODEL"} {
+		if !strings.Contains(tiers, want) {
+			t.Errorf("spend tiers missing %q", want)
+		}
+	}
 
 	c.Press("esc", "u")
-	usage := ansi.Strip(c.Screen())
-	fmt.Printf("\n########## u USAGE ##########\n%s\n", usage)
+	if usage := ansi.Strip(c.Screen()); !strings.Contains(usage, "USAGE") ||
+		strings.Contains(usage, "not available on this proxy") {
+		t.Errorf("usage charts unavailable — the capturer must attach a usage aggregator:\n%s", usage)
+	}
 
 	c.Press("esc", "G", "enter")
 	events := ansi.Strip(c.Screen())
-	fmt.Printf("\n########## EVENTS ##########\n%s\n", events)
+	for _, want := range []string{"ACTION", "PLUGIN", "HOST", "inference-parser", "api.anthropic.com"} {
+		if !strings.Contains(events, want) {
+			t.Errorf("events table missing %q", want)
+		}
+	}
+	if strings.Contains(events, "fix the retry handler") == false {
+		t.Error("expected to drill into the busiest session")
+	}
 
-	c.Press("enter")
+	c.Press("up", "enter")
 	detail := ansi.Strip(c.Screen())
-	fmt.Printf("\n########## DETAIL ##########\n%s\n", detail)
+	if !strings.Contains(detail, `"messages"`) {
+		t.Error("detail pane should open on a request carrying the conversation")
+	}
+
+	c.Press("f", "f")
+	manifest := ansi.Strip(c.Screen())
+	for _, want := range []string{`"tools"`, `"parameters"`} {
+		if !strings.Contains(manifest, want) {
+			t.Errorf("two pages down should reach the tool manifest; missing %q", want)
+		}
+	}
 }

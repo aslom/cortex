@@ -2,6 +2,9 @@
 
 **See what your coding agent actually sends — and pay less for it.**
 
+<img src="./docs/assets/cortex-demo.svg" width="100%"
+     alt="A terminal installs Cortex with one command and points Claude Code at it. Three Claude Code sessions run in separate directories, and abctl then lists all three with their token counts, cost and remaining context. Pressing $ breaks the spend down by tier, where cache reads dominate. Drilling into the busiest session shows the whole conversation and the fifteen-tool manifest it re-sends on every turn.">
+
 Cortex sits in your agent's request path, decrypts its traffic, and shows you the model
 calls, tool calls and agent-to-agent messages as they happen. It can also strip the
 tool definitions your agent never calls, which is 4–20% of the prompt on every turn.

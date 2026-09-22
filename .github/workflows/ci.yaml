@@ -110,6 +110,36 @@ jobs:
             echo "${profile}: ${tags}"
           done
 
+  go-ci-readme-demo:
+    name: Go CI (README demo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: authbridge/scripts/readme-demo
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: authbridge/scripts/readme-demo/go.mod
+
+      - name: Lint
+        run: |
+          go fmt ./...
+          go vet ./...
+
+      # The generator drives the real abctl TUI and compares its output against the
+      # committed docs/assets/cortex-demo.svg, so it reads sibling trees through
+      # relative paths and needs the full checkout. -count=1 is required, not
+      # cosmetic: Go's test cache keys on this package's own inputs and knows
+      # nothing about abctl's sources or the committed asset, so a cached PASS can
+      # outlive exactly the UI change this job exists to catch.
+      - name: Test (includes the asset staleness check)
+        run: go test -count=1 -v ./...
+
   go-ci-authbridge-cmd:
     name: Go CI (authbridge ${{ matrix.binary }})
     runs-on: ubuntu-latest
