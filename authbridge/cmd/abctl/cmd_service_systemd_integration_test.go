@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -86,13 +87,26 @@ func slowScript(t *testing.T) string {
 	return path
 }
 
+const restartOnFailureProp = "Restart=on-failure"
+
 // runTransientUnit starts script under a throwaway, uniquely-named unit with the
 // same Restart=on-failure our real renderUnitFor writes (RestartSec=1 here, not the
 // production 10, purely so the test doesn't wait 10s per restart it triggers), and
 // registers its own teardown — stop and reset-failed, so a failed assertion never
 // leaves a unit respawning after the test process exits.
+//
+// Restart=on-failure is hand-copied into the systemd-run args below rather than
+// read from renderUnitFor, so nothing would otherwise tie this test to the unit it
+// claims to vouch for: delete the property from renderUnitFor's linux branch and
+// this test would go on passing, proving a fact about systemd that the shipped
+// unit no longer requests. This assertion is the missing link — it fails if the
+// real renderer and this test's hand-copied property ever diverge.
 func runTransientUnit(t *testing.T, name, script string) {
 	t.Helper()
+	if u := renderUnitFor("linux", servicePaths{}); !strings.Contains(u, restartOnFailureProp) {
+		t.Fatalf("the linux unit no longer sets %s; this test would be vouching for a "+
+			"property the real unit doesn't request:\n%s", restartOnFailureProp, u)
+	}
 	stop := func() {
 		// systemd-run transient units are garbage-collected once inactive, so by the
 		// time this runs the unit is typically already gone: `stop` on a unit that
@@ -102,11 +116,18 @@ func runTransientUnit(t *testing.T, name, script string) {
 		// print on every passing run. Logging them unconditionally defeated the point
 		// of logging at all: a real leak would read identically to normal. Only
 		// anything else is worth surfacing.
+		//
+		// stop's exit 5 is a narrow, confirmed-benign case, checked by code. reset-failed's
+		// exit 1 is systemd's generic failure code, not a specific one — checking it by
+		// code would suppress nearly everything this call can produce, including a user
+		// bus that goes away mid-run. Matched by message instead, so only the confirmed
+		// "unit doesn't exist" case is swallowed.
 		if err := exec.Command("systemctl", "--user", "stop", name).Run(); err != nil && !isExitCode(err, 5) {
 			t.Logf("cleanup: systemctl --user stop %s: %v", name, err)
 		}
-		if err := exec.Command("systemctl", "--user", "reset-failed", name).Run(); err != nil && !isExitCode(err, 1) {
-			t.Logf("cleanup: systemctl --user reset-failed %s: %v", name, err)
+		if out, err := exec.Command("systemctl", "--user", "reset-failed", name).CombinedOutput(); err != nil &&
+			!strings.Contains(string(out), "not loaded") && !strings.Contains(string(out), "not found") {
+			t.Logf("cleanup: systemctl --user reset-failed %s: %v: %s", name, err, strings.TrimSpace(string(out)))
 		}
 	}
 	t.Cleanup(stop)
@@ -119,7 +140,7 @@ func runTransientUnit(t *testing.T, name, script string) {
 
 	args := []string{
 		"--user", "--unit=" + name,
-		"-p", "Restart=on-failure",
+		"-p", restartOnFailureProp,
 		"-p", "RestartSec=1",
 		script,
 	}
@@ -206,10 +227,16 @@ func TestSupervisorRestartsAfterCrash_RealSystemd(t *testing.T) {
 		t.Fatal("unit never reported a main PID")
 	}
 
-	// -9, not a plain stop: this must bypass the script's own TERM trap entirely,
-	// so it looks like a real crash (a segfault, an OOM kill) rather than a
-	// deliberate, distinguishable stop — which the next test proves does NOT restart.
-	if err := exec.Command("kill", "-9", strconv.Itoa(pid)).Run(); err != nil {
+	// SIGKILL, not a plain stop: this must bypass the script's own TERM trap
+	// entirely, so it looks like a real crash (a segfault, an OOM kill) rather
+	// than a deliberate, distinguishable stop — which the next test proves does
+	// NOT restart. syscall.Kill instead of exec.Command("kill", ...): requireRealSystemd
+	// already gated this on GOOS=linux, so the syscall package is always usable here,
+	// and it removes an external-binary dependency requireRealSystemd doesn't guard —
+	// on a slim image missing /bin/kill, that would surface as a failed test with
+	// ABCTL_SYSTEMD_TESTS=required set, rather than the environment-problem skip it
+	// actually is.
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill -9 %d: %v", pid, err)
 	}
 
@@ -244,10 +271,15 @@ func TestSupervisorStaysStoppedAfterDeliberateStop_RealSystemd(t *testing.T) {
 		t.Fatalf("systemctl --user stop: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 
-	// The script's own TERM trap takes ~2s; give it real room, then assert it STAYS
-	// inactive rather than just checking once immediately after stop returns.
+	// `systemctl --user stop` already blocked until the stop job completed, so the
+	// script's ~2s TERM-trap drain is behind us by the time we get here — this is
+	// the first second of the negative assertion, not a grace period. It's tightened
+	// to 1s (not the full 4s below) because RestartSec=1 means a wrongly-firing
+	// restart would already be visible this early: is-active reads "deactivating"
+	// mid-drain and "activating"/"active" only once a new process exists, so this
+	// can't mistake the trap's own tail for a restart.
 	if waitUntil(1*time.Second, func() bool { return unitIsActive(unit) }) {
-		t.Fatal("unit is active immediately after a deliberate stop")
+		t.Fatal("unit is active within 1s of a deliberate stop — looks like a wrongly-firing restart, not the stop itself")
 	}
 	// A flat sleep, not a poll, because this asserts a negative: there is no "it
 	// happened" event to wait for. The risk this accepts is one-directional — a
