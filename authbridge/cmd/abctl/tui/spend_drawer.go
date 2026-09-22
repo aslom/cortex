@@ -218,7 +218,16 @@ func wrapIndex(i, n int) int {
 // the strip on a terminal this short", which is a height complaint about a pane condition. A
 // reader resizes, nothing changes, and the key looks broken.
 func (m *model) spendDrawerHost() (bool, string) {
-	switch m.pane {
+	return spendDrawerHostPane(m.pane)
+}
+
+// spendDrawerHostPane is the pane rule on its own, so the [?] overlay can ask it
+// without a model. The overlay only lists `$` where `$` works, and it used to
+// hardcode "(not on usage)" beside the key instead — a second copy of this switch,
+// in prose, on a line that rendered on every pane including the two where the
+// drawer is refused for an entirely different reason.
+func spendDrawerHostPane(pane paneID) (bool, string) {
+	switch pane {
 	case paneNamespaces, panePods:
 		// The strip itself does not draw here: these run before a connection exists, so there
 		// is no spend to summarise, let alone break down.

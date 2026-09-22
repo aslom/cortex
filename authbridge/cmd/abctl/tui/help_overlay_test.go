@@ -95,13 +95,29 @@ func TestHelpOverlayRendersAndEmphasizesCurrentPane(t *testing.T) {
 	if !strings.Contains(view, "NAMESPACES (this pane)") {
 		t.Fatalf("overlay should emphasize the active pane's group:\n%s", view)
 	}
-	// P is the binding this overlay exists to make discoverable.
-	if !strings.Contains(view, "plugin catalog") {
-		t.Fatalf("overlay should document the P / plugin catalog binding:\n%s", view)
+	// The pane's PURPOSE, not just its keys. The overlay named nine panes and
+	// described none of them before the pane-focused rewrite.
+	if !strings.Contains(view, paneKeys[paneNamespaces].purpose) {
+		t.Fatalf("overlay should say what the active pane shows:\n%s", view)
 	}
-	// Other panes are summarized, not omitted.
-	if !strings.Contains(view, "OTHER PANES") {
-		t.Fatalf("overlay should list other panes:\n%s", view)
+	// `C` is the binding this overlay exists to make discoverable. On the picker it
+	// does not work yet, so the section keeps its heading and names the catalog in
+	// prose rather than advertising a dead key — see
+	// TestHelpBody_PickerPanesExplainWhyThereIsNoJumpSection for both halves.
+	if !strings.Contains(view, "plugin catalog") {
+		t.Fatalf("overlay should name the plugin catalog:\n%s", view)
+	}
+	if !strings.Contains(view, jumpSectionTitle) {
+		t.Fatalf("overlay should keep the %q heading on the picker:\n%s",
+			jumpSectionTitle, view)
+	}
+	// Other panes are documented, not omitted. That they are documented IN FULL is
+	// asserted on the body instead (see
+	// TestHelpBody_EveryPaneSectionSpellsOutEveryDescription): the section runs
+	// past the fold on any ordinary terminal, so View() legitimately shows only its
+	// first rows.
+	if !strings.Contains(view, everyPaneTitle) {
+		t.Fatalf("overlay should list every other pane:\n%s", view)
 	}
 	if !strings.Contains(view, "close") {
 		t.Fatalf("overlay should say how to close itself:\n%s", view)
@@ -309,8 +325,35 @@ func TestFooterHintsMentionUsageKey(t *testing.T) {
 func TestUsageFooterMatchesHandledKeys(t *testing.T) {
 	m := &model{pane: paneUsage, selectedSess: "s1"}
 
-	// Keys the pane handles, per the paneUsage switch in handleKey.
-	handled := []string{"m", "w", "b", "s"}
+	// Keys the pane handles, DRIVEN rather than copied. The list used to be
+	// hand-written "per the paneUsage switch in handleKey" and never pressed, so the
+	// footer-versus-handler claim in this test's name rested on the two lists having
+	// been kept in sync by hand — which is the drift the test exists to catch.
+	//
+	// Each key is pressed on a fresh model and counted as handled if it changed the
+	// pane's state. `m`/`b` cycle enums, `w` refetches with a new window, `s` toggles
+	// scope; a key the switch stopped handling changes nothing and is reported.
+	handled := []string{}
+	for _, probe := range []struct {
+		key     rune
+		changed func(before, after *usageState) bool
+	}{
+		{'m', func(b, a *usageState) bool { return a.metric != b.metric }},
+		{'w', func(b, a *usageState) bool { return a.windowIdx != b.windowIdx }},
+		{'b', func(b, a *usageState) bool { return a.group != b.group }},
+		{'s', func(b, a *usageState) bool { return a.session != b.session }},
+	} {
+		mm := &model{pane: paneUsage, selectedSess: "s1"}
+		before := mm.usage
+		mm.handleKey(keyRune(probe.key))
+		if probe.changed(&before, &mm.usage) {
+			handled = append(handled, string(probe.key))
+		} else {
+			t.Errorf("`%c` changed nothing on the usage pane — the footer advertises it",
+				probe.key)
+		}
+	}
+
 	footer := m.helpView()
 	for _, k := range handled {
 		if !strings.Contains(footer, "["+k+"]") {
@@ -472,34 +515,58 @@ func TestHelpOverlayScrollKeys(t *testing.T) {
 			if mm.helpVp.YOffset <= before {
 				t.Fatalf("%s should scroll down: offset %d → %d", tc.name, before, mm.helpVp.YOffset)
 			}
-			// And back up with the mirror key where one exists.
-			up := tea.KeyMsg{Type: tea.KeyUp}
-			u, _ = mm.Update(up)
+			// And back up. THIS USED TO ASSERT NOTHING: the branch it had was an
+			// `if … { return }` that passed on every path, so up-scrolling was
+			// untested while looking covered.
+			down := mm.helpVp.YOffset
+			u, _ = mm.Update(tea.KeyMsg{Type: tea.KeyUp})
 			mm = u.(*model)
-			if mm.helpVp.AtBottom() && mm.helpVp.YOffset != 0 {
-				// fine: single-line step from a clamped bottom
-				return
+			if mm.helpVp.YOffset >= down && !mm.helpVp.AtTop() {
+				t.Errorf("up arrow should scroll back: offset %d → %d (AtTop=%v)",
+					down, mm.helpVp.YOffset, mm.helpVp.AtTop())
 			}
 		})
 	}
 }
 
-// The scroll affordance appears only when it's needed, and reports
-// position so the reader knows there's more below.
-func TestHelpOverlayScrollHint(t *testing.T) {
-	// Tall terminal: whole reference fits, no scroll noise.
-	tall := helpModelAt(t, paneSessions, 100, 60)
-	if tall.helpVp.TotalLineCount() > tall.helpVp.VisibleLineCount() {
-		t.Skip("terminal not tall enough for the no-scroll case")
+// helpNoScrollHeight is a terminal tall enough to show the whole reference at
+// helpWideTerminal columns, so the no-affordance case is testable.
+//
+// IT IS BIG, AND THAT IS THE POINT. The body is 91 lines once every pane carries
+// its purpose and its descriptions, and 94 rows is the exact floor. The previous
+// version of this test asked for 60 and t.Skip()ed when the content did not fit —
+// which, the moment the body grew, silently took the three short-terminal
+// assertions below with it and reported PASS. A number that has to track the body's
+// height is asserted, never skipped.
+//
+// It has already earned that: adding the MOVING AROUND THIS HELP group took the
+// body from 86 lines to 91, and this failed with the value to use rather than going
+// quiet again.
+const (
+	helpWideTerminal   = 100
+	helpNoScrollHeight = 94
+)
+
+// With everything visible there must be no scroll affordance — it would be noise
+// pointing at content that is already on screen.
+func TestHelpOverlayScrollHint_AbsentWhenEverythingFits(t *testing.T) {
+	tall := helpModelAt(t, paneSessions, helpWideTerminal, helpNoScrollHeight)
+	if got, vis := tall.helpVp.TotalLineCount(), tall.helpVp.VisibleLineCount(); got > vis {
+		t.Fatalf("%d×%d shows %d of %d body lines — raise helpNoScrollHeight to at "+
+			"least %d rather than skipping this case",
+			helpWideTerminal, helpNoScrollHeight, vis, got, got+helpOverlayFrameH)
 	}
 	// Match the affordance specifically, not the word "scroll" — the
 	// global key list legitimately contains "scroll this help".
 	if strings.Contains(tall.View(), "[↑↓] scroll") {
 		t.Errorf("no scroll affordance expected when everything fits:\n%s", tall.View())
 	}
+}
 
-	// Short terminal: hint present, with a percentage.
-	short := helpModelAt(t, paneSessions, 100, 14)
+// When it does overflow the affordance appears and reports position, so the reader
+// knows there is more below and how much of it they have seen.
+func TestHelpOverlayScrollHint_ReportsPosition(t *testing.T) {
+	short := helpModelAt(t, paneSessions, helpWideTerminal, 14)
 	v := short.View()
 	if !strings.Contains(v, "[↑↓] scroll") {
 		t.Errorf("scroll affordance expected when content overflows:\n%s", v)
