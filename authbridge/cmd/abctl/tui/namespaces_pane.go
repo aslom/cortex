@@ -118,10 +118,13 @@ func newPickerModel(ctx context.Context, lister cluster.Lister, pf cluster.PortF
 		pipelineTbl:  newPipelineTable(),
 		catalogTbl:   newCatalogTable(),
 		previousPane: paneNone,
-		detailVp:     viewport.New(0, 0),
-		filterInput:  ti,
-		lastTick:     time.Now(),
-		connState:    connStateInfo{phase: connConnecting},
+		// Mirrors New, per this constructor's doc comment. paneNone rather than
+		// the zero value, which is paneNamespaces — see New.
+		pipelineReturnPane: paneNone,
+		detailVp:           viewport.New(0, 0),
+		filterInput:        ti,
+		lastTick:           time.Now(),
+		connState:          connStateInfo{phase: connConnecting},
 
 		// Picker-only:
 		lister:        lister,

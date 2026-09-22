@@ -21,17 +21,23 @@ type keyGroup struct {
 	bindings []keyBinding
 }
 
-// globalKeys are the bindings that work in (nearly) every pane. `P` lives
+// globalKeys are the bindings that work in (nearly) every pane. `C` lives
 // here because it's the discoverability problem this overlay exists to
 // solve: it works from every session-view pane but was never shown in any
 // footer. The picker panes are the documented exception — noted in the
 // group title rather than duplicated per-pane.
+//
+// `C` WAS `P` UNTIL THE PIPELINE TOOK THAT LETTER. The sentence above is why
+// that swap was cheap: a binding no footer ever advertised has close to no
+// muscle memory behind it, and "C for Catalog" needs less explaining than a `P`
+// borrowed from the word "Plugin".
 var globalKeys = keyGroup{
 	title: "GLOBAL",
 	bindings: []keyBinding{
 		{"?", "this help"},
 		{"↑↓ / jk", "scroll this help"},
-		{"P", "plugin catalog (session views)"},
+		{"P", "pipeline (session views)"},
+		{"C", "plugin catalog (session views)"},
 		{"p", "pause/resume stream"},
 		{"g / G", "jump to top / bottom"},
 		{"b / f", "page up / down"},
@@ -83,7 +89,7 @@ var paneKeys = map[paneID]keyGroup{
 		bindings: []keyBinding{
 			{"↑↓ / jk", "navigate"},
 			{"↵ / → / l", "drill into session"},
-			{"tab", "switch to pipeline"},
+			{"P", "pipeline"},
 			{"u", "usage charts (all sessions)"},
 			{"/", "filter"},
 			{"esc", "back to pods picker"},
@@ -119,8 +125,7 @@ var paneKeys = map[paneID]keyGroup{
 			{"↑↓ / jk", "navigate"},
 			{"↵ / → / l", "plugin detail"},
 			{"e", "edit pipeline in $EDITOR"},
-			{"tab", "switch to sessions"},
-			{"esc", "back to pods picker"},
+			{"esc / ← / h", "back to where P was pressed"},
 		},
 	},
 	panePluginDetail: {

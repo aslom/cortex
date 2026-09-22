@@ -288,7 +288,12 @@ trust to a bundle with no bridge CA in it.
 
 ## Panes
 
-The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
+The UI has these panes. `Enter` drills in; `Esc` backs out.
+
+**Sessions is the only pane you land on.** Pipeline (`P`), Usage (`u`) and the
+plugin catalog (`C`) are each opened by a key from anywhere in the session views
+and return to the pane you pressed it on. There is no tab strip: Sessions is what
+abctl is for, and the other three are surfaces you visit and leave.
 
 - **Sessions** (default): table of active sessions in the store, most
   recently updated first. Columns: session (truncated), title, updated
@@ -390,7 +395,7 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   column at once:
 
   ```
-  abctl · http://localhost:9094 · [Sessions] Pipeline
+  abctl · http://localhost:9094
   LAST 1H    TODAY   7 DAYS    MONTH
     $4.04   $18.80  $216.44  $703.18
   ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -401,7 +406,7 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
    default                    1h ago               8           —           —           —            —
 
   ● connected  2.1 events/sec   feedback: https://github.com/rossoctl/cortex/issues/new/choose
-  [↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [$] spend  [/] filter  [p] pause  [?] keys  [q] quit
+  [↑↓] nav  [↵] drill  [u] usage  [$] spend  [/] filter  [p] pause  [P] pipeline  [?] keys  [q] quit
   ```
 
   The two money columns are dropped entirely on a terminal too narrow to show a
@@ -608,8 +613,9 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   than abbreviated with `~`, and gives it the whole line while the notice is up;
   on a terminal too narrow for it the path is truncated from the left, so the
   filename stays readable.
-- **Pipeline**: the active plugin chain in inbound + outbound order.
-  Columns: position, direction, plugin name, DEPS (✓/✗ — see "Plugin
+- **Pipeline**: the active plugin chain in inbound + outbound order, opened by
+  `P` from Sessions, Events or Detail; `Esc` returns to whichever of those it was
+  opened from. Columns: position, direction, plugin name, DEPS (✓/✗ — see "Plugin
   dependencies" below), writes, body access, event count. `e` opens
   the editor. Outside the viewer, `abctl pipeline get` prints the same
   composition — plus each plugin's description and config — and `--json` emits
@@ -782,7 +788,7 @@ Layered on top of all of them:
 | `r` | namespaces, pods | reload agent list from cluster |
 | `Enter` / `→` / `l` | sessions, events | drill into selection |
 | `Esc` / `←` / `h` | detail, events | back out |
-| `Esc` | sessions, pipeline | (picker mode) tear down port-forward and back to pods |
+| `Esc` | sessions | (picker mode) tear down port-forward and back to pods. The only pane that does this — every key-opened surface returns to its caller instead |
 | `/` | sessions, events | filter (substring match; Enter commits and saves, Esc cancels the edit and saves nothing; clear the box and press Enter to remove a saved filter) |
 | `s` | events | toggle skip-row visibility (default: hidden; the events footer shows the hidden count) |
 | `c` | events | open the column picker (`↑↓`/`jk` move, `space`/`x` toggle, `s` sort, `r` reset, `Esc`/`Enter`/`c` close); the selection and sort are saved on close |
@@ -799,7 +805,9 @@ Layered on top of all of them:
 | `b` | usage | cycle breakdown: none / status / method / plugin (not offered for latency — there is no per-label latency) |
 | `s` | usage | toggle between this session and all sessions |
 | `Esc` | usage | back to the pane it was opened from |
-| `P` | any session-view pane (not the picker) | open the registered-plugin catalog |
+| `P` | sessions, events, detail | open the pipeline. Capital `P` because lowercase `p` pauses the stream and has no replacement worth the trade — `space` and `d` are the table's page-down and half-page-down |
+| `Esc` | pipeline | back to the pane `P` was pressed on |
+| `C` | any session-view pane (not the picker) | open the registered-plugin catalog. Was `P` until the pipeline took that letter |
 | `r` | catalog | refresh the catalog from `/v1/plugins` |
 | `e` | pipeline | edit pipeline subtree in `$EDITOR` |
 | `y` | edit/diff | apply the edit |
