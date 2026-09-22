@@ -42,6 +42,7 @@ func fullEvent() pipeline.SessionEvent {
 			// rather than the ~163x it measures against a live proxy.
 			Messages:         bigConversation(24, 8192),
 			Tools:            []pipeline.InferenceTool{{Name: "search"}},
+			AgentRole:        pipeline.AgentRoleMain,
 			Completion:       strings.Repeat("y", 2048),
 			ToolCalls:        []pipeline.InferenceToolCall{{Name: "search"}},
 			PromptTokens:     100,
@@ -97,6 +98,12 @@ func TestSummarizeEvent_DropsPayloadsKeepsTimelineFields(t *testing.T) {
 	}
 	if got.Inference.ToolCount != len(full.Inference.Tools) {
 		t.Errorf("toolCount = %d, want %d", got.Inference.ToolCount, len(full.Inference.Tools))
+	}
+	// agentRole needs no such rescue — it is a scalar the struct copy carries — but it is read by
+	// the same consumer for the same question, so a projection that lost it would break the
+	// CONTEXT gauge exactly as dropping the counts did.
+	if got.Inference.AgentRole != full.Inference.AgentRole {
+		t.Errorf("agentRole = %q, want %q", got.Inference.AgentRole, full.Inference.AgentRole)
 	}
 	if got.A2A.Artifact != "" {
 		t.Error("A2A.Artifact survived")
@@ -294,7 +301,11 @@ func TestSummarizeEvent_ShapeIsGuarded(t *testing.T) {
 		want int
 	}{
 		{"SessionEvent", reflect.TypeOf(pipeline.SessionEvent{}), 22},
-		{"InferenceExtension", reflect.TypeOf(pipeline.InferenceExtension{}), 24},
+		// 25 since AgentRole, which is TIMELINE data: abctl's CONTEXT gauge reads it on every
+		// row the timeline serves. It needs no assertion of its own in the projection test
+		// beyond the equality one there — a scalar survives the struct copy, unlike the two
+		// slices whose lengths had to be recorded before they were dropped.
+		{"InferenceExtension", reflect.TypeOf(pipeline.InferenceExtension{}), 25},
 		{"A2AExtension", reflect.TypeOf(pipeline.A2AExtension{}), 11},
 		{"MCPExtension", reflect.TypeOf(pipeline.MCPExtension{}), 6},
 	} {

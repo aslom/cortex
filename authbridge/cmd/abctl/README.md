@@ -237,19 +237,35 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   means *no context known*, stays distinguishable from the sliver a barely-used
   session gets.
 
-  **A session is not one conversation.** Claude Code interleaves one-shot
-  completions — title generation, quota and summary calls — with your
-  conversation, under the same session id. Measured across 115 responses in
-  three live sessions, those carry *no tool manifest* and 2–3 messages, while
-  every conversation turn carried 27–31 tools and 63–1572 messages, with no
-  overlap at all. So the gauge considers only requests that carried tools, and
-  among those the one with the most messages: a one-shot can be large — one
-  measured at 295k — and would otherwise hijack the column, while a subagent's
-  own conversation can never out-message a long one.
+  **A session is three kinds of caller, not one conversation.** Claude Code
+  sends your conversation, the subagents it spawns, and its own one-shot
+  completions — title generation, the permission security monitor, the auto-mode
+  classifier — under one session id. Two facts sort them out, and the gauge
+  needs both:
 
-  There is deliberately no recency window. Your conversation goes silent while
-  a subagent runs, and that silence is structural, so any last-N-requests
-  window can fill with the subagent's traffic and hand the gauge to it.
+  | | tool manifest | `agentRole` |
+  |---|---|---|
+  | your conversation | present | `main` |
+  | a subagent | present | `subagent` |
+  | a one-shot | **absent** | `main` |
+
+  The manifest excludes the one-shots. Measured across 115 responses in three
+  live sessions they carry *no tools* and 2–3 messages, while every conversation
+  turn carried 27–31 tools and 63–1572 messages. They are not small, which is
+  why size is not the filter: one measured 295k and another 421,220 against a
+  true context of 998,334. And they declare themselves `main`, because the CLI
+  issues them rather than a subagent.
+
+  The role excludes the subagents, which Claude Code states on every request.
+  The message count only approximated it — subagent turns reached 177 and 186
+  messages against main threads at 188 and 288 — and it cannot see a compaction,
+  which restarts your conversation at a low count while leaving the role alone.
+
+  Among what is left, the **latest** turn wins. There is deliberately no recency
+  window: your conversation goes silent while a subagent runs, and that silence
+  is structural, so a last-N-requests window can fill with the subagent's
+  traffic and hand the gauge to it. Both filters are exact, so none of that
+  traffic is a candidate in the first place.
 
   Three things worth knowing. The denominator is fixed at 1M, the largest
   window on any path the proxy sees, so a model with a smaller window reads
@@ -257,25 +273,32 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
   The figure comes from abctl's own event cache, filled by the live stream or
   by drilling into a session. The timeline fetch asks for `view=summary`, and
-  that projection drops the two fields this rule reads — the tool manifest and
-  the message count — so it now records their **lengths** before dropping them
-  (`messageCount` / `toolCount`) and the gauge reads either shape. Without that
-  a delivered row could not be read at all, and an idle session showed a dash
-  however long you looked at it.
+  that projection drops the slices this rule used to read, so it records their
+  **lengths** before dropping them (`messageCount` / `toolCount`) and the gauge
+  reads either shape. Without that a delivered row could not be read at all, and
+  an idle session showed a dash however long you looked at it. `agentRole` needs
+  none of that: it is a scalar the projection copies as-is.
 
   Against a proxy older than those fields, an idle row still shows the dash
   until traffic arrives or you open one of its events — the one request that
   returns an event in full. Once a figure is established it is kept, so a
   projection that says nothing cannot erase it.
 
-  And after a compaction the gauge can stay on the pre-compaction context for a
-  while, because the older, longer request still holds the most messages; a
-  stale figure was preferred to one that flips to a one-shot's. Since the figure
-  outlives the events it was read from, the way to clear one you do not believe
-  is `Esc` back to the Pods pane and re-enter: a different pod is the one thing
-  that discards it, and re-attaching starts the column from whatever streams
-  next. That reset only exists in picker mode — under `--endpoint` there is no
-  Pods pane to back out to, so restarting abctl is the equivalent.
+  **Against a proxy that publishes no `agentRole`**, the gauge falls back to the
+  old rule — tool-carrying requests, the one with the most messages — and pays
+  what that costs. After a compaction it can stay on the pre-compaction context
+  for the rest of the session, because the older, longer request still holds the
+  most messages: measured at 999,623 against a true 400,249, a bar at 98.6% for
+  a session with 600k of headroom. A stale figure is still preferred to one that
+  flips to a subagent's. With the role published there is nothing to wait for —
+  the column follows the compaction on the next turn.
+
+  Since the figure outlives the events it was read from, the way to clear one you
+  do not believe is `Esc` back to the Pods pane and re-enter: a different pod is
+  the one thing that discards it, and re-attaching starts the column from
+  whatever streams next. That reset only exists in picker mode — under
+  `--endpoint` there is no Pods pane to back out to, so restarting abctl is the
+  equivalent.
 
   It replaced an `ACTIVE` column whose `●` nobody acted on — `UPDATED` already
   answers "is this live", in seconds rather than as a dot. The `cached` marker

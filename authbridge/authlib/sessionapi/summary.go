@@ -64,11 +64,14 @@ func summarizeEvent(e *pipeline.SessionEvent) *pipeline.SessionEvent {
 		// COUNTED BEFORE BEING DROPPED. Two facts about a conversation survive with none of its
 		// content — whether the request carried a tool manifest, and how long the conversation
 		// is — and abctl's CONTEXT gauge needs both: the manifest separates an agentic turn from
-		// a one-shot completion, the message count identifies the main thread among the several
-		// that share a session id. It read them off the slices below, so this projection blanked
+		// a one-shot completion, the message count tells its thread from a subagent's where the
+		// proxy states no agentRole. It read them off the slices below, so this projection blanked
 		// that column for every row the timeline delivered while the unprojected SSE stream kept
 		// working. Two ints against a payload that is 99.5% of the event; see
 		// pipeline.InferenceExtension.MessageCount for the "zero means not stated" rule.
+		//
+		// AgentRole is not in this list and needs nothing: the struct copy above carries it, which
+		// is the whole difference between a scalar and the slices below.
 		inf.MessageCount, inf.ToolCount = len(inf.Messages), len(inf.Tools)
 		inf.Messages = nil
 		inf.Tools = nil

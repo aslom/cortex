@@ -63,6 +63,31 @@ func oneShot(id string, at time.Time, context int) []pipeline.SessionEvent {
 	return exchange(id, at, 3, 0, 300, context-300)
 }
 
+// roled states the caller's role on every event of a turn, which is what a proxy that reads
+// Claude Code's billing-header line publishes.
+//
+// conversation and oneShot above state NOTHING, so every test written before this field existed
+// exercises the fallback rule — and that is deliberate rather than an oversight: the two rules
+// have to be pinned separately, because a proxy older than the field is the case the fallback is
+// for. mainAgent and subagent below are their stated counterparts.
+func roled(evs []pipeline.SessionEvent, role pipeline.AgentRole) []pipeline.SessionEvent {
+	for i := range evs {
+		evs[i].Inference.AgentRole = role
+	}
+	return evs
+}
+
+// mainAgent is a conversation turn whose request declared itself the interactive thread.
+func mainAgent(id string, at time.Time, msgs, context int) []pipeline.SessionEvent {
+	return roled(conversation(id, at, msgs, context), pipeline.AgentRoleMain)
+}
+
+// subagent is a Task-spawned agent's turn. It carries its OWN tool manifest, which is why the
+// manifest alone cannot filter it out — measured at 11 tools against the main thread's 27.
+func subagent(id string, at time.Time, msgs, context int) []pipeline.SessionEvent {
+	return roled(conversation(id, at, msgs, context), pipeline.AgentRoleSubagent)
+}
+
 // THE CASE THIS COLUMN WAS REPORTED FOR. Real interleaving from one live session: a conversation
 // at ~1500 messages and 830-851k, with one-shots at 3 messages carrying 282k and 6k landing
 // between its turns. Before this rule the gauge followed whichever spoke last, swinging 83% to
@@ -106,10 +131,11 @@ func TestSessionContext_SurvivesALongSilence(t *testing.T) {
 	}
 }
 
-// Among conversation turns the most messages wins, and equal counts keep the most recent. The
-// message count is what identifies the main thread: a subagent carrying its own tools IS a
-// candidate, and cannot out-message a long conversation.
-func TestSessionContext_MostMessagesWinsTiesGoToTheLatest(t *testing.T) {
+// WITH NO ROLE STATED the most messages wins among conversation turns, and equal counts keep the
+// most recent. This is the fallback rule, kept for a proxy that publishes no agentRole: the
+// message count is then the only thing that separates the main thread from a subagent carrying
+// its own tools, and it separates them only while the conversation is the longer of the two.
+func TestSessionContext_UnstatedRoleMostMessagesWins(t *testing.T) {
 	base := time.Now()
 	var evs []pipeline.SessionEvent
 	for _, e := range [][]pipeline.SessionEvent{
@@ -165,15 +191,19 @@ func TestSessionContext_IgnoresRequestEventsEvenWithCounts(t *testing.T) {
 	}
 }
 
-// THE COMPACTION TRADEOFF, pinned so it cannot be "fixed" by reintroducing the window that was
-// ruled out.
+// THE COMPACTION TRADEOFF THE FALLBACK STILL PAYS, pinned so it cannot be "fixed" by
+// reintroducing the window that was ruled out.
 //
-// A compaction restarts the conversation at a low message count while the pre-compaction turn
-// stays retained with 1500 of them, so the older, longer turn keeps winning and the gauge holds
-// the old figure. That is deliberate: a stale figure beats one that flips to a one-shot's. If this
-// test starts failing because a recency rule was added, the silence problem is back with it — the
-// main thread goes quiet while a subagent runs, and a last-N window fills with its traffic.
-func TestSessionContext_HoldsThePreCompactionFigure(t *testing.T) {
+// With no role stated, a compaction restarts the conversation at a low message count while the
+// pre-compaction turn stays retained with 1500 of them, so the older, longer turn keeps winning
+// and the gauge holds the old figure. A stale figure beats one that flips to a subagent's, and
+// nothing in an unstated stream can tell the two apart. If this test starts failing because a
+// recency rule was added to the FALLBACK, the silence problem is back with it — the main thread
+// goes quiet while a subagent runs, and a last-N window fills with its traffic.
+//
+// TestSessionContext_AfterACompactionFollowsTheMainAgent is the same session with the role
+// stated, and does not pay this.
+func TestSessionContext_UnstatedRoleHoldsThePreCompactionFigure(t *testing.T) {
 	base := time.Now()
 	evs := conversation("before", base, 1500, 851_000)
 	evs = append(evs, conversation("after", base.Add(time.Hour), 40, 62_000)...)
@@ -181,6 +211,91 @@ func TestSessionContext_HoldsThePreCompactionFigure(t *testing.T) {
 	if got, want := sessionContext(evs), 851_000; got != want {
 		t.Errorf("sessionContext = %d, want %d — the stale-after-compaction tradeoff changed; "+
 			"see the doc comment before accepting a new expectation here", got, want)
+	}
+}
+
+// THE CASE THIS RULE WAS CHANGED FOR, with the reported session's own figures.
+//
+// c39dae31 compacted at 21:32:20 after a turn at 2,468 messages and 999,623 prompt tokens. Ten
+// hours and 313 candidate turns later its conversation was at 952 messages and 400,249 tokens,
+// and the gauge still drew the pre-compaction figure — 999,623 against a one-million window, a
+// bar at 98.6% for a session with 600k of headroom. The message count could not recover for the
+// rest of the session: it had 1,516 to climb back.
+//
+// With the role stated the rule is just "the main agent's latest turn", so the column follows the
+// compaction on the very next turn.
+func TestSessionContext_AfterACompactionFollowsTheMainAgent(t *testing.T) {
+	base := time.Now()
+	evs := mainAgent("pre-compaction", base, 2468, 999_623)
+	evs = append(evs, mainAgent("post-compaction", base.Add(10*time.Hour), 952, 400_249)...)
+
+	if got, want := sessionContext(evs), 400_249; got != want {
+		t.Errorf("sessionContext = %d, want %d — the gauge is holding a pre-compaction figure "+
+			"for a conversation that restarted", got, want)
+	}
+}
+
+// A SUBAGENT SPEAKING LAST MUST NOT TAKE THE COLUMN, and the message count is not what stops it.
+//
+// Figures from d6cfc02e, where the two populations overlap: the subagent reached 186 messages and
+// 198,899 tokens while the main thread was at 288 and 217,121. Under latest-wins the subagent
+// speaks last, so only the declared role keeps the gauge on the conversation. This is the test
+// that fails if the role filter is dropped in favour of recency alone.
+func TestSessionContext_IgnoresASubagentThatSpokeLast(t *testing.T) {
+	base := time.Now()
+	evs := mainAgent("main", base, 288, 217_121)
+	evs = append(evs, subagent("sub", base.Add(time.Minute), 186, 198_899)...)
+
+	if got, want := sessionContext(evs), 217_121; got != want {
+		t.Errorf("sessionContext = %d, want %d — a subagent took the column", got, want)
+	}
+}
+
+// BOTH FILTERS ARE NEEDED, AND THE ONE-SHOT IS WHY.
+//
+// A one-shot is issued by the same CLI as the conversation, so it declares itself MAIN — the role
+// does not exclude it, and the manifest has to. And it is not small: the security monitor carries
+// a rendered transcript, measured at 421,220 prompt tokens against a true context of 998,334, so
+// a size threshold would not separate them either.
+func TestSessionContext_AStatedOneShotIsStillAOneShot(t *testing.T) {
+	base := time.Now()
+	evs := mainAgent("main", base, 952, 400_249)
+	evs = append(evs, roled(oneShot("monitor", base.Add(time.Minute), 421_220),
+		pipeline.AgentRoleMain)...)
+
+	if got, want := sessionContext(evs), 400_249; got != want {
+		t.Errorf("sessionContext = %d, want %d — a one-shot that declares itself main took the "+
+			"column; the tool manifest is what excludes it", got, want)
+	}
+}
+
+// A STATED TURN DISPLACES AN UNSTATED FIGURE OUTRIGHT, however much longer the unstated one was.
+//
+// This is a proxy upgrade mid-session: what came before was chosen by a rule that cannot tell a
+// subagent from a conversation, so it is not evidence about either. Taking the first stated turn
+// on the spot is what makes the fix arrive on the next event rather than on the next 500.
+func TestSessionContext_AStatedTurnDisplacesAnUnstatedFigure(t *testing.T) {
+	base := time.Now()
+	evs := conversation("unstated", base, 2468, 999_623)
+	evs = append(evs, mainAgent("stated", base.Add(time.Hour), 952, 400_249)...)
+
+	if got, want := sessionContext(evs), 400_249; got != want {
+		t.Errorf("sessionContext = %d, want %d — a stated turn must displace a figure chosen by "+
+			"the fallback", got, want)
+	}
+}
+
+// ONCE A SESSION STATES ROLES, AN UNSTATED ROW IS NOT A CANDIDATE — it cannot be checked against
+// the filter that matters, and a session whose proxy states roles has no reason to produce one.
+// Trusting it would let a single unstated row hand the column to whatever sent it.
+func TestSessionContext_AStatedSessionIgnoresUnstatedRows(t *testing.T) {
+	base := time.Now()
+	evs := mainAgent("stated", base, 952, 400_249)
+	evs = append(evs, conversation("unstated", base.Add(time.Hour), 2468, 999_623)...)
+
+	if got, want := sessionContext(evs), 400_249; got != want {
+		t.Errorf("sessionContext = %d, want %d — an unstated row took the column from a stated "+
+			"session", got, want)
 	}
 }
 

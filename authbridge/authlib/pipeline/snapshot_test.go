@@ -85,6 +85,19 @@ func TestSnapshotInference_PointerAliasing(t *testing.T) {
 	}
 }
 
+// THE REQUEST-PHASE FACTS HAVE TO REACH THE RESPONSE SNAPSHOT, which is the other half of the
+// aliasing contract above: the test before this one pins what must NOT leak forward, and this pins
+// what must. AgentRole is read while parsing the request and consumed on the response event, where
+// the token counts are — abctl's CONTEXT gauge cannot use a request event, so a role that did not
+// survive the copy would be invisible to the only reader it has.
+func TestSnapshotInference_CarriesRequestPhaseFields(t *testing.T) {
+	src := &InferenceExtension{Model: "claude-opus-5", AgentRole: AgentRoleSubagent}
+
+	if got := SnapshotInference(src).AgentRole; got != AgentRoleSubagent {
+		t.Errorf("AgentRole = %q, want %q", got, AgentRoleSubagent)
+	}
+}
+
 func TestSnapshotInference_Nil(t *testing.T) {
 	if got := SnapshotInference(nil); got != nil {
 		t.Errorf("SnapshotInference(nil) = %v, want nil", got)
