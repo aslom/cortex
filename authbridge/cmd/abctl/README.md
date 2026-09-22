@@ -115,6 +115,71 @@ wins. Resolution in full:
 | — | yes | passed | Namespaces picker |
 | — | no | either | Namespaces picker |
 
+### Naming sessions from Claude Code (`--skip-claude-metadata`)
+
+Cortex buckets traffic by session id, and a session id is a UUID. Claude Code
+knows more about the same session: it writes a transcript per session carrying a
+model-generated title and the directory the session ran in. `abctl observe`
+reads those transcripts and writes what it finds to
+`~/.cortex/session-metadata.json`, so the sessions table can show a `TITLE`
+column instead of a bare id.
+
+The scan runs in the **background**, while the viewer is already up: `abctl observe` paints
+immediately and the titles appear when the scan finishes — usually before you have
+picked a pod. The viewer opens with whatever titles the last run recorded, so a scan
+only ever adds names.
+
+This happens by default; `--skip-claude-metadata` turns it off:
+
+```sh
+./abctl observe                            # open the viewer; titles arrive as they scan
+./abctl observe --skip-claude-metadata     # skip the scan; previously-recorded titles still show
+```
+
+The scan is also **incremental**: a transcript whose mtime has not moved since it was
+last read is skipped, because a file that has not changed cannot have grown a new
+title. On a tree of 124 transcripts totalling 207 MB, a launch that follows a recent
+one re-reads 2 of them. A rewrite that *preserves* mtime — `rsync -t`, a restore from
+backup — therefore keeps whatever title the entry already had; re-run the explicit
+command below to force a re-read.
+
+Because the scan outlives nothing, quitting the viewer before it finishes simply means
+it did not save, and the next launch scans again. The window is the ~0.7s of a first
+full scan, and milliseconds once the file exists.
+
+Pass `--skip-claude-metadata` when the scan is unwanted, or when `~/.claude` should
+simply not be touched. It suppresses only the *scan*: the viewer still reads
+`~/.cortex/session-metadata.json`, so titles recorded by earlier runs keep rendering and
+only sessions new or renamed since the last scan show as bare ids. There is no flag that
+hides titles already on disk — delete the file for that.
+
+A harvest that cannot run is never fatal — a missing, unreadable or corrupt file
+costs the `TITLE` column and nothing else, and the viewer still opens. The failures
+that can be known before the viewer starts, such as an unreadable metadata file, print
+one line to stderr with the repair; success says nothing.
+
+The config directory is `CLAUDE_CONFIG_DIR` when set, and `~/.claude`
+otherwise. To read a different directory, or to force a full re-read of every
+transcript — the way to repair entries that are wrong — run the harvest
+explicitly:
+
+```sh
+./abctl experimental read-claude-sessions              # full scan, reports counts
+./abctl experimental read-claude-sessions --dir PATH   # a different config dir
+./abctl experimental read-claude-sessions --merge=false  # rebuild, dropping stale entries
+```
+
+Both the background scan and the default subcommand run **upsert**, so an entry stays once
+written: a session whose transcript Claude Code has pruned keeps its title indefinitely,
+and the file grows with sessions-ever-seen rather than sessions-that-exist. That is what
+`--merge=false` is for — but it drops every entry the run did not see, including entries
+harvested from a different `--dir`, so pass it with the same `--dir` that built the file.
+
+Only the explicit subcommand reports a transcript it could not read to the end. Such a
+session still gets whatever title was found before the stop, which may be an older one, and
+the background scan has nowhere to say so once the viewer owns the screen — so re-run the
+subcommand if a title looks wrong.
+
 ## Running one command through Cortex (`abctl exec`)
 
 `abctl configure claude-code enable` works because Claude Code has a settings
@@ -226,9 +291,12 @@ trust to a bundle with no bridge CA in it.
 The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
 - **Sessions** (default): table of active sessions in the store, most
-  recently updated first. Columns: session (truncated), updated (relative),
-  event count, tokens, cost, saved, context. Numerics are right-aligned so the
-  digits line up between rows.
+  recently updated first. Columns: session (truncated), title, updated
+  (relative), event count, tokens, cost, saved, context. `TITLE` is populated
+  from Claude Code's transcripts — see
+  [`--skip-claude-metadata`](#naming-sessions-from-claude-code---skip-claude-metadata)
+  — and is empty for a session nothing has harvested. Numerics are right-aligned
+  so the digits line up between rows.
 
   `CONTEXT(1M)` is a gauge, not a figure: how full the **conversation's**
   context was on its latest turn, against a fixed one-million-token window. The

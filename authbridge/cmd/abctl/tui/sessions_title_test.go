@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
@@ -184,17 +185,40 @@ func TestSessionsPane_PathTitleTruncatesFromTheLeft(t *testing.T) {
 	}
 }
 
-// Prose is not truncated from the left: it reads from the beginning.
+// Prose keeps its HEAD: it is cut from the right, the opposite side from a path.
 func TestSessionsPane_ProseTitleTruncatesFromTheRight(t *testing.T) {
 	const prose = "Investigate the flaky reloader debounce test"
 	m := newTitleModel(t, map[string]SessionMetadata{"s1": {Title: prose}}, "s1")
 	m.sessionsTbl.SetColumns(sessionsColumnsFor(116))
 	m.rebuildSessionsTable()
 
-	// Handed to bubbles whole: it is under no obligation to arrive pre-truncated, because
-	// bubbles' own right-truncation is already the correct side for prose.
-	if got := sessionsCell(t, m, titleRow(t, m, "s1"), "TITLE"); got != prose {
-		t.Errorf("TITLE = %q, want the untouched title %q", got, prose)
+	// Arrives whole HERE because it fits here, not because prose is exempt. The comment this
+	// replaced claimed the cell was "handed to bubbles whole" and "under no obligation to
+	// arrive pre-truncated", which stopped being true when every cell became bounded — it
+	// passed only because a 116-column fixture leaves this 43-character title room to spare.
+	// Asserting equality is still the right check at this width; what was wrong was the reason
+	// given for it, which invited someone to widen the title and conclude the code had broken.
+	got := sessionsCell(t, m, titleRow(t, m, "s1"), "TITLE")
+	if got != prose {
+		t.Errorf("TITLE = %q, want the untouched title %q — it fits this width", got, prose)
+	}
+
+	// And at a width where it does NOT fit, the cut takes the tail and keeps the opening
+	// words, which is the side this test is named for.
+	titleW := sessionsColumnWidth(sessionsColumnsFor(90), "TITLE")
+	cut := m.sessionTitleCell("s1", titleW)
+	if lipgloss.Width(cut) > titleW {
+		t.Errorf("TITLE is %d columns against a %d-column cell: %q", lipgloss.Width(cut), titleW, cut)
+	}
+	// "Investi…" at the narrow end — the opening words, however few fit. Checked as a prefix of
+	// the original rather than against a fixed string, so the assertion says "the head
+	// survived" without hard-coding what this width happens to allow.
+	head := strings.TrimSuffix(cut, "…")
+	if head == "" || !strings.HasPrefix(prose, head) {
+		t.Errorf("prose lost its head: %q is not the start of %q", cut, prose)
+	}
+	if !strings.HasSuffix(cut, "…") {
+		t.Errorf("the cut is not marked: %q", cut)
 	}
 }
 
@@ -523,5 +547,258 @@ func TestSessionsTitle_WidthNeverShrinksAsTheTerminalGrows(t *testing.T) {
 			t.Errorf("widening %d to %d shrank TITLE from %d to %d columns", w-1, w, prev, got)
 		}
 		prev = got
+	}
+}
+
+// forceColor makes styling real for the duration of a test.
+//
+// CI has no TTY, so lipgloss defaults to Ascii and every Render is a no-op there — which means a
+// width assertion measures plain text locally AND in CI, and never sees the escape sequences a real
+// terminal gets. That is the gap this closes: a style that emitted an unterminated sequence, or
+// padding computed from a styled string's byte length, would be invisible to every one of these
+// tests. Same idiom as event_retention_test.go and footer_test.go, which force it for the same
+// reason.
+func forceColor(t *testing.T) {
+	t.Helper()
+	orig := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(orig) })
+}
+
+// truncRight budgets in display columns, the same rule TestTruncLeft_BudgetsInDisplayColumns
+// pins for its sibling.
+//
+// The prose branch of sessionTitleCell used trunc, which counts RUNES, so a CJK or emoji title
+// measured roughly twice its budget: 11 columns returned 21 of CJK and 14 of emoji. The frame
+// stayed intact — the table's fixed-width box re-cuts an over-wide cell — so the symptom was
+// cosmetic over-truncation at a point the renderer picked rather than a broken line. Worth
+// fixing anyway, and worth a test: the sibling had one and this path had none, and making the
+// harvest default-on newly exposes it to every user.
+func TestTruncRight_BudgetsInDisplayColumns(t *testing.T) {
+	forceColor(t)
+	for _, s := range []string{
+		"fix the parser bug and add a regression test",
+		"日本語のセッションタイトルです日本語のセッション",
+		"🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉",
+		"mixed 日本語 and ascii together",
+		// Combining marks and variation selectors, for the reason the sibling lists them: both
+		// are zero-width and fuse onto what precedes them, so measuring the head PLUS the
+		// ellipsis is the only way to be sure of the result.
+		"é́́fghijklmnop prose",
+		"✈️✈️defghijklmnop prose",
+	} {
+		for _, n := range []int{1, 2, 5, 11, 14, 24, 40} {
+			got := truncRight(s, n)
+			if w := lipgloss.Width(got); w > n {
+				t.Errorf("truncRight(%q, %d) is %d display columns — over budget: %q", s, n, w, got)
+			}
+		}
+	}
+	// And the HEAD is what survives, which is why prose truncates from the right. 13 columns
+	// of it, not 14: the ellipsis marking the cut occupies one of the budgeted columns.
+	if got := truncRight("distinguishing-start of some prose", 14); !strings.HasPrefix(got, "distinguishin") {
+		t.Errorf("truncRight dropped the head: %q", got)
+	}
+	if got := truncRight("distinguishing-start of some prose", 14); !strings.HasSuffix(got, "…") {
+		t.Errorf("truncRight did not mark the cut: %q", got)
+	}
+}
+
+// A CJK prose title reaches the table cell already inside its budget.
+//
+// The unit test above pins truncRight; this pins that sessionTitleCell actually ROUTES prose
+// through it. The two used to disagree: the cell called the rune-counting helper, so the
+// function was right and the caller was not.
+func TestSessionTitleCell_BoundsCJKProse(t *testing.T) {
+	forceColor(t)
+	const id = "cjk-prose"
+	m := newTitleModel(t, map[string]SessionMetadata{
+		id: {Title: "日本語のセッションタイトルです日本語のセッション"},
+	}, id)
+	for _, w := range []int{11, 14, 20} {
+		got := m.sessionTitleCell(id, w)
+		if cw := lipgloss.Width(got); cw > w {
+			t.Errorf("sessionTitleCell(%d) is %d display columns: %q", w, cw, got)
+		}
+	}
+}
+
+// A background harvest that lands after the UI is up names the sessions already on screen.
+//
+// This is the whole point of running the scan async: the viewer opens immediately with whatever
+// the metadata file held, and a session the harvest newly names gets its title when the scan
+// finishes rather than at the next launch. Without the rebuild in the harvestedMsg handler the
+// map would update and the table would keep showing the old cells until the next poll.
+func TestHarvestedMsg_NamesSessionsAlreadyOnScreen(t *testing.T) {
+	const id = "late-named"
+	m := newTitleModel(t, map[string]SessionMetadata{}, id)
+	if got := m.sessionTitle(id); got != "" {
+		t.Fatalf("title = %q before the harvest, want empty", got)
+	}
+
+	m.Update(harvestedMsg{meta: map[string]SessionMetadata{
+		id: {Title: "arrived late"},
+	}})
+
+	if got := m.sessionTitle(id); got != "arrived late" {
+		t.Errorf("title = %q after the harvest, want %q", got, "arrived late")
+	}
+	// And it is in the rendered cell, not merely in the map.
+	if got := sessionsCell(t, m, titleRow(t, m, id), "TITLE"); !strings.Contains(got, "arrived late") {
+		t.Errorf("TITLE cell = %q, want it to carry the harvested title", got)
+	}
+}
+
+// A harvest MERGES rather than replaces, so it cannot blank a title the viewer already shows.
+//
+// The map it merges into was loaded from a file that may hold entries from another config dir or
+// from a transcript since pruned — the same reason the harvester itself upserts. An incremental
+// harvest also returns the merged file rather than only what it re-read, but this handler must
+// not depend on that.
+func TestHarvestedMsg_DoesNotBlankExistingTitles(t *testing.T) {
+	const kept, renamed = "keep-me", "rename-me"
+	m := newTitleModel(t, map[string]SessionMetadata{
+		kept:    {Title: "from another config dir"},
+		renamed: {Title: "old name"},
+	}, kept, renamed)
+
+	m.Update(harvestedMsg{meta: map[string]SessionMetadata{
+		renamed: {Title: "new name"},
+	}})
+
+	if got := m.sessionTitle(kept); got != "from another config dir" {
+		t.Errorf("an entry the harvest did not see was lost: %q", got)
+	}
+	if got := m.sessionTitle(renamed); got != "new name" {
+		t.Errorf("the harvest did not win for a session it re-read: %q", got)
+	}
+}
+
+// A harvest that brought nothing back changes nothing.
+//
+// One case, not two: a FAILED harvest and an EMPTY one are the same message here, because
+// harvestedMsg carries no error — there is nowhere to report one by the time this arrives, so
+// the handler has nothing to distinguish. A test named for failure alone would have promised
+// more than it checked, which is what the review pointed out.
+func TestHarvestedMsg_EmptyResultLeavesTitlesAlone(t *testing.T) {
+	const id = "s1"
+	m := newTitleModel(t, map[string]SessionMetadata{id: {Title: "existing"}}, id)
+
+	m.Update(harvestedMsg{})
+
+	if got := m.sessionTitle(id); got != "existing" {
+		t.Errorf("an empty harvest disturbed the title: %q", got)
+	}
+}
+
+// sanitizeLabel neutralizes every control class that can disturb a rendered label.
+//
+// Titles are LLM-generated transcript text read from a file nothing authenticates, so the
+// question is not whether a hostile title is likely but what one can do. C0 and DEL were already
+// handled; C1 controls and the bidi overrides were not, and the bidi ones are the ones that
+// actually render — each is zero-width, so the width math stays self-consistent and the frame
+// holds, but the terminal REORDERS the surrounding text and the title displays in an order that
+// is not the order of its bytes.
+func TestSanitizeLabel_NeutralizesControlClasses(t *testing.T) {
+	forceColor(t)
+	for _, tc := range []struct {
+		name string
+		in   string
+	}{
+		{"C0 newline", "two\nlines"},
+		{"C0 escape", "colour\x1b[31mshift"},
+		{"DEL", "del\x7fete"},
+		{"C1 NEL", "next\u0085line"},
+		{"C1 CSI", "csi\u009bm"},
+		{"bidi RLO", "report‮gnp.exe"},
+		{"bidi LRO", "a‭b"},
+		{"bidi isolate", "a⁦b⁩c"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeLabel(tc.in)
+			if got == tc.in {
+				t.Errorf("sanitizeLabel passed it through unchanged: %q", got)
+			}
+			if !strings.ContainsRune(got, '�') {
+				t.Errorf("no replacement character in %q", got)
+			}
+		})
+	}
+
+	// Legitimate content is untouched — including the CJK and emoji that real titles carry, which
+	// must not be swept up by a rule aimed at controls.
+	for _, ok := range []string{
+		"fix the parser bug",
+		"日本語のセッションタイトル",
+		"🎉 ship it",
+		"/Users/somebody/src/cortex",
+		"café naïve",
+	} {
+		if got := sanitizeLabel(ok); got != ok {
+			t.Errorf("sanitizeLabel altered legitimate text %q -> %q", ok, got)
+		}
+	}
+}
+
+// A non-positive budget yields no cell, not an unbounded one.
+//
+// Unreachable today — the column is admitted with a floor and layout only shrinks to it — but it
+// used to return the FULL title, which is an unbudgeted cell handed to a table that then has to
+// cut it somewhere. Every other branch of sessionTitleCell exists to stop exactly that, so if
+// this one ever becomes reachable it should fail in the safe direction.
+func TestSessionTitleCell_NonPositiveWidthYieldsNothing(t *testing.T) {
+	forceColor(t)
+	const prose, path = "prose-id", "path-id"
+	m := newTitleModel(t, map[string]SessionMetadata{
+		prose: {Title: "Investigate the flaky reloader debounce test"},
+		path:  {Title: "/Users/somebody/src/cortex/.worktrees/long-name"},
+	}, prose, path)
+
+	for _, id := range []string{prose, path} {
+		for _, w := range []int{0, -1} {
+			if got := m.sessionTitleCell(id, w); got != "" {
+				t.Errorf("sessionTitleCell(%q, %d) = %q, want \"\"", id, w, got)
+			}
+		}
+	}
+}
+
+// trunc budgets in display columns, and is unchanged on the ASCII its callers pass today.
+//
+// It counted RUNES, with four live callers — session ids, and the identity block's JWT subject,
+// client and scope claims, which are remote-controlled rather than ASCII-guaranteed. Measured
+// before the fix: an 11-column budget returned 21 columns of CJK.
+//
+// The ASCII half of this test is what makes the fix safe to make as a redirect rather than a
+// rewrite: if the two ever diverge on the input today's callers actually pass, this fails and the
+// redirect is not behaviour-preserving after all.
+func TestTrunc_BudgetsInDisplayColumnsAndKeepsASCIIIdentical(t *testing.T) {
+	forceColor(t)
+	for _, s := range []string{
+		"日本語のセッションタイトルです",
+		"🎉🎉🎉🎉🎉🎉🎉🎉",
+		"mixed 日本語 and ascii",
+	} {
+		for _, n := range []int{1, 2, 8, 11, 14, 40} {
+			if w := lipgloss.Width(trunc(s, n)); w > n {
+				t.Errorf("trunc(%q, %d) is %d display columns: %q", s, n, w, trunc(s, n))
+			}
+		}
+	}
+
+	// Unchanged for the shapes the live callers pass: session ids, a UUID, a JWT-ish claim line.
+	for _, s := range []string{
+		"agent-07.team1.svc.cluster.local:8080",
+		"3eb6d5ce-0000-0000-0000-000000000001",
+		"subject  alice@example.com",
+	} {
+		for _, n := range []int{8, 14, 20, 40} {
+			if got, want := trunc(s, n), truncRight(s, n); got != want {
+				t.Errorf("trunc(%q, %d) = %q, want %q", s, n, got, want)
+			}
+			if w := lipgloss.Width(trunc(s, n)); w > n {
+				t.Errorf("trunc(%q, %d) is %d columns, over budget", s, n, w)
+			}
+		}
 	}
 }

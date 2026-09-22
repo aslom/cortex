@@ -15,12 +15,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/observe/claude"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/cluster"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/edit"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/tui"
@@ -187,6 +189,95 @@ func wantsInfoFlagOnly(args []string) bool {
 	return true
 }
 
+// observeHarvester is the harvester runObserve hands the viewer, or nil for none.
+//
+// One line of decision, in a function, so a test asserts the SAME code production runs rather
+// than a copy of its condition. Inlined in runObserve it was untestable without a terminal, and
+// a test that restated the `if` passed with the real wiring deleted — confirmed by mutation,
+// which is why this exists at all.
+func observeHarvester(f observeFlags, warn io.Writer) tui.HarvestFunc {
+	// Nil under --skip-claude-metadata, which is what turns the harvest off: the viewer then
+	// shows whatever titles the metadata file already held, from the last run.
+	if *f.skipClaudeMetadata {
+		return nil
+	}
+	return claudeHarvester(warn)
+}
+
+// claudeHarvester returns the background harvest `abctl observe` runs, or nil when the user
+// asked for none.
+//
+// Returns a closure rather than harvesting here, because WHEN it runs is the point. It used to
+// run before tui.Run and block on it: a full read of a large ~/.claude is about 0.7s of an
+// empty terminal before the first frame, which is most of what startup felt like. Handed to the
+// TUI instead, it runs on bubbletea's own goroutine while the picker paints, and the titles
+// arrive whenever the scan finishes — usually before anyone has picked a pod.
+//
+// What makes that safe is that the harvest is not on the critical path for anything the first
+// frame shows. The viewer reads ~/.cortex/session-metadata.json while building its model, so it
+// opens with every title the LAST run wrote; this pass only adds names for sessions that are
+// new or renamed since. Nothing regresses if it lands late, and nothing breaks if it never
+// lands.
+//
+// Warnings go to warn, which is stderr before the alt screen goes up — the harvest itself
+// finishes after that, so a failure it discovers cannot be printed. Rather than pretend
+// otherwise, the two failures that are knowable UP FRONT are checked here, before returning:
+// an unresolvable home directory, and a metadata file that is already corrupt. Those are the
+// ones a user can act on, and the corrupt one is the one that repeats every launch.
+//
+// THE COST OF NOT BLOCKING: a tea.Cmd is a goroutine and nothing waits for it, so a viewer
+// quit before the scan finishes abandons it and writes no file — the next launch then scans
+// again. Measured, that window is the ~0.7s of a full first scan and ~2ms once the file exists.
+// Accepted rather than closed: someone who quits inside it never saw a title either way, and
+// the alternatives are worse — blocking startup is the thing being fixed, and waiting on the
+// goroutine at teardown would put that delay on EXIT, where it is more surprising, on a
+// keystroke the user expects to be instant.
+func claudeHarvester(warn io.Writer) tui.HarvestFunc {
+	// Checked here so the repair can actually be printed. Harvest would hit the same error on
+	// the background goroutine, where there is nowhere to say so.
+	if path, err := claude.SessionMetadataPath(); err != nil {
+		fmt.Fprintf(warn, "abctl: not naming sessions from Claude Code: %v\n", err)
+		return nil
+	} else if _, err := claude.ReadMetadata(path); err != nil {
+		// A corrupt file is the one failure that cannot clear itself: every launch reads the
+		// same bad file. ErrCorruptMetadata is exported so a caller can name the fix, and this
+		// caller has to name a different one from the subcommand's --merge=false, which is not
+		// a flag `abctl observe` has.
+		fmt.Fprintf(warn, "abctl: not naming sessions from Claude Code: %v\n"+
+			"  Fix or move the file, or rebuild it:\n"+
+			"    abctl experimental read-claude-sessions --merge=false\n", err)
+		return nil
+	}
+	return func() (map[string]tui.SessionMetadata, error) {
+		// Incremental, unlike `abctl experimental read-claude-sessions`: that command's subject
+		// IS the harvest, so it re-reads everything. This one runs on every launch, and a full
+		// scan measured 0.74s against 0.002s for an incremental pass over the same tree.
+		res, err := claude.Harvest(claude.Options{Merge: true, Incremental: true})
+		if err != nil {
+			return nil, err
+		}
+		// res.Partial IS DISCARDED HERE, and that is a real gap rather than an oversight: a
+		// transcript whose read ended early still yields whatever title was found before the stop,
+		// so the affected session shows a confidently-wrong — possibly stale — name with nothing
+		// marking it. `abctl experimental read-claude-sessions` prints a bounded summary of exactly
+		// this; the background path cannot.
+		//
+		// Why not: by the time this returns, tea.NewProgram owns the screen, and there is no log
+		// sink in abctl to divert to — anything written to the terminal corrupts the frame. Marking
+		// the rows would be the right answer instead of reporting, but Partial carries formatted
+		// "path: err" strings rather than session ids, so the ids are not recoverable here without
+		// widening the type and threading a per-entry flag into SessionMetadata and the TITLE cell.
+		// That is a bigger change than this pass is for; the honest interim is that the explicit
+		// subcommand is where a truncated transcript is visible, and it re-reads everything.
+		//
+		// The MERGED map, not just what this pass parsed: an incremental pass parses only the
+		// transcripts that changed, so its own harvest is nearly empty and would name almost
+		// nothing. Result.Meta is the whole thing Harvest wrote, which is also why this no
+		// longer re-reads the file — that was a third read of one file in a single launch.
+		return res.Meta, nil
+	}
+}
+
 // chooseEndpoint decides which session API abctl connects to, or "" for the
 // Namespaces → Pods picker.
 //
@@ -223,6 +314,8 @@ type observeFlags struct {
 	endpoint   *string
 	prefs      *string
 	kubernetes *bool
+	// skipClaudeMetadata turns off the implicit harvest. See registerObserveFlags.
+	skipClaudeMetadata *bool
 }
 
 // registerObserveFlags declares the viewer's flags on fs and returns the pointers.
@@ -261,6 +354,18 @@ func registerObserveFlags(fs *flag.FlagSet) observeFlags {
 		// a local Cortex that is down still falls through to the picker.
 		kubernetes: fs.Bool("kubernetes", false,
 			"open the Namespaces → Pods picker even when a Cortex is running on this machine. Without it, a running local Cortex is connected to directly and the picker appears only if none is answering. Ignored when --endpoint is given."),
+		// Default FALSE, so a bare `abctl observe` names its sessions with no flag at
+		// all: a viewer showing bare UUIDs is the problem the metadata file exists to
+		// solve, and nobody will run a separate subcommand first to get titles.
+		//
+		// The harvest is also INCREMENTAL — it parses the transcripts that changed since
+		// the last run, measured at 2 of 124 files and 5.1 of 207 MB on a real tree —
+		// but that is no longer why the default is affordable: since the scan moved to a
+		// background tea.Cmd it costs no startup time either way. What is left for this
+		// flag to decline is narrower, and it is the reason to keep it: a machine where
+		// ~/.claude should simply not be touched.
+		skipClaudeMetadata: fs.Bool("skip-claude-metadata", false,
+			"do not harvest session titles from Claude Code's transcripts. By default abctl observe scans CLAUDE_CONFIG_DIR / ~/.claude in the background once the viewer is up and records titles in ~/.cortex/session-metadata.json, so sessions show a name instead of a bare UUID. This skips the scan; titles already recorded by earlier runs are still shown, so only sessions new or renamed since the last scan appear as bare ids."),
 	}
 }
 
@@ -356,6 +461,7 @@ func runObserve(args []string) int {
 	// working `kubectl port-forward` on 9094 could not be reached with the one key
 	// that exists for exactly that.
 	opts := tui.RunOptions{Endpoint: *endpoint}
+	opts.Harvest = observeHarvester(f, os.Stderr)
 	if prefsPath != "" {
 		opts.Save = func(s tui.UserSettings) error { return saveUserConfig(prefsPath, s) }
 	}
