@@ -226,7 +226,8 @@ func TestSessionContextFor_AReleaseOfItsEventsKeepsTheFigure(t *testing.T) {
 	if got, want := m.sessionContextFor(id), 500_000; got != want {
 		t.Errorf("after the release: %d, want %d", got, want)
 	}
-	// And a later streamed turn still wins on message count.
+	// And a later streamed turn still wins — on the message count here, since these fixtures
+	// state no role.
 	m.events[id] = conversation("c2", time.Now().Add(time.Minute), 900, 700_000)
 	if got, want := m.sessionContextFor(id), 700_000; got != want {
 		t.Errorf("after a new turn: %d, want %d", got, want)
@@ -300,15 +301,15 @@ func TestSessionsTable_AnIdleSessionsSnapshotFillsTheGauge(t *testing.T) {
 	}
 }
 
-// AND THE MESSAGE COUNT STILL PICKS THE MAIN THREAD through the projection, which the test above
-// does not prove: there, every projected candidate loses its count equally and the tie-break falls
-// through to time, so the right answer comes out for the wrong reason. Mutation-checked — breaking
-// messageCount's counts arm leaves that test green and fails this one.
+// AND WITH NO ROLE STATED THE MESSAGE COUNT STILL PICKS THE MAIN THREAD through the projection,
+// which the test above does not prove: there, every projected candidate loses its count equally and
+// the tie-break falls through to time, so the right answer comes out for the wrong reason.
+// Mutation-checked — breaking messageCount's counts arm leaves that test green and fails this one.
 //
 // A tool-carrying SUBAGENT is the case that needs it. It is a legitimate candidate (its own
-// manifest, its own conversation) and it speaks LAST, so only its length keeps it from taking the
-// column from a 1509-message main thread.
-func TestSessionsTable_AProjectedTimelineStillPicksTheMainThread(t *testing.T) {
+// manifest, its own conversation) and it speaks LAST, so with nothing declaring what it is, only
+// its length keeps it from taking the column from a 1509-message main thread.
+func TestSessionsTable_AProjectedUnstatedTimelinePicksTheMainThread(t *testing.T) {
 	base := time.Now()
 	const id = "idle"
 	evs := append(conversation("main", base, 1509, 851_000),
@@ -320,7 +321,30 @@ func TestSessionsTable_AProjectedTimelineStillPicksTheMainThread(t *testing.T) {
 
 	if got, want := m.sessionContextFor(id), 851_000; got != want {
 		t.Errorf("after the snapshot: %d, want %d — the subagent spoke last and is a candidate; "+
-			"only the message count keeps the column on the main thread", got, want)
+			"with no role stated only the message count keeps the column on the main thread",
+			got, want)
+	}
+}
+
+// AND THE ROLE ARRIVES THROUGH THE PROJECTION, which is what lets the rule above be retired.
+//
+// Same shape as the test before it, inverted: the subagent speaks last AND out-messages the main
+// thread — 186 against 108, which the live sessions do reach — so the message count would hand it
+// the column. summarizeEvent copies the extension struct whole, so agentRole needs no counts arm
+// to survive, and a projected row answers the same as a streamed one.
+func TestSessionsTable_AProjectedTimelineReadsTheRole(t *testing.T) {
+	base := time.Now()
+	const id = "idle"
+	evs := append(mainAgent("main", base, 108, 217_121),
+		subagent("sub", base.Add(time.Minute), 186, 198_899)...)
+
+	m := &model{events: map[string][]pipeline.SessionEvent{}}
+	m.sessionsTbl = newSessionsTable()
+	m.Update(snapshotLoadedMsg{id: id, events: projected(evs), projected: true})
+
+	if got, want := m.sessionContextFor(id), 217_121; got != want {
+		t.Errorf("after the snapshot: %d, want %d — a longer, later subagent took the column, so "+
+			"the projected row states no role", got, want)
 	}
 }
 

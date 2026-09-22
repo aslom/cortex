@@ -9,44 +9,67 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
-// sessionContext is how full the session's context is, in prompt tokens: the CONVERSATION's
-// latest request, ignoring the one-shot calls interleaved with it.
+// sessionContext is how full the session's context is, in prompt tokens: the MAIN AGENT's latest
+// request, ignoring the subagents and one-shot calls interleaved with it.
 //
 // Zero when nothing can be said, which the gauge renders as an em dash rather than as an empty
 // track — "not known" and "barely used" are different answers and the column has to keep them
 // apart.
 //
-// THE LATEST REQUEST WAS THE WRONG ANSWER, and measuring said so. One session's own events, in
-// order, prompt tokens per response:
+// A SESSION IS THREE KINDS OF CALLER, not one thread: Claude Code puts all of them under the same
+// X-Claude-Code-Session-Id. One session's own events, in order, show what that does to a column
+// that follows whoever spoke last — prompt tokens per response:
 //
 //	msgs     1491     3     3  1494     3     3  1497     2  1500  1503  1506     2  1509
 //	context  830k  282k  282k  835k  282k  282k  837k    6k  840k  844k  848k    7k  851k
 //
-// Claude Code interleaves one-shot completions — title generation, quota and summary calls — with
-// the conversation, under the SAME X-Claude-Code-Session-Id, so a session is not one thread. The
-// gauge followed whichever spoke last and swung 83% to 0.7% between adjacent turns.
+// It swung 83% to 0.7% between adjacent turns. So the column classifies, and two facts do it —
+// neither of them sufficient alone:
 //
-// THE DISCRIMINATOR IS THE TOOL MANIFEST, not the size. Across 115 responses in three live
-// sessions the split was total, with no overlap:
+//	                tool manifest   agentRole
+//	main agent      present         main       <- the conversation, which is what this file wants
+//	subagent        present         subagent   <- Task-spawned, and carries its own manifest
+//	one-shot        ABSENT          main       <- monitor / classifier / title call
+//
+// THE MANIFEST EXCLUDES THE ONE-SHOTS. A request carrying no tools is a single completion rather
+// than an agentic turn, and across 115 responses in three live sessions the split was total:
 //
 //	carries tools    73 responses   63-1572 messages   94k-897k context
 //	no tools         42 responses     2-3   messages  6.5k-295k context
 //
-// A request with no tools is a one-shot completion, not an agentic conversation. Note the second
-// row's ceiling: one of those calls carried 295k, so "the biggest context wins" would have picked
-// it — the tool manifest is what separates the two populations, and the token count is not.
+// Note the second row's ceiling, because it rules out the two cheaper filters. One of those calls
+// carried 295k and another 421,220 against a true context of 998,334, so no size threshold
+// separates them — and they declare themselves MAIN, since the CLI issues them rather than a
+// subagent, so the role does not exclude them either.
 //
-// AMONG CANDIDATES, THE MOST MESSAGES WINS, and there is deliberately no window. The main thread
-// goes SILENT while a subagent runs — that is structural, not evidence it is gone — so any
-// last-N-responses window can fill with subagent traffic and hand the column to it. Unbounded,
-// a subagent's conversation can never out-message a long main thread however long it runs.
+// THE ROLE EXCLUDES THE SUBAGENTS, which the message count only approximated. Claude Code states
+// the role outright (see pipeline.InferenceExtension.AgentRole) and a compaction cannot change it,
+// whereas subagent turns reached 177 and 186 messages against main threads at 188 and 288, with
+// their contexts overlapping too — 198,899 against 217,121. The count separates the populations it
+// happens to be ordered on, and only while it is.
 //
-// WHAT THAT COSTS: a compaction restarts the conversation at a low message count while the
-// pre-compaction request stays retained with 1500 of them, so the gauge keeps showing the old
-// context — for the rest of the session, if that request is never evicted. Chosen knowingly: a
-// stale figure beats one that flips to a subagent's. The exact fix is a conversation id from the
-// proxy, which would make both the filter and this tie-break unnecessary; a window would not fix
-// it and would reintroduce the silence problem.
+// AMONG WHAT IS LEFT, THE LATEST WINS, by timestamp. That is safe only because both filters are
+// exact rather than statistical: there is no window, so a main thread that goes SILENT while a
+// subagent runs is never aged out, and no amount of subagent traffic is a candidate to fill one.
+// Measured across 555 main-agent turns in six sessions the series steps upward and drops exactly
+// once — at the compaction — so the column tracks the conversation, and follows it when it
+// restarts on the next turn rather than on the next five hundred.
+//
+// WITH NO ROLE STATED — a proxy older than the field — the rule falls back to the most messages,
+// ties to the latest: what this column did before, and the best an unstated stream supports. It
+// pays the cost the role was added to remove. A compaction restarts the conversation at a low
+// message count while the pre-compaction request stays retained with 2,468 of them, so the gauge
+// keeps showing the old context, for the rest of the session if that request is never evicted. A
+// stale figure still beats one that flips to a subagent's, and a window would not fix it — it
+// would reintroduce the silence problem. The fallback, contextRun.msgs and messageCount can all be
+// deleted once the supported proxy floor publishes agentRole.
+//
+// A SESSION IS EITHER STATED OR IT IS NOT, and one stated turn settles it. The first one takes the
+// column outright, however much longer an unstated predecessor was, because a figure chosen by a
+// rule that cannot see subagents is not evidence about the conversation — and taking it on the
+// spot is what makes an upgraded proxy's answer arrive on the next event. After that, unstated rows
+// are not candidates: a session whose proxy states roles has no reason to produce one, and
+// trusting it would hand the column to whatever sent it.
 //
 // THE PROMPT SIDE ONLY. promptTokens is input + cache-read + cache-write; output is left out.
 // Measured on the same sessions it is 0.003%-2.2% of the prompt, and 0.2% on the conversations
@@ -60,11 +83,13 @@ import (
 // appends every event under its session id, so any session with traffic since it attached has a
 // conversation here.
 //
-// THE TIMELINE ANSWERS ONLY THROUGH THE COUNTS. abctl asks for `view=summary` on every timeline
-// fetch, tail and page alike, and that projection drops both fields this rule reads — so
-// summarizeEvent records their lengths first and toolCount/messageCount read either shape. Without
-// them a delivered row cannot be read at all: measured on one live session's 200-event window, 41 of
-// 62 inference responses carry a manifest unprojected and 0 of 62 do projected.
+// THE TIMELINE ANSWERS THROUGH THE COUNTS AND THE ROLE. abctl asks for `view=summary` on every
+// timeline fetch, tail and page alike, and that projection drops the two SLICES this rule used to
+// read — so summarizeEvent records their lengths first and toolCount/messageCount read either
+// shape. Without them a delivered row cannot be read at all: measured on one live session's
+// 200-event window, 41 of 62 inference responses carry a manifest unprojected and 0 of 62 do
+// projected. agentRole needs none of that machinery: it is a scalar, and summarizeEvent copies the
+// extension struct whole before nilling the slices, so it arrives on a projected row as-is.
 //
 // AND THE FIGURE OUTLIVES THE EVENTS IT WAS READ FROM, deliberately — see rebaseSessionContext. Two
 // cases need that: a proxy built between this column and the counts projects without stating them,
@@ -99,7 +124,14 @@ func sessionContext(events []pipeline.SessionEvent) int {
 type contextRun struct {
 	n      int // events folded so far
 	tokens int
-	msgs   int
+	// msgs is the FALLBACK rule's comparator and is not read once stated is true. It goes with
+	// messageCount when the unstated arm does.
+	msgs int
+	// stated says a role-declaring candidate has been folded for this session, which is what
+	// decides WHICH rule runs — latest-wins against most-messages. It is a property of the
+	// session's traffic rather than of one event, which is why it lives here: an unstated row
+	// arriving after a stated one must be skipped, and nothing in that row says so.
+	stated bool
 	// at is WHEN the winning response arrived, and it exists because of the rebase. Ties go to
 	// the latest, which a single forward fold expresses as arrival order — but a rebase folds
 	// new events on top of a winner that is no longer in the slice, so arrival order says
@@ -110,9 +142,10 @@ type contextRun struct {
 
 // foldSessionContext folds events into run and returns the new running answer.
 //
-// Forward, and ties keep the LATEST — by TIMESTAMP, not by arrival order. Arrival order says
-// nothing once a rebase folds new events onto a winner that is no longer in the slice, so an older
-// turn of equal length would take the tie.
+// Forward, and the later turn wins — by TIMESTAMP, not by arrival order. Timestamp is the SOLE
+// comparator where the role is stated and the tie-break where it is not, so `at` carries both
+// rules. Arrival order says nothing once a rebase folds new events onto a winner that is no longer
+// in the slice, so an older turn would otherwise take it.
 //
 // At and not Seq, though a reviewer asked for Seq: the store's counter restarts at 1 when a session
 // is evicted and re-created under the same id (authlib/session/store.go), so Seq cannot order across
@@ -150,9 +183,25 @@ func foldSessionContext(events []pipeline.SessionEvent, run contextRun) contextR
 		if n <= 0 {
 			continue
 		}
-		if msgs := messageCount(e.Inference); msgs > run.msgs ||
-			(msgs == run.msgs && !e.At.Before(run.at)) {
-			run.tokens, run.msgs, run.at = n, msgs, e.At
+		// The role is the second filter, and the three arms below are the whole rule. See the
+		// doc comment above for why a subagent cannot be filtered by size or by message count,
+		// and why one stated turn switches the session's rule for good.
+		switch role := e.Inference.AgentRole; {
+		case role == pipeline.AgentRoleSubagent:
+			continue
+		case role != "" && !run.stated:
+			run.tokens, run.msgs, run.at, run.stated = n, messageCount(e.Inference), e.At, true
+		case role != "":
+			if !e.At.Before(run.at) {
+				run.tokens, run.at = n, e.At
+			}
+		case run.stated:
+			continue
+		default:
+			if msgs := messageCount(e.Inference); msgs > run.msgs ||
+				(msgs == run.msgs && !e.At.Before(run.at)) {
+				run.tokens, run.msgs, run.at = n, msgs, e.At
+			}
 		}
 	}
 	run.n += len(events)

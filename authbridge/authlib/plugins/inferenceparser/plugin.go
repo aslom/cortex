@@ -99,6 +99,11 @@ func (p *InferenceParser) OnRequest(_ context.Context, pctx *pipeline.Context) p
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
+	// Which caller made this request, read off the system prompt — both dialects, one call,
+	// because by here they have converged on a parsed extension whose system message is
+	// flattened the same way. See agentRole for the marker and what empty means.
+	ext.AgentRole = agentRole(ext.Messages)
+
 	pctx.Extensions.Inference = ext
 
 	slog.Info("inference-parser", "model", ext.Model)

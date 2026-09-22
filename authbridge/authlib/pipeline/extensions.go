@@ -166,11 +166,18 @@ type InferenceExtension struct {
 	// WHY A COUNT AND NOT THE SLICE: the two useful facts about a conversation that have nothing
 	// to do with its content are "did this request carry a tool manifest" and "how long is the
 	// conversation". abctl's CONTEXT gauge asks exactly those — a manifest separates an agentic
-	// turn from a one-shot completion, and the message count identifies the main thread among the
-	// several that share a session id — and it asked them of len(Tools) and len(Messages), which
-	// `view=summary` strips. Measured on one live session, 41 of 62 inference responses carry a
-	// manifest unprojected and 0 of 62 do projected, so the gauge showed a dash for every row the
-	// timeline delivered. Two ints answer both against a payload that is 99.5% of the event.
+	// turn from a one-shot completion, and the message count was how it guessed which of the
+	// threads sharing a session id was the conversation — and it asked them of len(Tools) and
+	// len(Messages), which `view=summary` strips. Measured on one live session, 41 of 62 inference
+	// responses carry a manifest unprojected and 0 of 62 do projected, so the gauge showed a dash
+	// for every row the timeline delivered. Two ints answer both against a payload that is 99.5%
+	// of the event.
+	//
+	// THE MESSAGE COUNT IS NOW THE FALLBACK for that second question and AgentRole below is the
+	// answer: the count separates a conversation from its subagents only while it is the longer of
+	// the two, and it cannot see a compaction, which restarts the conversation at a low count. It
+	// stays because a consumer may be reading a proxy that states no role. ToolCount is not
+	// affected — nothing else distinguishes a one-shot.
 	//
 	// ZERO MEANS "NOT STATED", NOT "NONE", so a reader must prefer the slice when it is present:
 	//
@@ -183,6 +190,37 @@ type InferenceExtension struct {
 	// from whatever it happens to hold.
 	MessageCount int `json:"messageCount,omitempty"`
 	ToolCount    int `json:"toolCount,omitempty"`
+
+	// AgentRole says WHICH CALLER under one session id made this request — the interactive
+	// conversation, or a subagent it spawned. Claude Code declares it: every request's system
+	// prompt opens with a pseudo-header line, and a subagent's carries cc_is_subagent=true.
+	//
+	//	main:     x-anthropic-billing-header: cc_version=2.1.270.119; cc_entrypoint=cli;
+	//	subagent: x-anthropic-billing-header: cc_version=2.1.270.658; cc_entrypoint=cli; cc_is_subagent=true;
+	//
+	// Measured on 19 probed requests across three live sessions: present on every restricted
+	// manifest (11 tools), absent on every full one (27 and 31), and — the property that makes
+	// it worth publishing — UNCHANGED ACROSS A COMPACTION, which rewrites the messages and
+	// leaves the system prompt alone. The message count cannot say this: subagent turns reached
+	// 177 and 186 messages against main threads at 188 and 288, so the two populations overlap.
+	//
+	// WHY THERE IS NO THIRD VALUE FOR A ONE-SHOT. The completions Claude Code interleaves with
+	// a conversation — its permission security monitor, the auto-mode state classifier — are
+	// issued by the same CLI rather than by a subagent, so they declare no marker and are
+	// "main" here. What separates them is that they carry no tool manifest, which is ToolCount
+	// above; this field does not restate it, and a reader needs both.
+	//
+	// EMPTY MEANS "NOT STATED", NOT "MAIN" — the same rule as the counts, and the reason this
+	// is a string rather than a bool. abctl's CONTEXT gauge takes the main agent's LATEST turn
+	// where the role is stated and falls back to the message count where it is not; a bool's
+	// false cannot tell a proxy that says "main" from one that says nothing, and the difference
+	// decides which rule runs. Set only when the billing-header line is there, so a client that
+	// is not Claude Code states nothing and gets the fallback.
+	//
+	// Read off the REQUEST. It reaches the response event the same way the manifest does —
+	// SnapshotInference copies the struct whole — and survives `view=summary` because
+	// summarizeEvent copies it too.
+	AgentRole AgentRole `json:"agentRole,omitempty"`
 
 	// StreamedResponse says the RESPONSE arrived as a stream, which is a different fact from Stream
 	// above — that one is what the request ASKED for, read off the request body.
@@ -236,6 +274,18 @@ type InferenceExtension struct {
 	// Classification — see MCPExtension.IsAction.
 	IsAction bool `json:"isAction,omitempty"`
 }
+
+// AgentRole is the closed vocabulary for InferenceExtension.AgentRole.
+//
+// THE EMPTY VALUE HAS NO CONSTANT, deliberately. It means "the parser could not tell", and
+// naming it would invite a reader to compare against it as though it were a third kind of
+// caller; the two constants below are the only claims this type ever makes.
+type AgentRole string
+
+const (
+	AgentRoleMain     AgentRole = "main"
+	AgentRoleSubagent AgentRole = "subagent"
+)
 
 // InferenceMessage represents a single message in the conversation.
 type InferenceMessage struct {
