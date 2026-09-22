@@ -320,18 +320,29 @@ func (c *Capturer) build(f Fixture) []pendingEvent {
 // something to show.
 //
 // The newest turn of every session is seconds old, because that is what makes a
-// session look live. One turn sits yesterday, so the spend band's 7 DAYS and
-// THIS MONTH exceed TODAY instead of all four spans repeating one figure. The
-// remainder land inside the last eight minutes, which is what puts more than a
-// single bar inside the usage chart's default ten-minute window.
+// session look live. One turn sits yesterday, so the spend band's 7 DAYS and THIS
+// MONTH exceed TODAY instead of all four spans repeating one figure. The remainder
+// land inside the last eight minutes, which is what puts more than a single bar
+// inside the usage chart's default ten-minute window.
+//
+// Everything inside that window is anchored to a WHOLE MINUTE, counted back from
+// the truncated current minute. The usage chart buckets by absolute minute, so an
+// offset that is not a multiple of a minute lands in one bucket or the next
+// depending on where in the current minute the generator happens to run — which
+// moved a 97k bar one column sideways between a laptop and CI and is the kind of
+// difference no amount of digit masking can reconcile.
 func turnTime(now time.Time, si, ti, n int) time.Time {
+	minute := now.Truncate(time.Minute)
 	switch {
 	case ti == n-1:
-		return now.Add(-time.Duration(40+si*7) * time.Second)
+		// Seconds old, but still pinned to a minute boundary: this event only has
+		// to be inside the newest bucket, and being exactly on its edge is what
+		// keeps it there however long the capture takes.
+		return minute
 	case ti == 0 && n >= 3:
-		return now.Add(-26*time.Hour + time.Duration(si)*13*time.Minute)
+		return minute.Add(-26 * time.Hour).Add(time.Duration(si) * 13 * time.Minute)
 	default:
-		return now.Add(-time.Duration(8*60-ti*90-si*20) * time.Second)
+		return minute.Add(-time.Duration(8-ti-si) * time.Minute)
 	}
 }
 
@@ -467,11 +478,42 @@ const localSessionPort = "9094"
 // to fixed column widths, so "9s ago" and "21s ago" consume different amounts of
 // the surrounding padding and shift every cell after them.
 var clockPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\d{4}-\d{2}-\d{2}T[\d:.]+(?:[+-]\d{2}:\d{2}|Z)`),
-	regexp.MustCompile(`\d{1,3}[smhd] ago`),
 	regexp.MustCompile(`\d{2}:\d{2}:\d{2}(?:\.\d+)?`),
 	regexp.MustCompile(`\b\d{2}:\d{2}\b`),
 	regexp.MustCompile(`:\d{2}\b`),
+}
+
+// isoTimestamp matches the RFC3339 stamps the detail pane prints, and
+// canonicalISO is the single value they are all rewritten to.
+//
+// Unlike the patterns above this one does NOT preserve length, because its length
+// is exactly what varies: Go renders a UTC time's offset as "Z" and a local one as
+// "-04:00", and trailing zeros in the fractional seconds are trimmed. That shifted
+// the tspan's textLength by 42px between a laptop and CI. Trailing spaces are never
+// emitted, so replacing the whole stamp with a fixed string of any length leaves
+// the rest of the row untouched.
+var isoTimestamp = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)`)
+
+const canonicalISO = "2026-09-22T17:42:03.424242-04:00"
+
+// agePattern matches an UPDATED cell together with the padding that follows it,
+// and canonicalAge is what it becomes.
+//
+// The trailing spaces are part of the match on purpose. An age's LENGTH varies —
+// "9s ago", "45s ago" and "1m ago" are six, seven and six characters, and which
+// one renders depends on how long the capture took — and the TUI pads the cell to
+// a fixed column width, so the age and its padding share one styled run. Replacing
+// both together and re-padding to the match's original length makes that run
+// identical between runs while leaving every column after it exactly where it was.
+var agePattern = regexp.MustCompile(`\d{1,3}[smhd] ago +`)
+
+const canonicalAge = "42s ago"
+
+func fixAge(match string) string {
+	if len(match) < len(canonicalAge) {
+		return fixClock(match)
+	}
+	return canonicalAge + strings.Repeat(" ", len(match)-len(canonicalAge))
 }
 
 // canonicalDigits is the repeating filler clock digits are replaced with.
@@ -501,6 +543,8 @@ func (c *Capturer) Screen() string {
 			view = strings.ReplaceAll(view, ":"+port, ":"+localSessionPort)
 		}
 	}
+	view = isoTimestamp.ReplaceAllString(view, canonicalISO)
+	view = agePattern.ReplaceAllStringFunc(view, fixAge)
 	for _, re := range clockPatterns {
 		view = re.ReplaceAllStringFunc(view, fixClock)
 	}

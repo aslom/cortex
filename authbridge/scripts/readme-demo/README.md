@@ -73,3 +73,8 @@ animation runs, which is why none of this uses JavaScript.
   each poll on their own cadence, so anything arriving afterwards produced screens
   where `LAST 1H` exceeded `TODAY` — both figures correct, sampled seconds apart,
   and indistinguishable from a bug.
+- **The usage chart cannot be made deterministic.** It plots a ten-minute window
+  ending *now* on a continuous axis, so its bars slide with the current second.
+  That one state is elided from the staleness check; its contract is asserted
+  structurally instead. Everything else is compared byte for byte, with nothing
+  masked — masking digits once made `CONTEXT(1M)` and `CONTEXT(2M)` compare equal.
