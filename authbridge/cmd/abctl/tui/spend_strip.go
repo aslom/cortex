@@ -136,10 +136,75 @@ func figureIsShort(degraded *usage.Degraded, saturated bool) bool {
 type stripFigure struct {
 	full    string
 	compact string
+	// col is the display width this figure occupies in a COLUMN, so figures stacked on successive
+	// rows line up. Zero means "as wide as the text", which is every caller that renders a single
+	// row on its own — the drawer's hint line, the fixed readings.
+	//
+	// A MINIMUM, NOT A LIMIT: a figure wider than its column overflows rather than being cut,
+	// because the alternative is a truncated money figure and every money surface here refuses
+	// that. A shifted row is visible and recoverable; a wrong number is not. The one figure that
+	// exceeds its column in practice is the prose fallback "cost unavailable", on a row whose
+	// money slot has no figure to align against anyway.
+	col int
+	// leftAlign pads on the RIGHT, which is what a label wants. Figures pad on the left, because
+	// a column of numbers is read down its last digit — the rule the tables and renderTierRows
+	// already follow.
+	leftAlign bool
 }
 
-// plainFigure is a reading with nothing to qualify: both forms are the same string.
+// plainFigure is a reading with nothing to qualify: both forms are the same string, and it takes
+// no column — see stripFigure.col.
 func plainFigure(s string) stripFigure { return stripFigure{full: s, compact: s} }
+
+// inColumn fixes f to a display width: left-aligned for a label, right-aligned for a figure.
+//
+// IT MAKES THE COMPACT FORM INERT FOR THIS FIGURE, and that is intended rather than overlooked.
+// Both forms pad to the same column, so whenever the full form already fits its column the compact
+// one saves nothing and fitStripFigures' compact pass cannot help: degradation for a columnar
+// figure is DROP-ONLY. Measured on a drawer row — six distinct renderings across widths 1 to 200,
+// none of them containing "568r" or a bare "137M".
+//
+// PADDING THE COMPACT FORM IS LOAD-BEARING, which is why the answer is not "skip the pad in compact
+// mode". The fitter runs per ROW against one shared width, and rows do not all reach the same
+// decision: a money slot holding "cost unavailable" is 16 columns in a 9-column column while "$9.43"
+// fits, so at some widths one row degrades and its neighbour does not. If compact forms rendered
+// unpadded, those two rows would then disagree about their column stride — silently misaligning the
+// table, which is the defect the columns exist to fix. A narrower compact column per figure would
+// preserve both, at the cost of a second width on every slot; it is not worth it for the band of
+// terminal widths it would serve, and the trade is recorded here rather than left to be rediscovered.
+func (f stripFigure) inColumn(width int, leftAlign bool) stripFigure {
+	f.col, f.leftAlign = width, leftAlign
+	return f
+}
+
+// pad renders one form of f at its column width.
+//
+// padLeft and padRight measure in DISPLAY COLUMNS, never Fprintf's rune count: these figures carry
+// an em dash and marker glyphs today and a styled string the moment anyone adds one, and a column
+// measured in one vocabulary and filled in another is wrong by the difference. footer.go records
+// what that cost the last time.
+func (f stripFigure) pad(s string) string {
+	if f.col <= 0 {
+		return s
+	}
+	// AN EMPTY FIGURE STILL OCCUPIES ITS COLUMN, and this case has to be spelled out because
+	// padLeft and padRight both return "" unchanged — `if s == "" || w >= width` — so neither will
+	// hold a column open. That guard suits the table cells they were written for and is exactly
+	// wrong here: an empty MIDDLE slot is the whole reason drawerFigures is positional, and
+	// collapsing it moves every column to its right.
+	//
+	// Measured before this: a row with a saving and no tokens rendered
+	// "model-b  $1.00  100 req      saved $0.50" against its neighbour's
+	// "model-a  $1.00  100 req  900k tokens  saved $0.50" — the saving eleven columns out of line,
+	// which is the defect the columns exist to prevent, surviving inside the fix for it.
+	if s == "" {
+		return strings.Repeat(" ", f.col)
+	}
+	if f.leftAlign {
+		return padRight(s, f.col)
+	}
+	return padLeft(s, f.col)
+}
 
 // coverageNote is the one spelling of a coverage gap, shared by every branch so the
 // wording cannot drift between them.
@@ -321,10 +386,6 @@ func moneyFigureTotal(usd float64, label string, unpriced, priceable, incomplete
 // though markMoney has already spent them on glyphs.
 func moneyFigureFrom(amount, label string, unpriced, priceable, incomplete int64,
 	degraded *usage.Degraded, saturated bool) stripFigure {
-	// A gap is only readable with a denominator, and a denominator of zero is not a
-	// gap at all — it is a window with nothing to price, which the caller handles.
-	// Recomputed here for the caveat list; moneyAmount owns the MARKER.
-	partial := unpriced > 0 && priceable > 0
 	// AN EMPTY LABEL ADDS NO SEPARATOR. Unconditional concatenation left a trailing space on
 	// every unlabelled figure, which the joiner then compounded into a four-space gap — visible
 	// in the drawer, whose rows have always passed "" here ("claude-opus-5   $35.5797    234
@@ -341,6 +402,25 @@ func moneyFigureFrom(amount, label string, unpriced, priceable, incomplete int64
 		reading += " " + label
 	}
 	fig := plainFigure(reading)
+	if note := moneyCaveatNote(unpriced, priceable, incomplete, degraded, saturated); note != "" {
+		fig.full = fig.compact + " " + note
+	}
+	return fig
+}
+
+// moneyCaveatNote is the parenthesised caveat list for a figure, or "" when there is nothing to
+// qualify.
+//
+// EXTRACTED so the drawer can put the words somewhere other than inside the figure. Its series
+// rows are a TABLE, and a parenthesised sentence of variable length sitting in the money column
+// knocked every column to its right out of line on whichever row happened to be inexact; the
+// drawer appends this as the row's LAST figure instead, where width pressure drops it first. One
+// spelling either way, which is the point of extracting it rather than composing it twice.
+//
+// The marker is NOT here and must not be: moneyAmount owns all three glyphs, so a caller that
+// wants the fact without the explanation already has it in stripFigure.compact.
+func moneyCaveatNote(unpriced, priceable, incomplete int64,
+	degraded *usage.Degraded, saturated bool) string {
 	var caveats []string
 	// The clamp leads even the damaged read: it is short in every column of the aggregate, not
 	// only in the dollars, and it is the reason a figure this line renders can be absurd rather
@@ -358,13 +438,16 @@ func moneyFigureFrom(amount, label string, unpriced, priceable, incomplete int64
 		// the full "N of M priced figures are lower bounds" for a reader who wants it.
 		caveats = append(caveats, fmt.Sprintf("%d inexact", incomplete))
 	}
-	if partial {
+	// A gap is only readable with a denominator, and a denominator of zero is not a gap at all —
+	// it is a window with nothing to price, which the caller handles. moneyAmount owns the MARKER;
+	// this is the prose.
+	if unpriced > 0 && priceable > 0 {
 		caveats = append(caveats, coverageNote(unpriced, priceable))
 	}
-	if len(caveats) > 0 {
-		fig.full = fig.compact + " (" + strings.Join(caveats, ", ") + ")"
+	if len(caveats) == 0 {
+		return ""
 	}
-	return fig
+	return "(" + strings.Join(caveats, ", ") + ")"
 }
 
 // formatSpendAge renders an age the way a strip has room for: "3m", not "3m12.4s".
@@ -410,13 +493,20 @@ func fitStripFigures(label string, figures []stripFigure, width int) string {
 	join := func(n int, compact bool) string {
 		parts := make([]string, 0, n)
 		for _, f := range figures[:n] {
+			s := f.full
 			if compact {
-				parts = append(parts, f.compact)
-			} else {
-				parts = append(parts, f.full)
+				s = f.compact
 			}
+			parts = append(parts, f.pad(s))
 		}
-		return label + "  " + strings.Join(parts, stripGap)
+		// EVERY FIGURE PADDED, THEN THE LINE RIGHT-TRIMMED, which is one rule where skipping the
+		// last figure was two and got one of them wrong. A right-aligned figure pads on the LEFT,
+		// so its padding is what puts it in its column and dropping it on the last figure
+		// misaligns the column it was meant to join — measured: "137M tokens" and "45M tokens" in
+		// an 11-column slot ended one column apart. Only a LEFT-aligned last figure has trailing
+		// padding, and that is invisible, so trimming it here is free and keeps it off the width
+		// budget rather than costing a figure that would have fitted.
+		return strings.TrimRight(label+"  "+strings.Join(parts, stripGap), " ")
 	}
 	for n := len(figures); n >= 1; n-- {
 		for _, compact := range []bool{false, true} {

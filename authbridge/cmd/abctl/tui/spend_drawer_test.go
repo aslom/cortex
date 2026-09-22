@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
@@ -1524,6 +1525,218 @@ func TestClosingTheDrawer_DisownsItsPollChainByEitherKey(t *testing.T) {
 					tc.name, seq)
 			}
 		})
+	}
+}
+
+// THE TWO COLUMNS DO NOT TOUCH, at any width that draws both.
+//
+// There was never a gutter in this layout — `"  " + %-*s(tierColumnWidth) + series` — and it only
+// looked like there was one because tierColumnWidth was 34 against tier rows that rendered 25
+// columns. Nine columns of accidental padding. Deriving tierColumnWidth from the row's own parts
+// removed the slack and the panel rendered "$56.51claude-opus-5": a money figure and a model name
+// welded into one token, on a money surface.
+//
+// FOUND BY RENDERING THE PANEL, not by a test — every existing assertion looked at one column or
+// the other, and the two were only ever composed in a code path nothing measured across. Hence this
+// asserts the SEAM specifically, and sweeps widths so it cannot pass on one lucky terminal size.
+func TestRenderSpendDrawer_TheColumnsDoNotTouch(t *testing.T) {
+	snap := &usage.Snapshot{
+		Window: "today", Priced: true,
+		Totals: usage.Counts{
+			Requests: 1755, CostMicros: 99_380_000,
+			InputCostMicros: 2110, CacheWriteCostMicros: 25340,
+			CacheReadCostMicros: 56510, OutputCostMicros: 15420,
+		},
+		Buckets: []usage.Bucket{{Series: map[string]usage.Counts{
+			"claude-opus-5": {
+				Requests: 1187, Tokens: 137_000_000, CostMicros: 89_950_000,
+				PricedRequests: 1187, PriceableRequests: 1187,
+			},
+		}}},
+	}
+	swept := 0
+	for w := spendDrawerTwoColumnMin; w <= 200; w++ {
+		for i, line := range renderSpendDrawer(snap, nil, usage.GroupModel, "TODAY", w) {
+			// The seam is where the tier column ends. Only rows that actually carry a tier figure
+			// can weld, so find one and check the columns either side of the boundary.
+			at := strings.Index(line, "claude-opus-5")
+			if at <= 0 {
+				continue
+			}
+			swept++
+			if line[at-1] != ' ' {
+				t.Fatalf("width %d row %d: the series column runs straight into the tier column "+
+					"at %d:\n%s", w, i, at, line)
+			}
+		}
+	}
+	if swept == 0 {
+		t.Fatal("no row put the two columns together, so this asserted nothing")
+	}
+}
+
+// THE SERIES COLUMN IS A TABLE: every row puts its figures in the same columns.
+//
+// It was a list of figures joined by a fixed gap, so each row's columns began wherever the previous
+// figure happened to end — and the model name is the widest variable on the row. Measured on a live
+// panel, "claude-opus-5" against "claude-sonnet-5" (two columns longer) put the two rows' money,
+// request counts and token counts in six different places:
+//
+//	claude-opus-5   ~$89.95 (3 inexact)   1187 req   137M tokens   saved $4.40
+//	claude-sonnet-5   $9.43   568 req   45M tokens
+//
+// Nothing there can be read down a column, which is the whole reason to stack rows.
+//
+// ASSERTED IN DISPLAY COLUMNS off the END of each figure, because right-aligned money is the point
+// and because a byte offset is not a column — see TestRenderTierRows_MoneyIsRightAligned, where
+// exactly that confusion made an already-aligned renderer look broken.
+func TestDrawerFigures_RowsShareTheirColumns(t *testing.T) {
+	row := func(label string, req, tokens int64) string {
+		return fitStripFigures(" ", drawerFigures(drawerRow{
+			label: label,
+			counts: usage.Counts{
+				Requests: req, Tokens: tokens, CostMicros: 11_121_400,
+				PricedRequests: req, PriceableRequests: req,
+			},
+		}), 140)
+	}
+	// Labels of different widths, which is the variable that broke the alignment.
+	short, long := row("claude-opus-5", 1187, 137_000_000), row("claude-sonnet-5", 568, 45_000_000)
+	if short == long {
+		t.Fatal("both rows rendered identically, so this test asserts nothing")
+	}
+
+	// endOf is the display column one past a substring.
+	endOf := func(t *testing.T, line, sub string) int {
+		t.Helper()
+		at := strings.Index(line, sub)
+		if at < 0 {
+			t.Fatalf("row %q does not contain %q", line, sub)
+		}
+		return lipgloss.Width(line[:at]) + lipgloss.Width(sub)
+	}
+
+	// The money figure is identical on both rows by construction, so its column is comparable.
+	money := formatUSDTotal(11.1214)
+	if a, b := endOf(t, short, money), endOf(t, long, money); a != b {
+		t.Errorf("the money column ends at %d on one row and %d on the other, so the figures do "+
+			"not line up:\n%s\n%s", a, b, short, long)
+	}
+	// And so does everything after it: a label two columns longer must not push the rest along.
+	for _, sub := range []string{"req", "tokens"} {
+		if a, b := endOf(t, short, sub), endOf(t, long, sub); a != b {
+			t.Errorf("%q ends at %d on one row and %d on the other:\n%s\n%s", sub, a, b, short, long)
+		}
+	}
+}
+
+// AN EMPTY MIDDLE COLUMN HOLDS ITS PLACE, which is the whole reason drawerFigures is positional.
+//
+// A row can be missing a middle figure and carry a later one: tool-prune removes prompt tokens from
+// a request whose response could not be parsed, so a saving with no token count is a real row rather
+// than a constructed one. If its empty slot collapses, the saving moves left into the tokens column
+// and no longer lines up with the savings above it.
+//
+// FOUND AFTER THE COLUMNS SHIPPED, by measuring what a review comment about the note's width
+// actually recovered — 3 columns where 14 were expected. The cause was that padLeft and padRight
+// both return "" unchanged, so stripFigure.pad was holding no column open at all for an empty
+// figure; every earlier test filled every slot, so nothing saw it.
+func TestDrawerFigures_AnEmptyMiddleColumnHoldsItsPlace(t *testing.T) {
+	row := func(label string, tokens int64) string {
+		return fitStripFigures(" ", drawerFigures(drawerRow{
+			label: label,
+			counts: usage.Counts{
+				Requests: 100, Tokens: tokens, CostMicros: 1_000_000,
+				PricedRequests: 100, PriceableRequests: 100, AvoidedMicros: 500_000,
+			},
+		}), 140)
+	}
+	withTokens, without := row("model-a", 900_000), row("model-b", 0)
+
+	saved := "saved " + formatUSDTotalMicros(500_000)
+	at := func(t *testing.T, line string) int {
+		t.Helper()
+		i := strings.Index(line, saved)
+		if i < 0 {
+			t.Fatalf("row %q does not carry %q", line, saved)
+		}
+		return lipgloss.Width(line[:i])
+	}
+	if a, b := at(t, withTokens), at(t, without); a != b {
+		t.Errorf("the saving starts at column %d with a token count and %d without it — the empty "+
+			"tokens column collapsed instead of holding its place:\n%s\n%s", a, b, withTokens, without)
+	}
+	// Not vacuous: the two rows really do differ in whether the tokens column is filled.
+	if !strings.Contains(withTokens, "tokens") || strings.Contains(without, "tokens") {
+		t.Fatalf("the fixture no longer varies the tokens column:\n%s\n%s", withTokens, without)
+	}
+
+	// THE OTHER MIDDLE-EMPTY SHAPE: a priced row with no request count, so the REQUEST column is the
+	// one held open under a token figure. Raised in review against the commit before pad learned to
+	// pad an empty figure, where it rendered
+	// "mcp-tool  $9.43       45M tokens" against "claude-sonnet-5  $9.43  568 req  45M tokens".
+	priced := func(label string, req int64) string {
+		return fitStripFigures(" ", drawerFigures(drawerRow{
+			label: label,
+			counts: usage.Counts{
+				Requests: req, Tokens: 45_000_000, CostMicros: 9_430_000,
+				PricedRequests: 568, PriceableRequests: req,
+			},
+		}), 140)
+	}
+	withReq, noReq := priced("claude-sonnet-5", 568), priced("mcp-tool", 0)
+	tok := "45M tokens"
+	tokAt := func(t *testing.T, line string) int {
+		t.Helper()
+		i := strings.Index(line, tok)
+		if i < 0 {
+			t.Fatalf("row %q does not carry %q", line, tok)
+		}
+		return lipgloss.Width(line[:i])
+	}
+	if a, b := tokAt(t, withReq), tokAt(t, noReq); a != b {
+		t.Errorf("the token figure starts at column %d with a request count and %d without it — the "+
+			"empty request column collapsed:\n%s\n%s", a, b, withReq, noReq)
+	}
+	if !strings.Contains(withReq, "568 req") || strings.Contains(noReq, "req") {
+		t.Fatalf("the fixture no longer varies the request column:\n%s\n%s", withReq, noReq)
+	}
+}
+
+// THE CAVEAT PROSE LEAVES THE MONEY COLUMN AND BECOMES THE ROW'S LAST FIGURE.
+//
+// "~$89.95 (3 inexact)" put a parenthesised sentence of variable length INSIDE a column every other
+// row aligns against, so one inexact row knocked the whole table out of line — and the prose is
+// what width pressure drops first anyway, which is precisely what a trailing figure is for. The
+// band states the same rule for itself as MARKERS, NOT PROSE; the difference here is that the
+// drawer has room to keep the words, just not in the middle of a column.
+//
+// The count is NOT lost, which is the half worth pinning: see
+// TestSpendDrawerRows_StateHowManyFiguresAreInexact.
+func TestDrawerFigures_TheCaveatIsTheLastFigure(t *testing.T) {
+	figs := drawerFigures(drawerRow{
+		label: "claude-opus-5",
+		counts: usage.Counts{
+			Requests: 40, Tokens: 900_000, CostMicros: 11_121_400,
+			PricedRequests: 40, PriceableRequests: 40, IncompleteRequests: 3,
+		},
+	})
+	if len(figs) < 2 {
+		t.Fatalf("row produced %d figures", len(figs))
+	}
+	last := figs[len(figs)-1]
+	if !strings.Contains(last.full, "3 inexact") {
+		t.Errorf("the last figure is %q, want the caveat list", last.full)
+	}
+	// And no EARLIER figure carries it, or the prose is still inside a column.
+	for i, f := range figs[:len(figs)-1] {
+		if strings.Contains(f.full, "inexact") {
+			t.Errorf("figure %d (%q) still carries the caveat prose", i, f.full)
+		}
+	}
+	// The marker stays on the money figure: the glyph is the fact, the words are the explanation.
+	if !strings.Contains(figs[1].full, inexactMarker) {
+		t.Errorf("the money figure %q lost its marker along with the prose", figs[1].full)
 	}
 }
 

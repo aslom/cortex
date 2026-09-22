@@ -103,11 +103,11 @@ func TestSpendLabels_NeutraliseAServerSuppliedControlCharacter(t *testing.T) {
 			for _, line := range lines {
 				assertNoControlChars(t, "band line", line)
 			}
-			if n := strings.Count(lines[1], emptyCell); n != 1 {
+			if n := strings.Count(lines[0], emptyCell); n != 1 {
 				t.Errorf("%d cells are %q, want exactly 1 — the tampered span and no other:\n%s",
 					n, emptyCell, strings.Join(lines, "\n"))
 			}
-			if strings.Contains(lines[1], "$1.00") {
+			if strings.Contains(lines[0], "$1.00") {
 				t.Errorf("the band drew the figure under the requested label for a window the "+
 					"server did not serve:\n%s", strings.Join(lines, "\n"))
 			}

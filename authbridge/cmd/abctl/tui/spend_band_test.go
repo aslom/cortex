@@ -51,15 +51,15 @@ func TestRenderSpendBand_EverySpanIsLabelledWithItsPeriod(t *testing.T) {
 	for span := spendSpan(0); span < numSpendSpans; span++ {
 		label := spendSpanDefs[span].label
 		if !strings.Contains(lines[0], label) {
-			t.Errorf("label row %q is missing %q", lines[0], label)
+			t.Errorf("band %q is missing %q", lines[0], label)
 		}
 	}
 	// And the figures are all there, under them.
 	for span := spendSpan(0); span < numSpendSpans; span++ {
 		want := formatUSDTotal(bandSummary().Spans[span].USD)
-		if !strings.Contains(lines[1], want) {
-			t.Errorf("value row %q is missing %s's figure %q",
-				lines[1], spendSpanDefs[span].label, want)
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("band %q is missing %s's figure %q",
+				lines[0], spendSpanDefs[span].label, want)
 		}
 	}
 }
@@ -73,7 +73,7 @@ func TestRenderSpendBand_ReadsOutwardsFromTheLiveHour(t *testing.T) {
 		label := spendSpanDefs[span].label
 		i := strings.Index(lines[0], label)
 		if i < 0 {
-			t.Fatalf("label row %q is missing %q", lines[0], label)
+			t.Fatalf("band %q is missing %q", lines[0], label)
 		}
 		if i <= at {
 			t.Errorf("%q appears at %d, not after the previous span at %d — the band must read "+
@@ -83,40 +83,71 @@ func TestRenderSpendBand_ReadsOutwardsFromTheLiveHour(t *testing.T) {
 	}
 }
 
-// THE FIGURES LINE UP, which is the whole reason four spans are legible together.
+// EVERY LABEL SITS IMMEDIATELY BESIDE ITS OWN FIGURE, which is what makes one line legible.
 //
-// They are four readings of the same quantity over different periods, so a reader compares them
-// directly — and left-flushed in cells of their own widths, "$4.04" and "$703.18" put their
-// decimal points four columns apart. Asserted as a fixed STRIDE rather than by eye: every cell
-// is one width, so each figure's last character sits a constant distance from the previous.
-func TestRenderSpendBand_FiguresShareAColumnStride(t *testing.T) {
-	lines := renderSpendBand(bandSummary(), 200)
-	var ends []int
+// THIS REPLACES TestRenderSpendBand_FiguresShareAColumnStride, and the swap is the point of
+// folding the band, so it is worth recording rather than leaving as a deleted test. The old band
+// stacked labels over values and right-aligned both in cells of ONE shared width, because four
+// readings of the same quantity left-flushed in cells of their own widths put "$4.04" and
+// "$703.18" four columns apart — a reader scanning the column could not compare them.
+//
+// On one line there is no column to scan, so that property is not weakened, it is INAPPLICABLE:
+// nothing sits above or below a figure to be aligned with. What replaces it is adjacency —
+// "TODAY $18.80" reads as a pair whatever its neighbours are — and adjacency is a stronger
+// guarantee than a shared stride, because a stride can be right while the label above it is the
+// wrong one. Asserted as a CONTIGUOUS SUBSTRING for exactly that reason: it cannot pass for a
+// band that pairs a label with a different span's money.
+//
+// The cost is real and is not hidden: two cells of unequal width no longer put their decimal
+// points anywhere near each other. That is accepted, because the row is read left to right now
+// rather than scanned top to bottom, and because the row it gives back goes to the sessions
+// table — see spendBandLines.
+func TestRenderSpendBand_EveryLabelSitsBesideItsOwnFigure(t *testing.T) {
+	line := renderSpendBand(bandSummary(), 200)[0]
+	at := -1
 	for span := spendSpan(0); span < numSpendSpans; span++ {
-		fig := formatUSDTotal(bandSummary().Spans[span].USD)
-		i := strings.Index(lines[1], fig)
+		pair := spendSpanDefs[span].label + " " + formatUSDTotal(bandSummary().Spans[span].USD)
+		i := strings.Index(line, pair)
 		if i < 0 {
-			t.Fatalf("value row %q is missing %q", lines[1], fig)
+			t.Errorf("%q does not appear as a unit in the band — a label must travel with its own "+
+				"figure and nothing may come between them:\n%s", pair, line)
+			continue
 		}
-		ends = append(ends, i+len([]rune(fig)))
+		// AND IN ASCENDING SPAN ORDER, checked here rather than left to
+		// TestRenderSpendBand_ReadsOutwardsFromTheLiveHour: that test finds each label
+		// independently, so it would stay green for a band that paired every label with the
+		// WRONG figure as long as the labels themselves were in order.
+		if i <= at {
+			t.Errorf("%q appears at %d, not after the previous pair at %d:\n%s", pair, i, at, line)
+		}
+		at = i
 	}
-	stride := ends[1] - ends[0]
-	for i := 2; i < len(ends); i++ {
-		if got := ends[i] - ends[i-1]; got != stride {
-			t.Errorf("figure %d ends %d columns after the previous one, but figure 1 ended %d "+
-				"after figure 0 — the cells are not one width, so the decimal points do not "+
-				"line up:\n%s\n%s", i, got, stride, lines[0], lines[1])
-		}
+}
+
+// A WIDE CELL COSTS ONLY ITSELF, which the two-line band could not promise.
+//
+// bandCell.width() used to give every surviving cell max(width) so their figures shared a stride,
+// so one five-figure month inflated all four columns — the effect
+// TestRenderSpendBand_HealthySlowSpansDoNotWidenTheBand measures from the other side. Folded, a
+// cell occupies its own label plus its own figure, so widening one span's number cannot move
+// another span's cell at all.
+//
+// This is what makes "THIS MONTH" affordable: five columns longer than "MONTH" and it lands on one
+// cell instead of four.
+func TestRenderSpendBand_AWideCellDoesNotWidenTheOthers(t *testing.T) {
+	base := renderSpendBand(bandSummary(), 200)[0]
+	// A month two orders of magnitude larger, nothing else touched.
+	fat := renderSpendBand(withSpan(bandSummary(), spanMonth, func(r *spanReading) {
+		r.USD = 70318.42
+	}), 200)[0]
+
+	// Everything up to the month's own cell is byte-identical.
+	cut := strings.Index(base, spendSpanDefs[spanMonth].label)
+	if cut < 0 {
+		t.Fatalf("band is missing %q:\n%s", spendSpanDefs[spanMonth].label, base)
 	}
-	// And the labels share it too: both lines are right-aligned in the same cells, so a label
-	// sits over the digits of its own figure rather than over the column's left edge.
-	for span := spendSpan(0); span < numSpendSpans; span++ {
-		label := spendSpanDefs[span].label
-		li := strings.Index(lines[0], label) + len([]rune(label))
-		if li != ends[span] {
-			t.Errorf("%q ends at column %d but its figure ends at %d — the heading is not over "+
-				"its own value:\n%s\n%s", label, li, ends[span], lines[0], lines[1])
-		}
+	if got, want := fat[:cut], base[:cut]; got != want {
+		t.Errorf("widening the month moved the cells before it:\n got %q\nwant %q", got, want)
 	}
 }
 
@@ -150,20 +181,36 @@ func TestRenderSpendBand_CarriesTheFigureMarkers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := withSpan(bandSummary(), spanToday, tc.mutate)
-			// EVERY WIDTH FROM THE NARROWEST THAT SHOWS TODAY UP, not 200 alone. A marker is one
-			// column and the cell width is uniform, so marking a cell can push the whole band
-			// wider — which is exactly where a marker is most likely to be dropped and least
-			// likely to be noticed. The strip this band replaced had a narrow-width marker test
-			// (its fitter fell back to a compact form); nothing restored that coverage here, so
-			// the whole marker suite was asserting one roomy terminal.
+			// AT EVERY WIDTH THAT DRAWS TODAY AT ALL, not 200 alone. A marker is a column, so
+			// marking a cell widens it — which is exactly where a marker is most likely to be
+			// dropped and least likely to be noticed. The strip this band replaced had a
+			// narrow-width marker test (its fitter fell back to a compact form); nothing restored
+			// that coverage here, so the whole marker suite was asserting one roomy terminal.
 			//
-			// The floor is measured rather than assumed: below it TODAY is not on screen at all,
-			// which is the drop order working and not a lost marker.
-			for width := narrowestWidthShowing(t, s, spanToday); width <= 200; width++ {
+			// GATED ON THE CELL BEING PRESENT, per width, rather than swept upward from the
+			// narrowest width that shows it. The upward sweep was sound only while every cell
+			// shared one width: inline, "TODAY ~$18.80" (13 columns) fits alone at 13 while
+			// "THIS MONTH $703.18" (18) does not, so TODAY is drawn at 13 and then correctly
+			// REPLACED by the month at 18 — the month outranks it in bandDropOrder, and trading a
+			// cell for a more valuable one as the terminal widens is what "chosen by value, not by
+			// count" means. Swept blindly, that legitimate swap reads as a lost marker.
+			//
+			// The property that actually matters is unchanged and is what is asserted: wherever the
+			// cell appears, its disclosure appears with it. Never a silent figure.
+			drawn := 0
+			for width := 1; width <= 200; width++ {
 				joined := strings.Join(renderSpendBand(s, width), "\n")
-				if !strings.Contains(joined, tc.want) {
-					t.Fatalf("width %d: band lost the %q marker:\n%s", width, tc.want, joined)
+				if !strings.Contains(joined, spendSpanDefs[spanToday].label) {
+					continue
 				}
+				drawn++
+				if !strings.Contains(joined, tc.want) {
+					t.Fatalf("width %d: TODAY is on screen without its %q marker:\n%s",
+						width, tc.want, joined)
+				}
+			}
+			if drawn == 0 {
+				t.Fatalf("TODAY is drawn at no width up to 200, so this asserted nothing")
 			}
 		})
 	}
@@ -182,19 +229,19 @@ func TestRenderSpendBand_AnUnanswerableSpanIsNotANumber(t *testing.T) {
 	})
 	lines := renderSpendBand(s, 200)
 	if !strings.Contains(lines[0], "MONTH") {
-		t.Errorf("label row %q dropped MONTH; silence about a span is worse than saying it is "+
+		t.Errorf("band %q dropped MONTH; silence about a span is worse than saying it is "+
 			"unavailable:\n%s", lines[0], strings.Join(lines, "\n"))
 	}
-	if strings.Contains(lines[1], "$703.18") {
-		t.Errorf("value row %q drew a figure for a span the deployment cannot answer:\n%s",
-			lines[1], strings.Join(lines, "\n"))
+	if strings.Contains(lines[0], "$703.18") {
+		t.Errorf("band %q drew a figure for a span the deployment cannot answer:\n%s",
+			lines[0], strings.Join(lines, "\n"))
 	}
-	if !strings.Contains(lines[1], emptyCell) {
-		t.Errorf("value row %q has no %q for the unanswerable span", lines[1], emptyCell)
+	if !strings.Contains(lines[0], emptyCell) {
+		t.Errorf("band %q has no %q for the unanswerable span", lines[0], emptyCell)
 	}
 	// The spans that CAN be answered are untouched: one degraded cell must not blank the band.
-	if !strings.Contains(lines[1], formatUSDTotal(4.04)) {
-		t.Errorf("value row %q lost the hour figure over the month's degradation", lines[1])
+	if !strings.Contains(lines[0], formatUSDTotal(4.04)) {
+		t.Errorf("band %q lost the hour figure over the month's degradation", lines[0])
 	}
 }
 
@@ -205,14 +252,14 @@ func TestRenderSpendBand_OneChainsFailureLeavesTheOthers(t *testing.T) {
 		r.Failed, r.Priced = true, false
 	})
 	lines := renderSpendBand(s, 200)
-	if !strings.Contains(lines[1], emptyCell) {
-		t.Errorf("value row %q has no %q for the failed span", lines[1], emptyCell)
+	if !strings.Contains(lines[0], emptyCell) {
+		t.Errorf("band %q has no %q for the failed span", lines[0], emptyCell)
 	}
 	for _, span := range []spendSpan{spanHour, spanToday, spanMonth} {
 		want := formatUSDTotal(bandSummary().Spans[span].USD)
-		if !strings.Contains(lines[1], want) {
-			t.Errorf("value row %q lost %s over another span's failure",
-				lines[1], spendSpanDefs[span].label)
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("band %q lost %s over another span's failure",
+				lines[0], spendSpanDefs[span].label)
 		}
 	}
 }
@@ -229,12 +276,12 @@ func TestRenderSpendBand_AStaleSpanIsDated(t *testing.T) {
 	})
 	lines := renderSpendBand(s, 200)
 	if !strings.Contains(lines[0], "TODAY "+formatSpendAge(7*time.Minute)) {
-		t.Errorf("label row %q does not date the stale span; a wedged chain is indistinguishable "+
+		t.Errorf("band %q does not date the stale span; a wedged chain is indistinguishable "+
 			"from a current reading without it:\n%s", lines[0], strings.Join(lines, "\n"))
 	}
 	// The figure itself is unchanged: the answer is old, not wrong.
-	if !strings.Contains(lines[1], formatUSDTotal(18.7994)) {
-		t.Errorf("value row %q dropped a figure that was merely stale", lines[1])
+	if !strings.Contains(lines[0], formatUSDTotal(18.7994)) {
+		t.Errorf("band %q dropped a figure that was merely stale", lines[0])
 	}
 	// And a fresh band carries no timestamp at all — a permanent one is noise.
 	fresh := strings.Join(renderSpendBand(bandSummary(), 200), "\n")
@@ -276,9 +323,9 @@ func TestRenderSpendBand_HeightIsConstantAndFiguresDropWhole(t *testing.T) {
 		// subject is currently correct. The first is a broken test; the second is an invariant.
 		for span := spendSpan(0); span < numSpendSpans; span++ {
 			whole := formatUSDTotal(bandSummary().Spans[span].USD)
-			if clipsFigure(lines[1], whole) {
+			if clipsFigure(lines[0], whole) {
 				t.Errorf("width %d: %s's figure was clipped: %q (probe %q, want whole %q)",
-					w, spendSpanDefs[span].label, lines[1], figureProbe(whole), whole)
+					w, spendSpanDefs[span].label, lines[0], figureProbe(whole), whole)
 			}
 		}
 	}
@@ -309,7 +356,7 @@ func TestRenderSpendBand_HeightIsConstantAndFiguresDropWhole(t *testing.T) {
 // operator reads, and deriving the expectation from the formatter would let a formatter change
 // take both sides with it. That is the vacuity TestClipsFigure_CanActuallyFail documents.
 func TestRenderSpendBand_UnpricedZeroAndSubCentAreThreeDifferentCells(t *testing.T) {
-	cell := func(s spendSummary) string { return renderSpendBand(s, 200)[1] }
+	cell := func(s spendSummary) string { return renderSpendBand(s, 200)[0] }
 
 	unpriced := cell(withSpan(bandSummary(), spanHour, func(r *spanReading) {
 		r.USD, r.Priced = 0, false
@@ -370,7 +417,11 @@ func TestRenderSpendBand_TodayAndMonthSurviveLongest(t *testing.T) {
 		// The WIDEST width that yields this many cells, so each rung is judged where it is the
 		// band's own choice rather than an artefact of the next rung's boundary.
 		found := ""
-		for w := 60; w >= 1; w-- {
+		// The ceiling has to clear the WHOLE band. Four cells of bandSummary() plus three
+		// separators is 66 columns once labels sit inline with their figures ("LAST 1H $4.04" is
+		// 13 where the old stacked cell was 7), so the 60 this scanned before the fold could not
+		// reach the four-cell rung at all and that rung silently asserted nothing.
+		for w := 120; w >= 1; w-- {
 			line := renderSpendBand(bandSummary(), w)[0]
 			n := 0
 			for span := spendSpan(0); span < numSpendSpans; span++ {
@@ -415,12 +466,12 @@ func TestRenderSpendBand_EmptySummaryStillFillsItsHeight(t *testing.T) {
 	// of em dashes is an honest answer, a band of "$0.00" is a claim that nothing was spent.
 	for span := spendSpan(0); span < numSpendSpans; span++ {
 		if !strings.Contains(lines[0], spendSpanDefs[span].label) {
-			t.Errorf("label row %q dropped %q on an empty summary", lines[0],
+			t.Errorf("band %q dropped %q on an empty summary", lines[0],
 				spendSpanDefs[span].label)
 		}
 	}
-	if strings.Contains(lines[1], "$0.00") {
-		t.Errorf("value row %q renders $0.00 for spans nothing has answered yet", lines[1])
+	if strings.Contains(lines[0], "$0.00") {
+		t.Errorf("band %q renders $0.00 for spans nothing has answered yet", lines[0])
 	}
 }
 
@@ -593,11 +644,30 @@ func TestRenderSpendBand_HealthySlowSpansDoNotWidenTheBand(t *testing.T) {
 				"measuring the wrong thing", spendSpanDefs[span].label)
 		}
 	}
-	lines := renderSpendBand(spendSummary{Spans: spans}, 40)
+	// THE WIDTH CONSEQUENCE, ASSERTED AGAINST A BAND WITH NO AGES AT ALL rather than at a fixed
+	// column count. It used to assert that all four cells survived at width 40, which held only
+	// because the stacked band charged every cell max(label, value) — seven columns, so four cells
+	// and three gutters came to 34. Inline, the same four spans need 61, and a hardcoded 40 turned a
+	// statement about staleness into a statement about arithmetic that the fold changed.
+	//
+	// What the test is actually for is that an age on a healthy chain costs nothing, and comparing
+	// against the same summary with every Stale flag cleared says exactly that — at any width, and
+	// without a number in the test that has to be re-derived every time a label changes.
+	clean := spendSummary{Spans: spans}
 	for span := spendSpan(0); span < numSpendSpans; span++ {
-		if !strings.Contains(lines[0], spendSpanDefs[span].label) {
-			t.Errorf("at width 40, %s was dropped from a band where every chain answered on "+
-				"schedule:\n%s", spendSpanDefs[span].label, strings.Join(lines, "\n"))
+		clean.Spans[span].Stale, clean.Spans[span].Age = false, 0
+	}
+	wide, plain := renderSpendBand(spendSummary{Spans: spans}, 200), renderSpendBand(clean, 200)
+	if got, want := lipgloss.Width(wide[0]), lipgloss.Width(plain[0]); got != want {
+		t.Errorf("a band whose chains all answered on schedule is %d columns against %d with the "+
+			"staleness explicitly cleared — a healthy chain is paying for an age it should not "+
+			"carry:\n%s\n%s", got, want, wide[0], plain[0])
+	}
+	// And every cell really is there, or an equal width would be two equally empty bands.
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		if !strings.Contains(wide[0], spendSpanDefs[span].label) {
+			t.Errorf("%s is missing from a band where every chain answered on schedule:\n%s",
+				spendSpanDefs[span].label, wide[0])
 		}
 	}
 }
@@ -677,16 +747,16 @@ func TestBandFixtureProbes_DoNotCrossMatch(t *testing.T) {
 // measuring styled text with a rune-counting primitive — so it is pinned at the two functions that
 // implement it rather than left to a fixture the renderer cannot generate.
 //
-// BOTH FUNCTIONS, because they have to agree: width() decides the column and padLeft fills it, and
-// a column measured in one vocabulary and filled in the other is wrong by the difference.
+// WIDTH IS THE WHOLE PAIR, and it is measured off render() so the separating space is counted
+// once. It used to be the wider HALF, because the two halves shared a column on separate rows.
 //
-// WHAT THIS CANNOT HOLD, stated rather than implied: that renderSpendBand still CALLS padLeft.
-// Swapping it back to Fprintf("%*s") passes every test in this package, because fmt and padLeft
-// agree on every input the renderer can produce — the two differ only on the styled and wide cells
-// above, which no production path can put in a cell. So the measurement half is pinned by mutation
-// here and the call site is not; the guard against that is the comment at the call site, and a
-// fixture cannot be written for it without a seam the renderer does not have.
-func TestBandCell_MeasuresAndPadsInDisplayColumns(t *testing.T) {
+// THE PADDING HALF OF THIS TEST IS GONE WITH padLeft. A one-line band pads nothing — each cell is
+// exactly its own contents — so there is no second function to agree with a measurement. What
+// replaced that agreement is render() against renderMuting(): the styled form must occupy the same
+// columns as the plain one, or the fit is computed on one band and drawn from another. Asserted
+// below with a mute that emits real escape sequences, since an identity function would pass for a
+// renderMuting that counted them.
+func TestBandCell_MeasuresInDisplayColumns(t *testing.T) {
 	restore := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(restore) })
@@ -695,6 +765,12 @@ func TestBandCell_MeasuresAndPadsInDisplayColumns(t *testing.T) {
 	if styled == "$4.04" {
 		t.Fatal("the style emitted no escape sequence, so the styled case asserts nothing")
 	}
+	mute := func(s string) string {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(s)
+	}
+	if mute("x") == "x" {
+		t.Fatal("the mute emitted no escape sequence, so the styling case asserts nothing")
+	}
 
 	for _, tc := range []struct {
 		name  string
@@ -702,14 +778,13 @@ func TestBandCell_MeasuresAndPadsInDisplayColumns(t *testing.T) {
 		want  int
 		cause string
 	}{
-		{"ascii", bandCell{label: "LAST 1H", value: "$4.04"}, 7, "the wider half"},
-		{"styled value", bandCell{label: "TODAY", value: styled}, 5,
+		// 7 columns of label, one space, 5 of figure.
+		{"ascii", bandCell{label: "LAST 1H", value: "$4.04"}, 13, "label, a space, and figure"},
+		{"styled value", bandCell{label: "TODAY", value: styled}, 11,
 			"escape bytes are not columns: counting them charges the cell for invisible text and " +
 				"the band drops a figure that would have fitted"},
-		// The wide half has to be the WIDER half, or the ASCII value decides the answer and the
-		// case cannot tell a rune count from a column count. Four CJK runes are eight columns
-		// against the value's five; as runes they are four, so a rune count picks the value.
-		{"wide runes", bandCell{label: "過去一時", value: "$4.04"}, 8,
+		// Four CJK runes are eight columns and four runes, so a rune count under-measures by four.
+		{"wide runes", bandCell{label: "過去一時", value: "$4.04"}, 14,
 			"a CJK rune occupies two columns, so counting runes under-measures the cell and the " +
 				"band renders wider than the terminal"},
 	} {
@@ -717,14 +792,55 @@ func TestBandCell_MeasuresAndPadsInDisplayColumns(t *testing.T) {
 			if got := tc.cell.width(); got != tc.want {
 				t.Errorf("width() = %d, want %d — %s", got, tc.want, tc.cause)
 			}
-			// And the padding lands on the same number the measurement produced.
-			for _, s := range []string{tc.cell.label, tc.cell.value} {
-				if got := lipgloss.Width(padLeft(s, tc.want)); got != tc.want {
-					t.Errorf("padLeft(%q, %d) renders %d columns: the cell is measured in one "+
-						"vocabulary and filled in another", s, tc.want, got)
-				}
+			// THE STYLED CELL OCCUPIES THE SAME COLUMNS, which is what lets the drop enumeration
+			// run over the plain form and the screen be drawn from the muted one.
+			plain, dressed := tc.cell.render(), tc.cell.renderMuting(mute)
+			if got, want := lipgloss.Width(dressed), lipgloss.Width(plain); got != want {
+				t.Errorf("renderMuting renders %d columns against render's %d — muting a label must "+
+					"not move a figure", got, want)
+			}
+			if dressed == plain {
+				t.Error("renderMuting returned the plain cell, so the styling assertion is vacuous")
 			}
 		})
+	}
+}
+
+// AND THE WHOLE BAND COSTS THE SAME DRESSED AS IT DOES PLAIN.
+//
+// bandCell above pins one cell; this pins the line, which is what app.go actually measures against
+// the terminal. A separator or an extra pad applied on only one of the two paths would be invisible
+// to the per-cell test and would overflow the reservation here.
+func TestRenderSpendBand_StylingCostsNoColumns(t *testing.T) {
+	restore := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(restore) })
+
+	for w := 1; w <= 120; w++ {
+		plain := renderSpendBand(bandSummary(), w)
+		dressed, drew := renderSpendBandStyled(bandSummary(), w)
+		if len(plain) != spendBandLines || len(dressed) != spendBandLines {
+			t.Fatalf("width %d: %d plain rows and %d styled, want %d of each",
+				w, len(plain), len(dressed), spendBandLines)
+		}
+		if got, want := lipgloss.Width(dressed[0]), lipgloss.Width(plain[0]); got != want {
+			t.Errorf("width %d: styled band is %d columns against the plain band's %d:\n%q",
+				w, got, want, dressed[0])
+		}
+		// AND `drew` AGREES WITH THE PLAIN LINE AT EVERY WIDTH. paneView gates the drawer on it, so
+		// a `drew` that disagreed would open the breakdown under an empty band — the state the
+		// styled string cannot be asked about, since an escape sequence is not whitespace.
+		if want := strings.TrimSpace(plain[0]) != ""; drew != want {
+			t.Errorf("width %d: drew = %v but the plain band is %q", w, drew, plain[0])
+		}
+	}
+	// Not vacuous: at a width that draws something, the styled form really does carry escapes.
+	dressed, drew := renderSpendBandStyled(bandSummary(), 200)
+	if !drew {
+		t.Error("drew is false at width 200, so the agreement above was asserted on empty bands")
+	}
+	if dressed[0] == renderSpendBand(bandSummary(), 200)[0] {
+		t.Error("the styled band is byte-identical to the plain one, so nothing was styled")
 	}
 }
 
@@ -755,60 +871,65 @@ func TestRenderSpendBand_ACleanSpanCarriesNoMarker(t *testing.T) {
 	}
 	// And the figures really are there, or "no markers" would be satisfied by an empty band.
 	for span := spendSpan(0); span < numSpendSpans; span++ {
-		if want := formatUSDTotal(bandSummary().Spans[span].USD); !strings.Contains(lines[1], want) {
+		if want := formatUSDTotal(bandSummary().Spans[span].USD); !strings.Contains(lines[0], want) {
 			t.Fatalf("the clean band is missing %s's figure %q, so this test asserted nothing:\n%s",
 				spendSpanDefs[span].label, want, joined)
 		}
 	}
 }
 
-// THE SURVIVING SET IS MAXIMAL, not merely narrow enough — dropping alone is not.
+// NO CELL THE BAND GAVE UP COULD HAVE BEEN KEPT, at any width.
 //
-// Every cell shares one width, so giving up a WIDE cell can leave room for a narrower one the
-// drop loop has already passed. Measured before the restore pass: with a stale TODAY, whose label
-// carries an age and so runs nine columns, the band drew MONTH alone at every width from 16 to 19
-// while LAST 1H and MONTH together need 16. Three cells of information surrendered to fit one,
-// with room for two going unused.
+// THIS REPLACES TestRenderSpendBand_RestoresACellThatStillFits, whose premise the fold retired, so
+// the reasoning is recorded rather than deleted. That test was written against a pathology of the
+// SHARED width: every surviving cell rendered at max(width), so surrendering a wide cell freed room
+// for a narrow one the drop loop had already walked past. Measured at the time, with a stale TODAY
+// whose label carries an age: the band drew MONTH alone at every width from 16 to 19 while LAST 1H
+// and MONTH together needed 16 — two readings' worth of room going unused. bandWidth now sums each
+// cell's OWN width, so a cell's cost does not depend on its neighbours and that shape cannot be
+// constructed any more.
 //
-// The priority is asserted as well as the count, because "more cells" is not the goal on its own:
-// at a width that holds two, the two must be the ones bandDropOrder keeps.
-func TestRenderSpendBand_RestoresACellThatStillFits(t *testing.T) {
+// What still has to hold is the guarantee the enumeration exists for, and it is asserted DIRECTLY
+// here instead of at the few widths where the old bug happened to surface: at every width, adding
+// back any single dropped cell must overflow. That needs no second copy of the enumeration in the
+// test — reimplementing it would only prove the test agrees with itself.
+//
+// SWEPT, not sampled, and with a stale TODAY: an age on one label is what makes the four cells
+// unequal enough for a maximality bug to have anywhere to hide.
+func TestRenderSpendBand_NoDroppedCellCouldHaveBeenKept(t *testing.T) {
 	stale := withSpan(bandSummary(), spanToday, func(r *spanReading) {
 		r.Age, r.Stale = 12*time.Minute, true
 	})
 
-	kept := func(line string) []string {
-		var out []string
+	// The cells the renderer itself would build, so the widths under test are the real ones.
+	var cells [numSpendSpans]bandCell
+	for span := spendSpan(0); span < numSpendSpans; span++ {
+		cells[span] = bandSpanCell(spendSpanDefs[span].label, stale.Spans[span])
+	}
+
+	for w := 1; w <= 120; w++ {
+		line := renderSpendBand(stale, w)[0]
+		used := lipgloss.Width(line)
+		if used > w {
+			t.Errorf("width %d: band rendered %d columns: %q", w, used, line)
+			continue
+		}
 		for span := spendSpan(0); span < numSpendSpans; span++ {
 			if strings.Contains(line, spendSpanDefs[span].label) {
-				out = append(out, spendSpanDefs[span].label)
+				continue
+			}
+			// A dropped cell would cost its own width, plus a separator unless it would be the
+			// only cell on the line.
+			cost := cells[span].width()
+			if used > 0 {
+				cost += bandSeparatorWidth
+			}
+			if used+cost <= w {
+				t.Errorf("width %d: gave up %q, which needs %d more columns with %d of %d used — "+
+					"it fits, so the surviving set is not maximal:\n%s",
+					w, spendSpanDefs[span].label, cost, used, w, line)
 			}
 		}
-		return out
-	}
-
-	for w := 16; w <= 19; w++ {
-		lines := renderSpendBand(stale, w)
-		got := kept(lines[0])
-		if len(got) < 2 {
-			t.Errorf("width %d: kept %v — LAST 1H and MONTH fit in 16 columns, so a single cell "+
-				"gives up a reading for nothing:\n%s", w, got, strings.Join(lines, "\n"))
-		}
-		// MONTH is the budget figure and outlives everything; the second survivor is the hour,
-		// because TODAY cannot fit at this width once its label carries an age.
-		if len(got) == 2 && (got[0] != "LAST 1H" || got[1] != "MONTH") {
-			t.Errorf("width %d: kept %v, want LAST 1H and MONTH — the restore pass must not let a "+
-				"lower-priority cell take a higher one's place", w, got)
-		}
-		if n := lipgloss.Width(lines[1]); n > w {
-			t.Errorf("width %d: restoring a cell overflowed to %d columns: %q", w, n, lines[1])
-		}
-	}
-
-	// And where the preferred pair DOES fit, it is still the one chosen.
-	if got := kept(renderSpendBand(stale, 20)[0]); len(got) != 2 || got[0] != "TODAY" {
-		t.Errorf("at width 20 kept %v, want TODAY and MONTH: the restore pass must not reorder the "+
-			"priority when the more valued cell fits", got)
 	}
 }
 

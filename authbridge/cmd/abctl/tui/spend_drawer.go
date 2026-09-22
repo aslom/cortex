@@ -591,13 +591,43 @@ func hasSeries(ranked []seriesKey, label string) bool {
 //
 // THE TIER COLUMN IS THE ONE THAT YIELDS, so the panel degrades to exactly the per-model
 // drawer that shipped before this feature: an addition gives way to the existing contract,
-// never the reverse. Measured from the parts — tierColumnWidth plus its gutter plus enough
-// for a model label and two figures — rather than chosen, so it moves with them.
-const spendDrawerTwoColumnMin = tierColumnWidth + 2 + 36
+// never the reverse. Measured from the parts rather than chosen, so it moves with them.
+//
+// EVERY PART NAMED, which it was not: this read `tierColumnWidth + 2 + 36` while its own doc
+// claimed "plus its gutter", and drawerColumnGutter was not in the sum — so at the threshold the
+// series column got 33 columns rather than the 36 intended. The literal 36 also predates the series
+// table: "enough for a model label and two figures" was a soft estimate when the figures had no
+// fixed widths, and now that they do the arithmetic can simply be stated. A label, the money column
+// and the request column, with their gutters, is 40.
+//
+// The leading 2 is paneView's indent, not a gutter; both are charged because the row carries both.
+const spendDrawerTwoColumnMin = tierColumnWidth + drawerColumnGutter + 2 +
+	drawerLabelWidth + len(stripGap) + drawerMoneyWidth + len(stripGap) + drawerReqWidth
 
 // tierColumnWidth is the left column's share. Fixed rather than proportional so the model
 // labels to its right do not reflow every time a tier figure changes width.
-const tierColumnWidth = 34
+//
+// DERIVED FROM THE ROW IT HOLDS, not a magic number. It was 34, chosen when a row was a label, a
+// bar and a left-flushed figure. Adding the share column left that one column short of a full bar,
+// so tierBarBudget would have quietly degraded to the HALF bar at every terminal size — and a
+// six-column bar on a 140-column terminal is the state a live panel was measured in even before
+// the share existed, because the old 34 was already below the old budget's own threshold of 35.
+//
+// Summing the parts means the column and the budget cannot disagree, and that adding a field to
+// the row is a compile-time change to both rather than a silent degradation in one.
+const tierColumnWidth = tierLabelWidth + 1 + tierPctWidth + 1 + tierBarWidth + 1 + tierMoneyWidth
+
+// drawerColumnGutter separates the tier column from the series column.
+//
+// DECLARED, because it used to be an accident. The layout is `"  " + %-*s(tierColumnWidth) + series`
+// with no gap in it at all, and it looked like there was one only because tierColumnWidth was 34
+// against rows that rendered 25 — nine columns of padding nobody had asked for. Deriving the width
+// from the row's own parts removed that slack and the two columns went flush: measured,
+// "$56.51claude-opus-5". A gutter that exists only while a constant is too big is not a gutter.
+//
+// Three columns, matching stripGap, so the space BETWEEN the panels is the same as the space
+// between figures inside one.
+const drawerColumnGutter = 3
 
 // drawerTotals is snap.Totals with a nil snapshot answered rather than dereferenced. The
 // caller may hold nil before the first poll answers, exactly as spendDrawerRows may.
@@ -621,7 +651,8 @@ func drawerHeaders(axis usage.Group, twoCol bool, width int) string {
 		// below — `label + "  "`. Two would leave the header one column left of its column.
 		return clipRow("   "+right, width)
 	}
-	return clipRow(fmt.Sprintf("  %-*s%s", tierColumnWidth, "WHERE IT WENT", right), width)
+	return clipRow(fmt.Sprintf("  %-*s%s", tierColumnWidth+drawerColumnGutter,
+		"WHERE IT WENT", right), width)
 }
 
 // renderSpendDrawer returns the drawer's rows, ready to join under the strip.
@@ -668,7 +699,7 @@ func renderSpendDrawer(snap *usage.Snapshot, err error, axis usage.Group, window
 	var tiers []string
 	if twoCol {
 		tiers = renderTierRows(drawerTotals(snap), tierColumnWidth)
-		seriesWidth = width - tierColumnWidth - 2
+		seriesWidth = width - tierColumnWidth - drawerColumnGutter - 2
 	}
 
 	out := make([]string, 0, spendDrawerLines)
@@ -694,8 +725,12 @@ func renderSpendDrawer(snap *usage.Snapshot, err error, axis usage.Group, window
 		// its own values — the same off-by-two measured and fixed for the right column above,
 		// surviving on the other side of the panel because only the right one had a test.
 		// Costs no width: the two columns are 2 + tierColumnWidth + seriesWidth either way.
-		out = append(out, fmt.Sprintf("  %-*s%s",
-			tierColumnWidth, tiers[i], strings.TrimLeft(series, " ")))
+		// TRIMMED ON THE RIGHT, because the gutter pads the tier column whether or not a series
+		// row follows it: the fourth tier row is drawn beside an empty series slot on any window
+		// with fewer than four series, and paneView passes these straight to styleMuted.Render,
+		// so the padding becomes styled trailing whitespace on a line nobody can see the end of.
+		out = append(out, strings.TrimRight(fmt.Sprintf("  %-*s%s",
+			tierColumnWidth+drawerColumnGutter, tiers[i], strings.TrimLeft(series, " ")), " "))
 	}
 	// The hint line is LAST and always present: it is the only place the two keys and the
 	// current axis are written down, and a drawer whose controls are undiscoverable is a
@@ -733,8 +768,46 @@ func renderSpendDrawer(snap *usage.Snapshot, err error, axis usage.Group, window
 // the strip's own figures do, built from THIS row's counters rather than the window's. A
 // per-model total that is 3-of-40 priced must say so on its own line; borrowing the window's
 // coverage would attach a caveat measured over other traffic.
+// drawerColWidths are the series table's columns, in display columns.
+//
+// A TABLE, NOT A LIST OF FIGURES. These rows are stacked, so a reader reads DOWN them — and joined
+// by a fixed gap with no columns, each row's figures began wherever the previous row's ended. The
+// model name is the widest variable on the row, so "claude-opus-5" against "claude-sonnet-5" put
+// two rows' money, request counts and token counts in six different places.
+//
+// Sized to the widest real content plus nothing: "claude-sonnet-5" is 15, "$16740.85" is 9 and is
+// the widest figure a month of traffic reaches, "1187 req" is 8, "137M tokens" is 11, and
+// "saved $4.40" is 11. A figure wider than its column overflows rather than truncating — see
+// stripFigure.col — so these are chosen to make that rare, not to make it impossible.
+const (
+	drawerLabelWidth  = 16
+	drawerMoneyWidth  = 9
+	drawerReqWidth    = 9
+	drawerTokensWidth = 11
+	drawerSavedWidth  = 11
+)
+
 func drawerFigures(r drawerRow) []stripFigure {
-	figs := []stripFigure{{full: r.label, compact: r.label}}
+	// POSITIONAL, so column N means the same thing on every row. Built as a fixed set of slots and
+	// trimmed at the end rather than appended to conditionally: appending shifted a row's tokens
+	// into the request column whenever Requests was absent, which is the whole failure this table
+	// is for.
+	//
+	// WHICH ROWS ACTUALLY EXERCISE IT, because this doc used to say "an MCP-only row" and that is
+	// the wrong example. MCP traffic has requests and no tokens and nothing priceable, so its empty
+	// slots are all TRAILING — they are trimmed, and no column is held open at all. The cases that
+	// need a placeholder are the ones with a filled column AFTER an empty one:
+	//
+	//	a saving with no token count — tool-prune removes prompt tokens from a request whose
+	//	response could not be parsed, so AvoidedMicros is set while Tokens is zero
+	//	a priced row reporting no request count, which leaves the request column empty under a
+	//	token figure
+	//
+	// Both are covered; see TestDrawerFigures_AnEmptyMiddleColumnHoldsItsPlace. The placeholder
+	// itself lives in stripFigure.pad, which has to spell the empty case out because padLeft and
+	// padRight deliberately leave "" alone.
+	var money, note, req, tokens, saved stripFigure
+	figs := []stripFigure{plainFigure(r.label).inColumn(drawerLabelWidth, true)}
 	switch {
 	case negativeCost(r.counts.CostMicros):
 		// AN IMPOSSIBLE FIGURE IS NOT A FIGURE, and this row is where that guard was missing.
@@ -746,15 +819,27 @@ func drawerFigures(r drawerRow) []stripFigure {
 		// NO COVERAGE NOTE beside it, unlike the unpriced branch below: the gap may well be zero
 		// here — every request priced, and the sum still impossible — so coverage is not what is
 		// wrong and naming it would point a reader at the rate table.
-		figs = append(figs, plainFigure("cost unavailable"))
+		money = plainFigure("cost unavailable")
 	case r.counts.PricedRequests > 0 || r.counts.CostMicros > 0:
 		// Cents, through moneyFigureTotal: this column is scanned and compared down its length,
 		// which is the side of the precision rule cents is for. It read four decimals until the
 		// sessions table moved, and a drawer at "$1.0601" under a band at "$1.06" was the same
 		// two-precisions-for-one-figure the rule exists to prevent, one panel lower.
-		figs = append(figs, moneyFigureTotal(float64(r.counts.CostMicros)/1e6, "",
+		//
+		// THE COMPACT FORM IN THE COLUMN AND THE CAVEATS AT THE END OF THE ROW. moneyFigureTotal's
+		// full form is the marked amount followed by "(3 inexact, 40 of 100 unpriced)", and a
+		// parenthesised sentence of variable length inside a column every other row aligns against
+		// is what put this table out of line one row at a time. The words move to the last slot,
+		// where width pressure drops them first — which is where they were always going to go.
+		// The MARKER stays on the figure, so the fact never leaves the column.
+		full := moneyFigureTotal(float64(r.counts.CostMicros)/1e6, "",
 			gapOf(r.counts), r.counts.PriceableRequests, r.counts.IncompleteRequests, nil,
-			r.counts.Saturated))
+			r.counts.Saturated)
+		money = plainFigure(full.compact)
+		if n := moneyCaveatNote(gapOf(r.counts), r.counts.PriceableRequests,
+			r.counts.IncompleteRequests, nil, r.counts.Saturated); n != "" {
+			note = plainFigure(n)
+		}
 	case r.counts.PriceableRequests > 0:
 		// A SERIES THAT PRICED NOTHING still has to say so, and this branch is the row most in
 		// need of a caveat: the gate above skipped moneyFigure entirely, so a 0-of-40-priced
@@ -765,8 +850,13 @@ func drawerFigures(r drawerRow) []stripFigure {
 		// The strip's own spelling for a figure nobody can produce, plus the gap, in the slot the
 		// money figure would have taken — so the row reads left to right the same way a priced
 		// one does.
-		figs = append(figs, plainFigure("cost unavailable"),
-			plainFigure(coverageNote(gapOf(r.counts), r.counts.PriceableRequests)))
+		//
+		// THE GAP IS THE ROW'S NOTE, not a second figure in the money slot. As two figures it
+		// occupied the request column on this row and the money column on every other, which is
+		// the misalignment the table exists to end; as the trailing note it sits where every
+		// other row's caveats sit and yields to width pressure the same way.
+		money = plainFigure("cost unavailable")
+		note = plainFigure("(" + coverageNote(gapOf(r.counts), r.counts.PriceableRequests) + ")")
 	case r.counts.Requests > 0:
 		// NOTHING HERE COULD EVER CARRY A PRICE, which is a different answer from the branch
 		// above and needs a different word. Requests without a single priceable one is the
@@ -782,19 +872,19 @@ func drawerFigures(r drawerRow) []stripFigure {
 		// And a blank was the third wrong answer: before this branch the row rendered
 		// "some-endpoint  9 req  8.0k tokens" with the cost slot simply missing, which reads as
 		// a drawer that failed to fill a cell rather than as an answer.
-		figs = append(figs, plainFigure("not priceable"))
+		money = plainFigure("not priceable")
 	}
 	if r.counts.Requests > 0 {
-		figs = append(figs, stripFigure{
+		req = stripFigure{
 			full:    fmt.Sprintf("%d req", r.counts.Requests),
 			compact: fmt.Sprintf("%dr", r.counts.Requests),
-		})
+		}
 	}
 	if r.counts.Tokens > 0 {
-		figs = append(figs, stripFigure{
+		tokens = stripFigure{
 			full:    humanizeCount(r.counts.Tokens) + " tokens",
 			compact: humanizeCount(r.counts.Tokens),
-		})
+		}
 	}
 	// THE COMPACT FORM KEEPS THE WORD "saved", which the other figures here drop. It used to be a
 	// bare "~$0.1804", distinguishable from this row's cost only by the marker — and this panel no
@@ -803,10 +893,35 @@ func drawerFigures(r drawerRow) []stripFigure {
 	// this figure's identity rather than an explanation of it, so it is not the part that yields;
 	// the strip's own saved figure made the same argument before it was replaced.
 	if r.counts.AvoidedMicros > 0 {
-		figs = append(figs, stripFigure{
-			full:    "saved " + formatUSDTotalMicros(r.counts.AvoidedMicros),
-			compact: "saved " + formatUSDTotalMicros(r.counts.AvoidedMicros),
-		})
+		saved = plainFigure("saved " + formatUSDTotalMicros(r.counts.AvoidedMicros))
+	}
+
+	// THE COLUMNAR SLOTS, IN ORDER, each at its own width. A slot with nothing in it still occupies
+	// its column when a later COLUMN is filled — that is what keeps a tokens figure out of the
+	// request column on an MCP-only row.
+	cols := []stripFigure{
+		money.inColumn(drawerMoneyWidth, false),
+		req.inColumn(drawerReqWidth, false),
+		tokens.inColumn(drawerTokensWidth, false),
+		saved.inColumn(drawerSavedWidth, false),
+	}
+	// TRIMMED AGAINST THE LAST FILLED COLUMN, NOT THE LAST FILLED SLOT, and the note is the reason
+	// the distinction matters. Nothing is aligned against the note — it is prose of whatever length
+	// the caveats come to — so an empty column held open in FRONT of it buys no alignment and costs
+	// its width plus a gap. Measured with the note counted as a slot: a row with caveats and no
+	// saving held drawerSavedWidth open for nothing, so the note first fitted at 91 columns where 77
+	// would do, and was dropped on every terminal between.
+	last := -1
+	for i, f := range cols {
+		if f.full != "" {
+			last = i
+		}
+	}
+	figs = append(figs, cols[:last+1]...)
+	// The note goes on the end and takes no column, so it is the first thing fitStripFigures gives
+	// up — which is right, since it is the explanation and every figure before it is the fact.
+	if note.full != "" {
+		figs = append(figs, note)
 	}
 	return figs
 }

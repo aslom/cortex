@@ -199,13 +199,15 @@ func TestPaneView_DrawsTheStrip(t *testing.T) {
 	if len(lines) < 2 {
 		t.Fatalf("paneView rendered %d lines; expected at least a title and a strip", len(lines))
 	}
-	// Row 1 is the band's LABEL line and row 2 its values: labels above values is the whole
-	// point, so a view with the two swapped is wrong even though both are present.
+	// ROW 1 IS THE WHOLE BAND, label and figure inline, which is what the fold means here. This
+	// used to assert a label row at 1 and a value row at 2 — "labels above values is the whole
+	// point" — and that point moved: the pair travels together now and row 2 belongs to whatever
+	// follows the band. See spendBandLines.
 	if !strings.Contains(lines[1], "LAST 1H") {
-		t.Errorf("row 1 is %q, want the band's label row directly under the title", lines[1])
+		t.Errorf("row 1 is %q, want the band directly under the title", lines[1])
 	}
-	if len(lines) < 3 || !strings.Contains(lines[2], "$1.12") {
-		t.Errorf("row 2 is %q, want the value row under its labels", lines[2])
+	if !strings.Contains(lines[1], "$1.12") {
+		t.Errorf("row 1 is %q, want the hour's figure on the same row as its own label", lines[1])
 	}
 }
 
