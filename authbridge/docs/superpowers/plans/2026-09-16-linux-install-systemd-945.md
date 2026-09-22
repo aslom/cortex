@@ -1,13 +1,10 @@
 # Issue #945 — Verified Linux install and systemd service lifecycle
 
-**Status:** research + gap analysis complete. **This branch (PR #1080) delivers only the
-Tier 2 `fakeSystemctl`/`fakeLoginctl` test harness (bullet 6)**, which required refactoring
-four functions to take `goos` explicitly (see "Cross-cutting themes") — that refactor and
-harness are this branch's own diff against `main`. The `TimeoutStopSec` fix (bullet 7) is
-**on a separate, not-yet-merged sibling PR (#1079)**, not part of this branch; this doc's
-copy here should not be read as claiming it. Tier 3 (real-systemd integration test, #1076)
-is also a separate sibling PR. Tier 4 (install.sh smoke test, #957) and Tier 5 (reboot
-check, #964) are separate issues, not started.
+**Status:** research + gap analysis complete. This branch (#1080) delivers the Tier 2
+`fakeSystemctl`/`fakeLoginctl` test harness (bullet 6), which required refactoring four
+functions to take `goos` explicitly (see "Cross-cutting themes"). The `TimeoutStopSec` fix
+(bullet 7) is #1079. Tier 3 (real-systemd integration test) is #1076. Tier 4 (install.sh
+smoke test, #957) and Tier 5 (reboot check, #964) are separate issues, not started.
 **Owner:** Alan Cha (per epic #962 owner table: "Linux install, release smoke tests, reboot
 verification, CI").
 **Repo:** rossoctl/cortex. This doc lives in the same directory as other planning docs
@@ -197,17 +194,16 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   this way — only that our own code reacts correctly to inputs we scripted. That's Tier 3
   (real systemd integration test), still not built.
 
-### 7. `stop` tolerates the proxy's ~15s drain — **In review (#1079), not part of this branch**
+### 7. `stop` tolerates the proxy's ~15s drain — **#1079**
 - **Exists:** the proxy's own 15s shutdown timeout (`main.go:671`) is the anchor value
   everything else has to respect. macOS handles this *explicitly* in Go
   (`serviceBootoutTimeout = 30*time.Second`, `cmd_service.go:39-42`, plus the supervisor's
   own 20s-before-SIGKILL logic in `supervise.go:88-95`, deliberately longer than 15s).
   Today it "works" only by accident of systemd's 90s default exceeding 15s.
-- **In review (#1079):** adds an explicit `TimeoutStopSec=20` to `renderUnitFor("linux",
-  ...)`, matching the macOS supervisor's 20s headroom over the proxy's 15s drain, with
+- **#1079:** adds an explicit `TimeoutStopSec=20` to `renderUnitFor("linux", ...)`,
+  matching the macOS supervisor's 20s headroom over the proxy's 15s drain, with
   `TestRenderUnit_BothPlatforms`'s `"linux restarts on failure only"` subtest asserting the
-  line is present. Neither the unit-file change nor the subtest exists on this branch —
-  see #1079 directly for status.
+  line is present.
 
 ### 8. Works under user systemd, and states what happens where systemd is absent
 - **Exists (this is the best-handled bullet):** `loadService` gives a clear,
@@ -232,25 +228,23 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
 
 1. ~~The systemd rendering/string-shape logic is solid and well tested. The gap is almost
    entirely at the "does this actually work against a real system service manager" layer —
-   nothing fakes or drives real `systemctl`/`loginctl` for Linux~~ — **this branch closes
-   the fake-driving half**: `cmd_service_systemd_test.go` now mirrors macOS's
-   `fakeLaunchctl` harness. The real-launchd-equivalent (a real-systemd integration test)
-   is a separate sibling PR (#1076), not part of this branch.
+   nothing fakes or drives real `systemctl`/`loginctl` for Linux~~ — this branch closes the
+   fake-driving half: `cmd_service_systemd_test.go` now mirrors macOS's `fakeLaunchctl`
+   harness. The real-launchd equivalent (a real-systemd integration test) is #1076.
 2. **The Linux path is architecturally simpler** (no supervisor process, no bootout-race
    workaround) for a legitimate reason — but that simplicity has never been backed by the
-   same real-world verification that justified and shaped the macOS design. (Now addressed,
-   but on sibling PR #1076, not this branch.)
+   same real-world verification that justified and shaped the macOS design. (Now addressed
+   in #1076.)
 3. **One concrete, low-risk fix stands out:** add `TimeoutStopSec=` to the Linux unit. Small,
-   self-contained, directly addresses checklist bullet 7. **Done on sibling PR #1079**, not
-   part of this branch.
+   self-contained, directly addresses checklist bullet 7. #1079.
 4. **No real Linux CI smoke test exists yet anywhere in the repo** — this is #957's job, but
    #957 can't be trusted until the gaps above are closed, since a smoke test built on top of
    an unverified `Restart=on-failure` assumption would just as confidently pass.
 
 ## Suggested next steps (not yet sequenced into a task plan)
 
-1. Add an explicit `TimeoutStopSec=` to `renderUnitFor("linux", ...)` — **done on sibling
-   PR #1079**, not part of this branch; see bullet 7 above.
+1. Add an explicit `TimeoutStopSec=` to `renderUnitFor("linux", ...)` — #1079; see bullet 7
+   above.
 2. ~~Build a `fakeSystemctl`/`fakeLoginctl` test harness~~ — **done 2026-09-17**, see
    bullet 6 above. Required refactoring `loadService`/`controlService`/`supervisorRunning`/
    `unloadService` to take `goos` explicitly first (same fix `renderUnitFor` already had) —
