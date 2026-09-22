@@ -215,37 +215,37 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   start→`enable --now`, restart→plain `systemctl --user restart` (transient, by design).
   `supervisorRunning`'s Linux branch uses `systemctl --user is-active cortex.service`, with a
   sane fallback ("no systemctl → treat as unknown, don't block") for systemd-less boxes.
-- **Fixed:** `loadService`, `controlService`, `supervisorRunning`, and `unloadService`
+- **#1080 (open):** `loadService`, `controlService`, `supervisorRunning`, and `unloadService`
   took `runtime.GOOS` directly (unlike `renderUnitFor`, which already took `goos` as an
-  explicit parameter for exactly this reason). Refactored all four to take `goos string`
-  explicitly, updated every call site in `cmd_service.go` to pass `runtime.GOOS`, and added
+  explicit parameter for exactly this reason). Refactors all four to take `goos string`
+  explicitly, updates every call site in `cmd_service.go` to pass `runtime.GOOS`, and adds
   `cmd_service_systemd_test.go` — a `fakeSystemctl`/`fakeLoginctl` harness mirroring
   `fakeLaunchctl`, plus tests that actually run (not skip) on any host by passing `"linux"`
-  explicitly. Confirmed by running for real (not just reading the code) that `is-active`
+  explicitly. Confirms by running for real (not just reading the code) that `is-active`
   already correctly treats `activating`/`failed`/`deactivating`/`inactive` as "not
   running" — only `active` (exit 0) reads as running. That logic was already correct; it
   was just unverified. Also covers: `loadService`'s daemon-reload/enable failure messages,
   the linger-enable/marker-write logic (skip when already on, write marker only when *we*
   turn it on, caveat-not-fatal when `enable-linger` fails), `unloadService`'s
   marker-gated `disable-linger` (never called without a marker), and `controlService`'s
-  exact verb-per-action mapping. 22 subtests, all passing.
+  exact verb-per-action mapping. 27 subtests, all passing.
 - **Still open:** none of this proves the *real* `systemctl`/`loginctl` actually behave
   this way — only that our own code reacts correctly to inputs we scripted. That's Tier 3
-  (real systemd integration test), still not built.
+  (real systemd integration test), bullet 5 above.
 
 ### 7. `stop` tolerates the proxy's ~15s drain — **#1079**
 - **Exists:** the proxy's own 15s shutdown timeout (`main.go:671`) is the anchor value
   everything else has to respect. macOS handles this *explicitly* in Go
   (`serviceBootoutTimeout = 30*time.Second`, `cmd_service.go:39-42`, plus the supervisor's
   own 20s-before-SIGKILL logic in `supervise.go:88-95`, deliberately longer than 15s).
-- **Fixed:** added an explicit `TimeoutStopSec=20` to `renderUnitFor("linux", ...)`
+- **#1079 (open):** adds an explicit `TimeoutStopSec=20` to `renderUnitFor("linux", ...)`
   (`cmd_service_platform.go`), matching the macOS supervisor's 20s headroom over the
   proxy's 15s drain, with a rationale comment in the same style as the surrounding
   `StartLimit*`/`network-online.target` comments. `TestRenderUnit_BothPlatforms`'s
-  `"linux restarts on failure only"` subtest now asserts the line is present, so a future
+  `"linux restarts on failure only"` subtest asserts the line is present, so a future
   regression that drops it fails CI instead of silently reverting to systemd's undocumented
-  default. Previously it "worked" only by accident of systemd's 90s default exceeding 15s —
-  now it's an explicit, tested value.
+  default. Today it "works" only by accident of systemd's 90s default exceeding 15s;
+  #1079 makes it an explicit, tested value instead.
 
 ### 8. Works under user systemd, and states what happens where systemd is absent
 - **Exists (this is the best-handled bullet):** `loadService` gives a clear,
@@ -271,12 +271,12 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
 *(Written during the initial research pass; superseded as of 2026-09-21 — kept for
 history, corrected below rather than deleted.)*
 
-1. ~~The systemd rendering/string-shape logic is solid and well tested. The gap is almost
+1. The systemd rendering/string-shape logic is solid and well tested. The gap was almost
    entirely at the "does this actually work against a real system service manager"
-   layer — nothing fakes or drives real `systemctl`/`loginctl` for Linux~~ — closed by
-   #1080 (fake harness, `cmd_service_systemd_test.go`) and this branch, #1076 (real
-   systemd, `cmd_service_systemd_integration_test.go`, wired into CI) — giving Linux a
-   real-integration test macOS still does not have (see #944 relationship note below).
+   layer — nothing faked or drove real `systemctl`/`loginctl` for Linux. This branch
+   (#1076) closes the real-systemd half (`cmd_service_systemd_integration_test.go`, wired
+   into CI here) — giving Linux a real-integration test macOS still does not have (see
+   #944 relationship note below). The fake-driving half is #1080, still open.
 2. ~~That simplicity has never been backed by the same real-world verification that
    justified and shaped the macOS design~~ — it now has: #1076 confirmed
    `Restart=on-failure` against a live systemd, in CI, 2026-09-21.
@@ -315,7 +315,13 @@ history, corrected below rather than deleted.)*
 - **#944** — macOS mirror of this issue. Owned by @huang195. Already has real end-to-end
   verification behind it (the KeepAlive finding, bootout-race fix #880) that Linux still
   lacks — worth mining `cmd_service_platform.go`'s darwin comments and tests as a template
-  for what "verified" should look like on Linux.
+  for what "verified" should look like on Linux. **Untracked gap found while building
+  #1076's Linux equivalent:** `ABCTL_LAUNCHD_TESTS=required` exists in
+  `cmd_service_bootout_test.go` but is never set by any workflow, so
+  `TestWaitBootedOut_RealLaunchd` still skips on every CI run, including this repo's own —
+  the exact trap #1076 was built to avoid on the Linux side. No macOS runner exists in this
+  repo to set it against, so it can't be closed from here; flagging it so it's tracked
+  against #944 or #956 (macOS smoke tests) rather than rediscovered later.
 - **#955** — unattended agent workloads / headless capture path, owned by @esnible. Both
   #956 and #957 need it for the "non-zero token count" smoke-test assertion. Not required
   for #945 itself.

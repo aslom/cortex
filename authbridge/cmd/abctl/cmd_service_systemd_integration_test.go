@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +43,12 @@ import (
 // the var, though, so the test has skipped in every CI run since it was written.
 // The one CI job that runs THIS test should set ABCTL_SYSTEMD_TESTS=required after
 // setting up a real systemd --user session, so it can't fall into the same trap.
+// isExitCode reports whether err is a process exit with exactly this code.
+func isExitCode(err error, code int) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == code
+}
+
 func requireRealSystemd(t *testing.T) {
 	t.Helper()
 	skip := t.Skipf
@@ -87,13 +94,18 @@ func slowScript(t *testing.T) string {
 func runTransientUnit(t *testing.T, name, script string) {
 	t.Helper()
 	stop := func() {
-		// Errors here are logged, not asserted on: cleanup failing shouldn't fail a
-		// test that already got its answer, but a leaked unit should be visible
-		// instead of silently accumulating on the runner's user session.
-		if err := exec.Command("systemctl", "--user", "stop", name).Run(); err != nil {
+		// systemd-run transient units are garbage-collected once inactive, so by the
+		// time this runs the unit is typically already gone: `stop` on a unit that
+		// isn't loaded exits 5, and `reset-failed` on one that's neither failed nor
+		// loaded exits 1. Both are the ordinary end of a transient unit's life, not
+		// evidence of a leak — confirmed from this suite's own CI output, where both
+		// print on every passing run. Logging them unconditionally defeated the point
+		// of logging at all: a real leak would read identically to normal. Only
+		// anything else is worth surfacing.
+		if err := exec.Command("systemctl", "--user", "stop", name).Run(); err != nil && !isExitCode(err, 5) {
 			t.Logf("cleanup: systemctl --user stop %s: %v", name, err)
 		}
-		if err := exec.Command("systemctl", "--user", "reset-failed", name).Run(); err != nil {
+		if err := exec.Command("systemctl", "--user", "reset-failed", name).Run(); err != nil && !isExitCode(err, 1) {
 			t.Logf("cleanup: systemctl --user reset-failed %s: %v", name, err)
 		}
 	}
