@@ -274,7 +274,7 @@ func (m *model) rebuildSessionsTable() {
 				padLeft(sessionMoneyCell(s.CostMicros, s.Saturated, costW), costW),
 				padLeft(sessionMoneyCell(s.AvoidedMicros, s.Saturated, savedW), savedW))
 		}
-		row = append(row, padLeft(contextGauge(sessionContext(m.events[s.ID]), contextW), contextW))
+		row = append(row, padLeft(contextGauge(m.sessionContextFor(s.ID), contextW), contextW))
 		rows = append(rows, row)
 		// APPENDED IN LOCKSTEP, one line apart, so the two cannot drift: the row carries what
 		// a reader sees and this carries what the code acts on.
@@ -315,7 +315,7 @@ func (m *model) rebuildSessionsTable() {
 		}
 		// These rows DO have a context, and it is the one case where abctl's cache is the only
 		// possible source: the server has forgotten the session, so nothing else could answer.
-		row = append(row, padLeft(contextGauge(sessionContext(cached), contextW), contextW))
+		row = append(row, padLeft(contextGauge(m.sessionContextFor(id), contextW), contextW))
 		rows = append(rows, row)
 		ids = append(ids, id)
 	}

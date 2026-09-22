@@ -41,9 +41,12 @@ func findByKey(rows []eventRow, k eventKey) int {
 	return -1
 }
 
-// newEventsTable builds an empty events table. Uses the shared tableStyles
-// (including the Reverse-based Selected highlight) like the other panes —
-// now safe because per-cell ANSI coloring was removed from this table.
+// newEventsTable builds an empty events table. Uses the shared tableStyles like every other pane.
+//
+// The selection highlight is a background tint now, not a reverse — see tableStyles. What stood
+// here said Reverse was "safe because per-cell ANSI coloring was removed from this table", and
+// that same removal is why styles.go was left claiming Reverse protected colouring that no
+// longer existed anywhere.
 func newEventsTable() table.Model {
 	t := table.New(
 		// One definition, not two. This used to hold a hand-written twelve-entry

@@ -159,6 +159,31 @@ type InferenceExtension struct {
 	Tools       []InferenceTool    `json:"tools,omitempty"`
 	ToolChoice  any                `json:"toolChoice,omitempty"` // "auto" | "none" | {type,function:{name}}
 
+	// MessageCount and ToolCount are how many Messages and Tools this event HAD, for readers of
+	// a copy that no longer carries them. Set only by sessionapi.summarizeEvent, immediately
+	// before it nils both slices; zero everywhere else, including on every event the store keeps.
+	//
+	// WHY A COUNT AND NOT THE SLICE: the two useful facts about a conversation that have nothing
+	// to do with its content are "did this request carry a tool manifest" and "how long is the
+	// conversation". abctl's CONTEXT gauge asks exactly those — a manifest separates an agentic
+	// turn from a one-shot completion, and the message count identifies the main thread among the
+	// several that share a session id — and it asked them of len(Tools) and len(Messages), which
+	// `view=summary` strips. Measured on one live session, 41 of 62 inference responses carry a
+	// manifest unprojected and 0 of 62 do projected, so the gauge showed a dash for every row the
+	// timeline delivered. Two ints answer both against a payload that is 99.5% of the event.
+	//
+	// ZERO MEANS "NOT STATED", NOT "NONE", so a reader must prefer the slice when it is present:
+	//
+	//	if n := len(inf.Tools); n > 0 { use n } else { use inf.ToolCount }
+	//
+	// Both version-skew directions land on that rule. An OLD proxy ignores `view` and returns
+	// full events (sessionapi.eventProjection), so the slices answer there. A proxy built between
+	// abctl's CONTEXT column and these fields projects without setting them, and then neither
+	// answers — which is one reason abctl remembers its own figure rather than recomputing it
+	// from whatever it happens to hold.
+	MessageCount int `json:"messageCount,omitempty"`
+	ToolCount    int `json:"toolCount,omitempty"`
+
 	// StreamedResponse says the RESPONSE arrived as a stream, which is a different fact from Stream
 	// above — that one is what the request ASKED for, read off the request body.
 	//

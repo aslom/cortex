@@ -230,18 +230,52 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
   event count, tokens, cost, saved, context. Numerics are right-aligned so the
   digits line up between rows.
 
-  `CONTEXT(1M)` is a gauge, not a figure: how full the session's context was on
-  its **latest** request, against a fixed one-million-token window. The
+  `CONTEXT(1M)` is a gauge, not a figure: how full the **conversation's**
+  context was on its latest turn, against a fixed one-million-token window. The
   brackets are the scale, drawn on every row, so a nearly-empty session reads
   as empty-out-of-something rather than as a blank cell — and an em dash, which
   means *no context known*, stays distinguishable from the sliver a barely-used
   session gets.
 
-  Two things worth knowing about it. The denominator is fixed at 1M, the
-  largest window on any path the proxy sees, so a model with a smaller window
-  reads lower than it really is. And the figure comes from abctl's own event
-  cache: a session idle since before abctl attached shows the dash until you
-  drill into it, because the session summary carries no per-request field.
+  **A session is not one conversation.** Claude Code interleaves one-shot
+  completions — title generation, quota and summary calls — with your
+  conversation, under the same session id. Measured across 115 responses in
+  three live sessions, those carry *no tool manifest* and 2–3 messages, while
+  every conversation turn carried 27–31 tools and 63–1572 messages, with no
+  overlap at all. So the gauge considers only requests that carried tools, and
+  among those the one with the most messages: a one-shot can be large — one
+  measured at 295k — and would otherwise hijack the column, while a subagent's
+  own conversation can never out-message a long one.
+
+  There is deliberately no recency window. Your conversation goes silent while
+  a subagent runs, and that silence is structural, so any last-N-requests
+  window can fill with the subagent's traffic and hand the gauge to it.
+
+  Three things worth knowing. The denominator is fixed at 1M, the largest
+  window on any path the proxy sees, so a model with a smaller window reads
+  lower than it really is.
+
+  The figure comes from abctl's own event cache, filled by the live stream or
+  by drilling into a session. The timeline fetch asks for `view=summary`, and
+  that projection drops the two fields this rule reads — the tool manifest and
+  the message count — so it now records their **lengths** before dropping them
+  (`messageCount` / `toolCount`) and the gauge reads either shape. Without that
+  a delivered row could not be read at all, and an idle session showed a dash
+  however long you looked at it.
+
+  Against a proxy older than those fields, an idle row still shows the dash
+  until traffic arrives or you open one of its events — the one request that
+  returns an event in full. Once a figure is established it is kept, so a
+  projection that says nothing cannot erase it.
+
+  And after a compaction the gauge can stay on the pre-compaction context for a
+  while, because the older, longer request still holds the most messages; a
+  stale figure was preferred to one that flips to a one-shot's. Since the figure
+  outlives the events it was read from, the way to clear one you do not believe
+  is `Esc` back to the Pods pane and re-enter: a different pod is the one thing
+  that discards it, and re-attaching starts the column from whatever streams
+  next. That reset only exists in picker mode — under `--endpoint` there is no
+  Pods pane to back out to, so restarting abctl is the equivalent.
 
   It replaced an `ACTIVE` column whose `●` nobody acted on — `UPDATED` already
   answers "is this live", in seconds rather than as a dot. The `cached` marker

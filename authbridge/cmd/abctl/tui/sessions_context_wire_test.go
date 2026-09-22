@@ -1,0 +1,409 @@
+package tui
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+)
+
+// projected models what the TIMELINE delivers: sessionapi.summarizeEvent's inference half — the
+// slices nilled and their LENGTHS recorded in MessageCount / ToolCount first.
+//
+// MIRRORED RATHER THAN CALLED — summarizeEvent is unexported and in another module, and authlib's
+// own tests pin both halves of it (TestSummarizeEvent_CountsTheConversationItDrops for the counts).
+//
+// EVERY OTHER FIXTURE IN THIS PACKAGE BUILDS Tools BY HAND, and that is exactly how a whole suite
+// stayed green while the column was blank for every row the server sent: the tool-manifest filter
+// and the projection strip the same two fields, so a hand-built fixture models the SSE stream and
+// nothing else. Anything asserting on the gauge against server-delivered events has to come
+// through here.
+func projected(events []pipeline.SessionEvent) []pipeline.SessionEvent {
+	return project(events, true)
+}
+
+// projectedNoCounts is the SAME projection from a proxy that predates the counts: it strips the
+// slices and states nothing in their place.
+//
+// That window is real — abctl and the proxy install separately, so a build between the CONTEXT
+// column and MessageCount/ToolCount projects blind — and it is the shape every rebase test below
+// needs, because it is the only one where the timeline genuinely cannot answer and the remembered
+// figure is the sole source left.
+func projectedNoCounts(events []pipeline.SessionEvent) []pipeline.SessionEvent {
+	return project(events, false)
+}
+
+func project(events []pipeline.SessionEvent, counts bool) []pipeline.SessionEvent {
+	out := make([]pipeline.SessionEvent, 0, len(events))
+	for _, e := range events {
+		c := e
+		if e.Inference != nil {
+			inf := *e.Inference
+			if counts {
+				inf.MessageCount, inf.ToolCount = len(inf.Messages), len(inf.Tools)
+			}
+			inf.Messages = nil
+			inf.Tools = nil
+			inf.ToolCalls = nil
+			c.Inference = &inf
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// THE TIMELINE ANSWERS THROUGH THE COUNTS, and could not answer at all before them.
+//
+// Measured against a live proxy on the same 200-event window, 41 of 62 inference responses carry a
+// manifest unprojected and 0 of 62 do with view=summary — which abctl asks for on every timeline
+// fetch. So the rule was evaluable on streamed events and blank on delivered ones, and the fix is
+// two ints the projection records before dropping the slices.
+func TestSessionContext_ReadsAProjectedTimelineThroughTheCounts(t *testing.T) {
+	full := conversation("c1", time.Now(), 600, 500_000)
+	if got, want := sessionContext(full), 500_000; got != want {
+		t.Fatalf("unprojected fixture = %d, want %d", got, want)
+	}
+	if got, want := sessionContext(projected(full)), 500_000; got != want {
+		t.Errorf("projected = %d, want %d — the counts are what make a delivered row readable",
+			got, want)
+	}
+	// And a one-shot stays a one-shot through the projection: a manifest of zero is STATED as
+	// zero, which is the same answer the slice gave.
+	if got := sessionContext(projected(oneShot("o1", time.Now(), 282_000))); got != 0 {
+		t.Errorf("a projected one-shot = %d, want 0", got)
+	}
+	// A proxy that projects without stating the counts cannot be read, and must not be guessed
+	// at: this is the case contextRun's remembered figure exists for.
+	if got := sessionContext(projectedNoCounts(full)); got != 0 {
+		t.Errorf("projected with no counts = %d, want 0", got)
+	}
+}
+
+// AN OLD PROXY RETURNS FULL EVENTS, so the len() arm has to stay. eventProjection treats an
+// unrecognised `view` as "no projection", which is the skew a new abctl against an old proxy hits —
+// and there the slices are populated while the counts are absent.
+func TestSessionContext_StillReadsAnOldProxysSlices(t *testing.T) {
+	evs := conversation("c1", time.Now(), 600, 500_000)
+	for i := range evs {
+		if evs[i].Inference != nil {
+			if evs[i].Inference.MessageCount != 0 || evs[i].Inference.ToolCount != 0 {
+				t.Fatal("the fixture states counts; this test is about a proxy that does not")
+			}
+		}
+	}
+	if got, want := sessionContext(evs), 500_000; got != want {
+		t.Errorf("sessionContext = %d, want %d — counts-only reading would blank every row "+
+			"served by a proxy that predates them", got, want)
+	}
+}
+
+// THE REGRESSION BOTH REVIEWS CAUGHT: opening a session must not blank its gauge.
+//
+// The stream establishes the figure, the operator presses Enter, and the snapshot replaces every
+// held event with a projected copy carrying no candidate. Dropping the running answer there — the
+// obvious invalidation — turned the column into a dash for exactly the session being looked at.
+func TestSessionContextFor_AProjectedSnapshotKeepsTheStreamsFigure(t *testing.T) {
+	base := time.Now()
+	const id = "s"
+	full := conversation("c1", base, 600, 500_000)
+	m := &model{events: map[string][]pipeline.SessionEvent{id: full}}
+	m.sessionsTbl = newSessionsTable()
+
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Fatalf("from the stream: %d, want %d", got, want)
+	}
+
+	// The real handler, and the real shape: same events, same count, projected — and WITHOUT the
+	// counts, because a proxy that states them makes this a question the slice can answer and
+	// stops testing the rebase. The counts-less window is the case the memory exists for.
+	m.Update(snapshotLoadedMsg{id: id, events: projectedNoCounts(full), projected: true})
+
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Errorf("after a view=summary snapshot: %d, want %d — the column blanked on drill-in",
+			got, want)
+	}
+}
+
+// An older page is projected too, and it arrives in FRONT of the folded events — so the run cannot
+// be extended and must not be discarded either.
+//
+// THE HELD EVENTS HAVE TO BE PROJECTED for this to test anything, which the first version of it got
+// wrong. With an unprojected conversation still in the slice, dropping the run and rescanning finds
+// that conversation again and reports the same figure, so the assertion passed with the fix
+// reverted. The production sequence is the one built here: stream, [t] (snapshot, projected), [o].
+func TestSessionContextFor_AnOlderPageKeepsTheFigure(t *testing.T) {
+	base := time.Now()
+	full := conversation("c1", base, 600, 500_000)
+	m := pagedModel(t, full)
+
+	if got, want := m.sessionContextFor("sess-1"), 500_000; got != want {
+		t.Fatalf("from the stream: %d, want %d", got, want)
+	}
+	// The snapshot leaves the slice projected — and clears the paging state, so [o] rebuilds it.
+	m.Update(snapshotLoadedMsg{id: "sess-1", events: projectedNoCounts(full), projected: true})
+	m.paging = map[string]*pagingState{"sess-1": {pageSizes: []int{len(full)}}}
+
+	// Older in wall-clock terms, or applyOlderPage refuses it as a restarted session.
+	older := projectedNoCounts(conversation("c0", base.Add(-time.Hour), 40, 62_000))
+	m.applyOlderPage(olderPageLoadedMsg{id: "sess-1", events: older, serverOldest: 1})
+
+	if got, want := m.sessionContextFor("sess-1"), 500_000; got != want {
+		t.Errorf("after an older page: %d, want %d — nothing in the slice can answer this "+
+			"question any more, so the remembered figure is the only source left", got, want)
+	}
+}
+
+// THE DETAIL FETCH IS THE ONLY PATH THAT PUTS A MANIFEST BACK, so it is the only way a session
+// abctl never streamed can ever show a gauge — and it changes an event's CONTENT at the same
+// length, which the fold's length check cannot see.
+func TestSessionContextFor_ADetailFetchFillsTheGauge(t *testing.T) {
+	base := time.Now()
+	const id = "s"
+	full := conversation("c1", base, 600, 500_000)
+	for i := range full {
+		full[i].Seq = uint64(i + 1)
+	}
+	// A session abctl attached to after its traffic, served by a proxy that projects without
+	// stating the counts: nothing in the timeline can answer, so the detail fetch is the only
+	// source of a figure at all. Against a current proxy the snapshot answers on its own — see
+	// TestSessionsTable_AnIdleSessionsSnapshotFillsTheGauge.
+	m := &model{events: map[string][]pipeline.SessionEvent{id: projectedNoCounts(full)}}
+	if got := m.sessionContextFor(id); got != 0 {
+		t.Fatalf("a projected timeline: %d, want 0 (the dash)", got)
+	}
+
+	// The operator opens the response row; the fetched event is unprojected.
+	resp := full[1]
+	m.replaceHeldEvent(id, &resp)
+
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Errorf("after the detail fetch: %d, want %d — the write-back was invisible to the "+
+			"length check", got, want)
+	}
+}
+
+// A DIFFERENT POD IS A DIFFERENT WORKLOAD, and it is the one case where a remembered figure is
+// void rather than merely unsupported: the same session id now names someone else's conversation.
+// Matching event counts make it a cache HIT, so the wrong figure would render rather than leak.
+func TestSessionContextFor_APodSwitchVoidsTheFigure(t *testing.T) {
+	base := time.Now()
+	m := fitModel(t, paneEvents, 200, 40, conversation("c1", base, 600, 500_000))
+	m.parentCtx, m.ctx = context.Background(), context.Background()
+	m.cancel = func() {}
+
+	if got, want := m.sessionContextFor("sess-1"), 500_000; got != want {
+		t.Fatalf("on the first pod: %d, want %d", got, want)
+	}
+
+	m.backToPodsPane()
+	// The next pod happens to have a session with the same id and the same event count.
+	m.events["sess-1"] = conversation("other", base.Add(time.Hour), 40, 62_000)
+
+	if got, want := m.sessionContextFor("sess-1"), 62_000; got != want {
+		t.Errorf("on the second pod: %d, want %d — the previous pod's context carried over",
+			got, want)
+	}
+}
+
+// RELEASING EVENTS FOR MEMORY IS NOT NEWS ABOUT THE SESSION. The picker drops cached events for
+// sessions the server still lists; the figure is one int and stays, or a live session's gauge would
+// fall back to a dash for having been economical.
+func TestSessionContextFor_AReleaseOfItsEventsKeepsTheFigure(t *testing.T) {
+	const id = "s"
+	m := &model{events: map[string][]pipeline.SessionEvent{
+		id: conversation("c1", time.Now(), 600, 500_000),
+	}}
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Fatalf("before the release: %d, want %d", got, want)
+	}
+
+	delete(m.events, id) // what the picker's prune does
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Errorf("after the release: %d, want %d", got, want)
+	}
+	// And a later streamed turn still wins on message count.
+	m.events[id] = conversation("c2", time.Now().Add(time.Minute), 900, 700_000)
+	if got, want := m.sessionContextFor(id), 700_000; got != want {
+		t.Errorf("after a new turn: %d, want %d", got, want)
+	}
+}
+
+// A TIE MUST STILL GO TO THE LATEST TURN ACROSS A REBASE, which is the one rule the remembered
+// figure could break.
+//
+// Two turns of equal length, the later one winning. The snapshot projects both away, so the figure
+// survives only in the run — and then the operator opens the OLDER turn, whose full event comes
+// back unprojected and folds as a candidate. It ties on message count, and a fold that reads "later
+// in this fold" as "later in the session" hands it the column: reproduced at 445k against a true
+// 500k before contextRun carried a timestamp.
+func TestSessionContextFor_ATieAcrossARebaseKeepsTheLaterTurn(t *testing.T) {
+	base := time.Now()
+	const id = "s"
+	older := conversation("early", base, 700, 445_000)
+	newer := conversation("late", base.Add(time.Hour), 700, 500_000)
+	for i := range older {
+		older[i].Seq = uint64(i + 1)
+	}
+	for i := range newer {
+		newer[i].Seq = uint64(i + 3)
+	}
+	all := append(append([]pipeline.SessionEvent{}, older...), newer...)
+
+	m := &model{events: map[string][]pipeline.SessionEvent{id: all}}
+	m.sessionsTbl = newSessionsTable()
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Fatalf("from the stream: %d, want %d", got, want)
+	}
+	m.Update(snapshotLoadedMsg{id: id, events: projectedNoCounts(all), projected: true})
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Fatalf("after the snapshot: %d, want %d", got, want)
+	}
+
+	resp := older[1] // the detail pane fetched the older turn's response
+	m.replaceHeldEvent(id, &resp)
+
+	if got, want := m.sessionContextFor(id), 500_000; got != want {
+		t.Errorf("after opening the older turn: %d, want %d — an older tie took the column",
+			got, want)
+	}
+}
+
+// AN IDLE SESSION'S SNAPSHOT NOW FILLS THE GAUGE, with no stream history and no detail fetch.
+//
+// This is the regression the third review measured against main, where the rule read only
+// promptTokens — which the projection keeps — so drilling into an idle row produced a figure. On
+// this branch it produced a dash until the counts landed. Main's figure was the LATEST request's,
+// right at 63% of drill-in moments across six live sessions and off by more than 10% at 37% of them,
+// worst case 6,331 against a true 246,919; the counts make the same rows correct instead.
+func TestSessionsTable_AnIdleSessionsSnapshotFillsTheGauge(t *testing.T) {
+	base := time.Now()
+	const id = "idle"
+	// A one-shot speaks LAST, which is what made main's latest-request reading wrong here.
+	evs := append(conversation("c1", base, 1509, 851_000), oneShot("o1", base.Add(time.Minute), 7_000)...)
+
+	m := &model{events: map[string][]pipeline.SessionEvent{}}
+	m.sessionsTbl = newSessionsTable()
+	if got := m.sessionContextFor(id); got != 0 {
+		t.Fatalf("before the snapshot: %d, want 0 — abctl holds nothing for this session", got)
+	}
+
+	m.Update(snapshotLoadedMsg{id: id, events: projected(evs), projected: true})
+
+	if got, want := m.sessionContextFor(id), 851_000; got != want {
+		t.Errorf("after the snapshot: %d, want %d — the conversation's figure, not the "+
+			"one-shot's 7,000 and not a dash", got, want)
+	}
+}
+
+// AND THE MESSAGE COUNT STILL PICKS THE MAIN THREAD through the projection, which the test above
+// does not prove: there, every projected candidate loses its count equally and the tie-break falls
+// through to time, so the right answer comes out for the wrong reason. Mutation-checked — breaking
+// messageCount's counts arm leaves that test green and fails this one.
+//
+// A tool-carrying SUBAGENT is the case that needs it. It is a legitimate candidate (its own
+// manifest, its own conversation) and it speaks LAST, so only its length keeps it from taking the
+// column from a 1509-message main thread.
+func TestSessionsTable_AProjectedTimelineStillPicksTheMainThread(t *testing.T) {
+	base := time.Now()
+	const id = "idle"
+	evs := append(conversation("main", base, 1509, 851_000),
+		conversation("sub", base.Add(time.Minute), 12, 40_000)...)
+
+	m := &model{events: map[string][]pipeline.SessionEvent{}}
+	m.sessionsTbl = newSessionsTable()
+	m.Update(snapshotLoadedMsg{id: id, events: projected(evs), projected: true})
+
+	if got, want := m.sessionContextFor(id), 851_000; got != want {
+		t.Errorf("after the snapshot: %d, want %d — the subagent spoke last and is a candidate; "+
+			"only the message count keeps the column on the main thread", got, want)
+	}
+}
+
+// THE FOLD MUST NOT RESCAN WHAT IT ALREADY FOLDED, which is the whole point of contextRun and was
+// pinned by nothing: either branch could regress to a whole-slice scan and every other test in this
+// package would stay green, because a rescan reaches the same ANSWER — 6.1ms and 3.49MB more slowly,
+// per session, per arriving event, on the pane abctl opens on.
+//
+// So this poisons the prefix: the events already folded are overwritten with a turn that would win a
+// rescan outright. A fold that trusts its prefix cannot see it; anything that re-reads the prefix
+// reports 999,000. Artificial by construction — production only rewrites a held event through
+// replaceHeldEvent, which rebases — and that is what makes it a clean probe of this one property.
+//
+// Both branches need it, and they fail to different mutations. The equal-length HIT is what the row
+// loop takes on every rebuild for every session with no new events; the delta fold is what one
+// arriving event costs.
+func TestSessionContextFor_DoesNotRescanTheFoldedPrefix(t *testing.T) {
+	base := time.Now()
+	const id = "s"
+	poisoned := func(t *testing.T) *model {
+		t.Helper()
+		m := &model{events: map[string][]pipeline.SessionEvent{
+			id: conversation("c1", base, 600, 500_000),
+		}}
+		if got, want := m.sessionContextFor(id), 500_000; got != want {
+			t.Fatalf("the first fold: %d, want %d", got, want)
+		}
+		// Same length, so only a re-read of the prefix can notice.
+		copy(m.events[id], conversation("poison", base.Add(time.Minute), 9_000, 999_000))
+		return m
+	}
+
+	t.Run("a repeat call with nothing appended", func(t *testing.T) {
+		m := poisoned(t)
+		if got, want := m.sessionContextFor(id), 500_000; got != want {
+			t.Errorf("repeat call = %d, want %d — 999000 means the length check stopped "+
+				"short-circuiting, so every row rescans on every rebuild", got, want)
+		}
+	})
+
+	t.Run("a call after one appended turn", func(t *testing.T) {
+		m := poisoned(t)
+		m.events[id] = append(m.events[id],
+			conversation("c2", base.Add(time.Hour), 700, 600_000)...)
+		if got, want := m.sessionContextFor(id), 600_000; got != want {
+			t.Errorf("after one turn = %d, want %d — 999000 means the delta fold became a "+
+				"whole-slice fold", got, want)
+		}
+	})
+}
+
+// THE PICKER'S RELEASE IS THE ONE m.events WRITER WITH NO TEST, and the one whose correct action is
+// to do NOTHING to contextRun. A `delete(m.contextRun, cached)` there — the obvious lockstep, and
+// what its neighbours do for the two maps beside it — turns a live session's gauge into a dash for
+// having been economical with memory. Driven through handleKey, since the comment forbidding that
+// deletion is only worth as much as the test behind it.
+func TestSessionContextFor_ThePickerReleaseKeepsTheFigure(t *testing.T) {
+	base := time.Now()
+	m := fitModel(t, paneEvents, 200, 40, conversation("c1", base, 600, 500_000))
+	m.events["other"] = conversation("c2", base, 900, 700_000)
+	if got, want := m.sessionContextFor("other"), 700_000; got != want {
+		t.Fatalf("before the release: %d, want %d", got, want)
+	}
+
+	// Selecting one session prunes the OTHER cached-but-live entries, which is the path under
+	// test; both must still be listed by the server for the prune to consider them live.
+	m.sessions = []session.SessionSummary{{ID: "sess-1"}, {ID: "other"}}
+	m.rebuildSessionsTable()
+	setCursorVisible(&m.sessionsTbl, 0)
+	m.pane = paneSessions
+	m.selectedSess = ""
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+
+	released := false
+	for _, id := range []string{"sess-1", "other"} {
+		if _, held := m.events[id]; !held {
+			released = true
+			if got := m.sessionContextFor(id); got == 0 {
+				t.Errorf("%q had its events released and its gauge went to a dash", id)
+			}
+		}
+	}
+	if !released {
+		t.Fatal("the picker released nothing, so this test is not exercising the prune")
+	}
+}

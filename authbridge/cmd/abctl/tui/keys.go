@@ -584,6 +584,13 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				for cached := range m.events {
 					if cached != id && live[cached] {
 						delete(m.events, cached)
+						// contextRun is deliberately NOT deleted, unlike the two
+						// below. This releases a still-listed session's events for
+						// memory — a storage decision, not news about the session —
+						// and the gauge's figure is one int. Dropping it would turn a
+						// live session's context into a dash; sessionContextFor
+						// re-folds whatever is left on top of the figure it kept.
+						//
 						// Same reason as the wholesale reset in backToPodsPane: the
 						// count belongs to the events it describes.
 						delete(m.olderNotFetched, cached)

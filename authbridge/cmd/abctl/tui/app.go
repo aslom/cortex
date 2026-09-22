@@ -324,7 +324,33 @@ type model struct {
 
 	// Data caches.
 	sessions []session.SessionSummary
-	events   map[string][]pipeline.SessionEvent // sessionID → ring buffer
+	// events was labelled a ring buffer and has never been one. Nothing trims an entry in
+	// place; every write is one of six, and the CONTEXT(1M) gauge folds forward off this map,
+	// so each one owes contextRun an action. The full inventory, because the gauge reads an
+	// unchanged LENGTH as "nothing new to fold" and two of these change content without
+	// changing length:
+	//
+	//	app.go   streamed append      grows           fold the delta (the design case)
+	//	app.go   snapshot load        replaces        rebaseSessionContext — PROJECTED events
+	//	paging   older-page merge     replaces        rebaseSessionContext — projected, and
+	//	                                             the page cap can drop newer events too
+	//	detail   replaceHeldEvent     same length!    rebaseSessionContext — swaps in the one
+	//	                                             UNPROJECTED copy abctl ever gets
+	//	app.go   backToPodsPane       whole map       m.contextRun = nil: a different pod is a
+	//	                                             different workload behind the same id
+	//	keys.go  picker release       deletes one     nothing: the figure outlives the events,
+	//	                                             which were released to save memory
+	//
+	// A seventh path that trimmed the front of an entry would be invisible to the length check
+	// if it also appended, so it would have to rebase.
+	events map[string][]pipeline.SessionEvent // sessionID → every event held for it
+	// contextRun is the CONTEXT(1M) gauge's answer per session, folded forward as events
+	// arrive rather than recomputed from the whole slice — see sessionContextFor. The row
+	// loop asks for every session on every rebuild, and a rebuild happens on every streamed
+	// event, so a full scan there is O(events) per session per event. It is a remembered
+	// maximum rather than a cache of the slice: the events can stop carrying the evidence
+	// (view=summary strips it) while the answer stays true.
+	contextRun map[string]contextRun
 	// sessionsData is what an agent knows about its own sessions that the proxy does
 	// not — a title, mostly. Read once at startup from ~/.cortex/session-metadata.json,
 	// which `abctl experimental read-claude-sessions` writes; empty when that has never
@@ -699,6 +725,12 @@ func (m *model) backToPodsPane() {
 	// In lockstep with m.events: a Seq recorded as fetched must not survive the rows
 	// it described, or the next session to reuse that Seq would be assumed complete.
 	m.fullFetched = nil
+	// In lockstep with m.events, and the one case where the gauge's remembered figure is
+	// genuinely void rather than merely unsupported by what is held: a different pod is a
+	// different workload, so the same session id now means someone else's conversation. Left
+	// behind, an id present on both pods with a matching event count takes the length-check
+	// hit and reports the previous pod's context. sessionContextFor reallocates lazily.
+	m.contextRun = nil
 	// In lockstep with m.events. A count describing a session whose events are gone is
 	// the bug that made this map per-session in the first place, just with a narrower
 	// window: re-entering the events pane on a matching id before its snapshot lands.
@@ -1042,6 +1074,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.serverProjects = msg.projected
 		// Only update if we're still focused on this session.
 		m.events[msg.id] = msg.events
+		// A wholesale replacement the length check cannot see, so the gauge is re-folded
+		// over what just landed. NOT dropped: msg.events is projected (view=summary
+		// strips the manifest and the message count), so dropping the figure here blanked
+		// the column the moment an operator opened a session — see rebaseSessionContext.
+		m.rebaseSessionContext(msg.id, msg.events)
 		if m.olderNotFetched == nil {
 			m.olderNotFetched = map[string]int{}
 		}
