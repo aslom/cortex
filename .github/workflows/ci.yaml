@@ -180,8 +180,11 @@ jobs:
       # Gives the abctl leg a real systemd --user session for
       # cmd_service_systemd_integration_test.go. The runner has no interactive login, so
       # nothing has started one yet; enable-linger asks logind to start and keep one
-      # running. ABCTL_SYSTEMD_TESTS=required (below) makes a setup failure here show up
-      # as a failed test, not a silently skipped one.
+      # running. Either way a real problem here is loud, not silent: a hard failure (e.g.
+      # enable-linger itself failing) fails this step outright under bash -e, so Test
+      # never runs; a soft one (session unreachable after enable-linger) only warns here,
+      # and ABCTL_SYSTEMD_TESTS=required (below) is what turns THAT case into a failed
+      # test instead of a silent skip.
       - name: Enable a systemd --user session (abctl leg only)
         if: matrix.binary == 'abctl'
         run: |

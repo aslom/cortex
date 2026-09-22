@@ -1,14 +1,16 @@
 # Issue #945 — Verified Linux install and systemd service lifecycle
 
-**Status:** research + gap analysis complete. Landed 2026-09-17: the `TimeoutStopSec` fix
-(bullet 7) and the Tier 2 `fakeSystemctl`/`fakeLoginctl` test harness (bullet 6), which
-required refactoring four functions to take `goos` explicitly. Landed 2026-09-21
-(PR #1076): the Tier 3 real-systemd integration test (bullet 5), wired into CI, and
-**confirmed passing against a real systemd** — `Restart=on-failure` really does restart
-a crashed unit, and a deliberate stop really doesn't trigger one. Two real bugs the
-first CI run caught (a `systemd-run` argument mistake, and this doc tripping an
-unrelated guard test) were fixed in the same PR. Tier 4 (install.sh smoke test, #957)
-and Tier 5 (reboot check, #964) are separate issues, not started.
+**Status:** research + gap analysis complete. **This branch (PR #1076) delivers only the
+Tier 3 real-systemd integration test (bullet 5)** — wired into CI, and confirmed passing
+against a real systemd: `Restart=on-failure` really does restart a crashed unit, and a
+deliberate stop really doesn't trigger one. Two real bugs the first CI run caught (a
+`systemd-run` argument mistake, and this doc tripping an unrelated guard test) were fixed
+in the same PR. Bullets 6 and 7 are proposed and verified, but **land on separate,
+not-yet-merged sibling PRs** — #1080 (Tier 2 fake harness + the `goos` refactor it
+required) and #1079 (the `TimeoutStopSec` fix) respectively — neither is part of this
+branch's own diff against `main`, and this doc's copy on this branch should not be read as
+claiming otherwise. Tier 4 (install.sh smoke test, #957) and Tier 5 (reboot check, #964)
+are separate issues, not started.
 **Owner:** Alan Cha (per epic #962 owner table: "Linux install, release smoke tests, reboot
 verification, CI").
 **Repo:** rossoctl/cortex. This doc lives in the same directory as other planning docs
@@ -209,7 +211,7 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   `Restart=on-failure` assumption** — it's currently trusted, not proven. This is precisely
   the class of gap #945 (and its manual-reboot sibling, #964) exists to close.
 
-### 6. `abctl service status | start | stop | restart` accurate in every state — **CLOSED (Tier 2) 2026-09-17**
+### 6. `abctl service status | start | stop | restart` accurate in every state — **CLOSED on sibling PR #1080 (Tier 2), not part of this branch**
 - **Exists:** `serviceStatus`/`serviceControl` (`cmd_service.go:540-665`) are
   platform-agnostic; Linux `controlService` maps stop→`disable --now` (persistent),
   start→`enable --now`, restart→plain `systemctl --user restart` (transient, by design).
@@ -233,7 +235,7 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   this way — only that our own code reacts correctly to inputs we scripted. That's Tier 3
   (real systemd integration test), still not built.
 
-### 7. `stop` tolerates the proxy's ~15s drain — **CLOSED 2026-09-17**
+### 7. `stop` tolerates the proxy's ~15s drain — **CLOSED on sibling PR #1079, not part of this branch**
 - **Exists:** the proxy's own 15s shutdown timeout (`main.go:671`) is the anchor value
   everything else has to respect. macOS handles this *explicitly* in Go
   (`serviceBootoutTimeout = 30*time.Second`, `cmd_service.go:39-42`, plus the supervisor's
@@ -274,26 +276,29 @@ history, corrected below rather than deleted.)*
 1. ~~The systemd rendering/string-shape logic is solid and well tested. The gap is almost
    entirely at the "does this actually work against a real system service manager"
    layer — nothing fakes or drives real `systemctl`/`loginctl` for Linux~~ — **no longer
-   true**: `cmd_service_systemd_test.go` (fake harness) and
-   `cmd_service_systemd_integration_test.go` (real systemd) both exist now, and Linux has
-   a real-integration test wired into CI, which macOS still does not (see #944 relationship
-   note below).
+   true across the three open sibling PRs together** (#1076/#1079/#1080), though **not
+   from this branch alone**: `cmd_service_systemd_test.go` (fake harness) is on #1080;
+   this branch (#1076) contributes only `cmd_service_systemd_integration_test.go` (real
+   systemd), which is wired into CI here and gives Linux a real-integration test macOS
+   still does not have (see #944 relationship note below).
 2. ~~That simplicity has never been backed by the same real-world verification that
-   justified and shaped the macOS design~~ — **it now has**: PR #1076 confirmed
-   `Restart=on-failure` against a live systemd, in CI, 2026-09-21.
-3. ~~One concrete, low-risk fix stands out: add `TimeoutStopSec=`~~ — **done**, bullet 7.
+   justified and shaped the macOS design~~ — **it now has, via this PR specifically**:
+   #1076 confirmed `Restart=on-failure` against a live systemd, in CI, 2026-09-21.
+3. ~~One concrete, low-risk fix stands out: add `TimeoutStopSec=`~~ — **done on sibling PR
+   #1079**, not part of this branch; see bullet 7.
 4. **No real Linux CI smoke test exists yet anywhere in the repo** — still true, this
    remains #957's job. What's changed: #957 now has a verified `Restart=on-failure`
    foundation to build on, rather than an unverified assumption underneath it.
 
 ## Suggested next steps (not yet sequenced into a task plan)
 
-1. ~~Add an explicit `TimeoutStopSec=` to `renderUnitFor("linux", ...)`~~ — **done
-   2026-09-17**, see bullet 7 above.
-2. ~~Build a `fakeSystemctl`/`fakeLoginctl` test harness~~ — **done 2026-09-17**, see
-   bullet 6 above. Required refactoring `loadService`/`controlService`/`supervisorRunning`/
-   `unloadService` to take `goos` explicitly first (same fix `renderUnitFor` already had) —
-   otherwise these functions can't be exercised from a non-Linux host at all.
+1. Add an explicit `TimeoutStopSec=` to `renderUnitFor("linux", ...)` — **done on sibling
+   PR #1079**, not part of this branch; see bullet 7 above.
+2. Build a `fakeSystemctl`/`fakeLoginctl` test harness — **done on sibling PR #1080**, not
+   part of this branch; see bullet 6 above. Required refactoring
+   `loadService`/`controlService`/`supervisorRunning`/`unloadService` to take `goos`
+   explicitly first (same fix `renderUnitFor` already had) — otherwise these functions
+   can't be exercised from a non-Linux host at all.
 3. ~~Get real verification that `Restart=on-failure` actually recovers the unit after
    `kill -9`~~ — **done 2026-09-21, confirmed passing in real CI**, see bullet 5 above
    (PR #1076). Still open: lingering/reboot-survival is a separate claim this test does

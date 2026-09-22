@@ -29,8 +29,13 @@ import (
 // reproduce, just the bare Restart=on-failure claim itself.
 
 // requireRealSystemd skips (or, with ABCTL_SYSTEMD_TESTS=required, fails) unless
-// this process can actually drive a live systemd --user session — mirroring the
-// four skip guards in TestWaitBootedOut_RealLaunchd (cmd_service_bootout_test.go).
+// this process can actually drive a live systemd --user session — covering the same
+// ground as TestWaitBootedOut_RealLaunchd's skip guards (cmd_service_bootout_test.go),
+// deliberately in a different shape: three categories here (wrong GOOS, a binary
+// missing from PATH, no reachable systemctl --user session) versus that test's four,
+// since its fourth — launchd refusing to start the test agent in this domain at all —
+// has no systemd analog. See this file's header comment for why the two platforms
+// don't need the same thing proved in the first place.
 //
 // That macOS test's env-var escape hatch exists because silent skipping is exactly
 // how the bootout-race bug (#880) shipped unexercised. Its own workflow never sets
@@ -93,7 +98,12 @@ func runTransientUnit(t *testing.T, name, script string) {
 		}
 	}
 	t.Cleanup(stop)
-	stop() // in case a previous, aborted run of this test left it behind
+	// No pre-emptive stop() here: the unit name embeds this process's own pid, unique
+	// to this run, so there is no plausible same-named leftover to clear first (unlike
+	// the darwin test this mirrors, which uses one fixed label — that's precisely why
+	// its pre-emptive bootout is meaningful and this one would not be). Calling it
+	// anyway only logs a spurious "cleanup:" failure on every normal passing run,
+	// since stopping/reset-failing a unit that was never registered is itself an error.
 
 	args := []string{
 		"--user", "--unit=" + name,
