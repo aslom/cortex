@@ -401,17 +401,32 @@ func TestRemappedKeys_MeanTheSameThingInEveryGroup(t *testing.T) {
 		}
 	}
 
-	// The labels are derived from paneName, and the jump rows are the only place a
-	// reader learns which pane a key opens. Assert the derivation rather than
-	// trusting it: a label that drifts from the pane's own title would have the
-	// overlay calling one surface two names.
+	// The jump rows are the only place a reader learns which pane a key opens, so
+	// the label each row shows is pinned to a LITERAL.
+	//
+	// It used to be compared against strings.ToLower(paneName(jt.pane)) — which is
+	// the body of jt.name() itself, so the assertion could not fail for any pane
+	// target and passed vacuously. Literals catch what a reader would actually
+	// notice: a pane retitled without its jump row being reconsidered.
+	wantLabel := map[string]string{
+		"u": "usage",
+		"P": "pipeline",
+		"C": "plugin catalog",
+		"$": "spend",
+	}
 	for _, jt := range jumpTargets {
-		if jt.pane == paneNone {
-			continue
+		if want, ok := wantLabel[jt.key]; !ok {
+			t.Errorf("jumpTargets has an undocumented key %q — add it here", jt.key)
+		} else if jt.name() != want {
+			t.Errorf("the %q jump row reads %q, want %q", jt.key, jt.name(), want)
 		}
-		if wantName := strings.ToLower(paneName(jt.pane)); jt.name() != wantName {
-			t.Errorf("jumpTargets labels %q %q but its pane is titled %q",
-				jt.key, jt.name(), wantName)
+		// label is consulted only for paneNone, so a value set on a pane target is
+		// dead weight the compiler cannot see. Keep it empty so it cannot disagree
+		// with the name actually rendered.
+		if jt.pane != paneNone && jt.label != "" {
+			t.Errorf("jumpTargets sets label %q on %q, whose pane is %v — the label is "+
+				"ignored for pane targets, so it can only mislead",
+				jt.label, jt.key, jt.pane)
 		}
 	}
 }

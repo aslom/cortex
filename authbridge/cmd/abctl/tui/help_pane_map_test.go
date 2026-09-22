@@ -11,6 +11,28 @@ import (
 // that assert on content are not reading a truncated body.
 const helpWide = 200
 
+// sectionFrom returns body from title onwards, stopping at the blank line that ends
+// the section when only is true.
+//
+// t.Fatalf ON A MISSING TITLE, which is the reason this is a helper: the callers
+// used body[strings.Index(body, title):] after a non-fatal t.Errorf, so a body that
+// lost a heading indexed at -1 and panicked — aborting the whole package instead of
+// failing the one case with a readable message.
+func sectionFrom(t *testing.T, body, title string, only bool) string {
+	t.Helper()
+	i := strings.Index(body, title)
+	if i < 0 {
+		t.Fatalf("body has no %q section:\n%s", title, body)
+	}
+	section := body[i:]
+	if only {
+		if end := strings.Index(section, "\n\n"); end > 0 {
+			section = section[:end]
+		}
+	}
+	return section
+}
+
 // allHelpGroups is every group the overlay can render anywhere: the non-pane
 // groups unioned over every pane (they are pane-conditional, so asking one pane
 // would miss any group that applies only elsewhere) plus each pane's own.
@@ -106,8 +128,16 @@ func TestHelpBody_JumpSectionMatchesTheKeysThatActuallyWork(t *testing.T) {
 			var works bool
 			switch jt.pane {
 			case paneNone:
-				// `$` opens no pane — the drawer's own host check is the authority.
-				works, _ = (&model{pane: p}).spendDrawerHost()
+				// `$` opens a drawer, not a pane, so "works" is the drawer actually
+				// opening. PRESSED, NOT ASKED: this used to call spendDrawerHost(),
+				// which is the very function jumpsFrom consults, so the expected value
+				// and the implementation came from one source and the check compared
+				// it with itself. A terminal tall enough for the drawer, so a height
+				// refusal cannot read as a pane refusal.
+				m := &model{pane: p, width: 120, height: 48, client: deadClient()}
+				m.layout()
+				m.handleKey(keyRune('$'))
+				works = m.spend.expanded
 			case p:
 				// Never advertise a jump to the pane the reader is already on.
 				works = false
@@ -154,7 +184,7 @@ func TestHelpBody_PickerPanesExplainWhyThereIsNoJumpSection(t *testing.T) {
 			t.Errorf("pane %v neither offers the jump keys nor explains why:\n%s", p, body)
 		}
 		// No key rows under it: the section names the panes in prose only.
-		head := body[strings.Index(body, jumpSectionTitle):]
+		head := sectionFrom(t, body, jumpSectionTitle, false)
 		for _, jt := range jumpTargets {
 			row := jt.key + "  " + jt.name()
 			if strings.Contains(head, row) {
@@ -220,10 +250,7 @@ func TestHelpBody_DrillPathLocatesEveryPane(t *testing.T) {
 
 	for p := paneNamespaces; p <= lastPaneID; p++ {
 		body := helpBodyLines(p, helpWide)
-		section := body[strings.Index(body, drillSectionTitle):]
-		if end := strings.Index(section, "\n\n"); end > 0 {
-			section = section[:end]
-		}
+		section := sectionFrom(t, body, drillSectionTitle, true)
 
 		if spine[p] {
 			if want := "[" + strings.ToLower(paneName(p)) + "]"; !strings.Contains(section, want) {
@@ -259,6 +286,80 @@ func TestHelpPaneKeys_DoNotRepeatTheJumpKeys(t *testing.T) {
 					"section is where it belongs", p, kb.keys, kb.desc)
 			}
 		}
+	}
+}
+
+// splitKeys breaks a key column into the individual keys it advertises: "b / f"
+// into b and f, "q · ctrl+c" into q and ctrl+c. Without this a comparison of key
+// COLUMNS misses every real collision, which is how "b / f  page up / down" sat in
+// ANYWHERE on the one pane where `b` cycles the breakdown — the strings "b" and
+// "b / f" are not equal, so nothing noticed.
+func splitKeys(col string) []string {
+	var out []string
+	for _, part := range strings.FieldsFunc(col, func(r rune) bool {
+		return r == '/' || r == '·'
+	}) {
+		if k := strings.TrimSpace(part); k != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// ANYWHERE may not claim a key the pane underneath rebinds to something else.
+//
+// This is the check whose absence let `b` ship wrong: anywhereKeys' own doc says it
+// holds only the keys that work regardless of what is on screen, and `a`/`w` were
+// moved out for exactly that reason while `b` was not. The overlayOnlyKeys rows are
+// the documented exception — they describe the overlay, not the pane, so both
+// meanings are true at once.
+func TestHelpBody_AnywhereKeysAreNotReboundByTheActivePane(t *testing.T) {
+	for p := paneNamespaces; p <= lastPaneID; p++ {
+		owned := map[string]string{}
+		for _, kb := range paneKeys[p].bindings {
+			for _, k := range splitKeys(kb.keys) {
+				owned[k] = kb.desc
+			}
+		}
+		for _, kb := range anywhereKeysFor(p).bindings {
+			if overlayOnlyKeys[kb.keys] {
+				continue
+			}
+			for _, k := range splitKeys(kb.keys) {
+				if desc, clash := owned[k]; clash {
+					t.Errorf("pane %v: ANYWHERE offers %q as %q while the pane binds %q to %q",
+						p, k, kb.desc, k, desc)
+				}
+			}
+		}
+	}
+}
+
+// And the behavioural half: the pane that does not page must not be offered the
+// paging row, driven off pageActivePane's real cases rather than a copy of them.
+func TestHelpBody_PagingRowOnlyWherePagingExists(t *testing.T) {
+	for p := paneNamespaces; p <= lastPaneID; p++ {
+		listed := false
+		for _, kb := range anywhereKeysFor(p).bindings {
+			if kb.keys == pagingKeys {
+				listed = true
+			}
+		}
+		if listed != panePages(p) {
+			t.Errorf("pane %v: paging row listed=%v but panePages=%v",
+				p, listed, panePages(p))
+		}
+	}
+
+	// paneUsage is the exclusion, and it is excluded because `b` means something
+	// else there. Press it and confirm that is still true, so this stops being a
+	// claim about a switch statement nobody re-reads.
+	m := &model{pane: paneUsage, selectedSess: "s1"}
+	before := m.usage.group
+	m.handleKey(keyRune('b'))
+	if m.usage.group == before {
+		t.Errorf("`b` no longer cycles the usage breakdown; if paging reached that pane, " +
+			"panePages should stop excluding it")
 	}
 }
 

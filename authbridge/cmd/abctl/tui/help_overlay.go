@@ -67,9 +67,50 @@ var anywhereKeys = keyGroup{
 		{"↑↓ / jk", "scroll this help"},
 		{"p", "pause / resume the stream"},
 		{"g / G", "jump to top / bottom"},
-		{"b / f", "page up / down"},
+		{pagingKeys, "page up / down"},
 		{"q · ctrl+c", "quit"},
 	},
+}
+
+// pagingKeys is the one row of anywhereKeys that is not available everywhere, so
+// it is named rather than written twice (here and in the filter that drops it).
+const pagingKeys = "b / f"
+
+// overlayOnlyKeys are the anywhereKeys rows whose description is about THIS
+// OVERLAY rather than the pane underneath it. They are the documented exception to
+// "ANYWHERE must not claim a key the active pane rebinds": `↑↓`/`jk` navigate a
+// pane and scroll the overlay, and both are true at once because the overlay is
+// modal. Every other row describes the pane, so a pane rebinding it is a conflict —
+// see TestHelpBody_AnywhereKeysAreNotReboundByTheActivePane.
+var overlayOnlyKeys = map[string]bool{"?": true, "↑↓ / jk": true}
+
+// panePages reports whether `b`/`f` page the pane's own content.
+//
+// paneUsage IS THE ONE THAT DOES NOT, and it is worse than merely inert there: its
+// key handler runs first and binds `b` to the breakdown cycle, so an overlay
+// listing "b / f  page up / down" on that pane names a key that does something
+// else entirely. pageActivePane has cases for events, sessions, pipeline, catalog
+// and the two detail viewports; the pickers return earlier and page through their
+// own table's binding. Usage is absent from both paths.
+func panePages(p paneID) bool {
+	return p != paneUsage
+}
+
+// anywhereKeysFor returns anywhereKeys as it applies on pane, dropping the paging
+// row where paging does not exist.
+func anywhereKeysFor(pane paneID) keyGroup {
+	if panePages(pane) {
+		return anywhereKeys
+	}
+	g := anywhereKeys
+	g.bindings = make([]keyBinding, 0, len(anywhereKeys.bindings))
+	for _, kb := range anywhereKeys.bindings {
+		if kb.keys == pagingKeys {
+			continue
+		}
+		g.bindings = append(g.bindings, kb)
+	}
+	return g
 }
 
 // spendDrawerKeys are live only while the spend drawer is open. Their own
@@ -112,7 +153,7 @@ var spendDrawerKeys = keyGroup{
 // explaining what `a` and `w` do inside a surface that cannot be opened is three
 // keys of pure noise.
 func helpGlobalGroups(pane paneID) []keyGroup {
-	groups := []keyGroup{anywhereKeys}
+	groups := []keyGroup{anywhereKeysFor(pane)}
 	if ok, _ := spendDrawerHostPane(pane); ok {
 		groups = append(groups, spendDrawerKeys)
 	}
@@ -227,7 +268,11 @@ var paneKeys = map[paneID]keyGroup{
 			{"↵", "open namespace"},
 			{"l", "connect to the local session API"},
 			{"r", "reload agent list"},
-			{"q · esc", "quit"},
+			// `esc` ALONE, not "q · esc": quit is already in ANYWHERE, and `q` here made
+			// this the one pane group that restated a key from it. What is pane-specific
+			// is that esc quits — everywhere else it goes back, and there is nowhere
+			// above this.
+			{"esc", "quit — nothing is above this pane"},
 		},
 	},
 	panePods: {
