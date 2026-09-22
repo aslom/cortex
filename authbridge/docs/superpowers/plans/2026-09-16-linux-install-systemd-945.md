@@ -1,9 +1,13 @@
 # Issue #945 — Verified Linux install and systemd service lifecycle
 
-**Status:** research + gap analysis complete. Landed 2026-09-17: the `TimeoutStopSec` fix
-(bullet 7) and the Tier 2 `fakeSystemctl`/`fakeLoginctl` test harness (bullet 6), which
-required refactoring four functions to take `goos` explicitly (see "Cross-cutting themes").
-Tiers 3-5 (real-systemd integration test, install.sh smoke test, reboot check) not started.
+**Status:** research + gap analysis complete. **This branch (PR #1080) delivers only the
+Tier 2 `fakeSystemctl`/`fakeLoginctl` test harness (bullet 6)**, which required refactoring
+four functions to take `goos` explicitly (see "Cross-cutting themes") — that refactor and
+harness are this branch's own diff against `main`. The `TimeoutStopSec` fix (bullet 7) is
+**on a separate, not-yet-merged sibling PR (#1079)**, not part of this branch; this doc's
+copy here should not be read as claiming it. Tier 3 (real-systemd integration test, #1076)
+is also a separate sibling PR. Tier 4 (install.sh smoke test, #957) and Tier 5 (reboot
+check, #964) are separate issues, not started.
 **Owner:** Alan Cha (per epic #962 owner table: "Linux install, release smoke tests, reboot
 verification, CI").
 **Repo:** rossoctl/cortex. This doc lives in the same directory as other planning docs
@@ -193,7 +197,7 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   this way — only that our own code reacts correctly to inputs we scripted. That's Tier 3
   (real systemd integration test), still not built.
 
-### 7. `stop` tolerates the proxy's ~15s drain — **CLOSED 2026-09-17**
+### 7. `stop` tolerates the proxy's ~15s drain — **CLOSED on sibling PR #1079, not part of this branch**
 - **Exists:** the proxy's own 15s shutdown timeout (`main.go:671`) is the anchor value
   everything else has to respect. macOS handles this *explicitly* in Go
   (`serviceBootoutTimeout = 30*time.Second`, `cmd_service.go:39-42`, plus the supervisor's
@@ -228,23 +232,27 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
 
 ## Cross-cutting themes
 
-1. **The systemd rendering/string-shape logic is solid and well tested.** The gap is almost
+1. ~~The systemd rendering/string-shape logic is solid and well tested. The gap is almost
    entirely at the "does this actually work against a real system service manager" layer —
-   nothing fakes or drives real `systemctl`/`loginctl` for Linux, while macOS has both a
-   `fakeLaunchctl` unit-test harness *and* a real-launchd integration test.
+   nothing fakes or drives real `systemctl`/`loginctl` for Linux~~ — **this branch closes
+   the fake-driving half**: `cmd_service_systemd_test.go` now mirrors macOS's
+   `fakeLaunchctl` harness. The real-launchd-equivalent (a real-systemd integration test)
+   is a separate sibling PR (#1076), not part of this branch.
 2. **The Linux path is architecturally simpler** (no supervisor process, no bootout-race
    workaround) for a legitimate reason — but that simplicity has never been backed by the
-   same real-world verification that justified and shaped the macOS design.
+   same real-world verification that justified and shaped the macOS design. (Now addressed,
+   but on sibling PR #1076, not this branch.)
 3. **One concrete, low-risk fix stands out:** add `TimeoutStopSec=` to the Linux unit. Small,
-   self-contained, directly addresses checklist bullet 7.
+   self-contained, directly addresses checklist bullet 7. **Done on sibling PR #1079**, not
+   part of this branch.
 4. **No real Linux CI smoke test exists yet anywhere in the repo** — this is #957's job, but
    #957 can't be trusted until the gaps above are closed, since a smoke test built on top of
    an unverified `Restart=on-failure` assumption would just as confidently pass.
 
 ## Suggested next steps (not yet sequenced into a task plan)
 
-1. ~~Add an explicit `TimeoutStopSec=` to `renderUnitFor("linux", ...)`~~ — **done
-   2026-09-17**, see bullet 7 above.
+1. Add an explicit `TimeoutStopSec=` to `renderUnitFor("linux", ...)` — **done on sibling
+   PR #1079**, not part of this branch; see bullet 7 above.
 2. ~~Build a `fakeSystemctl`/`fakeLoginctl` test harness~~ — **done 2026-09-17**, see
    bullet 6 above. Required refactoring `loadService`/`controlService`/`supervisorRunning`/
    `unloadService` to take `goos` explicitly first (same fix `renderUnitFor` already had) —

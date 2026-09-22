@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -55,7 +54,7 @@ func noSystemctlOnPath(t *testing.T) {
 func callLog(t *testing.T) (path string, appendLine string) {
 	t.Helper()
 	path = filepath.Join(t.TempDir(), "calls.log")
-	return path, fmt.Sprintf(`echo "$@" >> %s`, path)
+	return path, `echo "$@" >> ` + shQuote(path)
 }
 
 func readCallLog(t *testing.T, path string) []string {
