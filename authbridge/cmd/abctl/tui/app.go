@@ -1162,7 +1162,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.spendDrawerTickIsCurrent(msg.gen) || !m.spend.expanded {
 			return m, nil
 		}
-		return m, tea.Batch(m.fetchSpendDrawer(), spendDrawerTick(msg.gen))
+		return m, tea.Batch(m.fetchSpendDrawer(), spendDrawerTick(msg.gen, m.spend.pollInterval()))
 
 	case streamClosedMsg:
 		// In picker mode, ignore the close from the previous session —

@@ -464,9 +464,14 @@ func TestDrawerLabels_DescribeTheSnapshotNotTheNextRequest(t *testing.T) {
 		t.Errorf("axis label = %q while the rows on screen are grouped by %q: the label leads the "+
 			"data by one poll", axis, usage.GroupModel)
 	}
-	if window != "1h" {
-		t.Errorf("window label = %q, want 1h — the span the answer covers, not the one queued",
-			window)
+	// THE BAND'S OWN LABEL, not "1h": the served window is "1h0m0s" and the band cell directly
+	// above this caption says LAST 1H, so anything else here is two spellings of one period in
+	// one region. This expectation used to be "1h", which is what spanLabelFor returned when it
+	// compared the served string to the requested one with == : the hour is the only span written
+	// as a duration, so it was the only one that missed its own label.
+	if window != spendSpanDefs[spanHour].label {
+		t.Errorf("window label = %q, want %q — the span the answer covers, spelled the way the "+
+			"band spells it", window, spendSpanDefs[spanHour].label)
 	}
 
 	// With no snapshot there is nothing to describe, so the requested values are the honest
@@ -504,8 +509,9 @@ func TestPaneView_TheHintLineLabelsTheSnapshotNotTheNextRequest(t *testing.T) {
 		t.Errorf("the hint line does not bracket %q, the axis the rows on screen are grouped by:\n%s",
 			usage.GroupModel, out)
 	}
-	if !strings.Contains(out, "[w] 1h") {
-		t.Errorf("the hint line does not report 1h, the span the answer covers:\n%s", out)
+	if !strings.Contains(out, "[w] "+spendSpanDefs[spanHour].label) {
+		t.Errorf("the hint line does not report %q, the span the answer covers as the band spells "+
+			"it:\n%s", spendSpanDefs[spanHour].label, out)
 	}
 	// The queued values must not be on screen as though they described the data.
 	if strings.Contains(out, "["+string(usage.GroupEndpoint)+"]") || strings.Contains(out, "[w] 6h") {
@@ -1109,6 +1115,122 @@ func TestRenderSpendDrawer_AClampedSeriesRowSaysItIsAFloor(t *testing.T) {
 	joined := strings.Join(renderSpendDrawer(snap, nil, usage.GroupModel, "TODAY", 200), "\n")
 	if !strings.Contains(joined, saturatedNote) {
 		t.Errorf("a clamped series row does not say %q anywhere:\n%s", saturatedNote, joined)
+	}
+}
+
+// CYCLING DROPS THE PREVIOUS SPAN'S ERROR, so no failure is ever captioned with a span that was
+// not asked for.
+//
+// The error and the snapshot are stored together by applySpendLoaded, so a failed poll leaves err
+// set and snap nil — and the diagnostic prints the CURRENT label, which `w` has already moved.
+// Measured before the fix: a failed month poll followed by `w` printed "breakdown unavailable for
+// LAST 1H: <the month's error>" for the whole round trip.
+func TestCycleSpendDrawer_DropsThePreviousSpansError(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cycle func(m *model) tea.Cmd
+	}{
+		{"w", (*model).cycleSpendWindow},
+		{"a", (*model).cycleSpendAxis},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{width: 200, height: 60, pane: paneSessions}
+			m.sessionsTbl = newSessionsTable()
+			m.spend.expanded = true
+			m.spend.chains[spanHour].snap = drawerSnap()
+			// The month's poll failed: snap nil and err set, which is what applySpendLoaded stores.
+			m.spend.drawer.snap, m.spend.drawer.err = nil, errors.New("month poll exploded")
+			m.layout()
+			if !strings.Contains(m.paneView(), "month poll exploded") {
+				t.Fatalf("setup: the failure is not on screen to begin with:\n%s", m.paneView())
+			}
+
+			tc.cycle(m)
+
+			if m.spend.drawer.err != nil {
+				t.Errorf("drawer.err survived the cycle: %v", m.spend.drawer.err)
+			}
+			if out := m.paneView(); strings.Contains(out, "month poll exploded") {
+				t.Errorf("the previous span's failure is still captioned with the new span:\n%s", out)
+			}
+		})
+	}
+}
+
+// THE DRAWER'S CADENCE IS ITS SPAN'S, and the two lists that make that possible stay in step.
+//
+// The breakdown sits directly under the band cell it breaks down, so a slower cadence means the two
+// disagree about the same span for the difference between them. On one fixed five-minute interval
+// the hour's breakdown could lag the hour's total — twenty seconds — by five minutes, which is the
+// failure bandSpanCell's doc argues against, with nothing on screen saying so.
+func TestSpendDrawer_PollsAtTheCadenceOfTheSpanItShows(t *testing.T) {
+	// The two parallel lists first: windowSpan indexes into one and the request carries the other,
+	// so a span inserted into either alone would point the cadence at a different window than the
+	// one being fetched.
+	if len(spendDrawerSpans) != len(spendDrawerWindows) {
+		t.Fatalf("%d spans against %d windows", len(spendDrawerSpans), len(spendDrawerWindows))
+	}
+	for i, span := range spendDrawerSpans {
+		if got := spendSpanDefs[span].window; got != spendDrawerWindows[i] {
+			t.Errorf("index %d: span %d's window is %q, the window list says %q",
+				i, span, got, spendDrawerWindows[i])
+		}
+	}
+
+	// AND EVERY SELECTION REPORTS ITS OWN SPAN'S INTERVAL. Stepped through with the same keypress
+	// an operator uses, so the wrap and the index resolution are covered too.
+	m := &model{}
+	for i := range spendDrawerWindows {
+		want := spendSpanDefs[spendDrawerSpans[i]].pollInterval()
+		if got := m.spend.pollInterval(); got != want {
+			t.Errorf("step %d (%s): cadence %v, want its span's %v",
+				i, m.spend.window(), got, want)
+		}
+		m.cycleSpendWindow()
+	}
+
+	// The hour and the month must not be the same number, or the assertion above would hold for one
+	// constant applied to all four — which is the state this replaced.
+	if spendSpanDefs[spanHour].pollInterval() == spendSpanDefs[spanMonth].pollInterval() {
+		t.Error("the hour and the month poll at the same rate, so this test cannot see the defect")
+	}
+}
+
+// A LATE DRAWER SAYS SO, on its own label, at its own span's threshold.
+func TestDrawerLabels_ALateBreakdownCarriesItsAge(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		since   time.Duration
+		wantAge bool
+	}{
+		{"just answered", time.Second, false},
+		{"inside the threshold", 2*spendSpanDefs[spanHour].pollInterval() - time.Second, false},
+		{"past it", 6 * time.Minute, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &model{width: 200, height: 60, pane: paneSessions}
+			m.spend.drawer.snap = drawerSnap()
+			m.spend.drawer.snap.Window = spendSpanDefs[spanHour].window
+			m.spend.drawer.lastFetch = time.Now().Add(-tc.since)
+
+			_, window := m.drawerLabels()
+			base := spendSpanDefs[spanHour].label
+			if got := window != base; got != tc.wantAge {
+				t.Errorf("label = %q (base %q): carries an age = %v, want %v",
+					window, base, got, tc.wantAge)
+			}
+		})
+	}
+
+	// AND NEVER BEFORE THE FIRST ANSWER: a zero lastFetch is "nothing has answered", which the
+	// empty drawer already says. Rendered as an age it would read as a wedged chain on a drawer
+	// that has simply just been opened.
+	m := &model{width: 200, height: 60, pane: paneSessions}
+	m.spend.drawer.snap = drawerSnap()
+	m.spend.drawer.snap.Window = spendSpanDefs[spanHour].window
+	if _, window := m.drawerLabels(); window != spendSpanDefs[spanHour].label {
+		t.Errorf("label = %q before any poll answered, want the bare %q",
+			window, spendSpanDefs[spanHour].label)
 	}
 }
 

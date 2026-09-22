@@ -121,6 +121,14 @@ var spendDrawerWindows = []string{
 	spendSpanDefs[spanMonth].window,
 }
 
+// spendDrawerSpans is the same list as spendDrawerWindows, as SPANS, and it is the list
+// windowSpan resolves against.
+//
+// Two slices rather than one derivation because the strings above are what the request carries
+// and the spans here are what the cadence and the label come from; they are checked against
+// each other by TestSpendDrawerWindows_AreTheBandsSpans rather than trusted to stay in step.
+var spendDrawerSpans = []spendSpan{spanHour, spanToday, span7d, spanMonth}
+
 // window is the span the drawer currently requests.
 //
 // A PLAIN INDEX NOW, and that is a footgun retired rather than a simplification. windowStep
@@ -133,7 +141,30 @@ var spendDrawerWindows = []string{
 // already the right answer and the offset has nothing left to correct. The wrap survives as
 // defence in depth; see wrapIndex.
 func (s *spendState) window() string {
-	return spendDrawerWindows[s.windowStepIndex()]
+	return spendSpanDefs[s.windowSpan()].window
+}
+
+// windowSpan is which of the band's four spans the drawer is currently pointed at.
+//
+// THE DRAWER'S WINDOWS ARE THE BAND'S SPANS, one for one — spendDrawerWindows is built from
+// spendSpanDefs — so the span is the honest identity of the current selection and the window
+// string is one of its fields. Named because a second reader needs it: the drawer's poll
+// cadence comes from the span it is showing, not from one constant for all four.
+func (s *spendState) windowSpan() spendSpan {
+	return spendDrawerSpans[s.windowStepIndex()]
+}
+
+// pollInterval is how often THIS drawer selection refreshes: the cadence of the span it is
+// showing.
+//
+// ONE CONSTANT FOR ALL FOUR WAS WRONG IN BOTH DIRECTIONS, and the hour is the case that shows
+// it: the band's hour cell refreshes every twenty seconds and the breakdown underneath it every
+// five minutes, so the two disagreed for up to five minutes about the same span — a breakdown
+// that does not add up to the figure above it is the failure bandSpanCell's own doc argues
+// against. The month keeps its slow cadence, which is what the single constant was chosen for:
+// re-folding thirty-one day files every twenty seconds to redraw four rows.
+func (s *spendState) pollInterval() time.Duration {
+	return spendSpanDefs[s.windowSpan()].pollInterval()
 }
 
 // windowResolution asks the ring for a single bucket, and omits the parameter for a symbolic
@@ -281,10 +312,11 @@ func (m *model) toggleSpendDrawer() tea.Cmd {
 	// this the drawer draws into a body sized for a closed one and the footer goes off the
 	// bottom until the terminal happens to change size.
 	m.layout()
-	// Fetch immediately AND schedule: the drawer is opened to be read now, so waiting out
-	// spendDrawerPollInterval would show five minutes of empty rows.
+	// Fetch immediately AND schedule: the drawer is opened to be read now, so waiting out its
+	// span's cadence would show an empty breakdown for twenty seconds on the hour and five
+	// minutes on the month.
 	m.spend.drawer.invalidate()
-	return tea.Batch(m.fetchSpendDrawer(), spendDrawerTick(m.spend.drawer.tickGen))
+	return tea.Batch(m.fetchSpendDrawer(), spendDrawerTick(m.spend.drawer.tickGen, m.spend.pollInterval()))
 }
 
 // cycleSpendAxis handles `a` while the drawer is open, and refetches.
@@ -304,6 +336,16 @@ func (m *model) toggleSpendDrawer() tea.Cmd {
 // does not blink through an empty frame — it is a breakdown of the same traffic either way.
 func (m *model) cycleSpendAxis() tea.Cmd {
 	m.spend.groupIdx = (m.spend.groupIdx + 1) % len(spendDrawerAxes)
+	// THE PREVIOUS SPAN'S ERROR IS DROPPED HERE, and it has to be dropped rather than left to
+	// the reply that will overwrite it. applySpendLoaded stores both fields together, so a
+	// failed poll leaves err set and snap nil — and the diagnostic is captioned with the
+	// label, which now names the span just asked for. Measured: a failed month poll then `w`
+	// printed "breakdown unavailable for LAST 1H: <the month's error>", attributing a failure
+	// to a request nobody has made yet, for the whole round trip.
+	//
+	// The SNAPSHOT deliberately survives (see above) because it is a breakdown of the same
+	// traffic either way. An error is not: it describes one request.
+	m.spend.drawer.err = nil
 	return m.fetchSpendDrawer()
 }
 
@@ -321,6 +363,8 @@ func (m *model) cycleSpendAxis() tea.Cmd {
 // blink through an empty frame.
 func (m *model) cycleSpendWindow() tea.Cmd {
 	m.spend.windowStep = (m.spend.windowStep + 1) % len(spendDrawerWindows)
+	// Same reason as cycleSpendAxis: see there.
+	m.spend.drawer.err = nil
 	return m.fetchSpendDrawer()
 }
 
@@ -357,14 +401,22 @@ func plainFigures(ss ...string) []stripFigure {
 // spanLabelFor renders a REQUESTED window the way the hint line wants it.
 //
 // A span the band already names gets the band's own label, so "month" reads as MONTH in both
-// places rather than as two spellings of the same period. A duration is compacted through
-// formatWindowLabel ("1h0m0s" -> "1h"), and anything else is carried through as given.
+// places rather than as two spellings of the same period. A duration the band does NOT name is
+// compacted through formatWindowLabel ("6h0m0s" -> "6h"), and anything else is carried
+// through as given.
 //
-// Used only for the FALLBACK, before a snapshot has landed — drawerLabels prefers what the
-// server actually served, for the reason its own doc gives.
+// THE MATCH IS servedAsRequested's, NOT ==, and that distinction is the whole invariant. The
+// hour's window is the one span written as a DURATION, and a server answers a duration window by
+// stringifying it: "1h0m0s" against a requested "1h". An exact comparison missed that, fell
+// through to formatWindowLabel, and returned "1h" — so the caption flipped from LAST 1H to 1h
+// the moment the first poll landed, while the band cell directly above it still said LAST 1H.
+// Two spellings of one period in one region, which is exactly what this function is for.
+//
+// Used for the fallback AND for the served label — drawerLabels prefers what the server
+// actually served, for the reason its own doc gives, and routes it through here.
 func spanLabelFor(window string) string {
 	for span := spendSpan(0); span < numSpendSpans; span++ {
-		if spendSpanDefs[span].window == window {
+		if servedAsRequested(spendSpanDefs[span].window, window) {
 			return spendSpanDefs[span].label
 		}
 	}
@@ -372,6 +424,25 @@ func spanLabelFor(window string) string {
 		return formatWindowLabel(d)
 	}
 	return window
+}
+
+// drawerAge is how long ago the breakdown on screen answered, and whether that is longer than
+// its own span's cadence allows.
+//
+// THE SAME RULE THE BAND USES — twice the interval; see spanReadings — so one wedged chain
+// reads the same way wherever it is. Without this, drawer.lastFetch was recorded and never
+// rendered: a drawer whose poll had been failing for an hour showed an hour-old breakdown
+// under a caption that named the span and nothing about when it was true. The band spent the
+// whole of its own review round on exactly that, one row up.
+//
+// A ZERO lastFetch IS NOT STALE. Nothing has answered yet, which is a different state from a
+// wedged chain and is already visible: the drawer draws no rows.
+func (s *spendState) drawerAge(now time.Time) (time.Duration, bool) {
+	if s.drawer.lastFetch.IsZero() {
+		return 0, false
+	}
+	age := now.Sub(s.drawer.lastFetch)
+	return age, age > 2*s.pollInterval()
 }
 
 func (m *model) drawerLabels() (usage.Group, string) {
@@ -408,6 +479,11 @@ func (m *model) drawerLabels() (usage.Group, string) {
 		// the month says MONTH, not "month", and the reader is not left matching two spellings
 		// of one period across two rows of the same region.
 		window = spanLabelFor(l)
+	}
+	// THE AGE RIDES ON THE LABEL, and only when the chain is late — the same place and the same
+	// condition as the band's, so "LAST 1H 6m" means one thing on both rows.
+	if age, stale := m.spend.drawerAge(time.Now()); stale {
+		window += " " + formatSpendAge(age)
 	}
 	return axis, window
 }

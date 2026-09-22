@@ -163,7 +163,8 @@ type Snapshot struct {
 	// separate, and this field answers neither on its own.
 	Priced bool `json:"priced"`
 	// DaysOutsideRetention is how many days of the REQUESTED window fall before the durable
-	// ledger's retention horizon. A COVERAGE statement: the answer cannot have covered them.
+	// ledger's retention horizon. A COVERAGE statement, and a CEILING: the configuration does
+	// not promise those days, so spend on them may be missing from the total.
 	//
 	// NOT A LOSS, AND DELIBERATELY NOT IN Degraded, whose downstream meaning is "rows are
 	// missing from the sum". Nothing in the ledger records its own inception or what prune
@@ -174,7 +175,20 @@ type Snapshot struct {
 	//
 	// What it states instead is the part a client can act on and the server can prove: this
 	// window asked for N days the configuration does not reach. Whether spend happened on them
-	// is unknowable here; that the total cannot include it is certain.
+	// is unknowable here, and so is whether the total includes it.
+	//
+	// AN EARLIER VERSION OF THIS SAID "that the total cannot include it is certain". It is not,
+	// and the state that breaks it is ordinary rather than exotic: costledger's prune floors its
+	// reference day at the NEWEST day file, so a ledger nothing has written to keeps its last
+	// retainDays files however long ago they were written — while this figure is measured from
+	// the clock. A query then sums day files this field has already called outside. Reproduced
+	// in sessionapi's TestLedgerSnapshot_ADayReportedOutsideRetentionCanStillBeInTheTotal:
+	// retention_days 10, files for 21 consecutive days, read ten days after the last write —
+	// 21 days reported outside, and ten days of spend in the total.
+	//
+	// A CLIENT MUST THEREFORE RENDER THIS AS "may be missing", never as a deduction from the
+	// figure beside it. Both shipped consumers do: the band marks the total a floor, and
+	// `abctl cost` prints a coverage line.
 	//
 	// SAME SHAPE AS THE UNPRICED COVERAGE GAP beside it — Unpriced over Priceable — which is
 	// why it sits here rather than with the damage counters: both say "this figure covers less

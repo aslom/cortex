@@ -20,14 +20,6 @@ import (
 // ring read, the month is a walk over up to thirty-one day files.
 const spendPollInterval = 20 * time.Second
 
-// spendDrawerPollInterval is how often an OPEN drawer refreshes itself.
-//
-// The slow cadence, because the drawer's span can be a ledger window: re-folding a month's
-// breakdown every twenty seconds would walk day files to redraw four rows nobody asked to
-// change. Pressing `a` or `w` refetches immediately, so this only governs how stale an
-// untouched open drawer gets.
-const spendDrawerPollInterval = 5 * time.Minute
-
 // spendFetchTimeout bounds one poll. Generous enough for a ledger walk over a month of day
 // files on an operator-configured path — the slowest thing any of these ask for — and short
 // enough that a wedged endpoint surfaces as staleness rather than as a stuck chain.
@@ -808,9 +800,22 @@ func (m *model) spendTickIsCurrent(span spendSpan, gen uint64) bool {
 // lastFetch moves only on an accepted reply: advancing it for a discarded one would have the
 // band report the age of data it just threw away.
 //
-// A failed poll clears snap rather than leaving the previous one in place: once the fetch
-// failed we do not know that span's spend, and continuing to draw the last figure would
-// present a stale number as a current one.
+// A failed poll clears snap rather than leaving the previous one in place: continuing to draw
+// the last figure would present a stale number as a current one.
+//
+// THE COST OF THAT RULE ROSE WITH THE FOUR CADENCES, and it is worth stating rather than
+// leaving to be rediscovered. The month polls every five minutes, so one dropped reply blanks
+// the cell an operator opened abctl to read for five minutes, discarding a figure that was
+// good thirty seconds ago. Under the single twenty-second cadence this branch replaced, the
+// same rule cost twenty seconds.
+//
+// KEPT ANYWAY, and not because the reason is unchanged — it is weaker: the band can now say
+// "stale, and this old", per span, so a retained figure need not present as current. What
+// stops the change being a comment-sized one is the VOCABULARY. A kept-but-failed figure is a
+// fifth claim about a number, distinct from inexact, partial and damaged — "this is what it
+// was, and we could not check" — and the band's markers, the README that documents them and
+// the drop order that pays for label width all take a position on the set. An em dash plus a
+// failure is honest today; a figure wearing a claim nothing else on screen uses would not be.
 //
 // It does NOT render as silence. err is what spendSummary turns into a per-span failure,
 // which the band draws as an unavailable cell. The rows are reserved on height alone, so a
@@ -856,7 +861,7 @@ func (m *model) startSpendPolling() tea.Cmd {
 		cmds = append(cmds, m.fetchSpendSpan(span), spendTick(span, m.spend.chains[span].tickGen))
 	}
 	if m.spend.expanded {
-		cmds = append(cmds, m.fetchSpendDrawer(), spendDrawerTick(m.spend.drawer.tickGen))
+		cmds = append(cmds, m.fetchSpendDrawer(), spendDrawerTick(m.spend.drawer.tickGen, m.spend.pollInterval()))
 	}
 	return tea.Batch(cmds...)
 }
@@ -928,14 +933,18 @@ func (m *model) applySpendDrawerLoaded(msg spendDrawerLoadedMsg) {
 	m.spend.drawer.snap, m.spend.drawer.err, m.spend.drawer.lastFetch = msg.snap, msg.err, time.Now()
 }
 
-// spendDrawerTick schedules the next drawer refresh.
+// spendDrawerTick schedules the next drawer refresh, AT THE CADENCE OF THE SPAN IT IS SHOWING.
 //
-// ON THE SLOW CADENCE, because the drawer's span can be a ledger window: refreshing a month's
-// breakdown every twenty seconds would walk thirty-one day files to redraw four rows nobody
-// has asked to change. A keypress refetches immediately — see cycleSpendAxis and
-// cycleSpendWindow — so the interval only governs how stale an untouched open drawer gets.
-func spendDrawerTick(gen uint64) tea.Cmd {
-	return tea.Tick(spendDrawerPollInterval, func(time.Time) tea.Msg {
+// Per span rather than one constant, because the drawer's window is one of the band's four and
+// the breakdown has to keep up with the figure above it: the hour's cell refreshes every twenty
+// seconds, so an hour breakdown on a five-minute cadence disagreed with it for up to five
+// minutes. A month keeps the slow cadence — re-folding thirty-one day files to redraw four rows
+// is what the slow cadence was chosen for. See spendState.pollInterval.
+//
+// A keypress refetches immediately — see cycleSpendAxis and cycleSpendWindow — so this only
+// governs how stale an UNTOUCHED open drawer gets.
+func spendDrawerTick(gen uint64, every time.Duration) tea.Cmd {
+	return tea.Tick(every, func(time.Time) tea.Msg {
 		return spendDrawerTickMsg{gen: gen}
 	})
 }
@@ -1090,9 +1099,14 @@ type spanReading struct {
 	// thing every money surface here refuses.
 	Unanswerable bool
 	// DaysOutsideRetention is how many days of this span's window fall before the ledger's
-	// retention horizon, so the figure cannot include them. COVERAGE, not damage — see
+	// retention horizon, so the figure MAY NOT include them. COVERAGE, not damage — see
 	// usage.Snapshot.DaysOutsideRetention — and it earns partialMarker rather than
-	// damagedMarker: the real total is larger, and nothing was destroyed.
+	// damagedMarker: the real total is no smaller than this one, and nothing was destroyed.
+	//
+	// "MAY NOT", because a ledger nothing has written to keeps day files older than the horizon
+	// the clock implies — prune floors its reference day at the newest file — so a day counted
+	// here can be in the sum. partialMarker is the right glyph either way: it claims the figure
+	// is a FLOOR, which holds whether or not those days are present.
 	DaysOutsideRetention            int64
 	Unpriced, Priceable, Incomplete int64
 	Degraded                        *usage.Degraded

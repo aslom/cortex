@@ -6,37 +6,19 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
-// TestDefaultRetention_CoversEveryDayTheMonthWindowTouches pins this package's retention
-// default to the window it has to be able to answer.
+// THE MONTH'S PIN IS GONE, AND THAT IS THE FIX RATHER THAN A GAP. It compared
+// defaultRetentionDays against usage.WindowMonthLocalDays in both directions — "they must be
+// equal" — and the constant IS that expression now (see store.go), so the test had become 31 == 31.
 //
-// TWO CONSTANTS THAT HAVE TO AGREE, in packages that cannot import each other — the same
-// relationship config.minCostLedgerRetentionDays has with usage.Window7dLocalDays, and for the
-// same reason: this package is imported BY the query path, so taking a dependency on usage
-// would invert the direction. The agreement is therefore enforced here, from a test, where the
-// import costs nothing.
+// What it was really guarding lives in two better places: usage's own
+// TestWindowMonthLocalDays_IsTheLongestMonthsDateCount walks twenty-one years of calendars in
+// eight zones to confirm the number means what it says, and the 7d check below keeps a default
+// chosen for the month from dropping under the other shipped window.
 //
-// IT EXISTS BECAUSE THE TWO ALREADY DISAGREED ONCE. The default was 30 while claiming in its
-// own doc to be "long enough to answer what did last month cost", and 30 is one day short:
-// prune retains [ref-(retainDays-1), ref], which is exactly retainDays distinct dates, so a
-// month-to-date window on the 31st of a 31-day month had its first day file already deleted.
-// That loss is invisible — a pruned day file is absent rather than unreadable, so it produces
-// no Caveats entry and the total comes back labelled "month" and short.
-func TestDefaultRetention_CoversEveryDayTheMonthWindowTouches(t *testing.T) {
-	if defaultRetentionDays < usage.WindowMonthLocalDays {
-		t.Errorf("defaultRetentionDays = %d but a month-to-date window touches up to %d local "+
-			"dates (usage.WindowMonthLocalDays) — window=month would answer from %d day files "+
-			"and silently omit the rest, with no caveat to disclose it",
-			defaultRetentionDays, usage.WindowMonthLocalDays,
-			defaultRetentionDays)
-	}
-	// And not wastefully larger: the default is a month of history, not a quarter. A deployment
-	// that wants more says so in config; this is the floor that makes the shipped windows work.
-	if defaultRetentionDays > usage.WindowMonthLocalDays {
-		t.Errorf("defaultRetentionDays = %d, more than the %d a month window needs — extra "+
-			"history is an operator's choice via retention_days, not a default",
-			defaultRetentionDays, usage.WindowMonthLocalDays)
-	}
-}
+// It existed because the two DID disagree once: the default was 30 while its own doc claimed to be
+// "long enough to answer what did last month cost", and 30 is one day short — prune retains
+// exactly retainDays distinct dates, so a month-to-date window on the 31st of a 31-day month had
+// its first day file already deleted, invisibly, because a pruned day produces no Caveats entry.
 
 // TestDefaultRetention_StillCoversTheSevenDayWindow guards the other window against a change
 // made for the month's sake. 7d needs nine dates and the month needs thirty-one, so the month

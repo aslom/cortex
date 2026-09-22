@@ -17,8 +17,11 @@ import (
 // reported twenty-two days of loss and had lost nothing.
 //
 // So the claim is narrowed to what the server can prove: this window asked for N days the
-// configuration does not reach. Whether spend happened on them is unknowable; that the total
-// cannot include it is certain.
+// configuration does not reach. Whether spend happened on them is unknowable, and so is
+// whether the total includes it — prune floors its own window at the newest day file, so an
+// idle ledger keeps days this figure calls outside and a query sums them. The figure is a
+// CEILING on what is absent; TestLedgerSnapshot_ADayReportedOutsideRetentionCanStillBeInTheTotal
+// reproduces the state, and every consumer's wording is hedged accordingly.
 //
 // THE CUTOFF IS BUILT AT THE PRODUCER'S ANCHOR HOUR, and that is the whole reason this file was
 // rewritten. Every fixture here used to hand-build it at MIDNIGHT while the only caller passes

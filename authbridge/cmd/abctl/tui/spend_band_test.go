@@ -120,6 +120,23 @@ func TestRenderSpendBand_FiguresShareAColumnStride(t *testing.T) {
 	}
 }
 
+// narrowestWidthShowing is the smallest terminal width at which this span's cell is drawn at all.
+//
+// Measured from the renderer rather than computed, because the answer depends on the label, the
+// marked value's width and the drop order at once — and a width derived a second way is a width
+// that drifts from the one the band actually uses.
+func narrowestWidthShowing(t *testing.T, s spendSummary, span spendSpan) int {
+	t.Helper()
+	label := spendSpanDefs[span].label
+	for width := 1; width <= 200; width++ {
+		if strings.Contains(strings.Join(renderSpendBand(s, width), "\n"), label) {
+			return width
+		}
+	}
+	t.Fatalf("%q is not drawn at any width up to 200", label)
+	return 0
+}
+
 // Each of the three disclosure glyphs still rides on the figure it qualifies.
 func TestRenderSpendBand_CarriesTheFigureMarkers(t *testing.T) {
 	for _, tc := range []struct {
@@ -133,9 +150,20 @@ func TestRenderSpendBand_CarriesTheFigureMarkers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := withSpan(bandSummary(), spanToday, tc.mutate)
-			joined := strings.Join(renderSpendBand(s, 200), "\n")
-			if !strings.Contains(joined, tc.want) {
-				t.Errorf("band lost the %q marker:\n%s", tc.want, joined)
+			// EVERY WIDTH FROM THE NARROWEST THAT SHOWS TODAY UP, not 200 alone. A marker is one
+			// column and the cell width is uniform, so marking a cell can push the whole band
+			// wider — which is exactly where a marker is most likely to be dropped and least
+			// likely to be noticed. The strip this band replaced had a narrow-width marker test
+			// (its fitter fell back to a compact form); nothing restored that coverage here, so
+			// the whole marker suite was asserting one roomy terminal.
+			//
+			// The floor is measured rather than assumed: below it TODAY is not on screen at all,
+			// which is the drop order working and not a lost marker.
+			for width := narrowestWidthShowing(t, s, spanToday); width <= 200; width++ {
+				joined := strings.Join(renderSpendBand(s, width), "\n")
+				if !strings.Contains(joined, tc.want) {
+					t.Fatalf("width %d: band lost the %q marker:\n%s", width, tc.want, joined)
+				}
 			}
 		})
 	}

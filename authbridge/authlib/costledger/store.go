@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
 // dayLayout names a day file. Sortable, and the same layout Query parses back, so
@@ -31,11 +33,17 @@ const dayLayout = "2006-01-02"
 // month-to-date total silently lost its first day: no error, no caveat, a figure too small,
 // and a budget that looked further from its limit than it was.
 //
-// Derived from usage.WindowMonthLocalDays rather than chosen, and pinned to it by
-// TestDefaultRetention_CoversEveryDayTheMonthWindowTouches. Written as a literal for the
-// reason config.minCostLedgerRetentionDays is: this package does not import usage, so the
-// agreement is enforced from the test side, where that import is free.
-const defaultRetentionDays = 31
+// usage.WindowMonthLocalDays ITSELF, not a literal agreeing with it. An earlier version was
+// written out as 31 "because this package does not import usage" — which was never true here:
+// query.go has imported it since this package learned to answer a symbolic window, so the only
+// thing the literal bought was a test to keep two numbers equal.
+//
+// NOT THE SAME CASE AS config.minCostLedgerRetentionDays, whose literal stays: that package is
+// the leaf every binary loads to parse its config and must not import the aggregator at all.
+// Here the import already exists, so the agreement can be structural instead of asserted. What
+// the number means is in usage: the most distinct local dates a month-to-date window can touch,
+// which TestWindowMonthLocalDays_IsTheLongestMonthsDateCount walks a calendar to confirm.
+const defaultRetentionDays = usage.WindowMonthLocalDays
 
 // expiredSuffix marks a day file that prune has CONDEMNED but not yet deleted.
 //
