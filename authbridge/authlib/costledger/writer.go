@@ -73,6 +73,15 @@ type Writer struct {
 	retainDays int
 	// settle is the settleClosedMinute cadence. Zero disables it.
 	settle time.Duration
+	// rates rebuilds the per-tier split on rows READ from disk that were written without
+	// one. Nil disables that entirely; see WithPricing and repriceTiers.
+	//
+	// READ ONLY, and never under the mutex below: repriceTiers runs on rows that have
+	// already left the store, so a table swap behind the Resolver cannot interact with the
+	// accumulation path. It takes no part in what is WRITTEN — the write path copies the
+	// producer's own split — so a ledger and its files stay independent of whatever rates
+	// this process happens to hold.
+	rates pricing.Resolver
 
 	// ops carries work to the writer goroutine. Buffered; see opsBuffer.
 	ops  chan batch
@@ -173,6 +182,20 @@ func WithClock(fn func() time.Time) Option { return func(w *Writer) { w.now = fn
 // package default.
 func WithRetentionDays(days int) Option {
 	return func(w *Writer) { w.retainDays = days }
+}
+
+// WithPricing attaches a rate table, which lets a READ rebuild the modelled per-tier split
+// on rows that were written without one. See repriceTiers.
+//
+// A READ-SIDE DEPENDENCY, and the asymmetry is the point: the write path takes the split from
+// the producer's own record and needs no table, while the read path has to recover it for
+// history this binary did not write. Nothing here prices a request or changes a total.
+//
+// OPTIONAL BY DESIGN. With no table wired the ledger behaves exactly as before — totals
+// intact, split absent — which is the honest answer for a deployment that prices nothing
+// locally, and which keeps this from becoming a second place cost can be invented.
+func WithPricing(r pricing.Resolver) Option {
+	return func(w *Writer) { w.rates = r }
 }
 
 // withSettleInterval overrides how often the writer checks whether the held minute
@@ -515,6 +538,37 @@ func (w *Writer) Record(_ string, e *pipeline.SessionEvent) {
 			// this keeps the ledger's arithmetic identical to the ring's, which matters
 			// because /v1/usage answers from whichever one the window selects.
 			r.PriceableRequests = 1
+			// THE MODELLED PER-TIER SPLIT, which the total on its own cannot reconstruct.
+			//
+			// usage.Counts.ApportionTiers is the only consumer and it needs a MIX to apportion
+			// the total by; with these four at zero it returns ok=false and every money surface
+			// renders "not known here" for the breakdown. So a persisted total without them is
+			// a row that can say what a day cost and not what it was spent ON.
+			//
+			// Copied here for the same reason r.CostMicros is: the figure was settled upstream
+			// and this file's job is to keep it. usage.Aggregator.costOf does exactly this at
+			// its own published-record arm, so the ledger and the ring put the same numbers in
+			// the same fields — the property that lets /v1/usage answer window=1h from one and
+			// window=today from the other without the drawer changing shape between them. It
+			// was the missing half of that pair: the ring populated the mix, the ledger did
+			// not, and the drawer went blank on every window the ledger serves.
+			//
+			// NIL Tiers IS THE NORMAL CASE for a gateway-priced request on a model with no
+			// rates, and leaving the array zero is how "no split exists" is said. Nil and zero
+			// are different states here — see costevent.Event.Tiers — so this must not write
+			// four zeros for an absent split: omitempty then drops them from the file, and
+			// absence stays absence rather than becoming a durable claim that each tier
+			// was free.
+			//
+			// AFTER the token literal that assigns r.Counts wholesale, like r.AvoidedMicros
+			// above and for the same reason: before it, every inference row's split would be
+			// silently overwritten, which is all of the rows that can carry one.
+			if tc := ev.Tiers; tc != nil {
+				r.InputCostMicros = pricing.MicrosOrZero(tc.Input)
+				r.CacheWriteCostMicros = pricing.MicrosOrZero(tc.CacheWrite)
+				r.CacheReadCostMicros = pricing.MicrosOrZero(tc.CacheRead)
+				r.OutputCostMicros = pricing.MicrosOrZero(tc.Output)
+			}
 			if ev.Incomplete {
 				// The one caveat a persisted total cannot afford to lose. CostMicros here is
 				// a floor (a stream that died before its output count) or an approximation (a

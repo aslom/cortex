@@ -234,6 +234,15 @@ func (w *Writer) Query(ctx context.Context, from, to time.Time) ([]Row, Caveats,
 			out = append(out, r)
 		}
 	}
+	// THE ONE PLACE EVERY DISK ROW PASSES THROUGH, which is why the split is recovered here
+	// and not at the four call sites above this in the stack. Window delegates to Query and
+	// then appends only the unflushed minute — rows Record has already split — so enriching
+	// there would leave Query's own callers blank, and enriching in sessionapi would leave
+	// anything else that reads the ledger blank. A no-op with no rate table wired; see
+	// repriceTiers for what it will and will not model.
+	//
+	// AFTER the window filter, so no work is done for rows nobody asked for.
+	repriceTiers(out, w.rates)
 	return out, caveats, nil
 }
 
