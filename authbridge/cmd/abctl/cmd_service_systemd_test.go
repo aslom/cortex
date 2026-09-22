@@ -29,7 +29,10 @@ func fakeSystemctl(t *testing.T, body string) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// fakeLoginctl puts a loginctl on PATH that behaves however body says.
+// fakeLoginctl puts a loginctl on PATH that behaves however body says. Its own
+// temp dir, separate from fakeSystemctl's: a test using both ends up with two
+// prepended PATH entries, one per binary, which is fine — each dir holds only its
+// own stub, so there's nothing for the two to collide over.
 func fakeLoginctl(t *testing.T, body string) {
 	t.Helper()
 	dir := t.TempDir()
