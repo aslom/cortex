@@ -189,10 +189,10 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
   the linger-enable/marker-write logic (skip when already on, write marker only when *we*
   turn it on, caveat-not-fatal when `enable-linger` fails), `unloadService`'s
   marker-gated `disable-linger` (never called without a marker), and `controlService`'s
-  exact verb-per-action mapping. 22 subtests, all passing.
+  exact verb-per-action mapping. 27 subtests, all passing.
 - **Still open:** none of this proves the *real* `systemctl`/`loginctl` actually behave
   this way — only that our own code reacts correctly to inputs we scripted. That's Tier 3
-  (real systemd integration test), still not built.
+  (real systemd integration test), #1076 — bullet 5 above.
 
 ### 7. `stop` tolerates the proxy's ~15s drain — **#1079**
 - **Exists:** the proxy's own 15s shutdown timeout (`main.go:671`) is the anchor value
@@ -233,8 +233,7 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
    harness. The real-launchd equivalent (a real-systemd integration test) is #1076.
 2. **The Linux path is architecturally simpler** (no supervisor process, no bootout-race
    workaround) for a legitimate reason — but that simplicity has never been backed by the
-   same real-world verification that justified and shaped the macOS design. (Now addressed
-   in #1076.)
+   same real-world verification that justified and shaped the macOS design. #1076.
 3. **One concrete, low-risk fix stands out:** add `TimeoutStopSec=` to the Linux unit. Small,
    self-contained, directly addresses checklist bullet 7. #1079.
 4. **No real Linux CI smoke test exists yet anywhere in the repo** — this is #957's job, but
@@ -245,8 +244,8 @@ Full detail came from a source-code audit (Explore agent, 25 tool calls, full re
 
 1. Add an explicit `TimeoutStopSec=` to `renderUnitFor("linux", ...)` — #1079; see bullet 7
    above.
-2. ~~Build a `fakeSystemctl`/`fakeLoginctl` test harness~~ — **done 2026-09-17**, see
-   bullet 6 above. Required refactoring `loadService`/`controlService`/`supervisorRunning`/
+2. ~~Build a `fakeSystemctl`/`fakeLoginctl` test harness~~ — #1080, see bullet 6 above.
+   Required refactoring `loadService`/`controlService`/`supervisorRunning`/
    `unloadService` to take `goos` explicitly first (same fix `renderUnitFor` already had) —
    otherwise these functions can't be exercised from a non-Linux host at all.
 3. Get real verification (manual or in a systemd-capable container/VM with a lingering

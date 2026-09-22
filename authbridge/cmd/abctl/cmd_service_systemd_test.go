@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,11 +23,7 @@ import (
 // including the one these were written on.
 func fakeSystemctl(t *testing.T, body string) {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(body), 0o700); err != nil { //nolint:gosec
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	installStub(t, "systemctl", body)
 }
 
 // fakeLoginctl puts a loginctl on PATH that behaves however body says. Its own
@@ -35,11 +32,31 @@ func fakeSystemctl(t *testing.T, body string) {
 // own stub, so there's nothing for the two to collide over.
 func fakeLoginctl(t *testing.T, body string) {
 	t.Helper()
+	installStub(t, "loginctl", body)
+}
+
+// installStub writes body as an executable named "name" into its own temp dir and
+// prepends that dir to PATH, then immediately confirms name actually resolves to
+// it. That confirmation matters on its own, not just as a sanity check: a stub
+// that silently isn't reachable (PATH not applied yet in some odd ordering, or —
+// caught by mutating this file's own permission bits to prove it — written
+// non-executable) makes the code under test's own exec.LookPath/exec.Command fail
+// before ever touching the stub, so nothing gets appended to any call log. A test
+// that only checks "the call log has zero entries" cannot tell that apart from a
+// real, correct zero-calls outcome — both read as an empty log. Failing loudly
+// here, once, closes that for every subtest that uses these helpers, rather than
+// leaving each assertion to rediscover it independently.
+func installStub(t *testing.T, name, body string) {
+	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "loginctl"), []byte(body), 0o700); err != nil { //nolint:gosec
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if got, err := exec.LookPath(name); err != nil || got != path {
+		t.Fatalf("stub not reachable: LookPath(%q) = %q, %v; want %q", name, got, err, path)
+	}
 }
 
 // noSystemctlOnPath points PATH at an empty directory, so exec.LookPath("systemctl")
@@ -55,6 +72,9 @@ func noSystemctlOnPath(t *testing.T) {
 func callLog(t *testing.T) (path string, appendLine string) {
 	t.Helper()
 	path = filepath.Join(t.TempDir(), "calls.log")
+	// shQuote's own doc comment describes it as quoting a systemd ExecStart argument
+	// specifically, but the escaping rule is plain POSIX sh, the same for any word in
+	// any shell command — including this redirect target, not a unit file at all.
 	return path, `echo "$@" >> ` + shQuote(path)
 }
 
