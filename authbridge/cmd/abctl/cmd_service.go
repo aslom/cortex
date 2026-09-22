@@ -277,7 +277,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	// of the installer's output for one fact.
 	if !yes {
 		fmt.Fprintf(stdout, "This will install a %s that runs:\n  %s --config %s\n\n",
-			supervisorName(), p.binary, p.configFile)
+			supervisorName(runtime.GOOS), p.binary, p.configFile)
 		fmt.Fprintf(stdout, "It restarts on failure and starts at login, so Claude Code keeps working\n"+
 			"after a crash or a reboot. Unit file: %s\n\n", p.unitFile)
 	}
@@ -309,7 +309,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 			"  Cortex still runs, just not supervised — start it yourself:\n"+
 			"    %s --local\n\n"+
 			"  It will not restart after a crash or come back at login while running that\n"+
-			"  way. To stop it: kill that process.\n", supervisorName(), why, p.binary)
+			"  way. To stop it: kill that process.\n", supervisorName(runtime.GOOS), why, p.binary)
 		return exitNoSupervisor
 	}
 
@@ -382,7 +382,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	if installCanSkip(configChanged, forceRestart, func() bool { return serviceIsCurrent(p) }) {
 		fmt.Fprintf(stdout, "Already current: %s is running under %s and healthy.\n"+
 			"  Nothing to change. Use `abctl service restart` to restart it anyway.\n",
-			filepath.Base(p.binary), supervisorName())
+			filepath.Base(p.binary), supervisorName(runtime.GOOS))
 		return 0
 	}
 
@@ -437,7 +437,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 		fmt.Fprintf(stdout, "Wrote %s\n", p.unitFile)
 	}
 
-	if err := loadService(p, stdout); errors.Is(err, errLingerUnavailable) {
+	if err := loadService(runtime.GOOS, p, stdout); errors.Is(err, errLingerUnavailable) {
 		// The unit IS loaded, so this is a caveat rather than a failure: keep going,
 		// but never claim it survives a logout.
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
@@ -459,7 +459,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	// keeps the ports, the supervised copy loses the bind race and crash-loops, and
 	// the probe cheerfully succeeds against the survivor. Ask the supervisor whether
 	// OUR job is actually up before believing the probe.
-	if running, why := supervisorRunning(p); !running {
+	if running, why := supervisorRunning(runtime.GOOS, p); !running {
 		fmt.Fprintf(stderr, "abctl: the unit loaded but the supervisor does not report it running (%s).\n"+
 			"  Something else may hold the ports — check for a Cortex you started by hand:\n"+
 			"    pgrep -fl authbridge-prox\n"+
@@ -503,9 +503,9 @@ const crashRecoveryNote = "A supervisor process handles crashes (launchd will no
 // better. There is now no "which path prints what" to get wrong.
 func reportInstallSuccess(healthy bool, stdout io.Writer) {
 	if healthy {
-		fmt.Fprintf(stdout, "Running as a %s, healthy.\n", supervisorName())
+		fmt.Fprintf(stdout, "Running as a %s, healthy.\n", supervisorName(runtime.GOOS))
 	} else {
-		fmt.Fprintf(stdout, "Running as a %s.\n", supervisorName())
+		fmt.Fprintf(stdout, "Running as a %s.\n", supervisorName(runtime.GOOS))
 	}
 	if runtime.GOOS == "darwin" {
 		fmt.Fprintln(stdout, crashRecoveryNote)
@@ -517,7 +517,7 @@ func serviceUninstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Nothing to do: no unit at %s\n", p.unitFile)
 		return 0
 	}
-	fmt.Fprintf(stdout, "This will stop and remove the %s at:\n  %s\n\n", supervisorName(), p.unitFile)
+	fmt.Fprintf(stdout, "This will stop and remove the %s at:\n  %s\n\n", supervisorName(runtime.GOOS), p.unitFile)
 	fmt.Fprintf(stdout, "Cortex will no longer start at login. Claude Code stops working whenever\n"+
 		"the proxy is not running — `abctl configure claude-code disable` removes that\n"+
 		"dependency.\n\n")
@@ -525,7 +525,7 @@ func serviceUninstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "Not changed.")
 		return exitDeclined
 	}
-	if err := unloadService(p); err != nil {
+	if err := unloadService(runtime.GOOS, p); err != nil {
 		// Report but keep going: leaving the unit file behind would make a
 		// reinstall look installed-but-dead.
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
@@ -630,7 +630,7 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 		// umask — measured at 0644, which silently undid the 0600 this sets.
 		tightenLog(p.logFile, stderr)
 	}
-	if err := controlService(action, p, stdout); err != nil {
+	if err := controlService(runtime.GOOS, action, p, stdout); err != nil {
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
 		return 1
 	}
@@ -658,7 +658,7 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 		// Same gate install uses: an unadopted proxy holding the ports answers the
 		// probe while OUR job crash-loops on the bind, so health alone would report a
 		// restart that did not happen.
-		if running, why := supervisorRunning(p); !running {
+		if running, why := supervisorRunning(runtime.GOOS, p); !running {
 			fmt.Fprintf(stderr, "abctl: %sed, but the supervisor does not report it running (%s).\n"+
 				"  Check for a Cortex started by hand holding the ports: pgrep -fl authbridge-prox\n", action, why)
 			for _, line := range lastLines(p.logFile, 5) {
@@ -846,7 +846,7 @@ func serviceIsCurrent(p servicePaths) bool {
 	if runtime.GOOS == "darwin" && !strings.Contains(body, "--supervise") {
 		return false
 	}
-	if running, _ := supervisorRunning(p); !running {
+	if running, _ := supervisorRunning(runtime.GOOS, p); !running {
 		return false
 	}
 	if p.healthURL == "" {
