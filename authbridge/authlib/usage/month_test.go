@@ -193,3 +193,46 @@ func TestParseWindowSpec_MonthIsNotADuration(t *testing.T) {
 			"and must be refused, not served from a shorter window")
 	}
 }
+
+// WindowMonthLocalDays IS COUNTED, not asserted against another constant.
+//
+// Its only pin was costledger's TestDefaultRetention_CoversEveryDayTheMonthWindowTouches, which
+// compares it with defaultRetentionDays — so setting BOTH to 30 left all three modules green, and
+// the 30-against-31 defect this window exists to fix would have come back unnoticed. Two constants
+// that must agree cannot check each other; that is the lesson Window7dLocalDays already records,
+// and it is derived from its own span for exactly that reason.
+//
+// A month's length is not expressible as a compile-time expression the way 7x24h is, so the
+// constant stays a literal and the CALENDAR checks it: walk every month of a twenty-one year span
+// and count the distinct local dates a month-to-date window covers at the last instant of each.
+// The maximum over all of them is what the constant has to be — no more, because the ledger's
+// default retention is derived from it and history nobody needs is an operator's choice.
+func TestWindowMonthLocalDays_IsTheLongestMonthsDateCount(t *testing.T) {
+	for _, zone := range monthZones {
+		loc := mustZone(t, zone)
+		worst, when := 0, ""
+		for year := 2015; year <= 2035; year++ {
+			for month := 1; month <= 12; month++ {
+				// The last instant of the month, which is when month-to-date is widest.
+				end := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, loc).
+					AddDate(0, 1, 0).Add(-time.Second)
+				from := StartOfLocalMonth(end)
+
+				dates := map[string]bool{}
+				for d := from; !d.After(end); d = d.Add(time.Hour) {
+					dates[d.Format("2006-01-02")] = true
+				}
+				if len(dates) > worst {
+					worst, when = len(dates), end.Format("2006-01")
+				}
+			}
+		}
+		if worst != WindowMonthLocalDays {
+			t.Errorf("%s: the widest month-to-date window covers %d local dates (%s), but "+
+				"WindowMonthLocalDays is %d — costledger derives its default retention from this "+
+				"constant, so a value below the count answers window=month from too few day files "+
+				"and a value above it keeps history nothing asked for",
+				zone, worst, when, WindowMonthLocalDays)
+		}
+	}
+}

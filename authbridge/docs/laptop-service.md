@@ -181,10 +181,12 @@ no longer depends on the file. `grep -A1 cost_ledger ~/.cortex/config.yaml` show
 have.
 
 It exists because the in-memory counters are a 6-hour ring, and the proxy restarts several
-times a day. Without the ledger, both `today` and `7d` are still answered — from the ring's
-maximum window, with the response's own `window` field naming the span that was actually
-covered rather than the one you asked for. So the figures stay honest and get much smaller:
-six hours of a day, and six hours of a week.
+times a day. Without the ledger, `today`, `7d` and `month` are all still answered — from the
+ring's maximum window, with the response's own `window` field naming the span that was actually
+covered rather than the one you asked for. So the figures stay honest and get much smaller: six
+hours of a day, six hours of a week, and six hours of a month, which is the one that reads most
+wrongly if you take the label at face value. abctl draws such a span as `—` rather than as a
+number for that reason.
 
 **What is in the files.** One JSON line per minute per (endpoint, model, agent,
 provenance): the host, the model name, the calling agent's User-Agent, token counts,
@@ -195,10 +197,11 @@ that is a promise a test asserts against the serialized bytes, not a convention.
 reach the session API, which is **unauthenticated** (the proxy logs `UNAUTHENTICATED; contains
 raw user content; never expose via ingress` when it starts). On a laptop it binds to localhost.
 
-`abctl` is not yet one of those readers, and the distinction is worth being exact about:
-`GET /v1/usage` reaches these files only for the symbolic windows `today` and `7d`, and
-`apiclient.GetUsage` takes a duration, so every view abctl draws today is served from the
-6-hour ring instead. Reading the ledger from abctl is the next step, not this one.
+`abctl` is one of those readers now, and the distinction is worth being exact about:
+`GET /v1/usage` reaches these files only for the symbolic windows `today`, `7d` and `month`,
+which a duration cannot express — so the spend band asks for them by name through
+`apiclient.GetUsageWindow`, and three of its four cells are ledger-backed. Only `LAST 1H` comes
+from the 6-hour ring, and it is the one cell that survives a deployment with no ledger at all.
 Nothing about the ledger makes that worse, but "my spend is on disk and readable" is worth
 knowing rather than discovering.
 
