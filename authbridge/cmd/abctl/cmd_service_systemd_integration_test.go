@@ -75,9 +75,10 @@ func slowScript(t *testing.T) string {
 }
 
 // runTransientUnit starts script under a throwaway, uniquely-named unit with the
-// same Restart=on-failure/RestartSec our real renderUnitFor writes, and registers
-// its own teardown — stop and reset-failed, so a failed assertion never leaves a
-// unit respawning after the test process exits.
+// same Restart=on-failure our real renderUnitFor writes (RestartSec=1 here, not the
+// production 10, purely so the test doesn't wait 10s per restart it triggers), and
+// registers its own teardown — stop and reset-failed, so a failed assertion never
+// leaves a unit respawning after the test process exits.
 func runTransientUnit(t *testing.T, name, script string) {
 	t.Helper()
 	stop := func() {
