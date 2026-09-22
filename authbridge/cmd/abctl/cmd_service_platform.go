@@ -28,8 +28,8 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	return fs
 }
 
-func supervisorName() string {
-	if runtime.GOOS == "darwin" {
+func supervisorName(goos string) string {
+	if goos == "darwin" {
 		return "launchd user agent"
 	}
 	return "systemd user unit"
@@ -177,10 +177,10 @@ func loadService(goos string, p servicePaths, progress io.Writer) error {
 		if !waitBootedOutf(target, serviceBootoutTimeout, progress) {
 			if bootoutErr != nil && !strings.Contains(string(bootoutOut), "No such process") {
 				return fmt.Errorf("could not remove the previous %s: %v: %s",
-					supervisorName(), bootoutErr, strings.TrimSpace(string(bootoutOut)))
+					supervisorName(goos), bootoutErr, strings.TrimSpace(string(bootoutOut)))
 			}
 			return fmt.Errorf("the previous %s is still shutting down after %s; "+
-				"run `abctl service status`, then try again", supervisorName(), serviceBootoutTimeout)
+				"run `abctl service status`, then try again", supervisorName(goos), serviceBootoutTimeout)
 		}
 
 		// Retried on EIO, re-checking the domain each time. Without the re-check the

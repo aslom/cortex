@@ -276,7 +276,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	// of the installer's output for one fact.
 	if !yes {
 		fmt.Fprintf(stdout, "This will install a %s that runs:\n  %s --config %s\n\n",
-			supervisorName(), p.binary, p.configFile)
+			supervisorName(runtime.GOOS), p.binary, p.configFile)
 		fmt.Fprintf(stdout, "It restarts on failure and starts at login, so Claude Code keeps working\n"+
 			"after a crash or a reboot. Unit file: %s\n\n", p.unitFile)
 	}
@@ -308,7 +308,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 			"  Cortex still runs, just not supervised — start it yourself:\n"+
 			"    %s --local\n\n"+
 			"  It will not restart after a crash or come back at login while running that\n"+
-			"  way. To stop it: kill that process.\n", supervisorName(), why, p.binary)
+			"  way. To stop it: kill that process.\n", supervisorName(runtime.GOOS), why, p.binary)
 		return exitNoSupervisor
 	}
 
@@ -381,7 +381,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	if installCanSkip(configChanged, forceRestart, func() bool { return serviceIsCurrent(p) }) {
 		fmt.Fprintf(stdout, "Already current: %s is running under %s and healthy.\n"+
 			"  Nothing to change. Use `abctl service restart` to restart it anyway.\n",
-			filepath.Base(p.binary), supervisorName())
+			filepath.Base(p.binary), supervisorName(runtime.GOOS))
 		return 0
 	}
 
@@ -491,9 +491,9 @@ const crashRecoveryNote = "A supervisor process handles crashes (launchd will no
 // better. There is now no "which path prints what" to get wrong.
 func reportInstallSuccess(healthy bool, stdout io.Writer) {
 	if healthy {
-		fmt.Fprintf(stdout, "Running as a %s, healthy.\n", supervisorName())
+		fmt.Fprintf(stdout, "Running as a %s, healthy.\n", supervisorName(runtime.GOOS))
 	} else {
-		fmt.Fprintf(stdout, "Running as a %s.\n", supervisorName())
+		fmt.Fprintf(stdout, "Running as a %s.\n", supervisorName(runtime.GOOS))
 	}
 	if runtime.GOOS == "darwin" {
 		fmt.Fprintln(stdout, crashRecoveryNote)
@@ -505,7 +505,7 @@ func serviceUninstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Nothing to do: no unit at %s\n", p.unitFile)
 		return 0
 	}
-	fmt.Fprintf(stdout, "This will stop and remove the %s at:\n  %s\n\n", supervisorName(), p.unitFile)
+	fmt.Fprintf(stdout, "This will stop and remove the %s at:\n  %s\n\n", supervisorName(runtime.GOOS), p.unitFile)
 	fmt.Fprintf(stdout, "Cortex will no longer start at login. Claude Code stops working whenever\n"+
 		"the proxy is not running — `abctl claude-code disable` removes that dependency.\n\n")
 	if !yes && !confirm(stdout) {

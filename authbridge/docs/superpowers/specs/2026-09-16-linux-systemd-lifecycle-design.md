@@ -64,7 +64,7 @@ the macOS supervisor. That was the single biggest gap this issue needed to close
   unsupervised-fallback) Go restart loop.
 - `authbridge/cmd/authbridge-proxy/main.go` — the proxy itself; on SIGTERM/SIGINT
   does a graceful shutdown with a **15-second drain**
-  (`context.WithTimeout(..., 15*time.Second)`, `main.go:671`) — every "does stop
+  (`context.WithTimeout(..., 15*time.Second)`, `main.go:957`) — every "does stop
   tolerate the drain" question traces back to this constant.
 - `authbridge/docs/laptop-service.md` — user-facing doc for `abctl service *`,
   `~/.cortex/` layout, restricted-environment fallback, manual-removal
@@ -120,8 +120,8 @@ real-launchd integration test.
 The proxy's own 15s shutdown timeout is the anchor value everything else has to
 respect. macOS handles this explicitly in Go (a 30s bootout timeout, plus the
 supervisor's own 20s-before-SIGKILL logic). The rendered Linux unit set no
-`TimeoutStopSec` at all — it "worked" only by accident of systemd's undocumented
-90s default exceeding 15s.
+`TimeoutStopSec` at all — it "worked" only by accident of systemd's own
+90s default (`systemd.system.conf(5)`) exceeding 15s.
 
 ### 8. Works under user systemd, and states what happens where systemd is absent
 The best-handled bullet: `loadService` gives a clear, actionable message when
