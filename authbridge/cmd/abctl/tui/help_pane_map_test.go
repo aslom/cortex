@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
 
 // helpWide is a wrap budget wider than any line the overlay builds, so tests
@@ -80,6 +83,16 @@ func TestHelpPurpose_EveryPaneHasOne(t *testing.T) {
 		if strings.TrimSpace(g.purpose) == "" {
 			t.Errorf("pane %v (%q) has no purpose line — the overlay would name it "+
 				"without saying what it shows", p, g.title)
+		}
+		// thisPaneSuffix's whole claim is that paneName can strip it so the two forms
+		// cannot disagree — and nothing enforced it: every title hardcodes the literal,
+		// and paneName's TrimSuffix is a no-op on a title that omits it. A pane added
+		// without the suffix would lose the active-pane marker while paneName kept
+		// working, so the omission would be invisible.
+		if !strings.HasSuffix(g.title, thisPaneSuffix) {
+			t.Errorf("pane %v is titled %q, which does not end in %q — it would render "+
+				"unmarked when the overlay is opened over it",
+				p, g.title, thisPaneSuffix)
 		}
 	}
 }
@@ -310,9 +323,13 @@ func splitKeys(col string) []string {
 //
 // This is the check whose absence let `b` ship wrong: anywhereKeys' own doc says it
 // holds only the keys that work regardless of what is on screen, and `a`/`w` were
-// moved out for exactly that reason while `b` was not. The overlayOnlyKeys rows are
-// the documented exception — they describe the overlay, not the pane, so both
-// meanings are true at once.
+// moved out for exactly that reason while `b` was not.
+//
+// NO EXEMPTION LIST, which is the point of having moved the motion keys into
+// helpNavKeys. While they sat here the check needed `?` and `↑↓ / jk` excused as
+// "these describe the overlay, not the pane" — and an exemption list is where the
+// next `b` would have hidden. ANYWHERE now holds only keys with one meaning, so any
+// overlap at all is a defect.
 func TestHelpBody_AnywhereKeysAreNotReboundByTheActivePane(t *testing.T) {
 	for p := paneNamespaces; p <= lastPaneID; p++ {
 		owned := map[string]string{}
@@ -321,10 +338,7 @@ func TestHelpBody_AnywhereKeysAreNotReboundByTheActivePane(t *testing.T) {
 				owned[k] = kb.desc
 			}
 		}
-		for _, kb := range anywhereKeysFor(p).bindings {
-			if overlayOnlyKeys[kb.keys] {
-				continue
-			}
+		for _, kb := range anywhereKeys.bindings {
 			for _, k := range splitKeys(kb.keys) {
 				if desc, clash := owned[k]; clash {
 					t.Errorf("pane %v: ANYWHERE offers %q as %q while the pane binds %q to %q",
@@ -335,31 +349,71 @@ func TestHelpBody_AnywhereKeysAreNotReboundByTheActivePane(t *testing.T) {
 	}
 }
 
-// And the behavioural half: the pane that does not page must not be offered the
-// paging row, driven off pageActivePane's real cases rather than a copy of them.
-func TestHelpBody_PagingRowOnlyWherePagingExists(t *testing.T) {
+// The behavioural half, for the claim helpNavKeys actually makes: its three rows
+// move THIS OVERLAY on every pane, and its note says the closed-overlay meaning
+// differs on usage alone.
+//
+// Both halves are pressed rather than asserted against the switches they describe.
+// The overlay half is what the previous gating fix got backwards — it removed the
+// paging row from the one pane whose 86-line body most needs it, on the strength of
+// a pane behaviour that says nothing about what the key does while the overlay is up.
+func TestHelpNavKeys_MoveTheOverlayOnEveryPane(t *testing.T) {
 	for p := paneNamespaces; p <= lastPaneID; p++ {
-		listed := false
-		for _, kb := range anywhereKeysFor(p).bindings {
-			if kb.keys == pagingKeys {
-				listed = true
-			}
+		// A short terminal so the body always overflows and has somewhere to scroll.
+		m := helpModelAt(t, p, 100, 14)
+		if m.helpVp.TotalLineCount() <= m.helpVp.VisibleLineCount() {
+			t.Fatalf("pane %v: body fits at 100x14, so scrolling is untestable", p)
 		}
-		if listed != panePages(p) {
-			t.Errorf("pane %v: paging row listed=%v but panePages=%v",
-				p, listed, panePages(p))
+
+		u, _ := m.Update(keyRune('f'))
+		m = u.(*model)
+		if m.helpVp.YOffset == 0 {
+			t.Errorf("pane %v: `f` did not page the overlay, but the nav group offers it", p)
+		}
+		u, _ = m.Update(keyRune('b'))
+		m = u.(*model)
+		if m.helpVp.YOffset != 0 {
+			t.Errorf("pane %v: `b` did not page the overlay back to the top (offset %d)",
+				p, m.helpVp.YOffset)
+		}
+		u, _ = m.Update(keyRune('G'))
+		m = u.(*model)
+		if !m.helpVp.AtBottom() {
+			t.Errorf("pane %v: `G` did not jump the overlay to the bottom", p)
 		}
 	}
+}
 
-	// paneUsage is the exclusion, and it is excluded because `b` means something
-	// else there. Press it and confirm that is still true, so this stops being a
-	// claim about a switch statement nobody re-reads.
+// And the exception the note names: with the overlay closed, usage is the one pane
+// where `b` is not paging and `g` moves nothing.
+func TestHelpNavKeys_NoteNamesTheOneExceptionCorrectly(t *testing.T) {
 	m := &model{pane: paneUsage, selectedSess: "s1"}
 	before := m.usage.group
 	m.handleKey(keyRune('b'))
 	if m.usage.group == before {
-		t.Errorf("`b` no longer cycles the usage breakdown; if paging reached that pane, " +
-			"panePages should stop excluding it")
+		t.Errorf("`b` no longer cycles the usage breakdown — the nav note says it does")
+	}
+
+	// The note also claims g/G do nothing on usage. goTop has no case for it; assert
+	// via the footer contract the existing TestUsagePane_DoesNotShadowGlobalG relies
+	// on, so both stay true together.
+	if strings.Contains((&model{pane: paneUsage}).helpView(), "[g]") {
+		t.Error("the usage footer claims [g] while the nav note says g does nothing there")
+	}
+
+	// A pane on the other side of the exception, so the note cannot be made true by
+	// paging breaking everywhere.
+	s := &model{pane: paneSessions, height: 40, width: 120}
+	s.sessionsTbl = newSessionsTable()
+	s.sessionsTbl.SetHeight(10)
+	for i := 0; i < 40; i++ {
+		s.sessions = append(s.sessions, session.SessionSummary{ID: fmt.Sprintf("s%02d", i)})
+	}
+	s.rebuildSessionsTable()
+	s.handleKey(keyRune('f'))
+	if s.sessionsTbl.Cursor() == 0 {
+		t.Error("`f` did not page the sessions table, so the nav note's " +
+			"\"moves the pane's own list\" is wrong outside usage too")
 	}
 }
 

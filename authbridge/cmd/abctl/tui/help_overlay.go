@@ -39,6 +39,7 @@ const (
 	jumpSectionTitle  = "GO TO ANOTHER PANE"
 	drillSectionTitle = "THE DRILL PATH"
 	anywhereTitle     = "ANYWHERE"
+	helpNavTitle      = "MOVING AROUND THIS HELP"
 	spendDrawerTitle  = "INSIDE THE SPEND DRAWER"
 	everyPaneTitle    = "EVERY PANE"
 
@@ -64,53 +65,45 @@ var anywhereKeys = keyGroup{
 	title: anywhereTitle,
 	bindings: []keyBinding{
 		{"?", "this help"},
-		{"↑↓ / jk", "scroll this help"},
 		{"p", "pause / resume the stream"},
-		{"g / G", "jump to top / bottom"},
-		{pagingKeys, "page up / down"},
 		{"q · ctrl+c", "quit"},
 	},
 }
 
-// pagingKeys is the one row of anywhereKeys that is not available everywhere, so
-// it is named rather than written twice (here and in the filter that drops it).
-const pagingKeys = "b / f"
-
-// overlayOnlyKeys are the anywhereKeys rows whose description is about THIS
-// OVERLAY rather than the pane underneath it. They are the documented exception to
-// "ANYWHERE must not claim a key the active pane rebinds": `↑↓`/`jk` navigate a
-// pane and scroll the overlay, and both are true at once because the overlay is
-// modal. Every other row describes the pane, so a pane rebinding it is a conflict —
-// see TestHelpBody_AnywhereKeysAreNotReboundByTheActivePane.
-var overlayOnlyKeys = map[string]bool{"?": true, "↑↓ / jk": true}
-
-// panePages reports whether `b`/`f` page the pane's own content.
+// helpNavKeys move this overlay. Their own group because that is the one framing in
+// which every one of them is unconditionally true.
 //
-// paneUsage IS THE ONE THAT DOES NOT, and it is worse than merely inert there: its
-// key handler runs first and binds `b` to the breakdown cycle, so an overlay
-// listing "b / f  page up / down" on that pane names a key that does something
-// else entirely. pageActivePane has cases for events, sessions, pipeline, catalog
-// and the two detail viewports; the pickers return earlier and page through their
-// own table's binding. Usage is absent from both paths.
-func panePages(p paneID) bool {
-	return p != paneUsage
-}
-
-// anywhereKeysFor returns anywhereKeys as it applies on pane, dropping the paging
-// row where paging does not exist.
-func anywhereKeysFor(pane paneID) keyGroup {
-	if panePages(pane) {
-		return anywhereKeys
-	}
-	g := anywhereKeys
-	g.bindings = make([]keyBinding, 0, len(anywhereKeys.bindings))
-	for _, kb := range anywhereKeys.bindings {
-		if kb.keys == pagingKeys {
-			continue
-		}
-		g.bindings = append(g.bindings, kb)
-	}
-	return g
+// THE FIRST TWO ATTEMPTS AT THIS WERE BOTH WRONG, in opposite directions, and the
+// measured behaviour is why. While the overlay is up, handleKey sends everything
+// except ?/esc/q/g/G to helpVp.Update, and bubbles' viewport binds `b`/`f` to
+// PageUp/PageDown — so all three rows move the overlay on EVERY pane, usage
+// included. With it closed they move the pane instead, and there the coverage is
+// ragged: pageActivePane has no paneUsage case, goTop/goBottom cover neither usage
+// nor the two pickers, and on usage `b` is the breakdown cycle.
+//
+// So listing them under ANYWHERE claimed a pane behaviour that does not hold
+// (the original bug), and gating a row off usage denied an overlay behaviour that
+// does (the first fix). Describing them as what they are — the overlay's own
+// navigation — is true everywhere and needs no gating at all. The one pane where
+// the closed-overlay meaning differs is named in the note rather than by removing a
+// row the reader needs to page these 86 lines.
+//
+// `?`/`esc`/`q` close the overlay and are deliberately NOT here: that is the one
+// hint pinned in the frame's footer (see renderHelpOverlay), where it cannot be
+// scrolled away, and a second copy could drift from it.
+var helpNavKeys = keyGroup{
+	title: helpNavTitle,
+	bindings: []keyBinding{
+		{"↑↓ / jk", "scroll a line"},
+		{"b / f", "page"},
+		{"g / G", "jump to the top / bottom"},
+	},
+	notes: []string{
+		"All three work on every pane, because they move this overlay rather than " +
+			"what is behind it. With it closed they move the pane's own list instead — " +
+			"except on the usage pane, which has no list: there b cycles the breakdown " +
+			"and g / G do nothing.",
+	},
 }
 
 // spendDrawerKeys are live only while the spend drawer is open. Their own
@@ -148,12 +141,12 @@ var spendDrawerKeys = keyGroup{
 // A FUNCTION, AND THE ONE helpBodyLines RENDERS FROM. As a plain slice it was a
 // registry only the tests read, so a group added to the body and not to the slice
 // would have escaped every invariant check — the exact drift those checks exist to
-// catch. The drawer's group is conditional for the reason the jump section drops
-// `$`: on the pickers and on usage the key is refused, and a titled block
-// explaining what `a` and `w` do inside a surface that cannot be opened is three
-// keys of pure noise.
+// catch. The drawer's group is the only conditional one left, for the reason the
+// jump section drops `$`: on the pickers and on usage the key is refused, and a
+// titled block explaining what `a` and `w` do inside a surface that cannot be
+// opened is three keys of pure noise.
 func helpGlobalGroups(pane paneID) []keyGroup {
-	groups := []keyGroup{anywhereKeysFor(pane)}
+	groups := []keyGroup{anywhereKeys, helpNavKeys}
 	if ok, _ := spendDrawerHostPane(pane); ok {
 		groups = append(groups, spendDrawerKeys)
 	}

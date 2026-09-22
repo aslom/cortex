@@ -771,10 +771,13 @@ Layered on top of all of them:
      If you're on one of its five panes it's in brackets; the four
      key-opened panes are not steps on it, so they get a line naming that
      and naming where `Esc` returns them;
-  4. **ANYWHERE**, then **INSIDE THE SPEND DRAWER** (`a`/`w` are live
-     only while it is open, so they are not mixed in with the keys that
-     always work — and the section is omitted on the panes where `$`
-     is refused);
+  4. **ANYWHERE** — `?`, `p`, `q`, the three keys with one meaning
+     everywhere — then **MOVING AROUND THIS HELP** (`↑↓`/`jk`, `b`/`f`,
+     `g`/`G`: these move the overlay on every pane, and a note names the
+     one pane where their closed-overlay meaning differs), then **INSIDE
+     THE SPEND DRAWER** (`a`/`w` are live only while it is open, so they
+     are not mixed in with the keys that always work — and the section is
+     omitted on the panes where `$` is refused);
   5. **EVERY PANE** — the other eight in full, purpose and every
      binding's description. Not compacted to bare keys: `USAGE  m w b s
      esc` said the pane has five keys and nothing about what any of them
@@ -799,7 +802,7 @@ Layered on top of all of them:
   edge, so the descriptions and the scope note survive a narrow
   terminal.
 
-  Spelling out all nine panes costs roughly three screens at 24 rows,
+  Spelling out all nine panes costs roughly four screens at 24 rows,
   which `g`/`G` and the pinned close hint are what make affordable. The
   overlay is the one surface with no width or height budget to defend,
   so it is where completeness belongs.
