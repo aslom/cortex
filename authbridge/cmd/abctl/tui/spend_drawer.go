@@ -791,7 +791,21 @@ func drawerFigures(r drawerRow) []stripFigure {
 	// POSITIONAL, so column N means the same thing on every row. Built as a fixed set of slots and
 	// trimmed at the end rather than appended to conditionally: appending shifted a row's tokens
 	// into the request column whenever Requests was absent, which is the whole failure this table
-	// is for — and MCP-only traffic makes that a real row rather than a hypothetical one.
+	// is for.
+	//
+	// WHICH ROWS ACTUALLY EXERCISE IT, because this doc used to say "an MCP-only row" and that is
+	// the wrong example. MCP traffic has requests and no tokens and nothing priceable, so its empty
+	// slots are all TRAILING — they are trimmed, and no column is held open at all. The cases that
+	// need a placeholder are the ones with a filled column AFTER an empty one:
+	//
+	//	a saving with no token count — tool-prune removes prompt tokens from a request whose
+	//	response could not be parsed, so AvoidedMicros is set while Tokens is zero
+	//	a priced row reporting no request count, which leaves the request column empty under a
+	//	token figure
+	//
+	// Both are covered; see TestDrawerFigures_AnEmptyMiddleColumnHoldsItsPlace. The placeholder
+	// itself lives in stripFigure.pad, which has to spell the empty case out because padLeft and
+	// padRight deliberately leave "" alone.
 	var money, note, req, tokens, saved stripFigure
 	figs := []stripFigure{plainFigure(r.label).inColumn(drawerLabelWidth, true)}
 	switch {

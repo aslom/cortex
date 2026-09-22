@@ -1670,6 +1670,37 @@ func TestDrawerFigures_AnEmptyMiddleColumnHoldsItsPlace(t *testing.T) {
 	if !strings.Contains(withTokens, "tokens") || strings.Contains(without, "tokens") {
 		t.Fatalf("the fixture no longer varies the tokens column:\n%s\n%s", withTokens, without)
 	}
+
+	// THE OTHER MIDDLE-EMPTY SHAPE: a priced row with no request count, so the REQUEST column is the
+	// one held open under a token figure. Raised in review against the commit before pad learned to
+	// pad an empty figure, where it rendered
+	// "mcp-tool  $9.43       45M tokens" against "claude-sonnet-5  $9.43  568 req  45M tokens".
+	priced := func(label string, req int64) string {
+		return fitStripFigures(" ", drawerFigures(drawerRow{
+			label: label,
+			counts: usage.Counts{
+				Requests: req, Tokens: 45_000_000, CostMicros: 9_430_000,
+				PricedRequests: 568, PriceableRequests: req,
+			},
+		}), 140)
+	}
+	withReq, noReq := priced("claude-sonnet-5", 568), priced("mcp-tool", 0)
+	tok := "45M tokens"
+	tokAt := func(t *testing.T, line string) int {
+		t.Helper()
+		i := strings.Index(line, tok)
+		if i < 0 {
+			t.Fatalf("row %q does not carry %q", line, tok)
+		}
+		return lipgloss.Width(line[:i])
+	}
+	if a, b := tokAt(t, withReq), tokAt(t, noReq); a != b {
+		t.Errorf("the token figure starts at column %d with a request count and %d without it — the "+
+			"empty request column collapsed:\n%s\n%s", a, b, withReq, noReq)
+	}
+	if !strings.Contains(withReq, "568 req") || strings.Contains(noReq, "req") {
+		t.Fatalf("the fixture no longer varies the request column:\n%s\n%s", withReq, noReq)
+	}
 }
 
 // THE CAVEAT PROSE LEAVES THE MONEY COLUMN AND BECOMES THE ROW'S LAST FIGURE.
