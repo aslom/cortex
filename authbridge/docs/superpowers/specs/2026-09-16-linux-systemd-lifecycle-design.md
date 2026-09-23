@@ -132,16 +132,21 @@ Cited by symbol, not line, since #1079 landed in a sibling PR and this file's ow
 history spans branches where it wasn't there yet.
 
 ### 8. Works under user systemd, and states what happens where systemd is absent
-The best-handled bullet: `loadService` gives a clear, actionable message when
-`systemctl` isn't found; `install.sh`'s `supervisor_usable()` does a live
-preflight (`systemctl` present but user manager/D-Bus unreachable) and falls back
-to an unsupervised mode. Gap: no Linux equivalent of `launchdUsable()`
-(`cmd_service_platform.go:680-696`, darwin-only) — the function that lets macOS
-refuse cleanly *before writing anything to disk*, with a dedicated tested exit
-code. On Linux, "no systemd" is discovered later, inside `loadService`, after the
-unit file has already been written (then cleaned up on failure). Probably fine in
-practice, but by accident/genericness rather than an intentional, tested,
-Linux-aware preflight — still an open decision, not yet resolved either way.
+`loadService` gives a clear, actionable message when `systemctl` isn't found;
+`install.sh`'s `supervisor_usable()` does a live preflight (`systemctl` present but
+user manager/D-Bus unreachable) and falls back to an unsupervised mode. As of this
+audit (2026-09-16), `abctl`'s own preflight had no Linux equivalent of
+`launchdUsable()` — the function that lets macOS refuse cleanly *before writing
+anything to disk*, with a dedicated tested exit code. On Linux, "no systemd" was
+discovered later, inside `loadService`, after the unit file had already been
+written (then cleaned up on failure).
+
+**Closed** — `systemdUsable()` mirrors `launchdUsable()`'s live probe
+(`systemctl --user show-environment`, the same check `install.sh`'s shell-level
+preflight and this file's own `requireRealSystemd` already use), and
+`serviceManagerUsable(goos)` dispatches to it from `serviceInstall`'s existing
+preflight call site — the same place, same exit code, same message, that used to
+call `launchdUsable()` unconditionally and get a silent `true` on Linux.
 
 ## Relationship to other issues
 

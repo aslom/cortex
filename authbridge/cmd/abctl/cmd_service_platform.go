@@ -703,6 +703,41 @@ func launchdUsable() (bool, string) {
 	return false, first
 }
 
+// systemdUsable reports whether this process can drive a systemd --user session.
+// launchdUsable's Linux equivalent: `systemctl --user show-environment` is the same
+// live probe requireRealSystemd (cmd_service_systemd_integration_test.go) and
+// install.sh's shell-level supervisor_usable() already use to distinguish "systemctl
+// present but the user manager/D-Bus is unreachable" from a genuinely usable session.
+// Unlike launchdUsable, this has no internal GOOS guard: the caller picks which of the
+// two to run via serviceManagerUsable, so this stays callable from either host for
+// tests, the same reason loadService/controlService/supervisorRunning/unloadService
+// take goos explicitly rather than branching on runtime.GOOS themselves.
+func systemdUsable() (bool, string) {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return false, "systemctl is not on PATH"
+	}
+	out, err := exec.Command("systemctl", "--user", "show-environment").CombinedOutput()
+	if err == nil {
+		return true, ""
+	}
+	first := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
+	if first == "" {
+		first = err.Error()
+	}
+	return false, first
+}
+
+// serviceManagerUsable is the goos-dispatched preflight serviceInstall calls before
+// writing anything to disk. Without it on Linux, the first sign of an unusable
+// systemd --user session was systemctl's own failure after the unit was already
+// written — the exact bug launchdUsable was already guarding against on macOS.
+func serviceManagerUsable(goos string) (bool, string) {
+	if goos == "darwin" {
+		return launchdUsable()
+	}
+	return systemdUsable()
+}
+
 // waitGone polls gone() until it reports true, or d elapses.
 //
 // Split from waitBootedOutf so the progress behaviour is testable without launchd. The
