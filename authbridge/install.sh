@@ -593,6 +593,164 @@ demo_ports_busy() {
 	return 1
 }
 
+# pid_exe_path prints the full executable path of a pid, or nothing when it cannot
+# be resolved. `ps -o comm=` is NOT usable here: on Linux `comm` is the kernel's
+# comm field — argv[0]'s basename capped at 15 chars (TASK_COMM_LEN-1) — so it
+# prints "authbridge-prox" for our 16-char binary and never a path. Only macOS
+# prints a path there. The callers below compare against a full install path, so
+# a truncated name would compare unequal every time.
+#
+# Two sources, in order of trustworthiness: /proc/<pid>/exe is the kernel's own
+# link to the running image on Linux, and lsof's `txt` descriptor is the macOS
+# equivalent. Both name the executable itself. `ps -o args=` is the last resort
+# and the weakest — argv[0] is whatever the caller chose, may be relative, and a
+# path containing spaces cannot be recovered from it — so it is used only to
+# avoid returning nothing at all.
+pid_exe_path() { # pid
+	# -h (the symlink itself), NOT -r: `-r` follows the link, and the link dangles
+	# in exactly the case that matters most — a binary replaced under a running
+	# process, which is what an upgrade does and when this code runs. Testing -r
+	# there would skip the kernel's own answer and fall through to a weaker source.
+	if [ -h "/proc/$1/exe" ] && _pep=$(readlink "/proc/$1/exe" 2>/dev/null) \
+		&& [ -n "${_pep}" ]; then
+		# A replaced/deleted binary reads as "<path> (deleted)"; keep the path.
+		printf '%s\n' "${_pep% (deleted)}"
+		return 0
+	fi
+	if command -v lsof >/dev/null 2>&1; then
+		# -d txt is the mapped executable; -Fn gives one n<name> line per record,
+		# stable across lsof versions where the columnar output is not.
+		#
+		# -a is REQUIRED, not decoration: lsof ORs its list-selection options by
+		# default, so `-p <pid> -d txt` means "files of this pid OR any txt
+		# descriptor on the system" — which lists every process's executable, and
+		# `head -1` would then take whichever came first. On macOS this is the
+		# source foreign_proxy_holder judges, so a stray first record would name
+		# some other binary and classify our own managed proxy as foreign.
+		# (-sTCP:LISTEN elsewhere needs no -a: a state list is a filter, not an
+		# ORed selection set.)
+		_pep=$(lsof -p "$1" -a -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+		[ -n "${_pep}" ] && { printf '%s\n' "${_pep}"; return 0; }
+	fi
+	_pep=$(ps -p "$1" -o args= 2>/dev/null | head -1)
+	_pep=${_pep%% *}
+	[ -n "${_pep}" ] && { printf '%s\n' "${_pep}"; return 0; }
+	return 1
+}
+
+# port_holder prints "<pid> <executable-path>" for whatever listens on the given
+# loopback port, and nothing when it cannot name both. The binary path is the
+# whole point here: it is what distinguishes our own proxy from a foreign one,
+# since every candidate is named authbridge-proxy.
+#
+# Two pid sources, mirroring port_in_use: lsof, then `ss -p` (iproute2, the
+# default on modern Linux where lsof is often not installed, and the platform
+# this detection would otherwise silently never fire on). ss cannot name the
+# binary, but it does print the pid — and the pid is all that is needed, because
+# the path is resolved from it separately either way. nc is not a source: it
+# reports only that a port is taken, with no pid to resolve.
+#
+# Address matching follows port_in_use's ss branch: a listener on IPv4 loopback,
+# IPv6 loopback, or a wildcard bind all make the loopback port unavailable, so
+# all three must be seen. A bind on an external interface only does not, and
+# must not be reported as the holder.
+port_holder() {
+	_ph_pid=""
+	if command -v lsof >/dev/null 2>&1; then
+		# Query the loopback addresses and the wildcard separately: -i@127.0.0.1
+		# alone misses a proxy bound to ::1 or to 0.0.0.0, both of which do hold
+		# the port. Plain -i:PORT would also match an external-only bind, which
+		# does not. lsof reports a wildcard listener under -i@0.0.0.0 / -i@[::].
+		for _ph_addr in '127.0.0.1' '[::1]' '0.0.0.0' '[::]'; do
+			_ph_pid=$(lsof -nP -iTCP@"${_ph_addr}":"$1" -sTCP:LISTEN -Fp 2>/dev/null \
+				| sed -n 's/^p//p' | head -1)
+			[ -n "${_ph_pid}" ] && break
+		done
+	fi
+	if [ -z "${_ph_pid}" ] && command -v ss >/dev/null 2>&1; then
+		# -p adds users:(("name",pid=N,fd=M)); take the first pid= on a line whose
+		# Local Address:Port ($4) is loopback or wildcard, exactly as port_in_use
+		# filters it. The trailing fields shift with -p, so match on $4 by name.
+		_ph_pid=$(ss -Hltnp "sport = :$1" 2>/dev/null \
+			| awk -v p=":$1" '($4 ~ ("(^|[^0-9])127\\.0\\.0\\.1"p"$")||($4 ~ ("^\\[::1\\]"p"$"))||($4 ~ ("^(0\\.0\\.0\\.0|\\*|\\[::\\]|::)"p"$"))) && match($0, /pid=[0-9]+/) {print substr($0, RSTART+4, RLENGTH-4); exit}')
+	fi
+	[ -n "${_ph_pid}" ] || return 1
+	# No path means the holder cannot be told apart from our own proxy. Report
+	# nothing rather than a placeholder: the callers treat any non-match as
+	# foreign, so "unidentified" must not travel as a value.
+	_ph_cmd=$(pid_exe_path "${_ph_pid}") || return 1
+	[ -n "${_ph_cmd}" ] || return 1
+	printf '%s %s\n' "${_ph_pid}" "${_ph_cmd}"
+}
+
+# foreign_proxy_holder prints "<pid> <path>" when the forward port is held by a
+# process that is NOT the proxy this script manages, and nothing otherwise.
+#
+# Why this exists: a busy forward port was classified unconditionally as the
+# benign upgrade race, on the assumption that the holder is our own proxy still
+# draining. That assumption fails whenever the holder belongs to a DIFFERENT
+# install — a copy run from a checkout, a second clone, an earlier install whose
+# binary moved. Such a process never drains, so "wait and re-run" never comes
+# true, and the supervised service retries its bind forever. Worse, the squatter
+# keeps serving with its OWN TLS-bridge CA while clients are configured to trust
+# the CA of the install that cannot start, so every intercepted request fails
+# certificate verification. That surfaces to users as a self-signed-certificate
+# error from their agent, which points at the certificate rather than at the two
+# proxies fighting over one port.
+#
+# "Ours" is decided by the pidfile and by the binary path we install to, not by
+# process name: every candidate is named authbridge-proxy, so the name cannot
+# discriminate.
+#
+# This fails CLOSED in every direction. When the holder cannot be named — no
+# lsof and no ss, or a pid whose executable cannot be read (a process owned by
+# another user, a sandbox that blinds both) — nothing is reported and the
+# previous ports-busy behavior stands, rather than accusing a process that
+# cannot be seen. Same stance proxy_running takes when `ps` is blind: no
+# information means assume it is ours, because the cost of a false "foreign" is
+# a die() telling the user to kill their own proxy mid-upgrade.
+foreign_proxy_holder() {
+	_fp_holder=$(port_holder "${DEMO_FORWARD_PORT}") || return 1
+	[ -n "${_fp_holder}" ] || return 1
+	_fp_pid=${_fp_holder%% *}
+	_fp_cmd=${_fp_holder#* }
+	# Both halves must be present, and there must really be two of them: with no
+	# space in the line, `${_fp_holder#* }` yields the whole line back, so a bare
+	# pid would be compared as though it were a path and read as foreign. A pid
+	# without a path cannot be judged at all — fail closed.
+	[ -n "${_fp_pid}" ] || return 1
+	[ -n "${_fp_cmd}" ] || return 1
+	[ "${_fp_cmd}" != "${_fp_holder}" ] || return 1
+
+	# Our own unsupervised proxy, recorded at start: not foreign.
+	if [ -f "${PROXY_PIDFILE}" ]; then
+		_fp_recorded=$(cat "${PROXY_PIDFILE}" 2>/dev/null)
+		[ -n "${_fp_recorded}" ] && [ "${_fp_pid}" = "${_fp_recorded}" ] && return 1
+	fi
+	# The binary this install manages: a supervised restart of it is the genuine
+	# upgrade race, so leave that to the existing ports-busy path.
+	#
+	# Text equality first, then again with both sides symlink-resolved. The path
+	# resolved for a running process and the path we install to can differ
+	# character-for-character while naming one file: /proc/<pid>/exe resolves
+	# every symlink, so a $HOME that is itself a symlink — or /var -> /private/var
+	# on macOS — yields a different string for the same binary, and that would
+	# read as foreign. `test -ef` would say this in one operator but is not POSIX
+	# and this script is strict /bin/sh, so compare canonical paths instead.
+	# Keeping the plain text check as well matters for the case where the file is
+	# gone: an install whose binary was replaced under a running process still
+	# reads as ours on the string alone.
+	_fp_mine="${BIN_DIR}/authbridge-proxy"
+	[ "${_fp_cmd}" = "${_fp_mine}" ] && return 1
+	if command -v readlink >/dev/null 2>&1; then
+		_fp_a=$(readlink -f "${_fp_cmd}" 2>/dev/null || true)
+		_fp_b=$(readlink -f "${_fp_mine}" 2>/dev/null || true)
+		[ -n "${_fp_a}" ] && [ "${_fp_a}" = "${_fp_b}" ] && return 1
+	fi
+
+	printf '%s %s\n' "${_fp_pid}" "${_fp_cmd}"
+}
+
 # service_install_action classifies the outcome of `abctl service install` into one
 # word, so the decision is one testable place instead of a chain of greps inline.
 #   $1 = abctl's exit status   $2 = abctl's combined stdout+stderr
@@ -601,6 +759,12 @@ demo_ports_busy() {
 #   refused    — abctl declined ON PURPOSE (a `refus`* message, e.g. a config that
 #                would expose a listener). This is the one failure we must NOT paper
 #                over: running the same proxy unsupervised would defeat that check.
+#   foreign-proxy — the forward port is held by a proxy from a DIFFERENT install,
+#                identified by its executable path. That never drains, so it is not
+#                the upgrade race; reported with the pid and path so the user can
+#                stop the right process. Checked before ports-busy, which would
+#                otherwise absorb it. Only when the holder is positively named as
+#                someone else's: an unidentifiable holder stays ports-busy.
 #   ports-busy — non-zero, but our listener ports are held: the benign upgrade race
 #                (the old proxy is still draining). Falling back would crash a second
 #                proxy on the bound ports, so tell the user to wait and re-run.
@@ -615,6 +779,12 @@ demo_ports_busy() {
 service_install_action() { # status output
 	[ "$1" = "0" ] && { printf 'supervised\n'; return 0; }
 	if printf '%s' "$2" | grep -qi 'refus'; then printf 'refused\n'; return 0; fi
+	# Before ports-busy: a foreign holder looks identical at the port level but
+	# needs the opposite advice (stop that process, not wait for it).
+	_sia_foreign=$(foreign_proxy_holder) && [ -n "${_sia_foreign}" ] && {
+		printf 'foreign-proxy %s\n' "${_sia_foreign}"
+		return 0
+	}
 	if demo_ports_busy; then printf 'ports-busy\n'; return 0; fi
 	printf 'fallback\n'
 }
@@ -1177,7 +1347,11 @@ else
 	svc_out=$(cat "${svc_out_file}" 2>/dev/null || true)
 	rm -f "${svc_out_file}" "${svc_st_file}"
 	set -e
-	case "$(service_install_action "${svc_status}" "${svc_out}")" in
+	# Captured once: the foreign-proxy verdict carries the holder's pid and path in
+	# the same string, and re-running the classifier to re-read them could observe a
+	# different holder than the one that was classified.
+	svc_action=$(service_install_action "${svc_status}" "${svc_out}")
+	case "${svc_action}" in
 		supervised)
 			SUPERVISED=1
 			;;
@@ -1187,6 +1361,31 @@ else
 			die "abctl refused to set up the service — a safety decision, not an
   environment limit, so Cortex was NOT started. Its message was:
     ${svc_out}"
+			;;
+		"foreign-proxy "*)
+			# A proxy from a different install holds the forward port. It will not
+			# drain, so "wait and re-run" would be wrong advice — name the process
+			# and stop, rather than leaving the service to retry its bind forever
+			# while that proxy serves traffic signed by a CA nobody is configured
+			# to trust (which reaches users as a self-signed-certificate error).
+			svc_foreign=${svc_action#foreign-proxy }
+			die "port ${DEMO_FORWARD_PORT} is held by a proxy this install does not manage:
+    pid ${svc_foreign%% *}  ${svc_foreign#* }
+  That process will not shut down on its own, so re-running will not help. It is
+  most likely an authbridge-proxy started by hand or from another checkout. Stop it
+  and re-run this installer:
+    kill ${svc_foreign%% *}
+  If it comes back on its own, it is another install's supervised service rather
+  than a hand-started copy, and killing it only triggers a respawn. Stop the
+  service that owns it instead — \`abctl service uninstall\` from THAT install, or
+  by hand:
+    macOS:  launchctl bootout gui/\$(id -u)/io.rossoctl.cortex
+    Linux:  systemctl --user disable --now cortex.service
+  (\`systemctl --user stop\` alone leaves the unit enabled, so it returns at the
+  next login; \`disable --now\` is the durable form.)
+  Leaving it running is not a benign duplicate: clients are configured to trust the
+  TLS-bridge CA of THIS install, while that proxy presents its own, so intercepted
+  requests fail certificate verification."
 			;;
 		ports-busy)
 			die "the previous Cortex is still shutting down (its ports are still in use).
