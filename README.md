@@ -9,9 +9,17 @@ Cortex sits in your agent's request path, decrypts its traffic, and shows you th
 calls, tool calls and agent-to-agent messages as they happen. It can also strip the
 tool definitions your agent never calls, which is 4–20% of the prompt on every turn.
 
+**Think `top`, for your coding agent.** Where `top` shows which processes are eating
+your CPU, `abctl observe` shows which agent sessions are eating your tokens, your
+context window and your money — live, as they run.
+
 One binary, no Kubernetes. macOS or Linux, amd64 or arm64.
 
 ## Quick start
+
+<!-- This install command is duplicated in the website's laptop quickstart:
+     rossoctl/rossoctl → docs/get-started/laptop.md ("Step 1: install the program").
+     Change both, or they drift — the --ref wording already did once. -->
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/authbridge/install.sh \
@@ -37,11 +45,25 @@ Your agent's calls stream into `abctl`. Cortex only reads them; nothing is rewri
 **Any agent works**, not only Claude Code: point it at `localhost:47600` and trust
 `~/.cortex/ca/ca.crt`.
 
-The install URL is on `main`, but the script re-runs the copy from the newest
-**release**, so `curl | sh` does not execute unreleased code. `--ref` overrides that for
-both halves — script and binaries: `--ref=vX.Y.Z` pins a release, and `--ref=main`
-installs the unreleased tip
+`curl | sh` never executes unreleased code — the script re-runs the copy from the newest
+release. Pin or override with `--ref`
 ([CONTRIBUTING.md](./CONTRIBUTING.md#installing-an-unreleased-build)).
+
+**Full install guide:** [Cortex on your laptop](https://www.rossoctl.dev/docs/dev/get-started/laptop)
+— prerequisites, step-by-step walkthrough, service management and troubleshooting.
+
+## Feedback
+
+> [!NOTE]
+> **Cortex on a laptop is new, and we want to hear when it breaks.**
+>
+> If the install failed, the numbers looked wrong, or anything was unclear:
+>
+> - Open the **Laptop feedback** form → [new issue](https://github.com/rossoctl/cortex/issues/new/choose)
+> - Or say so in [Slack](https://ibm.biz/rossoctl-slack)
+>
+> A half-finished install with the error pasted in is more useful to us than a polished
+> bug report you never sent.
 
 ## What else Cortex does
 
