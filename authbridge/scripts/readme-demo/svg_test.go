@@ -1,0 +1,143 @@
+package main
+
+import (
+	"bytes"
+	"encoding/xml"
+	"io"
+	"regexp"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+func toyStates() []State {
+	return []State{
+		{Label: "one", At: 0, Dur: 10 * time.Second, Rows: []Row{
+			{Runs: []Run{{Text: "$ echo <hi> & 'bye'", FG: promptFG}},
+				Reveal: Reveal{Kind: "type", Dur: 800 * time.Millisecond}},
+			{Runs: []Run{{Text: "done", FG: defaultFG}}, Reveal: Reveal{Kind: "fill", At: time.Second}},
+		}},
+		{Label: "two", At: 10 * time.Second, Dur: 10 * time.Second, Final: true, Rows: []Row{
+			{Runs: []Run{{Text: "SESSION", FG: titleFG, Bold: true}, {Text: " api", BG: "#303050"}}},
+		}},
+	}
+}
+
+func emit(t *testing.T) string {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := EmitSVG(&buf, toyStates(), 20*time.Second, Grid{Cols: 40, Rows: 4}); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
+
+func TestEmitSVG_IsWellFormedXML(t *testing.T) {
+	d := xml.NewDecoder(strings.NewReader(emit(t)))
+	for {
+		_, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("not well-formed: %v", err)
+		}
+	}
+}
+
+func TestEmitSVG_EscapesMarkupInTerminalText(t *testing.T) {
+	out := emit(t)
+	if strings.Contains(out, "<hi>") {
+		t.Error("raw < > reached the output; terminal text must be escaped")
+	}
+	if !strings.Contains(out, "&lt;hi&gt;") {
+		t.Error("expected the escaped form of <hi>")
+	}
+	if !strings.Contains(out, "&amp;") {
+		t.Error("expected & to be escaped")
+	}
+}
+
+func TestEmitSVG_EveryTspanCarriesTextLength(t *testing.T) {
+	// Without a forced advance the grid shears on any reader whose default
+	// monospace differs from the author's, which for a table-heavy TUI is the
+	// difference between a screenshot and a mess.
+	for _, tspan := range regexp.MustCompile(`<tspan[^>]*>`).FindAllString(emit(t), -1) {
+		if !strings.Contains(tspan, "textLength=") || !strings.Contains(tspan, `lengthAdjust="spacingAndGlyphs"`) {
+			t.Errorf("tspan without forced metrics: %s", tspan)
+		}
+	}
+}
+
+// TestEmitSVG_StatesUseOpacityNotVisibility guards the bug that had every state
+// drawn on top of every other: visibility is inheritable, but a descendant may
+// re-declare `visible` and show through a hidden ancestor — and every row reveal
+// does exactly that. opacity cannot be escaped that way.
+func TestEmitSVG_StatesUseOpacityNotVisibility(t *testing.T) {
+	out := emit(t)
+	if !strings.Contains(out, "g.st{opacity:0}") {
+		t.Error("state groups must default to opacity:0")
+	}
+	for _, kf := range regexp.MustCompile(`@keyframes st\d+\{[^}]*\}[^}]*\}`).FindAllString(out, -1) {
+		if strings.Contains(kf, "visibility") {
+			t.Errorf("state keyframes must animate opacity, not visibility: %s", kf)
+		}
+	}
+}
+
+// TestEmitSVG_StateWindowsTileTheTimeline checks that consecutive states hand off
+// with no gap (a blank frame) and no overlap (two screens at once).
+func TestEmitSVG_StateWindowsTileTheTimeline(t *testing.T) {
+	out := emit(t)
+	re := regexp.MustCompile(`@keyframes st(\d+)\{(.*?)\}\n`)
+	matches := re.FindAllStringSubmatch(out, -1)
+	if len(matches) != 2 {
+		t.Fatalf("want 2 state keyframe blocks, got %d", len(matches))
+	}
+	pctRe := regexp.MustCompile(`([\d.]+)%`)
+	var ends []float64
+	for _, m := range matches {
+		var got []float64
+		for _, p := range pctRe.FindAllStringSubmatch(m[2], -1) {
+			v, err := strconv.ParseFloat(p[1], 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, v)
+		}
+		ends = append(ends, got...)
+	}
+	// State 0 spans 0..50%, state 1 spans 50..100% of a 20s timeline.
+	if !containsApprox(ends, 50) {
+		t.Errorf("expected a handoff at 50%%, got stops %v", ends)
+	}
+}
+
+func containsApprox(vals []float64, want float64) bool {
+	for _, v := range vals {
+		if v > want-0.01 && v < want+0.01 {
+			return true
+		}
+	}
+	return false
+}
+
+func TestEmitSVG_ReducedMotionPinsTheFinalState(t *testing.T) {
+	out := emit(t)
+	if !strings.Contains(out, "@media (prefers-reduced-motion:reduce)") {
+		t.Fatal("no reduced-motion block")
+	}
+	if !strings.Contains(out, "g.st.final{opacity:1}") {
+		t.Error("reduced motion must pin the final state visible")
+	}
+	if !strings.Contains(out, `class="st st1 final`) {
+		t.Error("the last state must carry the final class")
+	}
+}
+
+func TestEmitSVG_RejectsNoStates(t *testing.T) {
+	if err := EmitSVG(io.Discard, nil, time.Second, Grid{Cols: 1, Rows: 1}); err == nil {
+		t.Error("want an error for an empty state list")
+	}
+}

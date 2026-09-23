@@ -1,0 +1,450 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 670" width="1040" height="670" font-size="14" role="img" aria-label="Cortex: install, point Claude Code at it, run several sessions, then read what they cost in abctl">
+<style>
+text{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;white-space:pre}
+g.st{opacity:0}
+.rv{visibility:hidden}
+.cur{fill:#58a6ff}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0.15}}
+@keyframes st0{0.0000%,27.9990%{opacity:1}28.0000%,100%{opacity:0}}
+g.st0{animation:st0 50s linear infinite}
+@keyframes tp0_0{0%,0.0000%{width:0}9.4080%,100%{width:957.6px}}
+#cl0_0 rect{animation:tp0_0 50s steps(114,end) infinite}
+@keyframes cx0_0{0%,0.0000%{x:16.0px}9.4080%,100%{x:973.6px}}
+@keyframes cv0_0{0%,0.0000%{visibility:hidden}0.0000%,9.4080%{visibility:visible}10.0080%,100%{visibility:hidden}}
+.cur0_0{animation:cx0_0 50s steps(114,end) infinite,cv0_0 50s linear infinite,blink 1s steps(1,end) infinite}
+@keyframes rv0_1{0%,10.3470%{visibility:hidden}10.3480%,100%{visibility:visible}}
+.rv0_1{animation:rv0_1 50s linear infinite}
+@keyframes rv0_2{0%,15.3470%{visibility:hidden}15.3480%,100%{visibility:visible}}
+.rv0_2{animation:rv0_2 50s linear infinite}
+@keyframes rv0_3{0%,17.1470%{visibility:hidden}17.1480%,100%{visibility:visible}}
+.rv0_3{animation:rv0_3 50s linear infinite}
+@keyframes rv0_4{0%,18.5470%{visibility:hidden}18.5480%,100%{visibility:visible}}
+.rv0_4{animation:rv0_4 50s linear infinite}
+@keyframes rv0_5{0%,18.7870%{visibility:hidden}18.7880%,100%{visibility:visible}}
+.rv0_5{animation:rv0_5 50s linear infinite}
+@keyframes rv0_6{0%,20.5870%{visibility:hidden}20.5880%,100%{visibility:visible}}
+.rv0_6{animation:rv0_6 50s linear infinite}
+@keyframes rv0_7{0%,20.8870%{visibility:hidden}20.8880%,100%{visibility:visible}}
+.rv0_7{animation:rv0_7 50s linear infinite}
+@keyframes rv0_8{0%,21.1870%{visibility:hidden}21.1880%,100%{visibility:visible}}
+.rv0_8{animation:rv0_8 50s linear infinite}
+@keyframes rv0_9{0%,21.4870%{visibility:hidden}21.4880%,100%{visibility:visible}}
+.rv0_9{animation:rv0_9 50s linear infinite}
+@keyframes rv0_10{0%,22.0870%{visibility:hidden}22.0880%,100%{visibility:visible}}
+.rv0_10{animation:rv0_10 50s linear infinite}
+@keyframes rv0_11{0%,24.4870%{visibility:hidden}24.4880%,100%{visibility:visible}}
+.rv0_11{animation:rv0_11 50s linear infinite}
+@keyframes rv0_12{0%,26.2870%{visibility:hidden}26.2880%,100%{visibility:visible}}
+.rv0_12{animation:rv0_12 50s linear infinite}
+@keyframes st1{0%,27.9990%{opacity:0}28.0000%,39.9990%{opacity:1}40.0000%,100%{opacity:0}}
+g.st1{animation:st1 50s linear infinite}
+@keyframes rv1_0{0%,27.9990%{visibility:hidden}28.0000%,100%{visibility:visible}}
+.rv1_0{animation:rv1_0 50s linear infinite}
+@keyframes rv1_1{0%,28.7990%{visibility:hidden}28.8000%,100%{visibility:visible}}
+.rv1_1{animation:rv1_1 50s linear infinite}
+@keyframes rv1_2{0%,29.4390%{visibility:hidden}29.4400%,100%{visibility:visible}}
+.rv1_2{animation:rv1_2 50s linear infinite}
+@keyframes rv1_3{0%,30.0790%{visibility:hidden}30.0800%,100%{visibility:visible}}
+.rv1_3{animation:rv1_3 50s linear infinite}
+@keyframes rv1_4{0%,28.3990%{visibility:hidden}28.4000%,100%{visibility:visible}}
+.rv1_4{animation:rv1_4 50s linear infinite}
+@keyframes rv1_6{0%,31.9990%{visibility:hidden}32.0000%,100%{visibility:visible}}
+.rv1_6{animation:rv1_6 50s linear infinite}
+@keyframes rv1_7{0%,32.7990%{visibility:hidden}32.8000%,100%{visibility:visible}}
+.rv1_7{animation:rv1_7 50s linear infinite}
+@keyframes rv1_8{0%,33.4390%{visibility:hidden}33.4400%,100%{visibility:visible}}
+.rv1_8{animation:rv1_8 50s linear infinite}
+@keyframes rv1_9{0%,34.0790%{visibility:hidden}34.0800%,100%{visibility:visible}}
+.rv1_9{animation:rv1_9 50s linear infinite}
+@keyframes rv1_10{0%,32.3990%{visibility:hidden}32.4000%,100%{visibility:visible}}
+.rv1_10{animation:rv1_10 50s linear infinite}
+@keyframes rv1_12{0%,35.9990%{visibility:hidden}36.0000%,100%{visibility:visible}}
+.rv1_12{animation:rv1_12 50s linear infinite}
+@keyframes rv1_13{0%,36.7990%{visibility:hidden}36.8000%,100%{visibility:visible}}
+.rv1_13{animation:rv1_13 50s linear infinite}
+@keyframes rv1_14{0%,37.4390%{visibility:hidden}37.4400%,100%{visibility:visible}}
+.rv1_14{animation:rv1_14 50s linear infinite}
+@keyframes rv1_15{0%,38.0790%{visibility:hidden}38.0800%,100%{visibility:visible}}
+.rv1_15{animation:rv1_15 50s linear infinite}
+@keyframes rv1_16{0%,36.3990%{visibility:hidden}36.4000%,100%{visibility:visible}}
+.rv1_16{animation:rv1_16 50s linear infinite}
+@keyframes st2{0%,39.9990%{opacity:0}40.0000%,49.9990%{opacity:1}50.0000%,100%{opacity:0}}
+g.st2{animation:st2 50s linear infinite}
+@keyframes rv2_0{0%,39.9990%{visibility:hidden}40.0000%,100%{visibility:visible}}
+.rv2_0{animation:rv2_0 50s linear infinite}
+@keyframes rv2_1{0%,40.1390%{visibility:hidden}40.1400%,100%{visibility:visible}}
+.rv2_1{animation:rv2_1 50s linear infinite}
+@keyframes rv2_2{0%,40.2790%{visibility:hidden}40.2800%,100%{visibility:visible}}
+.rv2_2{animation:rv2_2 50s linear infinite}
+@keyframes rv2_3{0%,40.4190%{visibility:hidden}40.4200%,100%{visibility:visible}}
+.rv2_3{animation:rv2_3 50s linear infinite}
+@keyframes rv2_4{0%,40.5590%{visibility:hidden}40.5600%,100%{visibility:visible}}
+.rv2_4{animation:rv2_4 50s linear infinite}
+@keyframes rv2_5{0%,40.6990%{visibility:hidden}40.7000%,100%{visibility:visible}}
+.rv2_5{animation:rv2_5 50s linear infinite}
+@keyframes rv2_6{0%,40.8390%{visibility:hidden}40.8400%,100%{visibility:visible}}
+.rv2_6{animation:rv2_6 50s linear infinite}
+@keyframes rv2_7{0%,40.9790%{visibility:hidden}40.9800%,100%{visibility:visible}}
+.rv2_7{animation:rv2_7 50s linear infinite}
+@keyframes rv2_8{0%,41.1190%{visibility:hidden}41.1200%,100%{visibility:visible}}
+.rv2_8{animation:rv2_8 50s linear infinite}
+@keyframes rv2_9{0%,41.2590%{visibility:hidden}41.2600%,100%{visibility:visible}}
+.rv2_9{animation:rv2_9 50s linear infinite}
+@keyframes rv2_10{0%,41.3990%{visibility:hidden}41.4000%,100%{visibility:visible}}
+.rv2_10{animation:rv2_10 50s linear infinite}
+@keyframes rv2_11{0%,41.5390%{visibility:hidden}41.5400%,100%{visibility:visible}}
+.rv2_11{animation:rv2_11 50s linear infinite}
+@keyframes rv2_12{0%,41.6790%{visibility:hidden}41.6800%,100%{visibility:visible}}
+.rv2_12{animation:rv2_12 50s linear infinite}
+@keyframes rv2_13{0%,41.8190%{visibility:hidden}41.8200%,100%{visibility:visible}}
+.rv2_13{animation:rv2_13 50s linear infinite}
+@keyframes rv2_14{0%,41.9590%{visibility:hidden}41.9600%,100%{visibility:visible}}
+.rv2_14{animation:rv2_14 50s linear infinite}
+@keyframes rv2_15{0%,42.0990%{visibility:hidden}42.1000%,100%{visibility:visible}}
+.rv2_15{animation:rv2_15 50s linear infinite}
+@keyframes rv2_16{0%,42.2390%{visibility:hidden}42.2400%,100%{visibility:visible}}
+.rv2_16{animation:rv2_16 50s linear infinite}
+@keyframes rv2_17{0%,42.3790%{visibility:hidden}42.3800%,100%{visibility:visible}}
+.rv2_17{animation:rv2_17 50s linear infinite}
+@keyframes rv2_18{0%,42.5190%{visibility:hidden}42.5200%,100%{visibility:visible}}
+.rv2_18{animation:rv2_18 50s linear infinite}
+@keyframes rv2_19{0%,42.6590%{visibility:hidden}42.6600%,100%{visibility:visible}}
+.rv2_19{animation:rv2_19 50s linear infinite}
+@keyframes rv2_20{0%,42.7990%{visibility:hidden}42.8000%,100%{visibility:visible}}
+.rv2_20{animation:rv2_20 50s linear infinite}
+@keyframes rv2_21{0%,42.9390%{visibility:hidden}42.9400%,100%{visibility:visible}}
+.rv2_21{animation:rv2_21 50s linear infinite}
+@keyframes rv2_22{0%,43.0790%{visibility:hidden}43.0800%,100%{visibility:visible}}
+.rv2_22{animation:rv2_22 50s linear infinite}
+@keyframes rv2_23{0%,43.2190%{visibility:hidden}43.2200%,100%{visibility:visible}}
+.rv2_23{animation:rv2_23 50s linear infinite}
+@keyframes rv2_24{0%,43.3590%{visibility:hidden}43.3600%,100%{visibility:visible}}
+.rv2_24{animation:rv2_24 50s linear infinite}
+@keyframes rv2_25{0%,43.4990%{visibility:hidden}43.5000%,100%{visibility:visible}}
+.rv2_25{animation:rv2_25 50s linear infinite}
+@keyframes rv2_26{0%,43.6390%{visibility:hidden}43.6400%,100%{visibility:visible}}
+.rv2_26{animation:rv2_26 50s linear infinite}
+@keyframes rv2_27{0%,43.7790%{visibility:hidden}43.7800%,100%{visibility:visible}}
+.rv2_27{animation:rv2_27 50s linear infinite}
+@keyframes rv2_28{0%,43.9190%{visibility:hidden}43.9200%,100%{visibility:visible}}
+.rv2_28{animation:rv2_28 50s linear infinite}
+@keyframes rv2_29{0%,44.0590%{visibility:hidden}44.0600%,100%{visibility:visible}}
+.rv2_29{animation:rv2_29 50s linear infinite}
+@keyframes rv2_30{0%,44.1990%{visibility:hidden}44.2000%,100%{visibility:visible}}
+.rv2_30{animation:rv2_30 50s linear infinite}
+@keyframes rv2_31{0%,44.3390%{visibility:hidden}44.3400%,100%{visibility:visible}}
+.rv2_31{animation:rv2_31 50s linear infinite}
+@keyframes rv2_32{0%,44.4790%{visibility:hidden}44.4800%,100%{visibility:visible}}
+.rv2_32{animation:rv2_32 50s linear infinite}
+@keyframes rv2_33{0%,44.6190%{visibility:hidden}44.6200%,100%{visibility:visible}}
+.rv2_33{animation:rv2_33 50s linear infinite}
+@keyframes st3{0%,49.9990%{opacity:0}50.0000%,61.9990%{opacity:1}62.0000%,100%{opacity:0}}
+g.st3{animation:st3 50s linear infinite}
+@keyframes st4{0%,61.9990%{opacity:0}62.0000%,69.9990%{opacity:1}70.0000%,100%{opacity:0}}
+g.st4{animation:st4 50s linear infinite}
+@keyframes st5{0%,69.9990%{opacity:0}70.0000%,79.9990%{opacity:1}80.0000%,100%{opacity:0}}
+g.st5{animation:st5 50s linear infinite}
+@keyframes st6{0%,79.9990%{opacity:0}80.0000%,87.9990%{opacity:1}88.0000%,100%{opacity:0}}
+g.st6{animation:st6 50s linear infinite}
+@keyframes st7{0%,87.9990%{opacity:0}88.0000%,95.9990%{opacity:1}96.0000%,100%{opacity:0}}
+g.st7{animation:st7 50s linear infinite}
+@keyframes st8{0%,95.9990%{opacity:0}96.0000%,100%{opacity:1}}
+g.st8{animation:st8 50s linear infinite}
+@media (prefers-reduced-motion:reduce){
+g.st,.rv,.cur,clipPath rect{animation:none!important}
+g.st{opacity:0}
+g.st.final{opacity:1}
+.rv{visibility:visible}
+.cur{visibility:hidden}
+clipPath rect{width:100000px}
+}
+</style>
+<rect width="1040" height="670" rx="8" fill="#0d1117"/>
+<path d="M0 8a8 8 0 0 1 8-8h1024a8 8 0 0 1 8 8v22H0z" fill="#161b22"/>
+<circle cx="18" cy="15" r="5" fill="#ff5f57"/>
+<circle cx="36" cy="15" r="5" fill="#febc2e"/>
+<circle cx="54" cy="15" r="5" fill="#28c840"/>
+<text x="520" y="19.0" fill="#6e7681" font-size="12" text-anchor="middle">cortex</text>
+<g class="st st0 lbl-install">
+<clipPath id="cl0_0"><rect x="16.0" y="45.0" width="0" height="18.0"/></clipPath>
+<text clip-path="url(#cl0_0)" y="58.0"><tspan x="16.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#3fb950" font-weight="600">$ </tspan><tspan x="32.8" textLength="940.8" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/authbridge/install.sh | sh -s -- --claude-code</tspan></text>
+<rect class="cur cur0_0" x="16.0" y="46.0" width="8.4" height="14.0"/>
+<text class="rv rv0_1" y="76.0"><tspan x="16.0" textLength="226.8" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">Resolving newest release...</tspan></text>
+<text class="rv rv0_2" y="94.0"><tspan x="16.0" textLength="319.2" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">Downloading v0.9.3 for darwin/arm64...</tspan></text>
+<text class="rv rv0_3" y="112.0"><tspan x="16.0" textLength="445.2" lengthAdjust="spacingAndGlyphs" fill="#3fb950">Installed abctl and authbridge-proxy to ~/.cortex/bin</tspan></text>
+<text class="rv rv0_4" y="130.0"><tspan x="16.0" textLength="277.2" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">Setting up the launchd service...</tspan></text>
+<text class="rv rv0_5" y="148.0"></text>
+<text class="rv rv0_6" y="166.0"><tspan x="16.0" textLength="428.4" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">Adds to the &quot;env&quot; block of ~/.claude/settings.json:</tspan></text>
+<text class="rv rv0_7" y="184.0"><tspan x="16.0" textLength="319.2" lengthAdjust="spacingAndGlyphs" fill="#8b949e">    HTTPS_PROXY=http://localhost:47600</tspan></text>
+<text class="rv rv0_8" y="202.0"><tspan x="16.0" textLength="310.8" lengthAdjust="spacingAndGlyphs" fill="#8b949e">    HTTP_PROXY=http://localhost:47600</tspan></text>
+<text class="rv rv0_9" y="220.0"><tspan x="16.0" textLength="361.2" lengthAdjust="spacingAndGlyphs" fill="#8b949e">    NODE_EXTRA_CA_CERTS=~/.cortex/ca/ca.crt</tspan></text>
+<text class="rv rv0_10" y="238.0"><tspan x="16.0" textLength="579.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">Nothing else in the file changes; a copy is kept as settings.json.bak</tspan></text>
+<text class="rv rv0_11" y="256.0"><tspan x="16.0" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#d29922">Apply? [y/N] y</tspan></text>
+<text class="rv rv0_12" y="274.0"><tspan x="16.0" textLength="268.8" lengthAdjust="spacingAndGlyphs" fill="#3fb950">Enabled — run `claude` as usual.</tspan></text>
+</g>
+<g class="st st1 lbl-sessions">
+<text class="rv rv1_0" y="58.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#6e7681">┌─ ~/work/api ─────────────────────────────────────────────────────────────────────────────────────────────────────────┐</tspan></text>
+<text class="rv rv1_1" y="76.0"><tspan x="16.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#6e7681">│ </tspan><tspan x="32.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#3fb950" font-weight="600">$ </tspan><tspan x="49.6" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">claude</tspan></text>
+<text class="rv rv1_2" y="94.0"><tspan x="16.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#6e7681">│ </tspan><tspan x="32.8" textLength="193.2" lengthAdjust="spacingAndGlyphs" fill="#8b949e">▸ fix the retry handler</tspan></text>
+<text class="rv rv1_3" y="112.0"><tspan x="16.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#6e7681">│ </tspan><tspan x="32.8" textLength="226.8" lengthAdjust="spacingAndGlyphs" fill="#8b949e">  Read src/retry/handler.go</tspan></text>
+<text class="rv rv1_4" y="130.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#6e7681">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</tspan></text>
+<text class="rv rv1_6" y="166.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#6e7681">┌─ ~/work/web ─────────────────────────────────────────────────────────────────────────────────────────────────────────┐</tspan></text>
+<text class="rv rv1_7" y="184.0"><tspan x="16.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#6e7681">│ </tspan><tspan x="32.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#3fb950" font-weight="600">$ </tspan><tspan x="49.6" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">claude</tspan></text>
+<text class="rv rv1_8" y="202.0"><tspan x="16.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#6e7681">│ </tspan><tspan x="32.8" textLength="184.8" lengthAdjust="spacingAndGlyphs" fill="#8b949e">▸ add dark mode toggle</tspan></text>
+<text class="rv rv1_9" y="220.0"><tspan x="16.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#6e7681">│ </tspan><tspan x="32.8" textLength="243.6" lengthAdjust="spacingAndGlyphs" fill="#8b949e">  Edit src/pages/Settings.tsx</tspan></text>
+<text class="rv rv1_10" y="238.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#6e7681">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</tspan></text>
+<text class="rv rv1_12" y="274.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#6e7681">┌─ ~/work/infra ───────────────────────────────────────────────────────────────────────────────────────────────────────┐</tspan></text>
+<text class="rv rv1_13" y="292.0"><tspan x="16.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#6e7681">│ </tspan><tspan x="32.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#3fb950" font-weight="600">$ </tspan><tspan x="49.6" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">claude</tspan></text>
+<text class="rv rv1_14" y="310.0"><tspan x="16.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#6e7681">│ </tspan><tspan x="32.8" textLength="184.8" lengthAdjust="spacingAndGlyphs" fill="#8b949e">▸ debug the helm chart</tspan></text>
+<text class="rv rv1_15" y="328.0"><tspan x="16.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#6e7681">│ </tspan><tspan x="32.8" textLength="184.8" lengthAdjust="spacingAndGlyphs" fill="#8b949e">  Bash helm template .</tspan></text>
+<text class="rv rv1_16" y="346.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#6e7681">└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘</tspan></text>
+</g>
+<g class="st st2 lbl-sessions">
+<text class="rv rv2_0" y="58.0"><tspan x="16.0" textLength="243.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">abctl · http://127.0.0.1:9094</tspan></text>
+<text class="rv rv2_1" y="76.0"><tspan x="16.0" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">LAST 1H</tspan><tspan x="74.8" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="150.4" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">TODAY</tspan><tspan x="192.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="268.0" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">7 DAYS</tspan><tspan x="318.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79 · </tspan><tspan x="394.0" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">THIS MONTH</tspan><tspan x="478.0" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79                                                           </tspan></text>
+<text class="rv rv2_2" y="94.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text class="rv rv2_3" y="112.0"><tspan x="24.4" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">SESSION       </tspan><tspan x="158.8" textLength="226.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">TITLE                      </tspan><tspan x="402.4" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">UPDATED       </tspan><tspan x="536.8" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">  EVENTS</tspan><tspan x="620.8" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">    TOKENS</tspan><tspan x="721.6" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">      COST</tspan><tspan x="822.4" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">    SAVED~</tspan><tspan x="923.2" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">CONTEXT(1M)</tspan></text>
+<rect class="rv rv2_4" x="16.0" y="117.0" width="1008.0" height="18.0" fill="#303050"/>
+<text class="rv rv2_4" y="130.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9" font-weight="600"> infra-55de      debug the helm chart         42s ago                2       16.2k       $0.02           —  ▕▏        ▏ </tspan></text>
+<text class="rv rv2_5" y="148.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> web-2a91        add dark mode toggle         42s ago                4       76.0k       $0.20           —  ▕▍        ▏ </tspan></text>
+<text class="rv rv2_6" y="166.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> api-7f3c        fix the retry handler        42s ago                8      300.7k       $0.57           —  ▕█▎       ▏ </tspan></text>
+<text class="rv rv2_7" y="184.0"></text>
+<text class="rv rv2_8" y="202.0"></text>
+<text class="rv rv2_9" y="220.0"></text>
+<text class="rv rv2_10" y="238.0"></text>
+<text class="rv rv2_11" y="256.0"></text>
+<text class="rv rv2_12" y="274.0"></text>
+<text class="rv rv2_13" y="292.0"></text>
+<text class="rv rv2_14" y="310.0"></text>
+<text class="rv rv2_15" y="328.0"></text>
+<text class="rv rv2_16" y="346.0"></text>
+<text class="rv rv2_17" y="364.0"></text>
+<text class="rv rv2_18" y="382.0"></text>
+<text class="rv rv2_19" y="400.0"></text>
+<text class="rv rv2_20" y="418.0"></text>
+<text class="rv rv2_21" y="436.0"></text>
+<text class="rv rv2_22" y="454.0"></text>
+<text class="rv rv2_23" y="472.0"></text>
+<text class="rv rv2_24" y="490.0"></text>
+<text class="rv rv2_25" y="508.0"></text>
+<text class="rv rv2_26" y="526.0"></text>
+<text class="rv rv2_27" y="544.0"></text>
+<text class="rv rv2_28" y="562.0"></text>
+<text class="rv rv2_29" y="580.0"></text>
+<text class="rv rv2_30" y="598.0"></text>
+<text class="rv rv2_31" y="616.0"></text>
+<text class="rv rv2_32" y="634.0"><tspan x="16.0" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">● connected</tspan><tspan x="125.2" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">0.0 events/sec</tspan><tspan x="242.8" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">   feedback: https://github.com/rossoctl/cortex/issues/new/choose</tspan></text>
+<text class="rv rv2_33" y="652.0"><tspan x="16.0" textLength="823.2" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">[↑↓] nav  [↵] drill  [u] usage  [$] spend  [/] filter  [p] pause  [P] pipeline  [?] keys  [q] quit</tspan></text>
+</g>
+<g class="st st3 lbl-spend">
+<text y="58.0"><tspan x="16.0" textLength="243.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">abctl · http://127.0.0.1:9094</tspan></text>
+<text y="76.0"><tspan x="16.0" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">LAST 1H</tspan><tspan x="74.8" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="150.4" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">TODAY</tspan><tspan x="192.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="268.0" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">7 DAYS</tspan><tspan x="318.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79 · </tspan><tspan x="394.0" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">THIS MONTH</tspan><tspan x="478.0" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79                                                           </tspan></text>
+<text y="94.0"><tspan x="16.0" textLength="436.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">  WHERE IT WENT                             BY MODEL</tspan></text>
+<text y="112.0"><tspan x="16.0" textLength="823.2" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">  cache-read   43% ████████████     $0.27   claude-opus-5          $0.63       4 req   319k tokens</tspan></text>
+<text y="130.0"><tspan x="16.0" textLength="823.2" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">  output       31% █████████        $0.20   claude-sonnet-5        $0.02       1 req    16k tokens</tspan></text>
+<text y="148.0"><tspan x="16.0" textLength="344.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">  cache-write  21% ██████           $0.14</tspan></text>
+<text y="166.0"><tspan x="16.0" textLength="344.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">  input         5% █▍               $0.03</tspan></text>
+<text y="184.0"><tspan x="16.0" textLength="504.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">   [a] [model] · endpoint · agent   [w] LAST 1H   esc closes</tspan></text>
+<text y="202.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text y="220.0"><tspan x="24.4" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">SESSION       </tspan><tspan x="158.8" textLength="226.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">TITLE                      </tspan><tspan x="402.4" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">UPDATED       </tspan><tspan x="536.8" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">  EVENTS</tspan><tspan x="620.8" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">    TOKENS</tspan><tspan x="721.6" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">      COST</tspan><tspan x="822.4" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">    SAVED~</tspan><tspan x="923.2" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">CONTEXT(1M)</tspan></text>
+<rect x="16.0" y="225.0" width="1008.0" height="18.0" fill="#303050"/>
+<text y="238.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9" font-weight="600"> infra-55de      debug the helm chart         42s ago                2       16.2k       $0.02           —  ▕▏        ▏ </tspan></text>
+<text y="256.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> web-2a91        add dark mode toggle         42s ago                4       76.0k       $0.20           —  ▕▍        ▏ </tspan></text>
+<text y="274.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> api-7f3c        fix the retry handler        42s ago                8      300.7k       $0.57           —  ▕█▎       ▏ </tspan></text>
+<text y="292.0"></text>
+<text y="310.0"></text>
+<text y="328.0"></text>
+<text y="346.0"></text>
+<text y="364.0"></text>
+<text y="382.0"></text>
+<text y="400.0"></text>
+<text y="418.0"></text>
+<text y="436.0"></text>
+<text y="454.0"></text>
+<text y="472.0"></text>
+<text y="490.0"></text>
+<text y="508.0"></text>
+<text y="526.0"></text>
+<text y="544.0"></text>
+<text y="562.0"></text>
+<text y="580.0"></text>
+<text y="598.0"></text>
+<text y="616.0"></text>
+<text y="634.0"><tspan x="16.0" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">● connected</tspan><tspan x="125.2" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">0.0 events/sec</tspan><tspan x="242.8" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">   feedback: https://github.com/rossoctl/cortex/issues/new/choose</tspan></text>
+<text y="652.0"><tspan x="16.0" textLength="823.2" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">[↑↓] nav  [↵] drill  [u] usage  [$] spend  [/] filter  [p] pause  [P] pipeline  [?] keys  [q] quit</tspan></text>
+</g>
+<g class="st st4 lbl-usage">
+<text y="58.0"><tspan x="16.0" textLength="361.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">abctl · http://127.0.0.1:9094 · usage · all</tspan></text>
+<text y="76.0"><tspan x="16.0" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">LAST 1H</tspan><tspan x="74.8" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="150.4" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">TODAY</tspan><tspan x="192.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="268.0" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">7 DAYS</tspan><tspan x="318.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79 · </tspan><tspan x="394.0" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">THIS MONTH</tspan><tspan x="478.0" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79                                                           </tspan></text>
+<text y="94.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text y="112.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">  USAGE — all sessions — 10m0s @ 1m0s — tokens — ungrouped                                                              </tspan></text>
+<text y="130.0"></text>
+<text y="148.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">  tok                                                                                                                   </tspan></text>
+<text y="166.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> 209k                                                       ████                                                        </tspan></text>
+<text y="184.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">                                                            ████                                                        </tspan></text>
+<text y="202.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> 167k                                                       ████                                                        </tspan></text>
+<text y="220.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">                                                            ████                                                        </tspan></text>
+<text y="238.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> 125k             ████                                      ████                                                        </tspan></text>
+<text y="256.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">                  ████                                      ████                                                        </tspan></text>
+<text y="274.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">  83k             ████                                      ████                                                        </tspan></text>
+<text y="292.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">                  ████                                      ████                                                        </tspan></text>
+<text y="310.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">  41k             ████                                      ████                                                        </tspan></text>
+<text y="328.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">                  ████                                      ████                                                        </tspan></text>
+<text y="346.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">   0 ┼────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────                                                        </tspan></text>
+<text y="364.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">      42:24       :24         :24         :24         :24                                                               </tspan></text>
+<text y="382.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">     0     0     126k  0     0     0     0     0     0     209k                                                         </tspan></text>
+<text y="400.0"></text>
+<text y="418.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">  REQUESTS 5    ERRORS 0 (0.0%)    TOKENS 335k    LATENCY 2.90s    COST $0.65 [unlabelled]                              </tspan></text>
+<text y="436.0"></text>
+<text y="454.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9">  updated 42s ago(every 20s)                                                                                            </tspan></text>
+<text y="472.0"></text>
+<text y="490.0"><tspan x="16.0" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">● connected</tspan><tspan x="125.2" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">0.0 events/sec</tspan><tspan x="242.8" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">   feedback: https://github.com/rossoctl/cortex/issues/new/choose</tspan></text>
+<text y="508.0"><tspan x="16.0" textLength="730.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">[m] metric  [w] window  [b] breakdown  [s] this session  [esc] back  [?] keys  [q] quit</tspan></text>
+</g>
+<g class="st st5 lbl-events">
+<text y="58.0"><tspan x="16.0" textLength="336.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">abctl · fix the retry handler (api-7f3c)</tspan></text>
+<text y="76.0"><tspan x="16.0" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">LAST 1H</tspan><tspan x="74.8" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="150.4" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">TODAY</tspan><tspan x="192.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="268.0" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">7 DAYS</tspan><tspan x="318.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79 · </tspan><tspan x="394.0" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">THIS MONTH</tspan><tspan x="478.0" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79                                                           </tspan></text>
+<text y="94.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text y="112.0"><tspan x="24.4" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">#   </tspan><tspan x="74.8" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">TIME        </tspan><tspan x="192.4" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">DIR </tspan><tspan x="242.8" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">PHASE  </tspan><tspan x="318.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">ACTION  </tspan><tspan x="402.4" textLength="151.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">PLUGIN            </tspan><tspan x="570.4" textLength="151.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">METHOD            </tspan><tspan x="738.4" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">STATUS </tspan><tspan x="814.0" textLength="168.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">HOST                </tspan></text>
+<text y="130.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> 1     42:24:24.24   out   req      observe   inference-parser    claude-opus-5                api.anthropic.com        </tspan></text>
+<text y="148.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> 1     42:24:24.24   out   resp     observe   2 plugins           claude-opus-5       200      api.anthropic.com        </tspan></text>
+<text y="166.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> 2     42:24:24.24   out   req      modify    token-exchange      tools/call                   github-tool-mcp          </tspan></text>
+<text y="184.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> 2     42:24:24.24   out   resp     —         —                   tools/call          200      github-tool-mcp          </tspan></text>
+<text y="202.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> 3     42:24:24.24   out   req      observe   inference-parser    claude-opus-5                api.anthropic.com        </tspan></text>
+<text y="220.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> 3     42:24:24.24   out   resp     observe   2 plugins           claude-opus-5       200      api.anthropic.com        </tspan></text>
+<text y="238.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> 4     42:24:24.24   out   req      observe   inference-parser    claude-opus-5                api.anthropic.com        </tspan></text>
+<rect x="16.0" y="243.0" width="974.4" height="18.0" fill="#303050"/>
+<text y="256.0"><tspan x="16.0" textLength="974.4" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9" font-weight="600"> 4     42:24:24.24   out   resp     observe   2 plugins           claude-opus-5       200      api.anthropic.com    </tspan></text>
+<text y="274.0"></text>
+<text y="292.0"></text>
+<text y="310.0"></text>
+<text y="328.0"></text>
+<text y="346.0"></text>
+<text y="364.0"></text>
+<text y="382.0"></text>
+<text y="400.0"></text>
+<text y="418.0"></text>
+<text y="436.0"></text>
+<text y="454.0"></text>
+<text y="472.0"></text>
+<text y="490.0"></text>
+<text y="508.0"></text>
+<text y="526.0"></text>
+<text y="544.0"></text>
+<text y="562.0"></text>
+<text y="580.0"></text>
+<text y="598.0"></text>
+<text y="616.0"></text>
+<text y="634.0"><tspan x="16.0" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">● connected</tspan><tspan x="125.2" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">0.0 events/sec</tspan><tspan x="242.8" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">   feedback: https://github.com/rossoctl/cortex/issues/new/choose</tspan></text>
+<text y="652.0"><tspan x="16.0" textLength="974.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">… [s] hide passthru/skip  [p] pause  [/] filter  [esc] back  ·  → 3 more columns ([c] to choose)  [?] keys  [q] quit</tspan></text>
+</g>
+<g class="st st6 lbl-detail">
+<text y="58.0"><tspan x="16.0" textLength="403.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">abctl · fix the retry handler (api-7f3c) · event</tspan></text>
+<text y="76.0"><tspan x="16.0" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">LAST 1H</tspan><tspan x="74.8" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="150.4" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">TODAY</tspan><tspan x="192.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="268.0" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">7 DAYS</tspan><tspan x="318.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79 · </tspan><tspan x="394.0" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">THIS MONTH</tspan><tspan x="478.0" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79                                                           </tspan></text>
+<text y="94.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text y="112.0"><tspan x="16.0" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="130.0"><tspan x="32.8" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;at&quot;</tspan><tspan x="66.4" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="83.2" textLength="285.6" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;2026-09-22T42:24:24.242424-42:24&quot;</tspan><tspan x="368.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="148.0"><tspan x="32.8" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;direction&quot;</tspan><tspan x="125.2" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="142.0" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;outbound&quot;</tspan><tspan x="226.0" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="166.0"><tspan x="32.8" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;host&quot;</tspan><tspan x="83.2" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="100.0" textLength="159.6" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;api.anthropic.com&quot;</tspan><tspan x="259.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="184.0"><tspan x="32.8" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;httpMethod&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;POST&quot;</tspan><tspan x="200.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="202.0"><tspan x="32.8" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;httpPath&quot;</tspan><tspan x="116.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="133.6" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;/v1/messages&quot;</tspan><tspan x="251.2" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="220.0"><tspan x="32.8" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;inference&quot;</tspan><tspan x="125.2" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="142.0" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="238.0"><tspan x="49.6" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;messages&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">[</tspan></text>
+<text y="256.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="274.0"><tspan x="83.2" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;content&quot;</tspan><tspan x="158.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="175.6" textLength="495.6" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;You are Claude Code, Anthropic&apos;s official CLI for Claude.&quot;</tspan><tspan x="671.2" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="292.0"><tspan x="83.2" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;role&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;system&quot;</tspan></text>
+<text y="310.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan><tspan x="74.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="328.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="346.0"><tspan x="83.2" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;content&quot;</tspan><tspan x="158.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="175.6" textLength="621.6" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;The retry handler drops the last attempt&apos;s error. Fix it and add a test.&quot;</tspan><tspan x="797.2" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="364.0"><tspan x="83.2" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;role&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;user&quot;</tspan></text>
+<text y="382.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan><tspan x="74.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="400.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="418.0"><tspan x="83.2" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;content&quot;</tspan><tspan x="158.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="175.6" textLength="621.6" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;I&apos;ll start by reading the retry handler to see how attempts are tracked.&quot;</tspan><tspan x="797.2" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="436.0"><tspan x="83.2" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;role&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;assistant&quot;</tspan></text>
+<text y="454.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan><tspan x="74.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="472.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="490.0"><tspan x="83.2" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;content&quot;</tspan><tspan x="158.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="175.6" textLength="403.2" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;[tool_result] src/retry/handler.go (142 lines)&quot;</tspan><tspan x="578.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="508.0"><tspan x="83.2" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;role&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;user&quot;</tspan></text>
+<text y="526.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan><tspan x="74.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="544.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="562.0"><tspan x="83.2" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;content&quot;</tspan><tspan x="158.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="175.6" textLength="428.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;Now I&apos;ll make the change in the file I just read.&quot;</tspan><tspan x="604.0" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="580.0"><tspan x="83.2" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;role&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;assistant&quot;</tspan></text>
+<text y="598.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan><tspan x="74.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="616.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="634.0"><tspan x="16.0" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">● connected</tspan><tspan x="125.2" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">0.0 events/sec</tspan><tspan x="242.8" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">   feedback: https://github.com/rossoctl/cortex/issues/new/choose</tspan></text>
+<text y="652.0"><tspan x="16.0" textLength="537.6" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">[↑↓] scroll  [y] yank  [u] usage  [esc] back  [?] keys  [q] quit</tspan></text>
+</g>
+<g class="st st7 lbl-manifest">
+<text y="58.0"><tspan x="16.0" textLength="403.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">abctl · fix the retry handler (api-7f3c) · event</tspan></text>
+<text y="76.0"><tspan x="16.0" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">LAST 1H</tspan><tspan x="74.8" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="150.4" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">TODAY</tspan><tspan x="192.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="268.0" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">7 DAYS</tspan><tspan x="318.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79 · </tspan><tspan x="394.0" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">THIS MONTH</tspan><tspan x="478.0" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79                                                           </tspan></text>
+<text y="94.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text y="112.0"><tspan x="83.2" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;role&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;assistant&quot;</tspan></text>
+<text y="130.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan><tspan x="74.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="148.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="166.0"><tspan x="83.2" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;content&quot;</tspan><tspan x="158.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="175.6" textLength="445.2" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;[tool_result] edit applied: 1 replacement  (step 3)&quot;</tspan><tspan x="620.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="184.0"><tspan x="83.2" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;role&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;user&quot;</tspan></text>
+<text y="202.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan><tspan x="74.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="220.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="238.0"><tspan x="83.2" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;content&quot;</tspan><tspan x="158.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="175.6" textLength="403.2" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;Running the tests to confirm the change holds.&quot;</tspan><tspan x="578.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="256.0"><tspan x="83.2" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;role&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;assistant&quot;</tspan></text>
+<text y="274.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan><tspan x="74.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="292.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="310.0"><tspan x="83.2" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;content&quot;</tspan><tspan x="158.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="175.6" textLength="302.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;[tool_result] ok  0.412s  (step 3)&quot;</tspan><tspan x="478.0" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="328.0"><tspan x="83.2" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;role&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;user&quot;</tspan></text>
+<text y="346.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan></text>
+<text y="364.0"><tspan x="49.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">]</tspan><tspan x="58.0" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="382.0"><tspan x="49.6" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;model&quot;</tspan><tspan x="108.4" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="125.2" textLength="126.0" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;claude-opus-5&quot;</tspan><tspan x="251.2" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="400.0"><tspan x="49.6" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;tools&quot;</tspan><tspan x="108.4" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="125.2" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">[</tspan></text>
+<text y="418.0"><tspan x="66.4" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="436.0"><tspan x="83.2" textLength="109.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;description&quot;</tspan><tspan x="192.4" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="209.2" textLength="478.8" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;Launch a new agent to handle complex, multi-step tasks.&quot;</tspan><tspan x="688.0" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="454.0"><tspan x="83.2" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;name&quot;</tspan><tspan x="133.6" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="150.4" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;Task&quot;</tspan><tspan x="200.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="472.0"><tspan x="83.2" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;parameters&quot;</tspan><tspan x="184.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="200.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="490.0"><tspan x="100.0" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;properties&quot;</tspan><tspan x="200.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="217.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="508.0"><tspan x="116.8" textLength="109.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;description&quot;</tspan><tspan x="226.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="242.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="526.0"><tspan x="133.6" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;type&quot;</tspan><tspan x="184.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="200.8" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;string&quot;</tspan></text>
+<text y="544.0"><tspan x="116.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan><tspan x="125.2" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="562.0"><tspan x="116.8" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;prompt&quot;</tspan><tspan x="184.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="200.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="580.0"><tspan x="133.6" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;type&quot;</tspan><tspan x="184.0" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="200.8" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">&quot;string&quot;</tspan></text>
+<text y="598.0"><tspan x="116.8" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">}</tspan><tspan x="125.2" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">,</tspan></text>
+<text y="616.0"><tspan x="116.8" textLength="126.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc">&quot;subagent_type&quot;</tspan><tspan x="242.8" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">: </tspan><tspan x="259.6" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">{</tspan></text>
+<text y="634.0"><tspan x="16.0" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">● connected</tspan><tspan x="125.2" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">0.0 events/sec</tspan><tspan x="242.8" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">   feedback: https://github.com/rossoctl/cortex/issues/new/choose</tspan></text>
+<text y="652.0"><tspan x="16.0" textLength="537.6" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">[↑↓] scroll  [y] yank  [u] usage  [esc] back  [?] keys  [q] quit</tspan></text>
+</g>
+<g class="st st8 final lbl-back">
+<text y="58.0"><tspan x="16.0" textLength="243.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">abctl · http://127.0.0.1:9094</tspan></text>
+<text y="76.0"><tspan x="16.0" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">LAST 1H</tspan><tspan x="74.8" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="150.4" textLength="42.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">TODAY</tspan><tspan x="192.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.65 · </tspan><tspan x="268.0" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">7 DAYS</tspan><tspan x="318.4" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79 · </tspan><tspan x="394.0" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">THIS MONTH</tspan><tspan x="478.0" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> $0.79                                                           </tspan></text>
+<text y="94.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text y="112.0"><tspan x="24.4" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">SESSION       </tspan><tspan x="158.8" textLength="226.8" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">TITLE                      </tspan><tspan x="402.4" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">UPDATED       </tspan><tspan x="536.8" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">  EVENTS</tspan><tspan x="620.8" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">    TOKENS</tspan><tspan x="721.6" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">      COST</tspan><tspan x="822.4" textLength="84.0" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">    SAVED~</tspan><tspan x="923.2" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#a5b3fc" font-weight="600">CONTEXT(1M)</tspan></text>
+<text y="130.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> infra-55de      debug the helm chart         42s ago                2       16.2k       $0.02           —  ▕▏        ▏ </tspan></text>
+<text y="148.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9"> web-2a91        add dark mode toggle         42s ago                4       76.0k       $0.20           —  ▕▍        ▏ </tspan></text>
+<rect x="16.0" y="153.0" width="1008.0" height="18.0" fill="#303050"/>
+<text y="166.0"><tspan x="16.0" textLength="1008.0" lengthAdjust="spacingAndGlyphs" fill="#c9d1d9" font-weight="600"> api-7f3c        fix the retry handler        42s ago                8      300.7k       $0.57           —  ▕█▎       ▏ </tspan></text>
+<text y="184.0"></text>
+<text y="202.0"></text>
+<text y="220.0"></text>
+<text y="238.0"></text>
+<text y="256.0"></text>
+<text y="274.0"></text>
+<text y="292.0"></text>
+<text y="310.0"></text>
+<text y="328.0"></text>
+<text y="346.0"></text>
+<text y="364.0"></text>
+<text y="382.0"></text>
+<text y="400.0"></text>
+<text y="418.0"></text>
+<text y="436.0"></text>
+<text y="454.0"></text>
+<text y="472.0"></text>
+<text y="490.0"></text>
+<text y="508.0"></text>
+<text y="526.0"></text>
+<text y="544.0"></text>
+<text y="562.0"></text>
+<text y="580.0"></text>
+<text y="598.0"></text>
+<text y="616.0"></text>
+<text y="634.0"><tspan x="16.0" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#6ee7b7">● connected</tspan><tspan x="125.2" textLength="117.6" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">0.0 events/sec</tspan><tspan x="242.8" textLength="546.0" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">   feedback: https://github.com/rossoctl/cortex/issues/new/choose</tspan></text>
+<text y="652.0"><tspan x="16.0" textLength="823.2" lengthAdjust="spacingAndGlyphs" fill="#9ca3af">[↑↓] nav  [↵] drill  [u] usage  [$] spend  [/] filter  [p] pause  [P] pipeline  [?] keys  [q] quit</tspan></text>
+</g>
+</svg>
