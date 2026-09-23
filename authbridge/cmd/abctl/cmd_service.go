@@ -304,7 +304,7 @@ func serviceInstall(p servicePaths, yes, forceRestart bool, stdout, stderr io.Wr
 	// launchctl's "Bootstrap failed: 5: Input/output error" after the unit was already on
 	// disk — a message that names neither the cause nor a way forward. Reported from a
 	// restricted sandbox environment.
-	if ok, why := launchdUsable(); !ok {
+	if ok, why := serviceManagerUsable(runtime.GOOS); !ok {
 		fmt.Fprintf(stderr, "abctl: this environment cannot manage %ss (%s).\n\n"+
 			"  Cortex still runs, just not supervised — start it yourself:\n"+
 			"    %s --local\n\n"+

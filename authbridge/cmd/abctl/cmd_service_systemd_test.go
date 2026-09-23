@@ -444,3 +444,51 @@ exit 1
 		}
 	})
 }
+
+// TestSystemdUsable mirrors TestLaunchdUsable (cmd_service_restricted_test.go) for
+// the Linux side: systemdUsable has no internal GOOS guard, so unlike launchdUsable
+// it's directly testable from any host.
+func TestSystemdUsable(t *testing.T) {
+	t.Run("no systemctl on PATH", func(t *testing.T) {
+		noSystemctlOnPath(t)
+		ok, why := systemdUsable()
+		if ok {
+			t.Error("reported usable with no systemctl on PATH")
+		}
+		if !strings.Contains(why, "systemctl") {
+			t.Errorf("reason does not name the missing binary: %q", why)
+		}
+	})
+	t.Run("an unreachable user session is not usable, and says why", func(t *testing.T) {
+		fakeSystemctl(t, "#!/bin/sh\necho 'Failed to connect to bus: No such file or directory' >&2\nexit 1\n")
+		ok, why := systemdUsable()
+		if ok {
+			t.Error("reported usable with no reachable systemd --user session")
+		}
+		if !strings.Contains(why, "bus") {
+			t.Errorf("reason does not explain anything: %q", why)
+		}
+	})
+	t.Run("a working session is usable", func(t *testing.T) {
+		fakeSystemctl(t, "#!/bin/sh\necho 'XDG_RUNTIME_DIR=/run/user/1000'\nexit 0\n")
+		if ok, why := systemdUsable(); !ok {
+			t.Errorf("reported unusable against a working systemctl: %s", why)
+		}
+	})
+}
+
+// TestServiceManagerUsable_Linux exercises serviceManagerUsable's own dispatch: given
+// "linux" it must call systemdUsable, not launchdUsable — the two report through
+// entirely different fakes, so a swapped branch would read the wrong one's stub.
+func TestServiceManagerUsable_Linux(t *testing.T) {
+	t.Run("linux dispatches to systemdUsable", func(t *testing.T) {
+		fakeSystemctl(t, "#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n")
+		ok, why := serviceManagerUsable("linux")
+		if ok {
+			t.Error("reported usable with no reachable systemd --user session")
+		}
+		if !strings.Contains(why, "bus") {
+			t.Errorf("reason = %q, want it to come from systemdUsable, not launchdUsable", why)
+		}
+	})
+}
