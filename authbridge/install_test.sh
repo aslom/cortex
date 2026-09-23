@@ -714,7 +714,16 @@ with_pid_exe_path() { # proc_exe_target(empty for no /proc)  lsof_txt  ps_args
 		printf 'PROCROOT=%s\n' "${_root}"
 		if [ -n "$2" ]; then
 			printf 'command() { case "$2" in lsof) return 0 ;; *) return 0 ;; esac; }\n'
-			printf 'lsof() { printf "n%%s\\n" "%s"; }\n' "$2"
+			# Modelled on real lsof rather than echoing a fixed answer: list-selection
+			# options are ORed unless -a is given, so without -a `-p <pid> -d txt`
+			# lists every process's executable and head -1 takes whatever came first.
+			# The stub emits an unrelated record FIRST in that case, so dropping -a
+			# fails the test instead of passing silently.
+			printf 'lsof() {\n'
+			printf '\t_a=no; for _w in "$@"; do [ "${_w}" = "-a" ] && _a=yes; done\n'
+			printf '\t[ "${_a}" = no ] && printf "n/usr/bin/some-other-process\\n"\n'
+			printf '\tprintf "n%%s\\n" "%s"\n' "$2"
+			printf '}\n'
 		else
 			printf 'command() { case "$2" in lsof) return 1 ;; *) return 0 ;; esac; }\n'
 		fi
@@ -741,6 +750,19 @@ check "pid_exe_path: a deleted/replaced binary keeps its path, drops ' (deleted)
 check "pid_exe_path: no /proc -> lsof txt descriptor (the macOS path)" \
 	"/Users/u/.local/bin/authbridge-proxy" \
 	"$(with_pid_exe_path '' /Users/u/.local/bin/authbridge-proxy /ps/path)"
+# Same case, stated as the bug it guards: lsof ORs -p and -d unless -a is passed,
+# so without it the query means "this pid OR any txt descriptor on the system" and
+# head -1 can take another process's executable. On macOS this is the source
+# foreign_proxy_holder judges, so the wrong path there classifies our OWN managed
+# proxy as foreign and dies. The stub above emits a foreign record first when -a is
+# missing, so this check is what fails if the flag is ever dropped.
+check "pid_exe_path: the lsof query is ANDed with -a (not 'this pid OR any txt fd')" \
+	"/Users/u/.local/bin/authbridge-proxy" \
+	"$(with_pid_exe_path '' /Users/u/.local/bin/authbridge-proxy '')"
+# Belt and braces: pin the flag in the source too, so a refactor that rewrites the
+# invocation cannot quietly lose the conjunction while still passing the stub test.
+check "the lsof executable query passes -a" "1" \
+	"$(grep -c 'lsof -p "\$1" -a -d txt' "${INSTALL_SH}")"
 # argv[0] is the weakest source (caller-chosen, possibly relative) so it is last,
 # but it beats reporting nothing.
 check "pid_exe_path: no /proc, no lsof -> first field of ps args" \

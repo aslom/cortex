@@ -620,7 +620,16 @@ pid_exe_path() { # pid
 	if command -v lsof >/dev/null 2>&1; then
 		# -d txt is the mapped executable; -Fn gives one n<name> line per record,
 		# stable across lsof versions where the columnar output is not.
-		_pep=$(lsof -p "$1" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+		#
+		# -a is REQUIRED, not decoration: lsof ORs its list-selection options by
+		# default, so `-p <pid> -d txt` means "files of this pid OR any txt
+		# descriptor on the system" — which lists every process's executable, and
+		# `head -1` would then take whichever came first. On macOS this is the
+		# source foreign_proxy_holder judges, so a stray first record would name
+		# some other binary and classify our own managed proxy as foreign.
+		# (-sTCP:LISTEN elsewhere needs no -a: a state list is a filter, not an
+		# ORed selection set.)
+		_pep=$(lsof -p "$1" -a -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
 		[ -n "${_pep}" ] && { printf '%s\n' "${_pep}"; return 0; }
 	fi
 	_pep=$(ps -p "$1" -o args= 2>/dev/null | head -1)
