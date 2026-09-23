@@ -128,8 +128,8 @@ of systemd's own 90s default (`systemd.system.conf(5)`) exceeding 15s.
 **Closed by #1079** — `renderUnitFor("linux", ...)` now sets `TimeoutStopSec=20`
 explicitly on `main`, matching the macOS supervisor's 20s headroom over the same
 15s drain, with a subtest in `cmd_service_test.go` asserting the line is present.
-Not yet on this branch's own tree until it merges — cited by symbol, not line,
-since #1079 landed in a sibling PR.
+Cited by symbol, not line, since #1079 landed in a sibling PR and this file's own
+history spans branches where it wasn't there yet.
 
 ### 8. Works under user systemd, and states what happens where systemd is absent
 The best-handled bullet: `loadService` gives a clear, actionable message when

@@ -348,13 +348,16 @@ echo "unit not loaded" >&2
 exit 1
 `)
 		err := unloadService("linux", p)
-		if err == nil || !strings.Contains(err.Error(), "disable") || !strings.Contains(err.Error(), "unit not loaded") {
-			t.Errorf("err = %v, want it to name disable --now and the underlying reason", err)
+		if err == nil ||
+			!strings.Contains(err.Error(), "--user disable --now cortex.service") ||
+			!strings.Contains(err.Error(), "unit not loaded") {
+			t.Errorf("err = %v, want it to name the exact systemctl invocation and the underlying reason", err)
 		}
 	})
 }
 
 func TestLingerEnabled(t *testing.T) {
+	uid := strconv.Itoa(os.Getuid())
 	cases := []struct {
 		name string
 		body string
@@ -370,11 +373,26 @@ func TestLingerEnabled(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeLoginctl(t, tc.body)
-			if got := lingerEnabled("501"); got != tc.want {
+			if got := lingerEnabled(uid); got != tc.want {
 				t.Errorf("lingerEnabled() = %v, want %v", got, tc.want)
 			}
 		})
 	}
+
+	// The cases above only check the parsed result — a wrong property flag or a
+	// wrong uid would leave all four green, since fakeLoginctl answers the same
+	// way regardless of what it was actually asked. This pins the invocation
+	// itself, closing that the same way callLog does everywhere else in this file.
+	t.Run("invokes show-user with the exact uid and property", func(t *testing.T) {
+		logPath, logLine := callLog(t)
+		fakeLoginctl(t, "#!/bin/sh\n"+logLine+"\necho 'Linger=yes'\nexit 0\n")
+		lingerEnabled(uid)
+		calls := readCallLog(t, logPath)
+		want := "show-user " + uid + " --property=Linger"
+		if len(calls) != 1 || calls[0] != want {
+			t.Errorf("loginctl calls = %v, want exactly [%s]", calls, want)
+		}
+	})
 }
 
 func TestControlService_Linux(t *testing.T) {
