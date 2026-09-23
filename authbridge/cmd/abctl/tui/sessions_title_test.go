@@ -2,15 +2,19 @@ package tui
 
 import (
 	"encoding/json"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/table"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/observe/claude"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
@@ -799,6 +803,517 @@ func TestTrunc_BudgetsInDisplayColumnsAndKeepsASCIIIdentical(t *testing.T) {
 			if w := lipgloss.Width(trunc(s, n)); w > n {
 				t.Errorf("trunc(%q, %d) is %d columns, over budget", s, n, w)
 			}
+		}
+	}
+}
+
+// A rendered TITLE cell carries no ANSI, which is what makes the column measurement sufficient.
+//
+// bubbles v1.0.0 runs runewidth.Truncate over every cell before styling, and runewidth does not skip
+// escape sequences. Measuring in display columns here is therefore only safe while the cell is PLAIN:
+// escape bytes would be charged against the budget and a narrow cell would collapse to a lone
+// ellipsis. The harvester guarantees plain titles; this asserts the renderer does not reintroduce
+// styling, so the pair of facts the comment on truncLeft depends on is actually held by a test.
+func TestSessionTitleCell_CarriesNoANSI(t *testing.T) {
+	forceColor(t) // styling real, so a Render that added escapes would show up here
+
+	const id = "s1"
+	for _, title := range []string{
+		"a plain prose title",
+		"/Users/somebody/src/cortex/.worktrees/a-long-name/authbridge",
+		"日本語のセッションタイトルです",
+		"ship it 🎉",
+	} {
+		m := newTitleModel(t, map[string]SessionMetadata{id: {Title: title}}, id)
+
+		// The WIDTH half, on the helper. This one is real here: sessionTitleCell does the truncation,
+		// so a budget it fails to honour is its own bug.
+		for _, w := range []int{11, 20, 40} {
+			got := m.sessionTitleCell(id, w)
+			if lipgloss.Width(got) > w {
+				t.Errorf("title cell is %d columns against a %d-column budget: %q",
+					lipgloss.Width(got), w, got)
+			}
+		}
+
+		// The ESCAPE half, on the STORED CELL — the string this package hands to bubbles.
+		//
+		// It used to assert on sessionTitleCell's return, which makes no Render call, so it held by
+		// construction. The stored row cell is one step further along and is the value that actually
+		// matters for the hazard MaxTitleLen's doc comment describes: bubbles renders every cell as
+		// styles.Cell.Render(style.Render(runewidth.Truncate(value, width, "…"))) — table.go:435 in
+		// v1.0.0 — and runewidth is NOT ANSI-aware. So escape bytes in `value` are charged against
+		// the column budget and a narrow cell collapses to a lone ellipsis. Asserting on the stored
+		// value is asserting on runewidth's input, which is where the contract lives.
+		//
+		// NOT the rendered View(): that string legitimately contains escapes — tableStyles sets
+		// Selected to bold-on-background and DefaultStyles pads every cell — so a scan for 0x1b
+		// there would fail on correct output and says nothing about the title.
+		//
+		// forceColor is above, so lipgloss emits real escapes and a styled title is caught.
+		for _, termW := range []int{80, 100, 200} {
+			m.width = termW
+			m.sessionsTbl.SetColumns(sessionsColumnsFor(termW))
+			m.rebuildSessionsTable()
+			cell := sessionsCell(t, m, titleRow(t, m, id), "TITLE")
+			if strings.ContainsRune(cell, 0x1b) {
+				t.Errorf("stored TITLE cell carries an escape byte at terminal width %d: %q — "+
+					"bubbles measures this value with runewidth, which counts escape bytes against "+
+					"the column budget and would collapse a narrow cell to an ellipsis", termW, cell)
+			}
+			titleW := sessionsColumnWidth(sessionsColumnsFor(termW), "TITLE")
+			if lipgloss.Width(cell) > titleW {
+				t.Errorf("at terminal width %d: stored TITLE cell is %d columns against a "+
+					"%d-column column: %q", termW, lipgloss.Width(cell), titleW, cell)
+			}
+		}
+	}
+}
+
+// THE CROSS-MODULE CONTRACT: the harvester's rune cap is safe only because this package
+// re-truncates by display width.
+//
+// Each side was tested independently and neither held the relationship. authlib/observe/claude can
+// assert only that MaxTitleLen counts runes — it has no width library — and this package asserts only
+// that cells fit their column. So deleting the renderer's truncation broke no test, while the
+// harvester's own comment warned that 80 runes of CJK occupy 160 columns.
+//
+// This closes it from the side that can see both: it takes a title at exactly the harvester's cap,
+// in the worst case for the mismatch, and requires the rendered cell to fit a narrow column anyway.
+// It fails if either the cap stops being a rune count or the renderer stops measuring in columns.
+func TestTitleCap_IsSafeOnlyBecauseTheRendererRemeasures(t *testing.T) {
+	forceColor(t)
+
+	// A title the harvester would emit at its limit: MaxTitleLen runes of CJK, which is twice that
+	// in display columns.
+	title := strings.Repeat("日", claude.MaxTitleLen)
+	if n := len([]rune(title)); n != claude.MaxTitleLen {
+		t.Fatalf("fixture is %d runes, want %d", n, claude.MaxTitleLen)
+	}
+	if w := lipgloss.Width(title); w <= claude.MaxTitleLen {
+		t.Fatalf("fixture is %d columns for %d runes — it no longer exercises the mismatch, so "+
+			"either MaxTitleLen has become a width budget or this fixture needs wider characters",
+			w, claude.MaxTitleLen)
+	}
+
+	// BOTH BRANCHES, because the cap meets a different truncator depending on the title's shape and
+	// this test named only one of them. The prose fixture above has no leading "/", so looksLikePath
+	// is false and it exercises truncRight alone — mutating truncLeft to a passthrough left this test
+	// green while ten others in the package failed. A path-shaped fixture at the same cap routes down
+	// the other branch, so the constant's doc comment can claim the relationship is guarded here.
+	pathTitle := "/" + strings.Repeat("日", claude.MaxTitleLen-5) + "/日日日"
+	if n := len([]rune(pathTitle)); n != claude.MaxTitleLen {
+		t.Fatalf("path fixture is %d runes, want %d", n, claude.MaxTitleLen)
+	}
+	if !looksLikePath(pathTitle) {
+		t.Fatalf("path fixture %q does not route down the left-truncating branch", pathTitle)
+	}
+
+	for _, tc := range []struct{ name, title string }{
+		{"prose", title},
+		{"path", pathTitle},
+	} {
+		const id = "s1"
+		m := newTitleModel(t, map[string]SessionMetadata{id: {Title: tc.title}}, id)
+		for _, w := range []int{11, 14, 20, 40} {
+			got := m.sessionTitleCell(id, w)
+			if cw := lipgloss.Width(got); cw > w {
+				t.Errorf("%s: a %d-rune title rendered %d columns into a %d-column cell: %q — the "+
+					"harvester's cap is a RUNE count, so this package must re-truncate by width",
+					tc.name, claude.MaxTitleLen, cw, w, got)
+			}
+		}
+	}
+
+	const id = "s1"
+	m := newTitleModel(t, map[string]SessionMetadata{id: {Title: title}}, id)
+
+	// And the same through the rendered row, so the guard covers what a reader actually sees rather
+	// than only the cell helper.
+	//
+	// The budget has to come from the model's OWN width. An earlier version of this test installed a
+	// 100-column header while the fixture model was 200 wide, then asserted against the 100-column
+	// budget — rebuildSessionsTable reads the width it is about to install, so it correctly produced
+	// a 107-column cell and the test called that a bug. The failure was in the fixture.
+	for _, termW := range []int{80, 100, 200} {
+		m.width = termW
+		m.sessionsTbl.SetColumns(sessionsColumnsFor(termW))
+		m.rebuildSessionsTable()
+		titleW := sessionsColumnWidth(sessionsColumnsFor(termW), "TITLE")
+		cell := sessionsCell(t, m, titleRow(t, m, id), "TITLE")
+		if lipgloss.Width(cell) > titleW {
+			t.Errorf("at terminal width %d: rendered TITLE cell is %d columns against a %d-column "+
+				"column: %q", termW, lipgloss.Width(cell), titleW, cell)
+		}
+	}
+}
+
+// A slash command keeps its COMMAND NAME; a filesystem path keeps its leaf.
+//
+// The discriminator was a bare leading "/", which was the whole story until session titles started
+// coming from the user's own prompts. A typed slash command begins with one too, so
+// "/review <url> carefully" was left-truncated to "…pull/1101 carefully" — discarding the command
+// name, the one part a reader needs, and inverting this file's own rule that prose reads
+// left-to-right.
+func TestSessionTitleCell_SlashCommandIsNotAPath(t *testing.T) {
+	forceColor(t)
+	const id = "s1"
+	for _, tc := range []struct {
+		name, title string
+		keepHead    bool
+	}{
+		{"slash command with args", "/review https://github.com/rossoctl/cortex/pull/1101 carefully", true},
+		{"slash command with a path arg", "/fix-ocr some/path.md and then report", true},
+		{"slash command alone", "/clear", true},
+		// A real cwd: more than one segment, no space before the second "/", so the leaf is what
+		// identifies it and left-truncation is right.
+		{"absolute path", "/Users/somebody/src/cortex/.worktrees/alpha/authbridge", false},
+		{"short absolute path", "/tmp/build/output/artifacts/final", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTitleModel(t, map[string]SessionMetadata{id: {Title: tc.title}}, id)
+			const w = 20
+			got := m.sessionTitleCell(id, w)
+			if lipgloss.Width(got) > w {
+				t.Fatalf("cell is %d columns against a %d-column budget: %q", lipgloss.Width(got), w, got)
+			}
+			// RUNE slices, not byte slices. Every fixture here is ASCII today, but this suite
+			// deliberately exercises CJK elsewhere, and a byte slice would split a multi-byte
+			// character the moment someone adds such a case — producing an invalid-UTF-8 needle and
+			// a failure that looks like the code's fault.
+			head := string([]rune(tc.title)[:5])
+			tail := func(s string) string { r := []rune(s); return string(r[len(r)-5:]) }
+			if tc.keepHead {
+				if !strings.HasPrefix(got, head) {
+					t.Errorf("command name lost: %q from %q", got, tc.title)
+				}
+				if strings.HasPrefix(got, "…") {
+					t.Errorf("a slash command was truncated from the LEFT: %q", got)
+				}
+				return
+			}
+			if !strings.HasSuffix(got, tail(tc.title)) {
+				t.Errorf("path leaf lost: %q from %q", got, tc.title)
+			}
+		})
+	}
+}
+
+// looksLikePath itself, so the rule is pinned independently of how a cell renders.
+func TestLooksLikePath(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"/Users/somebody/src/cortex", true},
+		{"/tmp/build/out", true},
+		{"/a/b", true},
+		{"/review some/path.md", false}, // a space before the second slash
+		{"/clear", false},               // one segment
+		{"/fix-ocr", false},
+		{"how do I build abctl?", false},
+		{"src/cortex/authbridge", false}, // no leading slash
+		{"", false},
+	} {
+		if got := looksLikePath(tc.in); got != tc.want {
+			t.Errorf("looksLikePath(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestLooksLikePath_SingleSegmentPathWithASpaceReadsAsProse pins the rule's ONE deliberate miss.
+//
+// The doc comment calls this out as wrong on purpose, but nothing held it, so the trade was a claim
+// rather than a decision anyone could see change. Characterization, not an endorsement: it asserts
+// what the current rule does so that widening it is a visible diff and not a silent one.
+//
+// "/tmp foo" is a real single-segment directory with a space in it. The rule wants a second "/" before
+// any space, so it reads as prose and is truncated from the RIGHT — the opposite end from the one a
+// path wants kept. The cost is bounded and small, which is why the rule stays simple: the cell is cut
+// at the wrong end, not unbounded, and Claude Code records a cwd with at least two segments, so this
+// shape does not arise from harvesting. It can only arrive from a hand-edited metadata file or a
+// prompt that happens to look like one.
+//
+// The OPPOSITE direction is not a miss and belongs here so the two are not confused: "/review a/b" and
+// "/read docs/x.md" are slash commands whose argument contains a slash, and prose is the right answer
+// for them. The rule gets those right for the same reason it gets "/tmp foo" wrong — it looks for the
+// second "/" before any space — so one behaviour cannot be changed without the other.
+func TestLooksLikePath_SingleSegmentPathWithASpaceReadsAsProse(t *testing.T) {
+	// The deliberate miss: a genuine path, classified as prose, right-truncated.
+	for _, in := range []string{"/tmp foo", "/opt my notes", "/srv a"} {
+		if looksLikePath(in) {
+			t.Errorf("looksLikePath(%q) = true, want false — the rule requires a second %q before "+
+				"any space, so a single-segment path with a space reads as prose. If this now "+
+				"returns true the trade-off changed; update the doc comment with it", in, "/")
+		}
+	}
+
+	// And what it costs, measured rather than described: the leaf goes, the head is kept.
+	const budget = 6
+	if got := truncRight("/tmp foo", budget); got != "/tmp …" {
+		t.Errorf("truncRight(%q, %d) = %q, want %q — this is the cost of the miss above, pinned so "+
+			"it is a bounded wrong-end cut and not something worse", "/tmp foo", budget, got, "/tmp …")
+	}
+
+	// NOT a miss: a slash command with a slash in its argument. Prose is correct, and the same clause
+	// produces both answers.
+	for _, in := range []string{"/review a/b", "/read docs/x.md", "/cd /usr/local"} {
+		if looksLikePath(in) {
+			t.Errorf("looksLikePath(%q) = true, want false: a slash command reads left-to-right, so "+
+				"left-truncating it would discard the command name", in)
+		}
+	}
+}
+
+// runBatch invokes a command and, if it is a tea.Batch, every member it carries.
+//
+// tea.Batch does not run its members: it returns a tea.BatchMsg, which the runtime then dispatches.
+// A test asserting that a batched command reached a closure has to do that dispatch itself.
+func runBatch(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	if cmd == nil {
+		return
+	}
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		for _, c := range msg {
+			runBatch(t, c)
+		}
+	}
+}
+
+// The session picker re-harvests periodically, so a session started elsewhere gets named.
+//
+// The picker is the one pane where someone may sit for minutes with nothing refreshing the titles:
+// the 2s tick skips the session fetch there (m.client may be nil), and the harvest previously ran
+// once at Init. A session started in another terminal meanwhile stayed nameless until the viewer was
+// restarted.
+func TestPicker_ReHarvestsOnAnInterval(t *testing.T) {
+	newPicker := func(harvest HarvestFunc) *model {
+		m := newTitleModel(t, map[string]SessionMetadata{})
+		m.pane = paneNamespaces
+		m.harvest = harvest
+		return m
+	}
+	called := 0
+	harvest := func() (map[string]SessionMetadata, error) {
+		called++
+		return map[string]SessionMetadata{"s1": {Title: "found later"}}, nil
+	}
+
+	// Not yet due: the stamp is fresh, so the tick only re-arms the timer.
+	m := newPicker(harvest)
+	m.lastHarvest = time.Now()
+	if _, cmd := m.Update(refreshTickMsg(time.Now())); cmd == nil {
+		t.Fatal("the refresh ticker was not re-armed")
+	}
+	if called != 0 {
+		t.Errorf("harvested %d times while not due, want 0", called)
+	}
+
+	// Due: the returned command must include the harvest, which we run to observe it.
+	m = newPicker(harvest)
+	m.lastHarvest = time.Now().Add(-2 * reharvestInterval)
+	_, cmd := m.Update(refreshTickMsg(time.Now()))
+	if cmd == nil {
+		t.Fatal("no command returned when a re-harvest was due")
+	}
+	// tea.Batch returns a BatchMsg holding the member commands rather than running them, so the
+	// members have to be invoked to reach the harvest closure.
+	runBatch(t, cmd)
+	if called == 0 {
+		t.Error("a due re-harvest did not run the harvester")
+	}
+	if !m.harvesting {
+		t.Error("the in-flight guard was not set, so a second tick could stack a harvest")
+	}
+
+	// While one is in flight, a further tick must not start another — even once the interval has
+	// elapsed again. Backdating the stamp is what makes this test the guard's: without it the tick is
+	// simply not due, so the assertion passed with the guard removed (confirmed by mutation).
+	before := called
+	m.lastHarvest = time.Now().Add(-2 * reharvestInterval)
+	_, stacked := m.Update(refreshTickMsg(time.Now()))
+	runBatch(t, stacked)
+	if called != before {
+		t.Errorf("a harvest was stacked while one was in flight (%d -> %d)", before, called)
+	}
+
+	// The arriving result clears the guard.
+	m.Update(harvestedMsg{meta: map[string]SessionMetadata{"s1": {Title: "found later"}}})
+	if m.harvesting {
+		t.Error("harvestedMsg did not clear the in-flight guard")
+	}
+	if got := m.sessionTitle("s1"); got != "found later" {
+		t.Errorf("the re-harvested title did not reach the model: %q", got)
+	}
+
+	// A nil harvester (--skip-claude-metadata) must never be called.
+	m = newPicker(nil)
+	m.lastHarvest = time.Now().Add(-2 * reharvestInterval)
+	if _, c := m.Update(refreshTickMsg(time.Now())); c == nil {
+		t.Error("the ticker must stay armed even with no harvester")
+	}
+}
+
+// TestLooksLikePath_AnyUnicodeSpaceSeparates pins the separator class.
+//
+// The function's job is to keep a slash command from being left-truncated, and it decided that on an
+// ASCII-only IndexAny(rest, " \t"). A command separated by a non-breaking or ideographic space had no
+// separator by that test, so the second "/" in its argument made it a path and the command name — the
+// part a reader needs — was the part discarded.
+//
+// Reachable only from a stale or hand-edited metadata file, since the harvester folds every unicode
+// space to U+0020 before writing. Asserted here anyway: this package should not depend on its input
+// having come from the current harvester.
+func TestLooksLikePath_AnyUnicodeSpaceSeparates(t *testing.T) {
+	for _, sep := range []string{" ", "\t", " ", "　", " ", " ", " "} {
+		title := "/review" + sep + "docs/plan.md"
+		if looksLikePath(title) {
+			t.Errorf("looksLikePath(%q) = true, want false: the %U separator makes this a slash "+
+				"command with an argument, not a path — left-truncating it discards the command name",
+				title, []rune(sep)[0])
+		}
+	}
+
+	// The other direction still holds: a real path has no space at all before its second segment.
+	for _, title := range []string{"/Users/somebody/src", "/w/x/y", "/a/b"} {
+		if !looksLikePath(title) {
+			t.Errorf("looksLikePath(%q) = false, want true", title)
+		}
+	}
+}
+
+// TestTrunc_ScalesLinearly pins the cost of both truncators against the INPUT length.
+//
+// Both measured the whole remaining string with lipgloss.Width once per dropped rune, so the cost grew
+// with the square of the input: on one call, 2500 runes took 36ms, 5000 142ms, 10000 572ms and 20000
+// 2.33s — four times the input for sixteen times the work. Reachable because the cwd tier was
+// uncapped, and the renderer redraws on every poll.
+//
+// Asserted as a RATIO rather than a wall-clock bound, so it says what it means on a loaded CI machine:
+// quadratic growth shows up as ~4x per doubling, linear as ~2x, and the ceiling sits between them.
+// Both ends are timed inside one test so the comparison is against the same machine at the same moment.
+func TestTrunc_ScalesLinearly(t *testing.T) {
+	const budget = 40
+	measure := func(f func(string, int) string, runes int) time.Duration {
+		s := "/" + strings.Repeat("a", runes-1)
+		// Warm, so the first-call cost of anything lazy is not charged to the small input.
+		f(s, budget)
+		start := time.Now()
+		for i := 0; i < 20; i++ {
+			f(s, budget)
+		}
+		return time.Since(start)
+	}
+	for _, tc := range []struct {
+		name string
+		f    func(string, int) string
+	}{
+		{"truncLeft", truncLeft},
+		{"truncRight", truncRight},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			small := measure(tc.f, 4000)
+			large := measure(tc.f, 16000)
+			if small <= 0 {
+				t.Skip("timer resolution too coarse to compare")
+			}
+			// 4x the input. Linear predicts ~4x the time; quadratic predicts ~16x. A ceiling of 8x
+			// separates them with room for scheduling noise.
+			if ratio := float64(large) / float64(small); ratio > 8 {
+				t.Errorf("4x the input took %.1fx the time (%v -> %v) — that is the quadratic shape "+
+					"back: the per-rune search must skip to the last/first n runes before measuring",
+					ratio, small, large)
+			}
+		})
+	}
+}
+
+// TestTrunc_SkipAheadMatchesTheOneAtATimeSearch is the differential test that caught the first version
+// of the skip being wrong, kept so it cannot regress.
+//
+// The skip rests on "every rune is at least one column, so n runes from the end is an exact lower
+// bound". That premise is FALSE for zero-width runes — combining marks, joiners, variation selectors —
+// and an unguarded skip returned different bytes than the one-at-a-time search at n == 1 on a string of
+// combining marks. The guard is zeroWidthFree; this asserts the equivalence it is supposed to buy,
+// across alphabets chosen so both sides of the guard are exercised.
+func TestTrunc_SkipAheadMatchesTheOneAtATimeSearch(t *testing.T) {
+	// The pre-skip implementations, as an oracle.
+	oldLeft := func(s string, n int) string {
+		if lipgloss.Width(s) <= n {
+			return s
+		}
+		if n < 1 {
+			return ""
+		}
+		r := []rune(s)
+		for i := range r {
+			if out := "…" + string(r[i:]); lipgloss.Width(out) <= n {
+				return out
+			}
+		}
+		return "…"
+	}
+	oldRight := func(s string, n int) string {
+		if lipgloss.Width(s) <= n {
+			return s
+		}
+		if n < 1 {
+			return ""
+		}
+		r := []rune(s)
+		for i := len(r); i > 0; i-- {
+			if out := string(r[:i]) + "…"; lipgloss.Width(out) <= n {
+				return out
+			}
+		}
+		return "…"
+	}
+
+	alphabets := []string{
+		"abcdefghijklmnopqrstuvwxyz /._-", // the ordinary case, and the one that must be fast
+		"日本語のセッションタイトル漢字",                 // two columns per rune
+		"🎉🚀✨🔥",                            // wide emoji
+		"aあ🎉/b日x",                         // mixed widths
+		"éà",                            // COMBINING MARKS: zero width, the case that broke it
+		"️‍",                              // variation selector, ZWJ: also zero width
+	}
+	rng := rand.New(rand.NewSource(20260923))
+	checked := 0
+	for _, alpha := range alphabets {
+		ar := []rune(alpha)
+		for trial := 0; trial < 120; trial++ {
+			var sb strings.Builder
+			for i := 0; i < rng.Intn(60); i++ {
+				sb.WriteRune(ar[rng.Intn(len(ar))])
+			}
+			s := sb.String()
+			for n := -2; n <= 45; n++ {
+				if want, got := oldLeft(s, n), truncLeft(s, n); want != got {
+					t.Fatalf("truncLeft(%q, %d) = %q, one-at-a-time search gives %q", s, n, got, want)
+				}
+				if want, got := oldRight(s, n), truncRight(s, n); want != got {
+					t.Fatalf("truncRight(%q, %d) = %q, one-at-a-time search gives %q", s, n, got, want)
+				}
+				checked += 2
+			}
+		}
+	}
+	t.Logf("%d comparisons against the one-at-a-time search, all byte-identical", checked)
+}
+
+// TestZeroWidthFree pins the guard's own answer, including that an ordinary title takes the fast path.
+func TestZeroWidthFree(t *testing.T) {
+	for _, s := range []string{"", "plain prose", "/Users/x/src", "日本語", "🎉", "a b-c_d.e"} {
+		if !zeroWidthFree(s) {
+			t.Errorf("zeroWidthFree(%q) = false, want true — an ordinary title must take the fast path", s)
+		}
+	}
+	for _, s := range []string{"é", "a‍", "x️", "a\u0000b", "́"} {
+		if zeroWidthFree(s) {
+			t.Errorf("zeroWidthFree(%q) = true, want false — %U occupies no column, so the prefix "+
+				"bound does not hold", s, []rune(s)[len([]rune(s))-1])
 		}
 	}
 }

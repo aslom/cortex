@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // writeSessionTranscript writes one transcript with caller-supplied lines.
@@ -782,4 +784,1928 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+// Both title line kinds are read: ai-title and agent-name.
+//
+// Claude Code writes one or the other depending on the install, and reading only ai-title left
+// whole config dirs named by working directory instead — measured, 16 of 128 transcripts under one
+// dir carried agent-name and only 2 carried ai-title, with no overlap.
+func TestTitleFromTranscript_AcceptsBothTitleLineKinds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{
+			"agent-name only",
+			[]string{`{"type":"agent-name","agentName":"sept-15-rossoctl","sessionId":"ee85f9ac"}`},
+			"sept-15-rossoctl",
+		},
+		{
+			"ai-title only",
+			[]string{`{"type":"ai-title","aiTitle":"a generated title"}`},
+			"a generated title",
+		},
+		{
+			// Last-wins across the two kinds, the same rule that holds between two ai-title
+			// lines. Where real transcripts carry both they agree, so this only pins that
+			// neither kind is silently preferred over a later claim.
+			"both, agent-name later",
+			[]string{
+				`{"type":"ai-title","aiTitle":"earlier"}`,
+				`{"type":"agent-name","agentName":"later"}`,
+			},
+			"later",
+		},
+		{
+			"both, ai-title later",
+			[]string{
+				`{"type":"agent-name","agentName":"earlier"}`,
+				`{"type":"ai-title","aiTitle":"later"}`,
+			},
+			"later",
+		},
+		{
+			// A cwd is the fallback, not a competitor: a titled session keeps its title.
+			"agent-name beats the cwd fallback",
+			[]string{
+				`{"type":"user","cwd":"/some/dir"}`,
+				`{"type":"agent-name","agentName":"named"}`,
+			},
+			"named",
+		},
+		{
+			// The field on the wrong line kind is not a claim, same guard ai-title has.
+			"agentName on another line kind is ignored",
+			[]string{
+				`{"type":"user","agentName":"not a title","cwd":"/w"}`,
+			},
+			"/w",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSessionTranscript(t, dir, "s.jsonl", tc.lines...)
+			got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The user's last typed prompt names a session when no title line does.
+//
+// Third tier, below both title kinds: measured on a real config dir, 110 of 128 transcripts carried
+// neither an ai-title nor an agent-name and fell back to a directory path, which made most rows in
+// the sessions table indistinguishable from each other.
+func TestTitleFromTranscript_FallsBackToTheLastUserPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{
+			"plain string content",
+			[]string{`{"type":"user","message":{"role":"user","content":"how do I build abctl?"}}`},
+			"how do I build abctl?",
+		},
+		{
+			"text blocks are joined",
+			[]string{`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}}`},
+			"first second",
+		},
+		{
+			// LAST-wins, like the title tiers above it.
+			"last prompt wins",
+			[]string{
+				`{"type":"user","message":{"role":"user","content":"earlier ask"}}`,
+				`{"type":"user","message":{"role":"user","content":"later ask"}}`,
+			},
+			"later ask",
+		},
+		{
+			// tool_result is tool OUTPUT. 9576 of 9718 content arrays on the measured tree were
+			// this, so taking it would have titled 54 of 128 sessions with grep hits and build logs.
+			"tool_result is not a prompt",
+			[]string{
+				`{"type":"user","message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"1\tMakefile\n2\tbuild:"}]}}`,
+			},
+			"the real ask",
+		},
+		{
+			"interrupt markers are skipped",
+			[]string{
+				`{"type":"user","message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"user","message":{"role":"user","content":"[Request interrupted by user for tool use]"}}`,
+			},
+			"the real ask",
+		},
+		{
+			"image markers are skipped",
+			[]string{
+				`{"type":"user","message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"user","message":{"role":"user","content":"[Image: original 2100x200, displayed at 2000x190]"}}`,
+			},
+			"the real ask",
+		},
+		{
+			// 27 of 128 transcripts ended with one of these, so without the filter the commonest
+			// title on a real tree is a notification envelope.
+			"harness blocks are skipped",
+			[]string{
+				`{"type":"user","message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>abc</task-id>\n</task-notification>"}}`,
+			},
+			"the real ask",
+		},
+		{
+			"an assistant turn is not a prompt",
+			[]string{
+				`{"type":"user","message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"assistant","message":{"role":"assistant","content":"my reply"}}`,
+			},
+			"the real ask",
+		},
+		{
+			// Both title kinds outrank a prompt, so a titled session is never renamed.
+			"a title line outranks a prompt",
+			[]string{
+				`{"type":"user","message":{"role":"user","content":"a long rambling ask"}}`,
+				`{"type":"agent-name","agentName":"sept-15-rossoctl"}`,
+			},
+			"sept-15-rossoctl",
+		},
+		{
+			"cwd is still the last resort",
+			[]string{
+				`{"type":"user","cwd":"/w/project"}`,
+				`{"type":"user","message":{"role":"user","content":"[Request interrupted by user]"}}`,
+			},
+			"/w/project",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSessionTranscript(t, dir, "s.jsonl", tc.lines...)
+			got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Titles are clipped to 80 runes and flattened to one line.
+//
+// A prompt is unbounded free text and a title is a table cell. Runes rather than bytes so a
+// multi-byte prompt is not cut mid-character, and whitespace is collapsed because the viewer turns
+// control characters into U+FFFD rather than dropping them — a raw newline would reach the cell as
+// a visible glyph.
+func TestTitleFromTranscript_ClipsAndFlattens(t *testing.T) {
+	long := strings.Repeat("a", 200)
+	cjk := strings.Repeat("日", 200)
+	for _, tc := range []struct {
+		name        string
+		content     string
+		wantRunes   int
+		wantOneLine bool
+	}{
+		{"long ascii", long, MaxTitleLen, true},
+		{"long CJK is cut by rune, not byte", cjk, MaxTitleLen, true},
+		{"newlines collapse", "first line\n\nsecond line\twith a tab", -1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			body, err := json.Marshal(tc.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeSessionTranscript(t, dir, "s.jsonl",
+				`{"type":"user","message":{"role":"user","content":`+string(body)+`}}`)
+			got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			if n := len([]rune(got)); n > MaxTitleLen {
+				t.Errorf("title is %d runes, over the %d cap: %q", n, MaxTitleLen, got)
+			}
+			if tc.wantRunes > 0 && len([]rune(got)) != tc.wantRunes {
+				t.Errorf("title is %d runes, want %d", len([]rune(got)), tc.wantRunes)
+			}
+			if tc.wantOneLine && strings.ContainsAny(got, "\n\t") {
+				t.Errorf("title carries a control character: %q", got)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("title is not valid UTF-8 — cut mid-character: %q", got)
+			}
+		})
+	}
+}
+
+// An attributed human turn outranks everything below it, and a string outranks an array.
+//
+// origin.kind is the only authoritative statement of who produced a turn, and Claude Code supplies
+// it: measured across 128 transcripts, 640 user turns were "human", 151 "task-notification", 33
+// "peer". Every human turn carried STRING content and none carried an array — which is why the shape
+// grades the result too. The array path is where the harness injects, and it produced a
+// "Base directory for this skill: /Users/…/plugins/cache/…" title before this ranking existed.
+func TestTitleFromTranscript_PrefersAttributedHumanStrings(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{
+			// The shape of the reported file: one human turn early, harness arrays after it.
+			"human string beats a later array",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"what I actually asked"}}`,
+				`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /Users/x/.claude/plugins/cache/y"}]}}`,
+			},
+			"what I actually asked",
+		},
+		{
+			"human string beats an unattributed string",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"attributed"}}`,
+				`{"type":"user","message":{"role":"user","content":"unattributed but later"}}`,
+			},
+			"attributed",
+		},
+		{
+			// Explicitly not human: discarded rather than ranked.
+			"task-notification is discarded",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":"a notification body"}}`,
+			},
+			"the real ask",
+		},
+		{
+			"peer is discarded",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"user","origin":{"kind":"peer"},"message":{"role":"user","content":"a peer message"}}`,
+			},
+			"the real ask",
+		},
+		{
+			// Last-wins WITHIN the human grade.
+			"the latest human turn wins",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"first ask"}}`,
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"second ask"}}`,
+			},
+			"second ask",
+		},
+		{
+			// An unattributed string still beats an array, for transcripts with no origin field.
+			"unattributed string beats an array",
+			[]string{
+				`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"from an array"}]}}`,
+				`{"type":"user","message":{"role":"user","content":"a plain string"}}`,
+			},
+			"a plain string",
+		},
+		{
+			// A human turn is taken as typed, with no synthetic-text guessing over the top.
+			"a bracketed human prompt is kept",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"[note] this is mine"}}`,
+			},
+			"[note] this is mine",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSessionTranscript(t, dir, "s.jsonl", tc.lines...)
+			got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A slash command is rendered as the line the user typed, not as its envelope.
+//
+// Claude Code wraps a typed slash command in <command-message>/<command-name>/<command-args>. The
+// turn IS the user's, so filtering it would lose a real prompt — but 28 of 128 measured transcripts
+// ended with one, and 27 of those shared the same command, so left as markup they would all carry an
+// identical unreadable title. The arguments are what tell them apart.
+func TestTitleFromTranscript_UnwrapsSlashCommands(t *testing.T) {
+	for _, tc := range []struct {
+		name, content, want string
+	}{
+		{
+			"name and args",
+			`<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>some/path.md</command-args>`,
+			"/review some/path.md",
+		},
+		{
+			"name only",
+			`<command-message>clear</command-message>\n<command-name>/clear</command-name>\n<command-args></command-args>`,
+			"/clear",
+		},
+		{
+			"ordinary prose is untouched",
+			`just a normal question`,
+			"just a normal question",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			body, err := json.Marshal(strings.ReplaceAll(tc.content, `\n`, "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeSessionTranscript(t, dir, "s.jsonl",
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":`+string(body)+`}}`)
+			got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The cwd fallback is NOT clipped, so sibling directories stay distinguishable.
+//
+// A path's distinguishing end is its leaf and clipTitle keeps the head, so two worktrees under a
+// prefix of 80 runes or more clipped to byte-identical titles — the column stopped telling apart
+// exactly the sessions it exists to name. Also a regression against the behaviour before titles
+// were clipped at all.
+func TestTitleFromTranscript_DoesNotClipTheCwdFallback(t *testing.T) {
+	// 81 runes, so the leaf is entirely past the cap.
+	const prefix = "/Users/somebody/go/src/github.com/some-organisation/some-repository/worktrees/wt/"
+	if len([]rune(prefix)) <= MaxTitleLen {
+		t.Fatalf("fixture prefix is %d runes, needs to exceed %d to exercise the cut",
+			len([]rune(prefix)), MaxTitleLen)
+	}
+	titleFor := func(cwd string) string {
+		dir := t.TempDir()
+		body, err := json.Marshal(cwd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeSessionTranscript(t, dir, "s.jsonl", `{"type":"user","cwd":`+string(body)+`}`)
+		got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+		if gerr != nil {
+			t.Fatal(gerr)
+		}
+		return got
+	}
+	a, b := titleFor(prefix+"alpha"), titleFor(prefix+"beta")
+	if a == b {
+		t.Errorf("sibling paths produced the same title %q — the leaf was clipped away", a)
+	}
+	if !strings.HasSuffix(a, "alpha") || !strings.HasSuffix(b, "beta") {
+		t.Errorf("the leaf did not survive: %q / %q", a, b)
+	}
+}
+
+// A whitespace-only candidate falls through to the next tier instead of rendering blank.
+//
+// It passed a bare `!= ""` guard and clipTitle then emptied it, so the tier below was skipped and
+// the cell came out empty. Each candidate is normalised before the switch now.
+func TestTitleFromTranscript_WhitespaceOnlyCandidateFallsThrough(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{
+			"whitespace ai-title falls through to the cwd",
+			[]string{
+				`{"type":"user","cwd":"/w/real"}`,
+				`{"type":"ai-title","aiTitle":"   "}`,
+			},
+			"/w/real",
+		},
+		{
+			"whitespace agent-name falls through to a prompt",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"agent-name","agentName":"\t\n "}`,
+			},
+			"the real ask",
+		},
+		{
+			"whitespace prompt falls through to the cwd",
+			[]string{
+				`{"type":"user","cwd":"/w/real"}`,
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"   \t "}}`,
+			},
+			"/w/real",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSessionTranscript(t, dir, "s.jsonl", tc.lines...)
+			got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Harness tags are detected with attributes, and whatever their case.
+//
+// The tag-name check ran over everything up to ">", so a space, "=" or quote failed it and every
+// attributed tag slipped through — a real transcript produced a title of raw
+// `<pasted_content id="...">` markup. Case folding is latent by comparison: every tag observed on a
+// real tree is lowercase.
+func TestIsSyntheticPrompt_HandlesAttributesAndCase(t *testing.T) {
+	for _, s := range []string{
+		`<pasted_content id="abc123">some pasted text</pasted_content>`,
+		`<task-notification id="1" kind="x">body</task-notification>`,
+		`<TASK-NOTIFICATION>body</TASK-NOTIFICATION>`,
+		`<Task-Notification id="2">body</Task-Notification>`,
+		`<system-reminder/>`,
+		`<bash-stdout>out</bash-stdout>`,
+		`[Request interrupted by user for tool use]`,
+		`[Image: original 2100x200, displayed at 2000x190]`,
+	} {
+		if !isSyntheticPrompt(s) {
+			t.Errorf("not detected as synthetic: %q", s)
+		}
+	}
+	// And real prose is still a prompt, including text that merely contains a "<".
+	for _, s := range []string{
+		"how do I build abctl?",
+		"is 3 < 5 in Go?",
+		"/review some/path.md",
+		"日本語の質問です",
+	} {
+		if isSyntheticPrompt(s) {
+			t.Errorf("real prompt rejected as synthetic: %q", s)
+		}
+	}
+}
+
+// MaxTitleLen is a RUNE cap, and the renderer is what bounds display width.
+//
+// 80 runes of CJK occupy 160 columns, so nothing may read this constant as a width budget. This
+// pins ONLY the half that lives in this package: that the cap counts runes rather than bytes or
+// columns. The other half — that the sessions pane re-truncates by lipgloss.Width — is in
+// cmd/abctl/tui and tested there; no test in either module fails if that truncation is removed while
+// this constant stays, so the cross-module invariant rests on the comments, not on this test.
+func TestMaxTitleLen_IsARuneCapNotAWidthBudget(t *testing.T) {
+	dir := t.TempDir()
+	body, err := json.Marshal(strings.Repeat("日", 200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSessionTranscript(t, dir, "s.jsonl",
+		`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":`+string(body)+`}}`)
+	got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if n := len([]rune(got)); n != MaxTitleLen {
+		t.Errorf("clipped to %d runes, want %d", n, MaxTitleLen)
+	}
+	// The point of the test: runes are capped, BYTES AND COLUMNS ARE NOT. authlib has no width
+	// library — lipgloss and go-runewidth are cmd/abctl dependencies, and adding one here for a
+	// single assertion is not worth it — so byte length stands in as the observable proxy: a
+	// three-byte-per-rune title is 240 bytes at 80 runes, and anything laying out by width will
+	// likewise see more than 80. What this pins is that the cap is NOT a width, which is the
+	// mistake the comment on MaxTitleLen warns against.
+	if len(got) <= MaxTitleLen {
+		t.Errorf("CJK title is %d bytes for %d runes; if that is now <= the cap then MaxTitleLen "+
+			"is being applied as a width or byte bound, and the renderers' own truncation must be "+
+			"revisited", len(got), MaxTitleLen)
+	}
+}
+
+// A pasted-input wrapper is stripped from a human turn, keeping what was pasted.
+//
+// `<pasted_content id="2e21">…` arrives with origin.kind "human" — the user really did paste it — so
+// filtering it would lose a real prompt, but the wrapper is markup and left alone it became the
+// title. A real transcript produced exactly that.
+func TestTitleFromTranscript_StripsPastedContentWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name, content, want string
+	}{
+		{
+			"pasted wrapper is stripped",
+			`<pasted_content id="2e21">` + "\n" + `When considering each agent node, consult the first`,
+			"When considering each agent node, consult the first",
+		},
+		{
+			"closing tag is dropped too",
+			`<pasted_content id="x">the pasted body</pasted_content>`,
+			"the pasted body",
+		},
+		{
+			// A command envelope must NOT lose its arguments to the wrapper strip: it is a
+			// multi-tag structure and <command-args> sits past the first tag.
+			"a command envelope keeps its args",
+			`<command-message>review</command-message>` + "\n" + `<command-name>/review</command-name>` + "\n" + `<command-args>some/path.md</command-args>`,
+			"/review some/path.md",
+		},
+		{
+			"prose containing a less-than is untouched",
+			"is 3 < 5 in Go?",
+			"is 3 < 5 in Go?",
+		},
+		{
+			// Falls through rather than titling with markup. An earlier version of this test
+			// expected the raw tag back, on the reasoning that returning the input unchanged is
+			// the safe default — but the caller now re-tests the result against the synthetic
+			// guard, so "unchanged" means "rejected" and the tier below is used instead. With no
+			// cwd in this fixture that leaves "", which is the honest answer for a turn whose
+			// entire content was a wrapper.
+			"a wrapper with nothing inside it yields no title",
+			`<pasted_content id="x">`,
+			"",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			body, err := json.Marshal(tc.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeSessionTranscript(t, dir, "s.jsonl",
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":`+string(body)+`}}`)
+			got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Claude Code's own last-prompt record outranks anything reconstructed from user turns.
+//
+// {"type":"last-prompt","lastPrompt":…} is the agent stating what the prompt was, rather than this
+// package inferring it and then filtering harness traffic back out. Measured, 129 of 130 transcripts
+// carry one.
+func TestTitleFromTranscript_PrefersLastPromptRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{
+			"last-prompt beats a reconstructed human turn",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"a reconstructed ask"}}`,
+				`{"type":"last-prompt","lastPrompt":"the recorded ask"}`,
+			},
+			"the recorded ask",
+		},
+		{
+			// Both title kinds still outrank it: a generated title is a summary, this is raw input.
+			"a title line still outranks last-prompt",
+			[]string{
+				`{"type":"last-prompt","lastPrompt":"the recorded ask"}`,
+				`{"type":"agent-name","agentName":"sept-15-rossoctl"}`,
+			},
+			"sept-15-rossoctl",
+		},
+		{
+			"last-wins among last-prompt lines",
+			[]string{
+				`{"type":"last-prompt","lastPrompt":"earlier"}`,
+				`{"type":"last-prompt","lastPrompt":"later"}`,
+			},
+			"later",
+		},
+		{
+			// A slash command is recorded in its envelope form here too.
+			"a recorded slash command is unwrapped",
+			[]string{
+				`{"type":"last-prompt","lastPrompt":"<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>some/path.md</command-args>"}`,
+			},
+			"/review some/path.md",
+		},
+		{
+			// Three of 2223 real lines carried a null, which decodes to "".
+			"a null lastPrompt falls through",
+			[]string{
+				`{"type":"user","cwd":"/w/real"}`,
+				`{"type":"last-prompt","lastPrompt":null}`,
+			},
+			"/w/real",
+		},
+		{
+			// A HARNESS-OUTPUT wrapper falls through: its body is the harness's own text, not the
+			// user's, so promoting it would put a notification in the title. An earlier version of
+			// this test asserted the opposite — that the body becomes the title — which
+			// contradicted isSyntheticPrompt's own stated purpose and let
+			// `<bash-stdout>total 40</bash-stdout>` render as "total 40".
+			"a harness-output lastPrompt falls through",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"last-prompt","lastPrompt":"<task-notification>body</task-notification>"}`,
+			},
+			"the real ask",
+		},
+		{
+			// A CONTENT-BEARING wrapper is still unwrapped: the user pasted what is inside it.
+			"a pasted-content lastPrompt is stripped to its body",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"last-prompt","lastPrompt":"<pasted_content id=\"x\">the pasted body</pasted_content>"}`,
+			},
+			"the pasted body",
+		},
+		{
+			"a lastPrompt that is markup all the way down falls through",
+			[]string{
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"the real ask"}}`,
+				`{"type":"last-prompt","lastPrompt":"<a><b>x</b></a>"}`,
+			},
+			"the real ask",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSessionTranscript(t, dir, "s.jsonl", tc.lines...)
+			got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Markup that survives one leading-tag strip falls through instead of becoming the title.
+//
+// Three shapes, one root cause — a single strip is not enough, so the result is re-tested against
+// the synthetic guard:
+//
+//   - an EMPTY body leaves the closing tag at index 0, which a `j > 0` guard skipped, yielding a
+//     bare "</pasted_content>";
+//   - a MALFORMED command envelope makes the unwrapper bail on the empty name, so control reaches
+//     the wrapper strip and leaves "</command-name> real text";
+//   - a NESTED wrapper has only its outer tag removed, leaving "<b>real prompt</b>".
+//
+// The nested case has no occurrence on real data (0 of 645 human string turns), but all three are the
+// same defect and the fix is one check.
+func TestTitleFromTranscript_MarkupSurvivingOneStripFallsThrough(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+	}{
+		{"empty-bodied wrapper", `<pasted_content id="x"></pasted_content>`},
+		{"malformed command envelope", `<command-name></command-name> real text`},
+		{"nested wrapper", `<a><b>real prompt</b></a>`},
+		{"bare closing tag", `</pasted_content>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			body, err := json.Marshal(tc.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A cwd is present, so falling through has somewhere to land and the assertion
+			// distinguishes "fell through" from "returned empty".
+			writeSessionTranscript(t, dir, "s.jsonl",
+				`{"type":"user","cwd":"/w/real"}`,
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":`+string(body)+`}}`)
+			got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			if got != "/w/real" {
+				t.Errorf("title = %q, want the cwd fallback — markup reached the title", got)
+			}
+			if strings.ContainsAny(got, "<>") {
+				t.Errorf("title carries markup: %q", got)
+			}
+		})
+	}
+}
+
+// Harness markup never reaches the title, wherever in the turn it sits.
+//
+// Two leaks, both reaching rendered output before this:
+//
+//   - a harness BLOCK alongside the user's real text in a multi-block turn. promptFromMessage joined
+//     every text block and the guard is anchored at the start, so the join began with prose and the
+//     markup passed intact. Filtered per block now.
+//   - markup APPENDED after prose in a string turn, which no anchored check can see. Measured on a
+//     real tree: 7 of 130 transcripts. Cut at the first known harness tag.
+func TestTitleFromTranscript_NoHarnessMarkupInTitles(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{
+			"a harness block beside real text is dropped",
+			[]string{`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":[{"type":"text","text":"my real question"},{"type":"text","text":"<system-reminder>hidden</system-reminder>"}]}}`},
+			"my real question",
+		},
+		{
+			"a harness block BEFORE real text is dropped",
+			[]string{`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":[{"type":"text","text":"<system-reminder>hidden</system-reminder>"},{"type":"text","text":"my real question"}]}}`},
+			"my real question",
+		},
+		{
+			"markup appended after prose is cut",
+			[]string{`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"my real question\n<system-reminder>do not mention this</system-reminder>"}}`},
+			"my real question",
+		},
+		{
+			// INDENTED. Every appended-block fixture here was unindented, so none exercised the
+			// whitespace path: requiring s[i-1] to be exactly a newline let "my question\n
+			// <system-reminder>…" keep its tag and get clipped mid-tag at 80 runes.
+			"a space-indented appended block is cut",
+			[]string{`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"my real question\n   <system-reminder>do not mention this</system-reminder>"}}`},
+			"my real question",
+		},
+		{
+			"a tab-indented appended block is cut",
+			[]string{`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"my real question\n\t<system-reminder>do not mention this</system-reminder>"}}`},
+			"my real question",
+		},
+		{
+			"a mixed-indent appended block is cut",
+			[]string{`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"my real question\n \t  <bash-stdout>total 40</bash-stdout>"}}`},
+			"my real question",
+		},
+		{
+			// Prose and markup sharing ONE text block. isSyntheticPrompt is anchored, so the block
+			// passed the per-block check and reached the title whole; the cut is applied inside the
+			// join loop now.
+			"markup sharing a block with prose is cut",
+			[]string{`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":[{"type":"text","text":"my real question\n<system-reminder>hidden</system-reminder>"}]}}`},
+			"my real question",
+		},
+		{
+			"markup sharing a block with prose, unattributed turn",
+			[]string{`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"my real question\n<system-reminder>hidden</system-reminder>"}]}}`},
+			"my real question",
+		},
+		{
+			"a recorded lastPrompt is cut the same way",
+			[]string{`{"type":"last-prompt","lastPrompt":"recorded ask\n<system-reminder>hidden</system-reminder>"}`},
+			"recorded ask",
+		},
+		{
+			// A TAG IS REMOVED WHEREVER IT APPEARS, including one a real prompt quotes. Titles are
+			// plain text with nothing hidden in them, and that cannot also be "faithfully quotes
+			// markup" — every shape-based filter this replaced was flanked by the next round of
+			// review. The prompt stays readable, which is what the title is for.
+			"a quoted tag is stripped, prose survives",
+			[]string{`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"why does <div> break my layout?"}}`},
+			"why does div break my layout?",
+		},
+		{
+			"generics are stripped, prose survives",
+			[]string{`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"how do I write List<String> in Go?"}}`},
+			"how do I write List String in Go?",
+		},
+		{
+			// A LONE "<" is not a tag and must survive: this is the shape a real prompt carries.
+			"a comparison is not markup",
+			[]string{`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"is 3 < 5 in Go?"}}`},
+			"is 3 < 5 in Go?",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSessionTranscript(t, dir, "s.jsonl", tc.lines...)
+			got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(got, "<system-reminder") || strings.Contains(got, "</system-reminder") {
+				t.Errorf("harness markup reached the title: %q", got)
+			}
+		})
+	}
+}
+
+// The byte prefilter does not depend on how the writer spaces its JSON.
+//
+// Every other fixture in this file is hand-written COMPACT JSON, so the suite could not see a
+// prefilter term that embedded a key-value pair: `"role":"user"` skipped a line written
+// `"role": "user"` before it ever reached the decoder, silently losing the prompt. The terms are bare
+// keys again, and this is the only test that writes the spaced form — which is the point of it.
+func TestTitleFromTranscript_PrefilterIgnoresJSONSpacing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{
+			"spaced user turn",
+			`{"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": "a spaced ask"}}`,
+			"a spaced ask",
+		},
+		{
+			"spaced last-prompt",
+			`{"type": "last-prompt", "lastPrompt": "a spaced record"}`,
+			"a spaced record",
+		},
+		{
+			"spaced agent-name",
+			`{"type": "agent-name", "agentName": "spaced-name"}`,
+			"spaced-name",
+		},
+		{
+			"spaced ai-title",
+			`{"type": "ai-title", "aiTitle": "a spaced title"}`,
+			"a spaced title",
+		},
+		{
+			"spaced cwd",
+			`{"type": "user", "cwd": "/w/spaced"}`,
+			"/w/spaced",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSessionTranscript(t, dir, "s.jsonl", tc.line)
+			got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q — the prefilter skipped a spaced line", got, tc.want)
+			}
+		})
+	}
+}
+
+// A harness-output wrapper never has its body promoted to a title.
+//
+// stripWrapperTag used to unwrap anything tag-shaped, so `<bash-stdout>total 40</bash-stdout>` became
+// the title "total 40" and a `<system-reminder>` body became a title — the grep-dump outcome
+// isSyntheticPrompt's doc says it exists to prevent. Only wrappers whose CONTENT IS THE USER'S are
+// unwrapped now; see contentBearingWrappers.
+func TestTitleFromTranscript_HarnessOutputWrappersFallThrough(t *testing.T) {
+	for _, tc := range []struct {
+		name, content, want string
+	}{
+		{"bash-stdout", `<bash-stdout>total 40</bash-stdout>`, "/w/fallback"},
+		{"bash-stderr", `<bash-stderr>No such file</bash-stderr>`, "/w/fallback"},
+		{"system-reminder", `<system-reminder>do not mention this</system-reminder>`, "/w/fallback"},
+		{"task-notification", `<task-notification>agent finished</task-notification>`, "/w/fallback"},
+		{"local-command-caveat", `<local-command-caveat>Caveat: generated</local-command-caveat>`, "/w/fallback"},
+		// The one wrapper whose body IS the user's, so it is still unwrapped.
+		{"pasted_content is still unwrapped", `<pasted_content id="x">the pasted body</pasted_content>`, "the pasted body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			body, err := json.Marshal(tc.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeSessionTranscript(t, dir, "s.jsonl",
+				`{"type":"user","cwd":"/w/fallback"}`,
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":`+string(body)+`}}`)
+			got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Prose that MENTIONS a known harness tag is not truncated; only a tag starting a line is a cut.
+//
+// THE COVERAGE GAP THIS CLOSES: every previous "untouched prose" case used an UNKNOWN tag — <div>,
+// List<String>, "3 < 5" — so they all took isSyntheticPrompt's structural path and never reached
+// cutTrailingHarness's named set. Nothing put a known tag inside real prose, which is exactly how
+// "how do I use <command-args> in a skill?" came to be truncated to "how do I use".
+func TestTitleFromTranscript_InlineHarnessTagMentionIsNotACut(t *testing.T) {
+	for _, tc := range []struct {
+		name, content, want string
+	}{
+		{
+			// AN UNCLOSED HARNESS TAG RUNS TO END-OF-STRING, so a prompt mentioning one loses its
+			// tail. That is the deliberate trade: an unclosed block whose body cannot be delimited
+			// otherwise promotes its content into the title — "prose <system-reminder>INJECTED
+			// payload" kept "INJECTED payload" — and a title being plain matters more than a prompt
+			// that quotes a harness tag reading in full. The head, which says what the session is
+			// about, survives either way.
+			"an unclosed known tag takes the rest of the line",
+			"how do I use <command-args> in a skill?",
+			"how do I use",
+		},
+		{
+			"an unclosed known tag, different tag",
+			"why does <system-reminder> show up in my logs?",
+			"why does",
+		},
+		{
+			"an unclosed known tag after a space",
+			"see <task-notification> for details",
+			"see",
+		},
+		{
+			// The real shape: the harness appends on its own line, which IS a cut.
+			"a tag starting a line is still cut",
+			"my real question\n<system-reminder>hidden</system-reminder>",
+			"my real question",
+		},
+		{
+			// Every occurrence is examined, so an inline mention does not mask a later real block.
+			// The first unclosed tag already takes the rest, appended block included.
+			"an unclosed mention takes the appended block with it",
+			"how do I use <command-args>?\n<system-reminder>hidden</system-reminder>",
+			"how do I use",
+		},
+		{
+			// THE LAST DOCUMENTED LEAK, now closed. This was left alone deliberately, as a trade
+			// against mid-sentence truncation — a known tag mid-line on a later line being
+			// ambiguous between prose and appended markup. Stripping the span removes the need to
+			// judge: the harness's block and its body go, the prose stays.
+			"a known tag mid-line on a later line is stripped",
+			"line one\nline two <system-reminder>x</system-reminder>",
+			"line one line two",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			body, err := json.Marshal(tc.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeSessionTranscript(t, dir, "s.jsonl",
+				`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":`+string(body)+`}}`)
+			got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A Unicode-escaped member name still reaches the decoder.
+//
+// JSON permits `"lastPrompt"`, which decodes to lastPrompt but matches no literal in the raw-byte
+// prefilter, so the line was skipped and the session lost its title. Nothing observed writes keys that
+// way — 0 of 46,124 real lines — so this is latent; it is taken because it is nearly free, only 0.2% of
+// lines containing a `\u` escape at all.
+func TestTitleFromTranscript_DecodesEscapedMemberNames(t *testing.T) {
+	for _, tc := range []struct {
+		name, line, want string
+	}{
+		// BACKTICK-CONCATENATED so the \u sequences reach the FILE as six literal characters. An
+		// earlier version of this test wrote them inside a normal literal, where Go decoded them at
+		// compile time: the fixture then contained a plain "lastPrompt" and the test passed with the
+		// fix removed, testing nothing. Verified by mutation after the change.
+		{"escaped lastPrompt", `{"type":"last-prompt","last` + `\u0050` + `rompt":"review the change"}`, "review the change"},
+		{"escaped aiTitle", `{"type":"ai-title","ai` + `\u0054` + `itle":"a generated title"}`, "a generated title"},
+		{"escaped agentName", `{"type":"agent-name","agent` + `\u004E` + `ame":"sept-15-rossoctl"}`, "sept-15-rossoctl"},
+		{"escaped cwd", `{"type":"user","c` + `\u0077` + `d":"/w/escaped"}`, "/w/escaped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSessionTranscript(t, dir, "s.jsonl", tc.line)
+			got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("title = %q, want %q — the prefilter skipped an escaped key", got, tc.want)
+			}
+		})
+	}
+}
+
+// EVERY title is plain text: no markup, no control characters, no hidden code points.
+//
+// THE GUARANTEE, asserted as a property rather than as a list of shapes. Six rounds of review each
+// found a new placement that the shape-based filters missed — markup inside <command-args>, mid-line
+// on a later line, a block indented with a vertical tab — because enumerating placements cannot
+// converge when the placements are the harness's to choose. clipTitle now normalises unconditionally,
+// and this checks the outcome for every input rather than each route into it.
+//
+// The corpus deliberately mixes real prompts with adversarial ones: a title is LLM-generated text
+// read from a file nothing authenticates, so "would a hostile transcript do this" is not the
+// question — the question is what a title may contain.
+func TestTitleFromTranscript_TitlesAreAlwaysPlain(t *testing.T) {
+	inputs := []string{
+		// Harness markup in every placement review found, plus the ones it did not.
+		`<system-reminder>injected instructions</system-reminder>`,
+		"my question\n<system-reminder>HARNESSBODY</system-reminder>",
+		"my question\n   <system-reminder>HARNESSBODY</system-reminder>",
+		"my question\n\t<system-reminder>HARNESSBODY</system-reminder>",
+		"my question\n\v<system-reminder>HARNESSBODY</system-reminder>",
+		"my question\n <system-reminder>injected</system-reminder>",
+		"my question\n　<system-reminder>injected</system-reminder>",
+		"line one\nline two <system-reminder>HARNESSBODY</system-reminder>",
+		"<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args><system-reminder>HARNESSBODY</system-reminder></command-args>",
+		`<pasted_content id="x"><system-reminder>injected</system-reminder></pasted_content>`,
+		`<bash-stdout>total 40</bash-stdout>`,
+		`<a><b>nested</b></a>`,
+		// UNKNOWN tags, which only stripTags removes — the corpus had none, so a mutation deleting
+		// that step passed. Same fixture blindness as the earlier rounds: the inputs excluded the
+		// exact path the code was meant to cover.
+		"why does <div> break my layout?",
+		"how do I write List<String> in Go?",
+		"a <b>bold</b> claim",
+		"<unknown-tag>body</unknown-tag>",
+		// THIS ROUND. Each was a leak or a mangling; the corpus grows rather than each getting its
+		// own test, because the property is what matters and the placements are open-ended.
+		"ok <system-\x1b[0mreminder>HARNESSBODY</system-reminder> end", // ESC splitting a tag name
+		"<system\x1b[m-reminder>HARNESSBODY</system-reminder>",
+		"prose <system-reminder>HARNESSBODY payload here", // unclosed block
+		"is 3 < 5 and 6 > 2 in Go?",                       // two balanced operators
+		"<system-reminder>HARNESSBODY</system-reminder> and 3 < 5",
+		"a\x1bPq injected \x1b\\b", // DCS
+		"a\x1b(Binjected",          // charset selection
+		"a\x1b_injected\x07b",      // APC
+		"title\x1b",                // trailing lone ESC
+		"my question\n\v<system-reminder>HARNESSBODY</system-reminder>",
+		"my question\n\f<system-reminder>HARNESSBODY</system-reminder>",
+		"my question\n\u00a0<system-reminder>HARNESSBODY</system-reminder>",
+		// Control characters and invisible code points.
+		"colour \x1b[31mred\x1b[0m here",
+		"osc \x1b]0;evil\x07 here",
+		"nel \u0085 here",
+		"csi \u009b here",
+		"del \x7f here",
+		"bidi ‮ reversed",
+		"isolate ⁦ x ⁩ y",
+		"zwsp a​b",
+		"zwj a‍b",
+		"vs16 a️b",
+		"nul \x00 here",
+		"tab\tand\nnewline",
+		// Legitimate content, which must survive as readable text.
+		"how do I build abctl?",
+		"is 3 < 5 in Go?",
+		"日本語のセッションタイトルです",
+		"ship it 🎉",
+		"café naïve",
+		"/review some/path.md",
+	}
+	for _, in := range inputs {
+		dir := t.TempDir()
+		body, err := json.Marshal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeSessionTranscript(t, dir, "s.jsonl",
+			`{"type":"user","cwd":"/w/fallback"}`,
+			`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":`+string(body)+`}}`)
+		got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+		if gerr != nil {
+			t.Fatalf("input %q: %v", in, gerr)
+		}
+
+		// NO TAG-SHAPED SPAN. Bare brackets are legitimate — "is 3 < 5 and 6 > 2 in Go?" is a real
+		// prompt and must survive whole — so the assertion is about a "<name>" span, not about the
+		// characters. An earlier version banned ">" outright and failed that prompt, which would have
+		// pushed the code toward eating comparison operators again.
+		// EVERY "<", not just the first. The scan used to start at strings.IndexByte(got, '<') and
+		// look once, so a span sitting after any earlier bracket went unchecked — and a lone
+		// comparison operator early in a title was enough to shadow it, since that "<" is legitimately
+		// not a span. Now every position is offered to tagSpanLen, which is what makes this a property
+		// of the whole title rather than of its first bracket.
+		for off := 0; off < len(got); off++ {
+			if got[off] != '<' {
+				continue
+			}
+			if tagSpanLen(got[off:]) > 0 {
+				t.Errorf("input %q: title carries a tag span at offset %d: %q", in, off, got)
+				break
+			}
+		}
+		// No harness tag name, in any form.
+		for _, tag := range harnessTagNames {
+			if strings.Contains(got, strings.TrimPrefix(tag, "<")) {
+				t.Errorf("input %q: title carries %s: %q", in, tag, got)
+			}
+		}
+		// AND NOT THE BODY EITHER. Stripping the brackets alone promoted the payload into the
+		// title — "my question\n<system-reminder>HARNESSBODY</system-reminder>" became
+		// "my question injected" — which is the whole point of removing a harness span rather than
+		// just its tags. Checking only for tags left this test blind to it, and the mutation that
+		// exposed the gap passed until this assertion existed.
+		// A harness BODY must not survive — stripping brackets alone promoted the payload. Keyed on
+		// a marker that appears ONLY inside harness spans in this corpus: "injected" was used both
+		// for those and for plain text after an escape sequence, so the check fired on text that was
+		// never inside a tag.
+		if strings.Contains(got, "HARNESSBODY") || strings.Contains(got, "total 40") {
+			t.Errorf("input %q: title carries a harness BODY: %q", in, got)
+		}
+		// Every rune prints as itself: no controls, format characters, surrogates or unassigned.
+		for _, r := range got {
+			if r == ' ' {
+				continue
+			}
+			if !unicode.IsGraphic(r) {
+				t.Errorf("input %q: title carries non-graphic %U: %q", in, r, got)
+			}
+		}
+		// One line, no runs of whitespace, no leading or trailing space.
+		if got != strings.TrimSpace(got) {
+			t.Errorf("input %q: title is not trimmed: %q", in, got)
+		}
+		if strings.Contains(got, "  ") {
+			t.Errorf("input %q: title has a double space: %q", in, got)
+		}
+		// Bounded, and valid UTF-8 — never cut mid-character.
+		if n := len([]rune(got)); n > MaxTitleLen {
+			t.Errorf("input %q: title is %d runes: %q", in, n, got)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("input %q: title is not valid UTF-8: %q", in, got)
+		}
+	}
+}
+
+// Legitimate prompts survive the normalisation as readable text.
+//
+// The guarantee above would also be satisfied by returning "" for everything, so this is the other
+// half of it: what the normalisation must NOT destroy.
+func TestClipTitle_KeepsLegitimateText(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"how do I build abctl?", "how do I build abctl?"},
+		{"is 3 < 5 in Go?", "is 3 < 5 in Go?"},
+		{"日本語のセッションタイトル", "日本語のセッションタイトル"},
+		{"ship it 🎉", "ship it 🎉"},
+		{"café naïve", "café naïve"},
+		{"/review some/path.md", "/review some/path.md"},
+		{"  leading and trailing  ", "leading and trailing"},
+		{"collapses\n\n\tinner   whitespace", "collapses inner whitespace"},
+		{"colour \x1b[31mred\x1b[0m here", "colour red here"},
+	} {
+		if got := clipTitle(tc.in); got != tc.want {
+			t.Errorf("clipTitle(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The cwd fallback is plain too, and keeps its leaf.
+//
+// It returned through a bare strings.Fields — whitespace collapsed and nothing else — so a directory
+// name carrying an ESC sequence, a bidi override or a tag reached the file unfiltered while every
+// other tier was clean. It now shares normalizeTitle with them, but NOT the length cap: a path's
+// distinguishing end is its leaf, and clipping keeps the head.
+func TestTitleFromTranscript_CwdFallbackIsPlainAndUnclipped(t *testing.T) {
+	titleFor := func(cwd string) string {
+		t.Helper()
+		dir := t.TempDir()
+		body, err := json.Marshal(cwd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeSessionTranscript(t, dir, "s.jsonl", `{"type":"user","cwd":`+string(body)+`}`)
+		got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+		if gerr != nil {
+			t.Fatal(gerr)
+		}
+		return got
+	}
+
+	for _, in := range []string{
+		"/w/dir\x1b[31mred",
+		"/w/‮dir",
+		"/w/<system-reminder>injected</system-reminder>dir",
+		"/w/áccent",
+		"/w/norm​al",
+	} {
+		got := titleFor(in)
+		for _, r := range got {
+			if r != ' ' && !unicode.IsGraphic(r) {
+				t.Errorf("cwd %q: title carries non-graphic %U: %q", in, r, got)
+			}
+		}
+		if strings.Contains(got, ">") {
+			t.Errorf("cwd %q: title carries markup: %q", in, got)
+		}
+		if strings.Contains(got, "injected") {
+			t.Errorf("cwd %q: title carries a harness body: %q", in, got)
+		}
+	}
+
+	// NOT clipped: a prefix past the cap must not swallow the leaf, or sibling worktrees become
+	// indistinguishable.
+	const prefix = "/Users/somebody/go/src/github.com/some-organisation/some-repository/worktrees/wt/"
+	if len([]rune(prefix)) <= MaxTitleLen {
+		t.Fatalf("fixture prefix is %d runes, needs to exceed %d", len([]rune(prefix)), MaxTitleLen)
+	}
+	a, b := titleFor(prefix+"alpha"), titleFor(prefix+"beta")
+	if a == b {
+		t.Errorf("sibling paths produced the same title %q", a)
+	}
+	if !strings.HasSuffix(a, "alpha") || !strings.HasSuffix(b, "beta") {
+		t.Errorf("the leaf did not survive: %q / %q", a, b)
+	}
+}
+
+// A truncated read is REPORTED, not silently swallowed, and the best title found still comes back.
+//
+// titleFromTranscript's second return says the scan ended early — a line past the 16MB buffer, or an
+// I/O error partway through — and ReadSessions collects those into Result.Partial for the caller to
+// warn about. The contract was documented in two places and asserted nowhere, so a regression would
+// have been silent: the title of a long session would quietly become a stale one.
+func TestTitleFromTranscript_ReportsTruncatedReads(t *testing.T) {
+	dir := t.TempDir()
+	// One line past bufio.Scanner's 16MB ceiling, after a usable title. The title found before the
+	// stop must survive, since something is better than nothing — that is why the error is returned
+	// ALONGSIDE it rather than instead of it.
+	huge := strings.Repeat("x", 17<<20)
+	writeSessionTranscript(t, dir, "s.jsonl",
+		`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"a real ask"}}`,
+		`{"type":"user","cwd":"/w/`+huge+`"}`)
+
+	got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+	if err == nil {
+		t.Error("a line past the scanner buffer was not reported")
+	}
+	if got != "a real ask" {
+		t.Errorf("title = %q, want the title found before the stop", got)
+	}
+}
+
+// ReadSessions surfaces a truncated transcript through Result.Partial rather than failing the harvest.
+//
+// One bad transcript must not cost the other hundred names, so the error is collected and the session
+// still lands in the map. The propagation was untested.
+func TestReadSessions_CollectsPartialReads(t *testing.T) {
+	cfg := t.TempDir()
+	proj := filepath.Join(cfg, "projects", "-p")
+	huge := strings.Repeat("x", 17<<20)
+	writeSessionTranscript(t, proj, "truncated.jsonl",
+		`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"a real ask"}}`,
+		`{"type":"user","cwd":"/w/`+huge+`"}`)
+	writeSessionTranscript(t, proj, "fine.jsonl",
+		`{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"another ask"}}`)
+
+	out, partial, _, err := ReadSessions(cfg, nil)
+	if err != nil {
+		t.Fatalf("a truncated transcript failed the whole harvest: %v", err)
+	}
+	if len(partial) != 1 {
+		t.Errorf("partial = %d entries, want 1: %v", len(partial), partial)
+	}
+	if len(partial) == 1 && !strings.Contains(partial[0], "truncated.jsonl") {
+		t.Errorf("the partial entry does not name the transcript: %q", partial[0])
+	}
+	// Both sessions are still named — the truncated one from what was found before the stop.
+	if out["truncated"].Title != "a real ask" {
+		t.Errorf("truncated session title = %q, want %q", out["truncated"].Title, "a real ask")
+	}
+	if out["fine"].Title != "another ask" {
+		t.Errorf("healthy session title = %q, want %q", out["fine"].Title, "another ask")
+	}
+}
+
+// stripANSI removes each escape class WITH its payload, not just the ESC byte.
+//
+// The property test cannot see this: dropping the ESC alone still leaves a plain title, so
+// "garbage but plain" satisfies the guarantee. Only CSI and OSC were handled, so a DCS or APC
+// payload — and the one byte after a charset-selection escape — survived as literal text.
+func TestStripANSI_HandlesEveryEscapeClass(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"CSI colour", "a\x1b[31mb", "ab"},
+		{"CSI cursor", "a\x1b[2Jb", "ab"},
+		{"OSC with BEL", "a\x1b]0;evil\x07b", "ab"},
+		{"OSC with ST", "a\x1b]0;evil\x1b\\b", "ab"},
+		{"DCS", "a\x1bPq payload \x1b\\b", "ab"},
+		{"SOS", "a\x1bXpayload\x07b", "ab"},
+		{"PM", "a\x1b^payload\x07b", "ab"},
+		{"APC", "a\x1b_payload\x07b", "ab"},
+		{"charset selection", "a\x1b(Bb", "ab"},
+		{"charset selection, other", "a\x1b)0b", "ab"},
+		{"two-byte escape", "a\x1b7b", "ab"},
+		{"trailing lone ESC", "title\x1b", "title"},
+		{"no escapes", "how do I build abctl?", "how do I build abctl?"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripANSI(tc.in); got != tc.want {
+				t.Errorf("stripANSI(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// tagSpanLen recognises a tag and declines everything else, which is what keeps comparison
+// operators in real prompts.
+//
+// Two defects came from counting "<" and ">" as a balanced pair: two operators cancelled out and
+// everything between them was eaten ("is 3 < 5 and 6 > 2 in Go?" became "is 3 2 in Go?"), and one
+// unbalanced "<" disabled stripping for the whole string including balanced tags before it.
+func TestTagSpanLen(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int
+	}{
+		{"<div>", 5},
+		{"</div>", 6},
+		{"<system-reminder>", 17},
+		{`<a href="x">`, 12},
+		{"<b>text</b>", 3}, // the opening tag only
+		{"< 5", 0},         // a comparison, not a tag
+		{"<=", 0},
+		{"<>", 0},
+		{"<", 0},
+		{"<div", 0}, // no closing bracket anywhere
+		{"plain", 0},
+		{"", 0},
+	} {
+		if got := tagSpanLen(tc.in); got != tc.want {
+			t.Errorf("tagSpanLen(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Comparison operators survive in both directions, and a tag beside them still goes.
+func TestClipTitle_KeepsComparisonOperators(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"is 3 < 5 in Go?", "is 3 < 5 in Go?"},
+		{"is 3 < 5 and 6 > 2 in Go?", "is 3 < 5 and 6 > 2 in Go?"},
+		{"a > b > c", "a > b > c"},
+		{"x <= y and y >= z", "x <= y and y >= z"},
+		// A balanced span BEFORE a lone "<" is still stripped: one unbalanced bracket used to
+		// disable stripping for the entire string.
+		{"<system-reminder>HARNESSBODY</system-reminder> and 3 < 5", "and 3 < 5"},
+		// An UNKNOWN tag is neutered, not deleted: the name survives as a word, the brackets do not.
+		// Contrast the harness case above, which is removed with its body — the two paths stay distinct.
+		{"<div>x</div> and 3 < 5", "div x div and 3 < 5"},
+	} {
+		if got := clipTitle(tc.in); got != tc.want {
+			t.Errorf("clipTitle(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A harness block nested inside the SAME tag name is removed whole.
+//
+// The close-tag search took the first "</name" after the opening tag, which for same-name nesting is
+// the INNER close — so the span ended early and everything up to the outer close survived as prose.
+// The fixed-point loop could not recover it either, because the opening tag had already been consumed.
+// Different-name nesting always worked, since each tag is scanned separately, and that is exactly why
+// the corpus missed this: it covered the case that worked.
+func TestStripHarnessSpans_HandlesSameNameNesting(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"one level", "<system-reminder>a<system-reminder>b</system-reminder>LEAK</system-reminder>", ""},
+		{"trailing prose survives", "<system-reminder>a<system-reminder>b</system-reminder>LEAK</system-reminder> tail", "tail"},
+		{"leading prose survives", "head <system-reminder>a<system-reminder>b</system-reminder>LEAK</system-reminder>", "head"},
+		{"three levels", "<system-reminder>a<system-reminder>b<system-reminder>c</system-reminder>d</system-reminder>LEAK</system-reminder>", ""},
+		// Two SEPARATE blocks are not nesting: the text between them is the user's and must survive.
+		{"separate blocks keep the text between", "<system-reminder>a</system-reminder> keep me <system-reminder>b</system-reminder>", "keep me"},
+		{"different-name nesting still works", "<system-reminder>x<task-notification>y</task-notification>z</system-reminder>", ""},
+		// An unclosed block still runs to end-of-string.
+		{"unclosed runs to end", "prose <system-reminder>LEAK payload", "prose"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clipTitle(tc.in); got != tc.want {
+				t.Errorf("clipTitle(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// cutTrailingHarness treats every whitespace class as indentation, decoded as runes.
+//
+// `unicode.IsSpace(rune(s[j]))` converts one BYTE, so a multi-byte space never matched — its
+// continuation bytes are not IsSpace, the scan stopped on them, and the block read as mid-line. The
+// adjacent comment named NBSP as a covered shape while the code could not see it. Not a leak end to
+// end, since normalisation removes the tag anyway, but the defence did not do what it claimed.
+func TestCutTrailingHarness_AnyWhitespaceIndent(t *testing.T) {
+	for _, ind := range []string{" ", "  ", "\t", "\v", "\f", " ", "　", " ", " ", " \t "} {
+		in := "my real question\n" + ind + "<system-reminder>hidden</system-reminder>"
+		if got := cutTrailingHarness(in); got != "my real question" {
+			t.Errorf("indent %q: cutTrailingHarness = %q, want %q", ind, got, "my real question")
+		}
+	}
+	// Real text before the tag on its line is still not a cut — the positional rule holds.
+	for _, in := range []string{
+		"line one\nline two <system-reminder>x</system-reminder>",
+		"see <task-notification> for details",
+	} {
+		if got := cutTrailingHarness(in); got != in {
+			t.Errorf("cutTrailingHarness(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}
+
+// The same content yields the same title whether or not the turn is attributed.
+//
+// THE GAP THIS CLOSES: the str and blocks tiers assigned raw text, skipping promptCandidate
+// entirely, so an unattributed slash command kept its "<command-message>…" envelope, failed the
+// synthetic check and fell through to the cwd — while the identical content titled correctly with
+// origin.kind=human. Unattributed turns are the majority (9940 against 640 on the measured tree), so
+// the tier that skipped the unwrapping was the common one.
+//
+// Both unwrap tests used only human-attributed fixtures, which is why CI was green on it. This one is
+// parameterised over attribution precisely so a future tier cannot be added without it.
+func TestTitleFromTranscript_AttributionDoesNotChangeTheTitle(t *testing.T) {
+	const envelope = "<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>some/path.md</command-args>"
+	for _, tc := range []struct{ name, content, want string }{
+		{"slash command envelope", envelope, "/review some/path.md"},
+		{"pasted content wrapper", `<pasted_content id="x">the pasted body</pasted_content>`, "the pasted body"},
+		{"plain prose", "how do I build abctl?", "how do I build abctl?"},
+		{"prose with trailing harness block", "my real question\n<system-reminder>hidden</system-reminder>", "my real question"},
+		// A harness-output wrapper still falls through in BOTH cases: its body is not the user's.
+		{"harness output wrapper", "<bash-stdout>total 40</bash-stdout>", "/w/fallback"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			titleFor := func(origin string) string {
+				t.Helper()
+				dir := t.TempDir()
+				body, err := json.Marshal(tc.content)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeSessionTranscript(t, dir, "s.jsonl",
+					`{"type":"user","cwd":"/w/fallback"}`,
+					`{"type":"user",`+origin+`"message":{"role":"user","content":`+string(body)+`}}`)
+				got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+				if gerr != nil {
+					t.Fatal(gerr)
+				}
+				return got
+			}
+			human := titleFor(`"origin":{"kind":"human"},`)
+			plain := titleFor("")
+			if human != tc.want {
+				t.Errorf("attributed title = %q, want %q", human, tc.want)
+			}
+			if plain != tc.want {
+				t.Errorf("unattributed title = %q, want %q", plain, tc.want)
+			}
+			if human != plain {
+				t.Errorf("attribution changed the title: %q vs %q", human, plain)
+			}
+		})
+	}
+}
+
+// The same holds for a content ARRAY, which reaches the blocks tier rather than str.
+//
+// Both tiers assigned raw text, so both were affected; a fix to one alone would leave the other.
+func TestTitleFromTranscript_AttributionDoesNotChangeBlockTitles(t *testing.T) {
+	const content = `[{"type":"text","text":"<pasted_content id=\"x\">the pasted body</pasted_content>"}]`
+	titleFor := func(origin string) string {
+		t.Helper()
+		dir := t.TempDir()
+		writeSessionTranscript(t, dir, "s.jsonl",
+			`{"type":"user","cwd":"/w/fallback"}`,
+			`{"type":"user",`+origin+`"message":{"role":"user","content":`+content+`}}`)
+		got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+		if gerr != nil {
+			t.Fatal(gerr)
+		}
+		return got
+	}
+	human, plain := titleFor(`"origin":{"kind":"human"},`), titleFor("")
+	if human != "the pasted body" || plain != "the pasted body" {
+		t.Errorf("attributed = %q, unattributed = %q, want both %q", human, plain, "the pasted body")
+	}
+}
+
+// stripHarnessSpans is linear in the input, not quadratic in the number of blocks.
+//
+// It re-sliced the string on every excision and restarted strings.Index from offset 0. Measured end
+// to end through titleFromTranscript before the fix: 155KB took 21ms, 620KB 242ms and 2.5MB 2.49s —
+// four times the input for eleven times the work. bufio admits lines up to 16MB, so one chatty
+// transcript line could stall the harvest for seconds. After: 9ms, 24ms, 54ms.
+//
+// Asserted as a RATIO rather than a wall-clock bound, so the test says what it means on a loaded CI
+// machine: quadratic growth shows up as time scaling with the square of the input, and a 4x input
+// step would take ~16x. The 8x ceiling leaves room for noise while still failing the 11x that was
+// measured.
+func TestStripHarnessSpans_ScalesLinearly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive")
+	}
+	build := func(kb int) string {
+		var b strings.Builder
+		for b.Len() < kb*1024 {
+			b.WriteString("some prose here <system-reminder>hidden payload text</system-reminder> more prose\n")
+		}
+		return b.String()
+	}
+	measure := func(s string) time.Duration {
+		start := time.Now()
+		stripHarnessSpans(s)
+		return time.Since(start)
+	}
+	small, large := build(256), build(1024) // a 4x step
+
+	// Warm up, so the first allocation does not land inside a measurement.
+	measure(small)
+
+	ts, tl := measure(small), measure(large)
+	if ts <= 0 {
+		ts = time.Microsecond
+	}
+	if ratio := float64(tl) / float64(ts); ratio > 8 {
+		t.Errorf("4x the input took %.1fx the time (%v vs %v) — that is quadratic, not linear",
+			ratio, tl, ts)
+	}
+}
+
+// TestNormalizeTitle_IsAFixedPointAcrossRuneScrubbing pins the ORDER of normalizeTitle's passes.
+//
+// The scrub that drops invisible runes used to run AFTER the markup loop had converged, and deleting
+// a rune is exactly the kind of rewrite that exposes new work for the markup passes. Splitting a tag
+// with any invisible rune hid it from every pass; dropping that rune afterwards re-joined the tag and
+// wrote intact markup to ~/.cortex/session-metadata.json, which consumers other than the TUI read as
+// plain text.
+//
+// Each case is ONE ordinary transcript line through the public path, not a direct normalizeTitle
+// call, because the claim is about what lands in the file.
+//
+// The MID-NAME variant is the one worth keeping a name for: it does not look like a failure. The
+// bracket cases came out as visible markup, but "hello <sys​tem-reminder>SECRET</...>" came out
+// as "hello SECRET world" — clean prose, with a harness block's body promoted into the title and
+// nothing on screen to flag it.
+func TestNormalizeTitle_IsAFixedPointAcrossRuneScrubbing(t *testing.T) {
+	// Every class of rune the scrub drops, since each one can split a tag.
+	for _, inv := range []struct {
+		name string
+		r    string
+	}{
+		{"zero-width space", "​"},
+		{"bidi override", "‮"},
+		{"bidi isolate", "⁦"},
+		{"combining mark", "́"},
+		{"variation selector", "️"},
+		{"zero-width joiner", "‍"},
+		{"soft hyphen", "­"},
+		{"C1 control", "\u0085"},
+	} {
+		for _, placement := range []struct {
+			name, prompt string
+		}{
+			{"after the bracket", "<" + inv.r + "system-reminder>INJECTED</" + inv.r + "system-reminder>"},
+			{"mid name", "hello <sys" + inv.r + "tem-reminder>SECRET</sys" + inv.r + "tem-reminder> world"},
+			{"before the bracket", "text " + inv.r + "<system-reminder>INJECTED</system-reminder>"},
+			{"plain tag", "look <" + inv.r + "b>bold</" + inv.r + "b> here"},
+		} {
+			t.Run(inv.name+", "+placement.name, func(t *testing.T) {
+				dir := t.TempDir()
+				line, err := json.Marshal(map[string]any{
+					"type":    "user",
+					"cwd":     "/w/x",
+					"origin":  map[string]any{"kind": "human"},
+					"message": map[string]any{"role": "user", "content": placement.prompt},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeSessionTranscript(t, dir, "s.jsonl", string(line))
+				got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+				if gerr != nil {
+					t.Fatal(gerr)
+				}
+				for _, bad := range []string{"<", ">", "system-reminder", "INJECTED", "SECRET"} {
+					if strings.Contains(got, bad) {
+						t.Errorf("title %q contains %q — the markup loop reached a fixed point "+
+							"before the rune scrub ran, so dropping %U reconstituted it",
+							got, bad, []rune(inv.r)[0])
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestNormalizeTitle_FoldsEveryUnicodeSpace pins that no whitespace but U+0020 survives.
+//
+// Two reasons, beyond a title being one plain line. A reader cannot tell U+00A0 from a space, so a
+// title that holds one is lying about its own shape; and a consumer that splits on ASCII space sees a
+// different string than the one on screen, which is how looksLikePath came to misread a slash command
+// as a path.
+func TestNormalizeTitle_FoldsEveryUnicodeSpace(t *testing.T) {
+	// A SEPARATOR folds to U+0020 — the printing spaces, plus newline, carriage return and tab, which
+	// separate words in prose that was never one line. A reader sees a gap in each case, so the title
+	// keeps one.
+	for _, sp := range []string{" ", "\t", "\n", "\r", "\u00a0", "\u3000", "\u2009", "\u2003", "\u205f", "\u1680"} {
+		if got := titleOf(t, "alpha"+sp+"beta"); got != "alpha beta" {
+			t.Errorf("title = %q, want %q: %U prints as a gap, so it must fold to a plain space",
+				got, "alpha beta", []rune(sp)[0])
+		}
+	}
+
+	// A NON-PRINTING rune is dropped, even though unicode.IsSpace is true for these four — U+000B,
+	// U+000C and U+0085 are whitespace AND non-graphic. Folding them to a space was a
+	// real leak, not a cosmetic choice: it turned "<\u0085system-reminder>BODY</...>" into
+	// "< system-reminder>BODY</ system-reminder>", which is not a tag by tagSpanLen's rule, so the
+	// block was never removed with its body and the body became the title. Joining two words is the
+	// cheaper error.
+	for _, sp := range []string{"\v", "\f", "\u0085"} {
+		if got := titleOf(t, "alpha"+sp+"beta"); got != "alphabeta" {
+			t.Errorf("title = %q, want %q: %U does not print, so it is dropped rather than folded — "+
+				"folding it to a space splits a tag name into something tagSpanLen will not match",
+				got, "alphabeta", []rune(sp)[0])
+		}
+	}
+}
+
+// titleOf writes prompt as the one human turn of a transcript and returns the harvested title.
+func titleOf(t *testing.T, prompt string) string {
+	t.Helper()
+	dir := t.TempDir()
+	line, err := json.Marshal(map[string]any{
+		"type":    "user",
+		"cwd":     "/w/x",
+		"origin":  map[string]any{"kind": "human"},
+		"message": map[string]any{"role": "user", "content": prompt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSessionTranscript(t, dir, "s.jsonl", string(line))
+	got, gerr := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	return got
+}
+
+// TestTagSpanLen_QuotedAngleBracketDoesNotCloseTheTag pins the quoting rule.
+//
+// HTML permits ">" inside a quoted attribute value, and scanning for the first ">" byte closed the
+// span there — so `<a href="x>y">link</a>` left `y">link` in the title. Both quote characters,
+// since either may contain the other unescaped.
+func TestTagSpanLen_QuotedAngleBracketDoesNotCloseTheTag(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`hello <a href="x>y">link</a> world`, "hello a link a world"},
+		{`hi <img alt='a>b'> there`, "hi img there"},
+		{`<span title="a > b">txt</span>`, "span txt span"},
+		{`<x a="'">keep</x>`, "x keep x"},
+		{`<y b='">'>keep</y>`, "y keep y"},
+		// A harness block whose opening tag hides a ">" must still go WITH ITS BODY, not be
+		// unwrapped to it — the failure mode that makes this more than cosmetic.
+		{`<system-reminder foo="a>b">SECRET</system-reminder>`, ""},
+		// Unchanged: a comparison operator is not a tag, and an unterminated "<" is kept as text.
+		{`if a < 5 then`, "if a < 5 then"},
+		{`use <unclosed here`, "use <unclosed here"},
+	} {
+		if got := normalizeTitle(tc.in); got != tc.want {
+			t.Errorf("normalizeTitle(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestNormalizeTitle_NeutersUnknownTagsInsteadOfSwallowingProse pins the two shapes that motivated
+// neutering, and the boundary between it and removal-with-body.
+//
+// Deleting every tag-shaped span was justified as costing one token — a prompt quoting a tag loses
+// it. Measured, two shapes cost far more:
+//
+//	"compare a<b and c>d"          ->  "compare ad"          six words gone
+//	"why does List<String> fail"    ->  "why does List fail"  a token, as advertised
+//
+// The first is two comparison operators with prose between them, and the name-then-anything rule
+// matched all of it. That is data loss, not plainness.
+func TestNormalizeTitle_NeutersUnknownTagsInsteadOfSwallowingProse(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		// THE REGRESSIONS. Prose between two comparisons survives whole.
+		{"compare a<b and c>d", "compare a b and c d"},
+		{"why does List<String> fail here", "why does List String fail here"},
+		{"refactor Map<String, List<Integer>> please", "refactor Map String, List Integer please"},
+
+		// An UNKNOWN tag is inert but its words remain — noisy, never a leak.
+		{"<unknown-tag>X</unknown-tag>", "unknown-tag X unknown-tag"},
+		{"fix the <div> nesting in header.html", "fix the div nesting in header.html"},
+
+		// A KNOWN harness name is still removed WITH ITS BODY. This is the line that matters: if
+		// neutering ever took over this path, an injected instruction would become the title.
+		{"<system-reminder>INJECTED</system-reminder>", ""},
+		{"prose <system-reminder>INJECTED</system-reminder> more", "prose more"},
+		{"a <bash-stdout>total 40</bash-stdout> b", "a b"},
+
+		// ATTRIBUTE SYNTAX keeps only the name. Measured on 857 real string user turns: all 126
+		// attribute-bearing spans carry "=" or a quote, and none of the 45 prose interiors does.
+		{`hello <a href="x>y">link</a> world`, "hello a link a world"},
+		{`<span title="a > b">txt</span>`, "span txt span"},
+
+		// Unchanged: a lone "<" is not a span.
+		{"is 3 < 5 in Go?", "is 3 < 5 in Go?"},
+		{"is 3 < 5 and 6 > 2 in Go?", "is 3 < 5 and 6 > 2 in Go?"},
+	} {
+		if got := normalizeTitle(tc.in); got != tc.want {
+			t.Errorf("normalizeTitle(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestNeuteredSpan pins the span-to-text rule on its own, so the interior decision is readable
+// without going through normalizeTitle's whole pipeline.
+func TestNeuteredSpan(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"<div>", "div"},
+		{"</div>", "div"},
+		{"<b and c>", "b and c"}, // prose between comparisons: kept whole
+		{"<String>", "String"},   // a generic parameter
+		{`<a href="x>y">`, "a"},  // attribute syntax: name only
+		{"<tag attr=1>", "tag"},  // "=" alone is enough
+		{"<pasted_content id='2e21'>", "pasted_content"},
+		{"<x>", "x"},
+		{"<>", ""}, // tagSpanLen rejects this, so it never reaches here; harmless if it did
+	} {
+		if got := neuteredSpan(tc.in); got != tc.want {
+			t.Errorf("neuteredSpan(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestStripHarnessSpans_MatchesTheNameNotItsBytes pins the class of body leak that came from
+// comparing tag names literally.
+//
+// tagSpanLen decides what a span IS and accepts A-Z in a name; the tag list is all lowercase and was
+// compared byte for byte. So every way a real name can differ from its literal form silently
+// downgraded "remove with body" to "neuter the brackets" — and neutering a harness tag PROMOTES its
+// body into the title, which is the one outcome this file exists to prevent.
+//
+// isSyntheticPrompt already lowercased its comparison and documented why. The function that removes
+// the body did not, which is the asymmetry these cases cover.
+func TestStripHarnessSpans_MatchesTheNameNotItsBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"uppercase", "<SYSTEM-REMINDER>INJECTED</SYSTEM-REMINDER>", ""},
+		{"mixed case", "<System-Reminder>INJECTED</System-Reminder>", ""},
+		{"uppercase, mid-prose", "ok <SYSTEM-REMINDER>INJECTED</SYSTEM-REMINDER> end", "ok end"},
+		{"close tag cased differently", "<system-reminder>INJECTED</SYSTEM-REMINDER>", ""},
+
+		// A rune wedged into the name. U+02C6 is category Lm, so scrubRunes does NOT drop it — it
+		// drops Mn/Me/Sk — which means nothing in the pipeline deletes the rune and the fixed-point
+		// loop cannot rescue the match. Canonicalising the name is what closes it.
+		{"Lm rune in the name", "<systemˆ-reminder>INJECTED</systemˆ-reminder>", ""},
+		{"Lm rune, open only", "<systemˆ-reminder>INJECTED</system-reminder>", ""},
+
+		// An ORPHAN CLOSE. The scan looked for "<system-reminder" and byte 1 of an orphan close is
+		// "/", so it missed and the neutering pass left the bare word behind.
+		{"orphan close", "</system-reminder>", ""},
+		{"orphan close, mid-prose", "prose </system-reminder> more", "prose"},
+		{"orphan close, uppercase", "</SYSTEM-REMINDER>", ""},
+
+		// Unchanged: a name that is NOT a harness tag is still only neutered, never body-removed.
+		{"unknown tag keeps its words", "<unknown-tag>X</unknown-tag>", "unknown-tag X unknown-tag"},
+		{"comparison is not a span", "is 3 < 5 in Go?", "is 3 < 5 in Go?"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeTitle(tc.in); got != tc.want {
+				t.Errorf("normalizeTitle(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeTitle_IsIdempotentAtEveryNestingDepth settles a reported concern rather than fixing
+// one, and keeps it settled.
+//
+// The claim was that neuteredSpan re-emits an interior "<" verbatim, so each left-nested bracket
+// costs one pass, nine nested pairs exhaust maxNormalizePasses and a live tag span survives. It does
+// not reproduce: neuteredSpan returns the interior WITHOUT its brackets, so nesting does not consume
+// passes at all and one pass handles any depth.
+//
+// Asserted as two properties, at depths well past the pass limit: no span survives, and a second
+// application changes nothing. The second is what "fixed point" means, and other comments in this
+// file now lean on it.
+func TestNormalizeTitle_IsIdempotentAtEveryNestingDepth(t *testing.T) {
+	for depth := 1; depth <= 24; depth++ {
+		for _, tag := range []string{"a", "unknown-tag", "system-reminder"} {
+			in := strings.Repeat("<"+tag+">", depth) + "BODY" + strings.Repeat("</"+tag+">", depth)
+			once := normalizeTitle(in)
+			if twice := normalizeTitle(once); once != twice {
+				t.Errorf("depth %d, <%s>: not idempotent — %q then %q", depth, tag, once, twice)
+			}
+			for off := 0; off < len(once); off++ {
+				if once[off] == '<' && tagSpanLen(once[off:]) > 0 {
+					t.Errorf("depth %d, <%s>: a live tag span survived at offset %d: %q",
+						depth, tag, off, once)
+					break
+				}
+			}
+			// And a harness block's body never survives, whatever the nesting.
+			if tag == "system-reminder" && strings.Contains(once, "BODY") {
+				t.Errorf("depth %d: harness body survived: %q", depth, once)
+			}
+		}
+	}
+}
+
+// TestTitleFromTranscript_AnEmptyCwdDoesNotClobberAGoodOne pins the last tier's guard.
+//
+// The cwd accumulator tested the RAW value for emptiness, unlike all five prompt tiers, which
+// normalise first. So a cwd that normalises away to nothing — whitespace only, an ESC sequence —
+// counted as present, and last-wins let it overwrite a good value from an earlier line. The cwd is the
+// final fallback, so the result was an unnamed session rather than a fall-through.
+func TestTitleFromTranscript_AnEmptyCwdDoesNotClobberAGoodOne(t *testing.T) {
+	for _, tc := range []struct{ name, later string }{
+		{"spaces", `"   "`},
+		{"tab", `"\t"`},
+		{"non-breaking space", `" "`},
+		{"ideographic space", `"　"`},
+		{"escape sequence only", `"\u001b[0m"`},
+		{"zero-width space", `"​"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeSessionTranscript(t, dir, "s.jsonl",
+				`{"type":"user","cwd":"/w/good"}`,
+				`{"type":"user","cwd":`+tc.later+`}`)
+			got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != "/w/good" {
+				t.Errorf("title = %q, want %q — a cwd that normalises to nothing must not overwrite "+
+					"a good one, since this tier is the last fallback", got, "/w/good")
+			}
+		})
+	}
+
+	// Last-wins still applies to a cwd that normalises to something. Not a defect of the guard: by
+	// this tier's own rule the later line is the current directory.
+	dir := t.TempDir()
+	writeSessionTranscript(t, dir, "s.jsonl",
+		`{"type":"user","cwd":"/w/first"}`,
+		`{"type":"user","cwd":"/w/second"}`)
+	got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/w/second" {
+		t.Errorf("title = %q, want %q — last-wins is the rule for a non-empty cwd", got, "/w/second")
+	}
+}
+
+// TestTitleFromTranscript_CwdIsBounded pins the one string the harvester used to leave unbounded.
+//
+// Five prompt tiers go through clipTitle; the cwd tier returned normalizeTitle(cwd) uncapped, on the
+// reasoning that "a path is bounded by the filesystem". It is not: e.Cwd is a JSON string field, and a
+// transcript is a file anything can write. The value then reached the renderer's per-rune width search,
+// which measured the whole remaining string once per dropped rune — seconds per redraw on a 20,000-rune
+// cwd.
+//
+// The cap is deliberately far above MaxTitleLen, because this tier exists to show a directory and
+// clipping it to a title's budget would defeat it. It is a BOUND, not a display budget.
+func TestTitleFromTranscript_CwdIsBounded(t *testing.T) {
+	for _, runes := range []int{10, 100, MaxCwdLen, MaxCwdLen + 1, 5000, 50000} {
+		dir := t.TempDir()
+		writeSessionTranscript(t, dir, "s.jsonl",
+			`{"type":"user","cwd":"/`+strings.Repeat("a", runes-1)+`"}`)
+		got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len([]rune(got)); n > MaxCwdLen {
+			t.Errorf("a %d-rune cwd produced a %d-rune title, over the %d cap — an unbounded title "+
+				"reaches the renderer's per-rune width search", runes, n, MaxCwdLen)
+		}
+		// A cwd at or under the cap is untouched: the bound must not clip a real path.
+		if runes <= MaxCwdLen && len([]rune(got)) != runes {
+			t.Errorf("a %d-rune cwd was clipped to %d runes, but the cap is %d — a genuine deep path "+
+				"must keep its whole leaf", runes, len([]rune(got)), MaxCwdLen)
+		}
+	}
+
+	// THE TAIL SURVIVES, not the head: a path's leaf is the identifying part, and it is the end the
+	// renderer keeps too.
+	dir := t.TempDir()
+	writeSessionTranscript(t, dir, "s.jsonl",
+		`{"type":"user","cwd":"/`+strings.Repeat("a", 5000)+`/the-leaf"}`)
+	got, err := titleFromTranscript(filepath.Join(dir, "s.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, "/the-leaf") {
+		t.Errorf("title = %q, want it to end in %q — clipping a cwd must keep the leaf",
+			got[max(0, len(got)-20):], "/the-leaf")
+	}
 }

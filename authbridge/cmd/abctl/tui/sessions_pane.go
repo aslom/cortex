@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
@@ -413,7 +414,7 @@ func (m *model) sessionTitleCell(id string, titleW int) string {
 	// 11: that was previously dismissed as unreachable on this platform, which confused where the
 	// string comes FROM with where it is rendered. Titles are harvested text; the renderer does
 	// not get to assume their shape.
-	if !strings.HasPrefix(title, "/") {
+	if !looksLikePath(title) {
 		if titleW <= 0 {
 			// FAIL SAFE, not wide. A non-positive budget means the caller could not tell us how
 			// much room there is, and returning the full title then hands an unbounded cell to a
@@ -441,6 +442,66 @@ func (m *model) sessionTitleCell(id string, titleW int) string {
 		return ""
 	}
 	return truncLeft(title, titleW)
+}
+
+// looksLikePath reports whether a title should be truncated from the LEFT, keeping its tail.
+//
+// A LEADING SLASH IS NOT ENOUGH. It was the whole test until session titles started coming from the
+// user's own prompts, and a typed slash command begins with one too: "/review <url> carefully" was
+// left-truncated to "…pull/1101 carefully", discarding the command name — the one part of it a reader
+// needs. That inverts this file's own rule that prose reads left-to-right.
+//
+// The distinction that matters is whether the string's LEAF is the identifying part. A filesystem path
+// has more than one segment and no spaces in its first one; a slash command is one word followed by
+// arguments. So a title qualifies only if it has a second "/" before any space — which "/review x"
+// does not, and "/Users/somebody/src" does.
+//
+// Deliberately simple, and wrong in one direction on purpose: "/tmp foo" reads as prose and would be
+// right-truncated. A single-segment path is not something Claude Code records as a cwd, and the cost
+// is a cell cut at the other end rather than anything unbounded.
+//
+// THAT MISS IS PINNED, by TestLooksLikePath_SingleSegmentPathWithASpaceReadsAsProse, as
+// characterization rather than endorsement — it also measures the cost, so widening this rule is a
+// visible diff. The same test covers the opposite direction, which is NOT a miss: "/review a/b" is a
+// slash command whose argument holds a slash, and prose is the right answer. One clause produces both,
+// so neither behaviour can change alone.
+//
+// ANY UNICODE SPACE SEPARATES, not just " " and "\t". An earlier IndexAny(rest, " \t") saw no
+// separator in "/review\u00a0docs/plan.md", found the second "/", and left-truncated the slash
+// command — the exact regression above, reachable through a non-breaking space, an ideographic space,
+// or any of the U+2000 block. Only from a stale or hand-edited metadata file today, since the
+// harvester now folds every unicode space to U+0020 before writing; this does not rely on that,
+// because a renderer should not assume its input came from the current harvester.
+func looksLikePath(title string) bool {
+	if !strings.HasPrefix(title, "/") {
+		return false
+	}
+	rest := title[1:]
+	if i := strings.IndexFunc(rest, unicode.IsSpace); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.Contains(rest, "/")
+}
+
+// zeroWidthFree reports whether every rune in s occupies at least one display column.
+//
+// What licenses the prefix skip in truncLeft and truncRight: with no zero-width rune, a run of more
+// than n runes cannot fit n columns, so n runes from the relevant end is an exact lower bound and
+// every index beyond it is provably too wide to measure. One zero-width rune breaks that, and a
+// differential test against the pre-skip implementation caught exactly that case.
+//
+// Checked structurally rather than by measuring: the classes runewidth gives zero columns are
+// non-spacing and enclosing marks, format characters and controls, plus the modifier symbols this
+// project already drops upstream. Cheap — one pass, no allocation — and the answer is yes for every
+// title, so the skip is not hypothetical.
+func zeroWidthFree(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) ||
+			unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Sk, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // truncRight clips s to n DISPLAY COLUMNS keeping the LEFT end, marking the cut with a
@@ -473,7 +534,16 @@ func truncRight(s string, n int) string {
 	//
 	// The ELLIPSIS PLUS THE HEAD is measured, not the head plus one, so a trailing combining
 	// mark that fuses onto the ellipsis cannot push the result over budget.
+	//
+	// AND IT SKIPS AHEAD, for truncLeft's reason, under the same guard: a head longer than n runes
+	// cannot fit n columns PROVIDED no rune is zero-width, so the first n runes are then an exact
+	// lower bound. This had the identical quadratic shape — 2500 runes 39ms, 20000 2.30s on one call
+	// — and is reachable the same way, since looksLikePath needs a leading "/" so a RELATIVE cwd
+	// routes down this branch while just as uncapped.
 	r := []rune(s)
+	if len(r) > n && zeroWidthFree(s) {
+		r = r[:n]
+	}
 	for i := len(r); i > 0; i-- {
 		if out := string(r[:i]) + "…"; lipgloss.Width(out) <= n {
 			return out
@@ -482,7 +552,8 @@ func truncRight(s string, n int) string {
 	return "…"
 }
 
-// truncLeft clips s to n runes keeping the RIGHT end, marking the cut with a leading ellipsis.
+// truncLeft clips s to n DISPLAY COLUMNS keeping the RIGHT end, marking the cut with a leading
+// ellipsis.
 //
 // The mirror of trunc, for values whose distinguishing end is the last one: a path, where every
 // sibling shares the prefix. n < 1 yields "" and n == 1 yields just the ellipsis, so the result
@@ -494,12 +565,31 @@ func truncLeft(s string, n int) string {
 	// package documents as content nobody here controls, so CJK and emoji are expected rather
 	// than exotic: measured, a 14-column budget returned 27 columns of CJK.
 	//
-	// The two failures differ and both are bad. In a header the over-wide string wraps the
-	// terminal, costing a body row. In the table the library re-truncates from the RIGHT,
-	// destroying the tail that left-truncation exists to keep — so the feature inverts for
-	// exactly the titles that need it.
+	// The two failures differ and both are bad. In a header the over-wide string wraps the terminal,
+	// costing a body row.
+	//
+	// In the table the cell is cut a SECOND time, and the result is worse than either end alone.
+	// bubbles renders every cell through runewidth.Truncate(value, width, "…"), which keeps the HEAD
+	// and appends its own ellipsis — so an over-wide left-truncation is cut again from the right,
+	// with this function's leading ellipsis already in place. Measured on a 14-column budget:
+	//
+	//	truncLeft, correct     "…日日日日日日"      13 columns, tail kept, one ellipsis
+	//	measured in runes      "…日日日日日日日日日日日日日"  27 columns
+	//	  ...after the table   "…日日日日日日…"     14 columns, TWO ellipses, tail gone
+	//
+	// So the failure is not that left-truncation inverts into right-truncation — it is that the cell
+	// ends up cut at BOTH ends and keeps the middle, which is the one part of a path that identifies
+	// nothing. At a narrow budget it degenerates completely: an 11-column cell renders "…日日日日…" and
+	// a 2-column one renders "……".
 	//
 	// lipgloss.Width, mirroring padLeft, which measures this way for the same reason.
+	//
+	// AND IT IS NOT THE LAST MEASUREMENT THE CELL MEETS. bubbles v1.0.0 runs runewidth.Truncate over
+	// every cell before styling, and runewidth does not skip ANSI. Measuring here in display columns
+	// is therefore necessary but not sufficient: it holds only while the cell is PLAIN, which for a
+	// title is guaranteed upstream (authlib/observe/claude normalises every one) and asserted below.
+	// Styling a title would put escape bytes inside that second budget and collapse a narrow cell to
+	// a lone ellipsis.
 	if lipgloss.Width(s) <= n {
 		return s
 	}
@@ -509,8 +599,32 @@ func truncLeft(s string, n int) string {
 	// Runes are dropped from the front until the remainder fits the budget less the ellipsis.
 	// One at a time rather than by arithmetic: a rune's width is 1 or 2, so there is no index
 	// that can be computed from the total.
+	//
+	// BUT THE SEARCH SKIPS AHEAD FIRST, because measuring from i == 0 made this quadratic: each
+	// iteration rebuilt the whole remaining tail and handed it to lipgloss.Width, so the cost grew
+	// with the square of the input. Measured on one call, dropping runes one at a time from the
+	// front: 2500 runes 36ms, 5000 142ms, 10000 572ms, 20000 2.33s — four times the input for
+	// sixteen times the work. The same shape stripHarnessSpans was flagged for; these two were left.
+	//
+	// THE SKIP IS GUARDED, because the obvious bound is not universally true. "Every rune is at
+	// least one column, so the last n runes are an exact lower bound" holds only while no rune is
+	// ZERO columns — and combining marks, joiners and variation selectors all are. A differential
+	// test against the old implementation caught it at n == 1: on a string of combining marks the
+	// bound skipped past marks the one-at-a-time search would have kept, and the two returned
+	// different bytes.
+	//
+	// So skipping is conditional on the premise: zeroWidthFree reports whether s contains any
+	// zero-width rune, and only then is the prefix provably untestable. A title reaching this file
+	// never contains one — authlib/observe/claude drops every Mn/Me/Cf/Cc/Sk, asserted there across
+	// the whole Unicode range — so the fast path is what actually runs. The fallback exists because
+	// these are general helpers with callers that make no such promise, and a wrong answer is worse
+	// than a slow one.
 	r := []rune(s)
-	for i := range r {
+	start := 0
+	if len(r) > n && zeroWidthFree(s) {
+		start = len(r) - n
+	}
+	for i := start; i < len(r); i++ {
 		// The ELLIPSIS PLUS THE TAIL is measured, not the tail plus one. A tail that begins
 		// with a combining mark or a variation selector fuses onto the ellipsis, so the pair
 		// is narrower than the sum of its parts — and assuming the ellipsis always adds
