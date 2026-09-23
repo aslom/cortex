@@ -647,10 +647,18 @@ check "ensure_tmpdir: set-but-unwritable TMPDIR falls back under CORTEX_DIR" "${
 # exit + `refus` + ports, so the failure text's stream no longer matters, and any
 # unrecognised failure falls back (Cortex runs) rather than dying. demo_ports_busy is
 # mocked; grep is real.
-with_service_install_action() { # status  output  ports_busy(yes|no)
+with_service_install_action() { # status  output  ports_busy(yes|no)  [foreign-holder]
 	{
 		if [ "$3" = yes ]; then printf 'demo_ports_busy() { return 0; }\n'
 		else printf 'demo_ports_busy() { return 1; }\n'; fi
+		# Stubbed explicitly rather than left undefined: these cases are about the
+		# ORDER of the verdicts, so "no foreign holder" has to be a deliberate
+		# answer. $4 empty means none found (return 1, printing nothing).
+		if [ -n "${4:-}" ]; then
+			printf 'foreign_proxy_holder() { printf "%%s\\n" "%s"; }\n' "$4"
+		else
+			printf 'foreign_proxy_holder() { return 1; }\n'
+		fi
 		sed -n '/^service_install_action()/,/^}/p' "${INSTALL_SH}"
 		printf 'service_install_action "%s" "%s"\n' "$1" "$2"
 	} >"${TMP}/sia.sh"
@@ -670,6 +678,226 @@ check "svc action: unknown non-zero, ports free -> fallback (default; Cortex sti
 # re-run", which would eventually run the config abctl refused.
 check "svc action: refusal wins over ports-busy" "refused" \
 	"$(with_service_install_action 1 'refused: unsafe config' yes)"
+
+# foreign-proxy is checked BEFORE ports-busy because the two are indistinguishable
+# at the port level and want opposite advice: wait for it vs stop it. The verdict
+# carries the pid and path through, since die() names them.
+check "svc action: a foreign holder outranks ports-busy (opposite advice)" \
+	"foreign-proxy 84858 /co/.local/bin/authbridge-proxy" \
+	"$(with_service_install_action 1 'bind: address already in use' yes '84858 /co/.local/bin/authbridge-proxy')"
+# ...but never over a safety refusal, which must still win outright.
+check "svc action: refusal outranks a foreign holder" "refused" \
+	"$(with_service_install_action 1 'refusing to expose listener' yes '84858 /co/.local/bin/authbridge-proxy')"
+# An unidentifiable holder must fall through to ports-busy, NOT be accused.
+check "svc action: no identifiable holder + ports held -> ports-busy" "ports-busy" \
+	"$(with_service_install_action 1 'bind: address already in use' yes '')"
+# A foreign holder is irrelevant when the install actually succeeded.
+check "svc action: exit 0 wins even with a foreign holder present" "supervised" \
+	"$(with_service_install_action 0 ok yes '84858 /co/.local/bin/authbridge-proxy')"
+
+# --- pid_exe_path: the full path, because `comm` cannot carry one on Linux ---
+#
+# The bug this replaced: the path check used `ps -o comm=`. On Linux `comm` is the
+# kernel's comm field — argv[0]'s basename capped at 15 chars (TASK_COMM_LEN-1) —
+# so a 16-char "authbridge-proxy" prints as "authbridge-prox" and NEVER as a path.
+# Compared for equality against an install path that made every busy-port upgrade
+# race on Linux classify as foreign-proxy, and die telling the user to kill their
+# own proxy. macOS hid it completely: there `comm` does print a path.
+#
+# Three sources in order: /proc/<pid>/exe (Linux kernel truth), lsof -d txt (the
+# macOS equivalent), then `ps -o args=` as a last resort. A fake /proc tree stands
+# in for the real one so the readlink branch is exercised on macOS too.
+with_pid_exe_path() { # proc_exe_target(empty for no /proc)  lsof_txt  ps_args
+	_root="${TMP}/pep"; rm -rf "${_root}"; mkdir -p "${_root}/proc/4242"
+	if [ -n "$1" ]; then ln -s "$1" "${_root}/proc/4242/exe"; fi
+	{
+		printf 'PROCROOT=%s\n' "${_root}"
+		if [ -n "$2" ]; then
+			printf 'command() { case "$2" in lsof) return 0 ;; *) return 0 ;; esac; }\n'
+			printf 'lsof() { printf "n%%s\\n" "%s"; }\n' "$2"
+		else
+			printf 'command() { case "$2" in lsof) return 1 ;; *) return 0 ;; esac; }\n'
+		fi
+		if [ -n "$3" ]; then printf 'ps() { printf "%%s\\n" "%s"; }\n' "$3"
+		else printf 'ps() { return 1; }\n'; fi
+		# Rewrite the two /proc references onto the fixture tree. The logic under
+		# test — the readlink, the (deleted) trim, the source ordering — is shipped
+		# code; only the root moves.
+		sed -n '/^pid_exe_path()/,/^}/p' "${INSTALL_SH}" \
+			| sed 's#"/proc/$1/exe"#"${PROCROOT}/proc/$1/exe"#g'
+		printf 'pid_exe_path 4242 || echo __NONE__\n'
+	} >"${TMP}/pep.sh"
+	sh "${TMP}/pep.sh" 2>/dev/null
+}
+check "pid_exe_path: /proc/<pid>/exe is preferred (Linux truth)" \
+	"/home/u/.local/bin/authbridge-proxy" \
+	"$(with_pid_exe_path /home/u/.local/bin/authbridge-proxy /lsof/path /ps/path)"
+# A binary replaced under a running process reads "<path> (deleted)" — an upgrade
+# in progress is exactly when this code runs, so the suffix must be trimmed off
+# rather than travelling into a path comparison that would then call it foreign.
+check "pid_exe_path: a deleted/replaced binary keeps its path, drops ' (deleted)'" \
+	"/home/u/.local/bin/authbridge-proxy" \
+	"$(with_pid_exe_path '/home/u/.local/bin/authbridge-proxy (deleted)' '' '')"
+check "pid_exe_path: no /proc -> lsof txt descriptor (the macOS path)" \
+	"/Users/u/.local/bin/authbridge-proxy" \
+	"$(with_pid_exe_path '' /Users/u/.local/bin/authbridge-proxy /ps/path)"
+# argv[0] is the weakest source (caller-chosen, possibly relative) so it is last,
+# but it beats reporting nothing.
+check "pid_exe_path: no /proc, no lsof -> first field of ps args" \
+	"/Users/u/.local/bin/authbridge-proxy" \
+	"$(with_pid_exe_path '' '' '/Users/u/.local/bin/authbridge-proxy --local --supervise')"
+# Nothing can name it: must FAIL, never print a placeholder. foreign_proxy_holder
+# treats any non-match as foreign, so "unknown" as a value would accuse a process
+# nobody can see — the thing the previous `${_ph_cmd:-unknown}` fallback did.
+check "pid_exe_path: nothing can name the pid -> fails, prints no placeholder" \
+	"__NONE__" "$(with_pid_exe_path '' '' '')"
+
+# --- foreign_proxy_holder: fails closed, and only accuses on a positive mismatch ---
+#
+# Its verdict gates a die(), so a false positive tells a user mid-upgrade to kill
+# their own working proxy. Every "cannot tell" branch must therefore read as ours.
+# port_holder is mocked (the pid/path discovery is covered above); the pidfile is a
+# real file so the cat + comparison is shipped code.
+with_foreign_proxy_holder() { # holder-line(empty=none)  pidfile(__MISSING__)  bin_dir
+	_pf="${TMP}/fph_pidfile"
+	if [ "$2" = "__MISSING__" ]; then rm -f "${_pf}"; else printf '%s\n' "$2" >"${_pf}"; fi
+	{
+		printf 'DEMO_FORWARD_PORT=47600\n'
+		printf 'PROXY_PIDFILE=%s\n' "${_pf}"
+		printf 'BIN_DIR=%s\n' "$3"
+		if [ -n "$1" ]; then printf 'port_holder() { printf "%%s\\n" "%s"; }\n' "$1"
+		else printf 'port_holder() { return 1; }\n'; fi
+		sed -n '/^foreign_proxy_holder()/,/^}/p' "${INSTALL_SH}"
+		printf 'foreign_proxy_holder || echo __OURS__\n'
+	} >"${TMP}/fph.sh"
+	sh "${TMP}/fph.sh" 2>/dev/null
+}
+# The reported bug: a proxy from a checkout, different path, never drains.
+check "foreign: a holder at another path IS foreign (the reported bug)" \
+	"84858 /co/.local/bin/authbridge-proxy" \
+	"$(with_foreign_proxy_holder '84858 /co/.local/bin/authbridge-proxy' __MISSING__ /home/u/.local/bin)"
+# The genuine upgrade race: our own managed binary restarting. Must stay ours, or
+# the installer dies on an ordinary upgrade — what the PR promises not to do.
+check "foreign: our own managed binary is NOT foreign (upgrade race preserved)" \
+	"__OURS__" \
+	"$(with_foreign_proxy_holder '29497 /home/u/.local/bin/authbridge-proxy' __MISSING__ /home/u/.local/bin)"
+# The pidfile identifies our unsupervised proxy even when the path check would not.
+check "foreign: the pid in our pidfile is NOT foreign, whatever its path" \
+	"__OURS__" \
+	"$(with_foreign_proxy_holder '777 /some/other/authbridge-proxy' 777 /home/u/.local/bin)"
+# An empty pidfile must not match an empty-ish pid field or accuse blindly.
+check "foreign: an empty pidfile does not make a real holder ours" \
+	"84858 /co/.local/bin/authbridge-proxy" \
+	"$(with_foreign_proxy_holder '84858 /co/.local/bin/authbridge-proxy' '' /home/u/.local/bin)"
+# Nobody is listening: nothing to report.
+check "foreign: no holder at all -> nothing reported" \
+	"__OURS__" "$(with_foreign_proxy_holder '' __MISSING__ /home/u/.local/bin)"
+# port_holder now refuses to emit a pid without a path, but if a bare pid ever
+# reached here it must not be judged: one field means the path is unknown.
+check "foreign: a pid with no path is unjudgeable, not foreign" \
+	"__OURS__" "$(with_foreign_proxy_holder '84858' __MISSING__ /home/u/.local/bin)"
+# A non-proxy process holding the port is still someone else's, and still blocks
+# the bind — worth naming rather than calling a drain that will never finish.
+check "foreign: an unrelated process holding the port is foreign too" \
+	"3121 /usr/bin/python3" \
+	"$(with_foreign_proxy_holder '3121 /usr/bin/python3' __MISSING__ /home/u/.local/bin)"
+
+# --- port_holder: the ss fallback, and which binds count as holding the port ---
+#
+# lsof-only meant this detection silently never fired on modern Linux, where
+# iproute2 is the default and lsof is often absent — the same platform port_in_use
+# went three-way out of its way to support. ss cannot name the binary, but it
+# prints the pid, and the path is resolved from the pid separately anyway.
+#
+# Address matching must agree with port_in_use: IPv4 loopback, IPv6 loopback and a
+# wildcard bind all make the loopback port unavailable; an external-only bind does
+# not and must not be reported as the holder.
+with_port_holder_ss() { # port  ss-listing-fixture
+	{
+		printf 'command() { case "$2" in ss) return 0 ;; *) return 1 ;; esac; }\n'
+		printf 'ss() { cat "%s"; }\n' "$2"
+		printf 'pid_exe_path() { printf "/home/u/.local/bin/authbridge-proxy\\n"; }\n'
+		sed -n '/^port_holder()/,/^}/p' "${INSTALL_SH}"
+		printf 'port_holder "%s" || echo __NONE__\n' "$1"
+	} >"${TMP}/phss.sh"
+	sh "${TMP}/phss.sh" 2>/dev/null
+}
+fixture ssp_v4loop.txt <<'EOF'
+LISTEN 0 4096 127.0.0.1:47600 0.0.0.0:* users:(("authbridge-prox",pid=84858,fd=7))
+EOF
+check "port_holder/ss: IPv4 loopback -> pid from users:((...)) [lsof absent]" \
+	"84858 /home/u/.local/bin/authbridge-proxy" "$(with_port_holder_ss 47600 "${FIXTURE}")"
+fixture ssp_v6loop.txt <<'EOF'
+LISTEN 0 4096 [::1]:47600 [::]:* users:(("authbridge-prox",pid=84858,fd=7))
+EOF
+check "port_holder/ss: IPv6 loopback [::1] also holds the port" \
+	"84858 /home/u/.local/bin/authbridge-proxy" "$(with_port_holder_ss 47600 "${FIXTURE}")"
+fixture ssp_wild.txt <<'EOF'
+LISTEN 0 4096 0.0.0.0:47600 0.0.0.0:* users:(("authbridge-prox",pid=84858,fd=7))
+EOF
+check "port_holder/ss: a wildcard bind holds the loopback port" \
+	"84858 /home/u/.local/bin/authbridge-proxy" "$(with_port_holder_ss 47600 "${FIXTURE}")"
+fixture ssp_wild6.txt <<'EOF'
+LISTEN 0 4096 [::]:47600 [::]:* users:(("authbridge-prox",pid=84858,fd=7))
+EOF
+check "port_holder/ss: an IPv6 wildcard bind holds it too" \
+	"84858 /home/u/.local/bin/authbridge-proxy" "$(with_port_holder_ss 47600 "${FIXTURE}")"
+# An external-only listener leaves the loopback port free: reporting it as the
+# holder would accuse an unrelated process of a conflict that does not exist.
+fixture ssp_external.txt <<'EOF'
+LISTEN 0 4096 192.168.1.5:47600 0.0.0.0:* users:(("nginx",pid=999,fd=7))
+EOF
+check "port_holder/ss: an external-only bind is not the loopback holder" \
+	"__NONE__" "$(with_port_holder_ss 47600 "${FIXTURE}")"
+# The port is anchored, so a loopback bind on another port must not be picked up.
+fixture ssp_otherport.txt <<'EOF'
+LISTEN 0 4096 127.0.0.1:9999 0.0.0.0:* users:(("something",pid=555,fd=7))
+EOF
+check "port_holder/ss: a loopback bind on a different port is not the holder" \
+	"__NONE__" "$(with_port_holder_ss 47600 "${FIXTURE}")"
+# ss without -p access (or a kernel that withholds it) prints no users:((...)).
+# No pid means nothing to resolve: report nothing rather than guess.
+fixture ssp_nopid.txt <<'EOF'
+LISTEN 0 4096 127.0.0.1:47600 0.0.0.0:*
+EOF
+check "port_holder/ss: a matching bind with no pid field reports nothing" \
+	"__NONE__" "$(with_port_holder_ss 47600 "${FIXTURE}")"
+fixture ssp_none.txt </dev/null
+check "port_holder/ss: nothing listening reports nothing" \
+	"__NONE__" "$(with_port_holder_ss 47600 "${FIXTURE}")"
+
+# Neither tool present: the no-op the PR promises. Nothing is reported, so the
+# classification stays ports-busy rather than accusing an invisible process.
+neither_tool_port_holder() {
+	{
+		printf 'command() { return 1; }\n'
+		sed -n '/^port_holder()/,/^}/p' "${INSTALL_SH}"
+		printf 'port_holder 47600 || echo __NONE__\n'
+	} >"${TMP}/phnone.sh"
+	sh "${TMP}/phnone.sh" 2>/dev/null
+}
+check "port_holder: no lsof and no ss -> no-op (previous behavior preserved)" \
+	"__NONE__" "$(neither_tool_port_holder)"
+
+# A pid found but unnameable must not yield "<pid> unknown": the placeholder was
+# the second reported defect, since any non-match reads as foreign downstream.
+pid_without_path_port_holder() {
+	{
+		printf 'command() { case "$2" in ss) return 0 ;; *) return 1 ;; esac; }\n'
+		printf 'ss() { printf "LISTEN 0 4096 127.0.0.1:47600 0.0.0.0:* users:((\\"x\\",pid=84858,fd=7))\\n"; }\n'
+		printf 'pid_exe_path() { return 1; }\n'
+		sed -n '/^port_holder()/,/^}/p' "${INSTALL_SH}"
+		printf 'port_holder 47600 || echo __NONE__\n'
+	} >"${TMP}/phnp.sh"
+	sh "${TMP}/phnp.sh" 2>/dev/null
+}
+check "port_holder: a pid whose path cannot be resolved reports nothing (no 'unknown')" \
+	"__NONE__" "$(pid_without_path_port_holder)"
+
+# The regression guard proper: no path comparison may be fed from `ps -o comm=`,
+# because it cannot carry a path on Linux. This is the defect that shipped.
+check "no comm=-derived path comparison remains" "0" \
+	"$(grep -c 'comm=.*authbridge-proxy\|authbridge-proxy.*comm=' "${INSTALL_SH}")"
 
 # --- the new-CA notice is gated on the CA CHANGING, not on ca.crt existing ---
 #
